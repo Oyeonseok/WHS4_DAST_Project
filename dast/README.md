@@ -28,9 +28,7 @@ aidast login
 ## Collect Scope
 
 ```bash
-aidast scope "https://hackerone.com/alsco"
-aidast scope "https://bugcrowd.com/engagements/aiven-mbb-og"
-aidast scope "https://yeswehack.com/programs/decathlon#program-description"
+aidast scope "프로그램 URL"
 ```
 
 산출물은 프로그램별로 구분됩니다.
