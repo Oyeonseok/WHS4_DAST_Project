@@ -2,16 +2,16 @@
 
 정찰 파이프라인(katana + ffuf 기반)은 돌아가는 상태고, 여기에 Playwright 로그인 세션 동안의 실제 트래픽을 mitmproxy로 관찰해서 더하기로 했다. 이 문서는 그 부분 맡을 사람을 위한 정리.
 
-## 지금까지 붙여놓은 것
+## 지금 상태 — 뼈대만 있고 핵심 로직은 비어있음
 
-- `src/aidast/recon/tools/mitm_addon.py` — mitmdump용 addon. flow마다 method/path/query/응답 status/content-type을 JSONL 한 줄로 남긴다. request/response body는 안 남김 (아래 "안 정한 것" 참고).
-- `src/aidast/recon/tools/mitm_ingest.py` — 그 JSONL을 읽어서 (1) katana/ffuf랑 같은 shape의 raw endpoint dict로 변환, (2) `http_exchanges` 테이블에 원본 기록.
-- `src/aidast/recon/db.py`의 `http_exchanges` 테이블 + `insert_http_exchange()` — 스키마는 이미 넣어놨다.
-- `src/aidast/recon/judgment.py`의 `assess_observation_gap()` — 기존 Gap Ratio(katana_standard vs headless)랑 완전히 같은 구조로, "mitmproxy에서만 나온 것 / 전체" 비율을 잰다.
-- `src/aidast/recon/tools/login.py`에 `proxy` 파라미터 추가 — `login_and_capture_session(..., proxy="http://127.0.0.1:8080")`로 부르면 로그인 트래픽이 mitmproxy를 거쳐서 나간다.
-- `scripts/demo_mitm_login.py` — 로그인 → flow 읽기 → DB 적재까지 한 번 이어놓은 스크립트. **아직 한 번도 실행해본 적 없음.**
+- `src/aidast/recon/tools/mitm_addon.py` — mitmdump용 addon 틀. `response()`가 `NotImplementedError` — flow에서 뭘 뽑아서 어떻게 남길지 구현 필요.
+- `src/aidast/recon/tools/mitm_ingest.py` — `load_flows()`(로그 파일 읽기)만 동작. `flows_to_raw_endpoints()`, `ingest_flows_to_db()`는 둘 다 `NotImplementedError` — 구현 필요.
+- `src/aidast/recon/db.py`의 `http_exchanges` 테이블 + `insert_http_exchange()` — 스키마/헬퍼는 만들어놨음, 그대로 쓰면 됨.
+- `src/aidast/recon/judgment.py`의 `assess_observation_gap()` — 함수 시그니처와 의도만 적어놨고 본문은 `NotImplementedError`.
+- `src/aidast/recon/tools/login.py`에 `proxy` 파라미터 추가 — `login_and_capture_session(..., proxy="http://127.0.0.1:8080")`로 부르면 로그인 트래픽이 mitmproxy를 거쳐서 나간다. 이건 동작함.
+- `scripts/demo_mitm_login.py` — 로그인 → flow 읽기 → DB 적재로 이어지는 흐름을 보여주는 예시. 위 미구현 함수들을 호출하는 지점에서 멈춘다.
 
-실행해보려면:
+각 파일 상단에 뭘 구현해야 하는지 TODO로 적어놨음. 완성되면 아래처럼 돌아가는 게 목표:
 
 ```
 # 터미널 1

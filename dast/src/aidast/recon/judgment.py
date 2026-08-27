@@ -90,27 +90,17 @@ def assess_gap_ratio(merged_endpoints: list[dict], *, threshold: float = 0.3) ->
 
 
 def assess_observation_gap(merged_endpoints: list[dict], *, threshold: float = 0.3) -> GapRatioResult:
-    """실제 트래픽(mitmproxy)과 메인 크롤러(katana) 비교판. 구조는
-    assess_gap_ratio와 완전히 같고 비교 대상 태그만 다르다 - katana는
-    "봇 두 종류끼리" 비교였다면, 이건 "진짜 트래픽 vs 봇" 비교라 더
-    직접적인 신호다. mitmproxy 전용으로 발견된(= 자동 크롤러가 못 찾은)
-    비율을 잰다.
+    """실제 트래픽(mitmproxy)과 메인 크롤러(katana) 비교판. (스켈레톤 -
+    구현 필요)
 
-    아직 실전 검증 안 됨 - mitm_ingest.py 상단 TODO 참고."""
-    total = len(merged_endpoints)
-    if total == 0:
-        return GapRatioResult(ratio=0.0, needs_deep_crawl=False, reasoning="발견된 엔드포인트 없음")
+    아이디어는 assess_gap_ratio()와 같다 - katana는 "봇 두 종류끼리"
+    비교였다면, 이건 "진짜 트래픽 vs 봇" 비교라 더 직접적인 신호일 것.
+    mitmproxy에서만 발견되고 katana(standard/headless)에서는 안 나온
+    비율을 분자로 삼으면 될 것 같은데, 이걸로 충분한지 katana 결과까지
+    합쳐서 봐야 하는지는 정해야 함.
 
-    crawler_tags = {"katana_standard", "katana_headless"}
-    observed_only = sum(
-        1 for e in merged_endpoints
-        if "mitmproxy" in e["source_tools"] and not (e["source_tools"] & crawler_tags)
-    )
-    ratio = observed_only / total
-    needs_action = ratio >= threshold
-    comparator = ">=" if needs_action else "<"
-    reasoning = (
-        f"mitmproxy 전용 발견 {observed_only}/{total} ({ratio:.0%}) "
-        f"{comparator} 임계값 {threshold:.0%}"
-    )
-    return GapRatioResult(ratio=ratio, needs_deep_crawl=needs_action, reasoning=reasoning)
+    merged_endpoints의 각 항목은 {"source_tools": set(...), ...} 형태
+    (judgment.merge_and_normalize()의 출력)라고 가정.
+    """
+    # TODO
+    raise NotImplementedError

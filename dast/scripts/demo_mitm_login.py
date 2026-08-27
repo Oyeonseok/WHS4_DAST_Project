@@ -1,11 +1,11 @@
-"""mitmproxy + Playwright 관찰 캡처 데모 - 아직 미완성, 다음 담당자가 이어서
-작업할 것.
+"""mitmproxy + Playwright 관찰 캡처 데모 - 뼈대만 있음, mitm_addon.py /
+mitm_ingest.py의 핵심 로직을 구현해야 실제로 돌아간다.
 
-지금까지 된 것: mitm_addon.py를 별도로 띄워두면 Playwright가 그 프록시를
-거쳐서 로그인하고, 끝난 뒤 flow_log를 읽어서 DB(http_exchanges)에 넣는
-흐름까지는 연결해놨다. 근데 실제로 한 번도 돌려본 적 없고, mitm_ingest.py
-상단에 적어둔 것들(auth_required 판단, parameters 추출, 로그인 이후
-상호작용을 어디까지 시킬지)이 먼저 정리돼야 결과가 의미 있어진다.
+의도한 흐름: mitm_addon.py를 별도로 띄워두면 Playwright가 그 프록시를
+거쳐서 로그인하고, 끝난 뒤 flow_log를 읽어서 DB(http_exchanges)에 넣는다.
+지금은 login_and_capture_session()과 load_flows()만 실제로 동작하고,
+mitm_addon.py의 캡처 로직과 mitm_ingest.py의 변환/적재 로직은 아직 구현
+전이라(NotImplementedError) 이대로 실행하면 그 지점에서 멈춘다.
 
 사전 준비:
     1. 터미널 1: mitmdump -s src/aidast/recon/tools/mitm_addon.py \
