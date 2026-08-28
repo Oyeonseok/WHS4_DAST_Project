@@ -1,7 +1,0 @@
-{
-  "tool_name": "Bash",
-  "tool_input_preview": "{\"command\":\"cd \\\"/Users/hyeonmin/Desktop/code/whs/project/WHS4_DAST_Project/dast\\\" && python3 -c \\\"\\nimport sys\\nsys.path.insert(0, 'src')\\nfrom aidast.scope.models import ScopeDocument\\nimport json\\n...",
-  "error": "Exit code 1\nTraceback (most recent call last):\n  File \"<string>\", line 4, in <module>\n  File \"/Users/hyeonmin/Desktop/code/whs/project/WHS4_DAST_Project/dast/src/aidast/scope/models.py\", line 9, in <module>\n    from pydantic import (\nModuleNotFoundError: No module named 'pydantic'",
-  "timestamp": "2026-08-27T10:12:09.733Z",
-  "retry_count": 1
-}
