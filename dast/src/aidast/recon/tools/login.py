@@ -20,6 +20,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from playwright.sync_api import sync_playwright
+from playwright.sync_api import BrowserContext
 
 EMAIL_SELECTOR = "#email"
 PASSWORD_SELECTOR = "#password"
@@ -110,3 +111,62 @@ def login_and_capture_session(
     else:
         print(f"  로그인 세션 확보 (쿠키 {len(cookies)}개, 헤더 {len(extra_headers)}개)")
     return session
+
+
+def wait_for_manual_login(
+    base_url: str,
+    *,
+    login_path: str = "/login",
+    proxy: str | None = None,
+) -> tuple[SessionCredentials, BrowserContext]:
+    """자동 로그인 셀렉터가 안 맞는 타겟을 위한 수동 로그인 모드.
+
+    브라우저 창을 실제로 띄워서(headless=False) 사용자가 직접 로그인하게
+    하고, Enter 입력을 기다렸다가 그 시점의 세션(쿠키+localStorage)을
+    캡처한다. login_and_capture_session과 달리 브라우저를 닫지 않고
+    context를 그대로 돌려준다 - 호출자가 이 context로 크롤링을 이어서
+    하기 위함이다(닫는 책임도 호출자에게 넘긴다).
+
+    proxy: "http://127.0.0.1:8080" 같은 mitmproxy 주소. 넘기면 이 로그인
+    세션이 그 프록시를 거쳐 나가서 mitm_addon.py가 트래픽을 관찰할 수 있게
+    된다. None이면 프록시 없이 바로 나간다.
+    """
+    playwright = sync_playwright().start()
+    browser = playwright.chromium.launch(headless=False)
+    context = browser.new_context(proxy={"server": proxy} if proxy else None)
+    page = context.new_page()
+
+    login_url = base_url.rstrip("/") + login_path
+    try:
+        page.goto(login_url, wait_until="domcontentloaded")
+
+        print("\n  브라우저에서 직접 로그인해주세요.")
+        input("  로그인 완료 후 Enter를 눌러주세요... ")
+
+        cookies = context.cookies()
+        cookie_header = "; ".join(f"{c['name']}={c['value']}" for c in cookies) or None
+
+        try:
+            local_storage: dict[str, str] = page.evaluate(
+                "() => Object.fromEntries(Object.entries(localStorage))"
+            )
+        except Exception:
+            local_storage = {}
+
+        extra_headers: dict[str, str] = {}
+        for value in local_storage.values():
+            if _looks_like_jwt(value):
+                extra_headers["Authorization"] = f"Bearer {value}"
+                break
+    except Exception as exc:  # noqa: BLE001 - 수동 로그인 실패도 치명적 에러 아님
+        print(f"  [경고] 수동 로그인 캡처 실패({login_url}): {exc}")
+        return SessionCredentials(), context
+
+    session = SessionCredentials(
+        cookie_header=cookie_header, extra_headers=extra_headers, raw_local_storage=local_storage,
+    )
+    if session.is_empty():
+        print("  [경고] 로그인은 됐지만 쿠키/토큰을 못 찾음 - 셀렉터가 이 타겟과 안 맞을 수 있음")
+    else:
+        print(f"  로그인 세션 확보 (쿠키 {len(cookies)}개, 헤더 {len(extra_headers)}개)")
+    return session, context

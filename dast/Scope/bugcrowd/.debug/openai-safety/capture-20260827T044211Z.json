@@ -1,0 +1,33 @@
+{
+  "capture_status": "PARTIAL",
+  "capture_reason": "CONTENT_INCOMPLETE",
+  "requested_url": "https://bugcrowd.com/engagements/openai-safety",
+  "final_url": "https://bugcrowd.com/engagements/openai-safety",
+  "title": "Bug Bounty: Safety Bug Bounty - Bugcrowd",
+  "captured_at": "2026-08-27T04:42:11.848406+00:00",
+  "captured_text": "Hacker Login\nCustomer Login",
+  "analysis": {
+    "program_name": "Safety Bug Bounty",
+    "program_description": "프로그램 설명을 확인할 수 없습니다.",
+    "in_scope_assets": [],
+    "out_of_scope_assets": [],
+    "allowed_activities": [],
+    "prohibited_activities": [],
+    "submission_requirements": [],
+    "operational_constraints": [],
+    "safe_harbor": "확인할 수 없습니다.",
+    "ambiguities": [
+      "프로그램 URL을 열었으나 프로그램 본문·범위·규칙·제외 항목이 렌더링되지 않았고 로그인 탐색 항목만 표시되었습니다. 명시적 거부 문구는 없으므로 CONTENT_INCOMPLETE로 분류했습니다."
+    ],
+    "source_evidence": [
+      {
+        "section": "페이지에 표시된 탐색 항목",
+        "quote": "Hacker Login"
+      },
+      {
+        "section": "페이지에 표시된 탐색 항목",
+        "quote": "Customer Login"
+      }
+    ]
+  }
+}

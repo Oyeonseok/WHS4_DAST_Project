@@ -1,0 +1,29 @@
+{
+  "capture_status": "PARTIAL",
+  "capture_reason": "UNKNOWN",
+  "requested_url": "https://app.intigriti.com/programs/adobe/adobepublic",
+  "final_url": "https://app.intigriti.com/programs/adobe/adobepublic",
+  "title": "",
+  "captured_at": "2026-08-27T05:21:08.684204+00:00",
+  "captured_text": "Internal Error ()\nURL https://app.intigriti.com/programs/adobe/adobepublic is not safe to open (non-retryable error)",
+  "analysis": {
+    "program_name": "Adobe Public",
+    "program_description": "",
+    "in_scope_assets": [],
+    "out_of_scope_assets": [],
+    "allowed_activities": [],
+    "prohibited_activities": [],
+    "submission_requirements": [],
+    "operational_constraints": [],
+    "safe_harbor": "",
+    "ambiguities": [
+      "프로그램 페이지를 열 수 없어 프로그램 설명, 범위, 규칙 및 제외 항목을 확인하지 못했습니다."
+    ],
+    "source_evidence": [
+      {
+        "section": "Capture",
+        "quote": "URL https://app.intigriti.com/programs/adobe/adobepublic is not safe to open (non-retryable error)"
+      }
+    ]
+  }
+}
