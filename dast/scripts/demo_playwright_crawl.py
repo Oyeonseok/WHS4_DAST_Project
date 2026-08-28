@@ -22,7 +22,12 @@ from pathlib import Path
 
 from aidast.recon import db as dbmod
 from aidast.recon.judgment import merge_and_normalize
-from aidast.recon.tools.mitm_ingest import ingest_flows_to_db, load_flows, flows_to_raw_endpoints
+from aidast.recon.tools.mitm_ingest import (
+    extract_parameters_from_flows,
+    ingest_flows_to_db,
+    load_flows,
+    flows_to_raw_endpoints,
+)
 from aidast.recon.tools.playwright_crawler import run_crawl_session
 
 TARGET_URL = "http://localhost:3000"
@@ -65,12 +70,31 @@ def main() -> None:
 
     # 3. 크롤 세션 실행 (수동 로그인 → 자동 크롤 → 401 시 재로그인)
     print("\n=== 크롤 세션 시작 ===")
-    run_crawl_session(
+    session = run_crawl_session(
         TARGET_URL,
         proxy=PROXY_SERVER,
         login_path="/#/login",  # JuiceShop은 Angular hash 라우팅
         flow_log=FLOW_LOG,
     )
+
+    # 3a. 세션 정보 DB 저장
+    import json as _json
+    session_id = None
+    if not session.is_empty():
+        auth_state = _json.dumps({
+            "cookie_header": session.cookie_header,
+            "extra_headers": session.extra_headers,
+            "raw_local_storage": session.raw_local_storage,
+        }, ensure_ascii=False)
+        session_id = dbmod.insert_session(
+            conn,
+            origin_id=origin_id,
+            target=TARGET_URL,
+            auth_state=auth_state,
+        )
+        print(f"  세션 저장 완료: {session_id}")
+    else:
+        print("  [경고] 세션이 비어 있어 sessions 테이블에 저장하지 않음")
 
     # 4. JSONL → DB 적재
     print("\n=== DB 적재 시작 ===")
@@ -83,7 +107,7 @@ def main() -> None:
         return
 
     # 4a. http_exchanges에 원본 트래픽 적재
-    ingest_flows_to_db(conn, origin_id=origin_id, session_id=None, flows=flows)
+    ingest_flows_to_db(conn, origin_id=origin_id, session_id=session_id, flows=flows)
     exchange_count = conn.execute("SELECT count(*) FROM http_exchanges").fetchone()[0]
     print(f"http_exchanges에 {exchange_count}건 적재 완료")
 
@@ -106,12 +130,34 @@ def main() -> None:
     excluded = [e for e in merged if e["is_excluded"]]
     print(f"endpoints에 {len(included)}건 적재 (제외 {len(excluded)}건)")
 
+    # 4c. parameters 테이블에 파라미터 추출·적재
+    endpoint_lookup: dict[tuple[str, str], str] = {}
+    for row in conn.execute("SELECT endpoint_id, method, normalized_path FROM endpoints").fetchall():
+        endpoint_lookup[(row[1], row[2])] = row[0]
+    param_count = extract_parameters_from_flows(
+        conn, flows=flows, endpoint_lookup=endpoint_lookup,
+    )
+    print(f"parameters에 {param_count}건 적재 완료")
+
     # 5. 요약
     print("\n=== 결과 요약 ===")
     print(f"DB 파일: {DB_PATH.resolve()}")
     print(f"JSONL 파일: {FLOW_LOG.resolve()}")
     print(f"http_exchanges: {exchange_count}건")
     print(f"endpoints: {len(included)}건 (제외 {len(excluded)}건)")
+    print(f"parameters: {param_count}건")
+    print(f"sessions: {'1 (저장됨)' if session_id else '0 (세션 없음)'}")
+
+    # 파라미터 미리보기
+    param_rows = conn.execute(
+        "SELECT p.name, p.location, p.data_type, p.example_value, e.path "
+        "FROM parameters p JOIN endpoints e ON p.endpoint_id = e.endpoint_id LIMIT 15"
+    ).fetchall()
+    if param_rows:
+        print("\n  대표 파라미터 (최대 15건):")
+        for name, loc, dtype, example, epath in param_rows:
+            ex = (example[:30] + "...") if example and len(example) > 30 else example
+            print(f"    {epath}  {loc}:{name} ({dtype}) = {ex}")
 
     # 대표 엔드포인트 10건 미리보기
     rows = conn.execute(
