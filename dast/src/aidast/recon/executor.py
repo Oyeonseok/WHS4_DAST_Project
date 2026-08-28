@@ -76,6 +76,7 @@ class ReconExecutor:
         login_email: str | None = None,
         login_password: str | None = None,
         login_path: str = "/login",
+        proxy: str | None = None,
     ):
         self.scan_id = scan_id
         self.conn = dbmod.init_db(db_path)
@@ -84,6 +85,9 @@ class ReconExecutor:
         self.login_email = login_email
         self.login_password = login_password
         self.login_path = login_path
+        # proxy를 주면 로그인(Playwright)과 katana/ffuf 요청이 이 프록시(mitmproxy)를
+        # 거쳐 나가서, mitm_addon.py가 같은 트래픽을 관찰할 수 있다.
+        self.proxy = proxy
         self._asset_ids: dict[str, str] = {}
         self._origin_ids: dict[str, str] = {}
         self._probe_cache: dict[str, ProbeResult] = {}
@@ -198,7 +202,7 @@ class ReconExecutor:
         if session is None and self.login_email and self.login_password:
             session = login_and_capture_session(
                 url, email=self.login_email, password=self.login_password,
-                login_path=self.login_path,
+                login_path=self.login_path, proxy=self.proxy,
             )
             self._session_cache[origin_id] = session
             if not session.is_empty():
@@ -217,7 +221,7 @@ class ReconExecutor:
         # 7) 브루트포스(ffuf)를 진행한다.
 
         # 1~2) standard+headless
-        katana_raw = discover_endpoints(url, header_args=header_args)
+        katana_raw = discover_endpoints(url, header_args=header_args, proxy=self.proxy)
         katana_merged = merge_and_normalize(katana_raw)
         katana_included = [e for e in katana_merged if not e["is_excluded"]]
 
@@ -250,7 +254,7 @@ class ReconExecutor:
                 print("   origins.spa_detected 정정: False -> True (정적 시그니처 판단이 실측과 어긋남)")
 
         # 7) 조치가 끝난 뒤에야 브루트포스 진행
-        ffuf_raw = discover_with_ffuf(url, wordlist=self.ffuf_wordlist, header_args=header_args)
+        ffuf_raw = discover_with_ffuf(url, wordlist=self.ffuf_wordlist, header_args=header_args, proxy=self.proxy)
 
         # 최종 DB 저장은 katana+ffuf를 합친 전체 집합으로.
         merged = merge_and_normalize(katana_raw + ffuf_raw)

@@ -379,6 +379,54 @@ def upsert_endpoint(
     return endpoint_id
 
 
+def upsert_parameter(
+    conn: sqlite3.Connection,
+    *,
+    endpoint_id: str,
+    name: str,
+    location: str,
+    data_type: str | None = None,
+    example_value: str | None = None,
+    is_identifier: bool = False,
+) -> str:
+    """엔드포인트에 딸린 파라미터 1건을 남긴다. 같은 (endpoint, name,
+    location)이 다시 들어오면 새로 만들지 않고 기존 행을 쓴다 - 실제
+    트래픽에는 같은 파라미터가 값만 바뀐 채로 여러 번 오기 때문이다.
+
+    example_value는 이름 그대로 '예시 하나'다. 값을 모으는 자리가 아니라
+    나중에 공격 페이로드를 만들 때 형태를 참고하는 용도라 한 건만 남긴다.
+    """
+    row = conn.execute(
+        "SELECT parameter_id FROM parameters WHERE endpoint_id=? AND name=? AND location=?",
+        (endpoint_id, name, location),
+    ).fetchone()
+    if row:
+        parameter_id = row[0]
+        # 처음 넣을 때 비어 있던 칸만 뒤늦게 채운다. 이미 있는 값은 건드리지
+        # 않는다 - 먼저 관찰된 쪽을 대표값으로 본다.
+        conn.execute(
+            """UPDATE parameters
+               SET data_type = COALESCE(data_type, ?),
+                   example_value = COALESCE(example_value, ?),
+                   is_identifier = MAX(is_identifier, ?)
+               WHERE parameter_id = ?""",
+            (data_type, example_value, int(bool(is_identifier)), parameter_id),
+        )
+    else:
+        parameter_id = new_id("param")
+        conn.execute(
+            """INSERT INTO parameters
+               (parameter_id, endpoint_id, name, location, data_type, example_value, is_identifier)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (
+                parameter_id, endpoint_id, name, location, data_type,
+                example_value, int(bool(is_identifier)),
+            ),
+        )
+    conn.commit()
+    return parameter_id
+
+
 def insert_observation(
     conn: sqlite3.Connection, *, origin_id: str, obs_type: str, key: str, value: str, source: str
 ) -> None:

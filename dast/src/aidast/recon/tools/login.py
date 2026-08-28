@@ -75,6 +75,12 @@ def login_and_capture_session(
         login_url = base_url.rstrip("/") + login_path
         try:
             page.goto(login_url, wait_until="domcontentloaded", timeout=timeout_ms)
+            # Juice Shop: 환영 배너/쿠키 배너가 로그인 폼을 가려서 먼저 닫는다 (있을 때만).
+            for _sel in ('button[aria-label="Close Welcome Banner"]', 'a[aria-label="dismiss cookie message"]'):
+                try:
+                    page.click(_sel, timeout=3000)
+                except Exception:
+                    pass
             page.fill(EMAIL_SELECTOR, email, timeout=timeout_ms)
             page.fill(PASSWORD_SELECTOR, password, timeout=timeout_ms)
             page.click(SUBMIT_SELECTOR, timeout=timeout_ms)
