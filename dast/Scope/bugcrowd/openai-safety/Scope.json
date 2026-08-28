@@ -1,0 +1,134 @@
+{
+  "schema_version": "1.0",
+  "scope_id": "scope_8dab0530e244438e81eb2884ac3134f8",
+  "created_at": "2026-08-27T04:47:01.017508Z",
+  "source": {
+    "requested_url": "https://bugcrowd.com/engagements/openai-safety",
+    "final_url": "https://bugcrowd.com/engagements/openai-safety",
+    "title": "Bug Bounty: Safety Bug Bounty - Bugcrowd",
+    "captured_at": "2026-08-27T04:46:10.149821Z",
+    "capture_status": "COMPLETE",
+    "capture_reason": "NONE",
+    "content_sha256": "0ed30125c65a7046ccf6dc1473865b32b773d2426551a864fb9df0639daa564f",
+    "text": "Hacker Login Customer Login\nEngagementsSafety Bug Bounty\nBug Bounty\nSafety Bug Bounty\nThe OpenAI Safety Bug Bounty Program is designed to complement our existing Security Bug Bounty Program by rewarding for safety and abuse issues that pose risks to OpenAI users.\nExpedited triage\nSubmissions to this Engagement will receive expedited triage by Bugcrowd.\nComputer SoftwareSafe harbor\nScope rating\n1 out of 4\nTesting period\nOngoing\nStarted at Jul 29, 2025\nStatus\nIn progress\n29 Jul 2025 18:00:00 GMT+0\nSubmit report\nFollow\nShare\nDetails\nChangelog\nAnnouncements\n3\nCrowdStream\nHall of Fame\nLast Updated :07 Aug 2026 18:31:30 GMT+0View changes\nOn this page\nOverview\nDescription\nTargets\nWhat’s new\nRecent activity\nCrowd highlights\nThings to know\nVulnerabilities rewarded\n9\nValidation within\n4 days\n75% of submissions are accepted or rejected within 4 days in last 3 months\nAverage payout\n$625\nlast 3 months\nWe’re pleased to announce that we are launching a new Bug Bounty Program for select safety and abuse issues. As AI technology rapidly evolves, so do the potential ways it can be misused. We believe it’s essential to recognize and reward responsible disclosures involving critical safety and abuse scenarios.\nProgram Rules\nIn addition to the existing OpenAI Security Bug Bounty rules, the following rules apply:\nQualifying issues must represent a design or implementation issue in an active OpenAI product that can be abused by an attacker to cause material harm.\nReports must be addressable via a clear set of recommended steps or mitigations. The goal of this program is to reward for bug fixes and we cannot reward requests for general product improvements.\nQualifying issues must be consistently reproducible. Researchers should provide enough steps and evidence to reproduce the issue reliably under typical conditions. We may accept partial or probabilistic exploits if the result is still high impact, but the burden of proof is on the researcher to demonstrate it is not a one-off fluke.\nWe only reward for issues that have not already been submitted to us.\nAny accounts used as victims must be test accounts owned by the researcher. Any testing that affects accounts, assets, or services owned by others is strictly prohibited.\nVulnerability testing must not risk damage or compromise to any real-world accounts. For example, prompt injection text should not be hosted on public surfaces discoverable by real users or their agents.\nFinal reward decisions and amounts are up to OpenAI discretion, especially when applied to safety issues.\nTargets\n1 out of 4\nBugcrowd calculates scope ratings based on the depth and breadth of in-scope targets.\nAgentic Tools Including MCP\nIn scope\nPayment reward chart\nP1\n$5500 – $7500\nP2\n$2500 – $3500\nP3\n$750 – $1500\nP4\n$250 – $500\nAbuse risks in our agentic products, defined as any product that 1) performs an action on behalf of the user or 2) accesses data as the user. This includes Atlas Browser, Codex, Operator, Connectors, and other agentic ChatGPT tools. Reports that detail issues that exist solely in third-party services that do not result in OpenAI-side remediation are out of scope. Ensure your tests attack only your own test accounts, never agents operated by real users.\nConnectors and MCP (Model Context Protocol) integrations expand an agent’s ability to access and act on data in external systems (e.g., reading content, searching, creating/updating records, sending messages, or retrieving files). These integrations are in scope when a vulnerability in OpenAI systems, configuration, permissioning, confirmation UX, or integration logic can be abused to cause material harm (e.g., unauthorized data access, cross-tenant data exposure, or harmful actions performed under the victim’s account).\nIn Scope: Indirect / third-party prompt injection or untrusted-content attacks that cause an agent to misuse a Connector or MCP tool to access, exfiltrate, or transform sensitive data from a bughunter-owned “victim” account, or to take a harmful action under that account. For the purposes of our bug bounty rewards program, extracting personally identifiable information from a user’s chat history counts as sensitive private data. Prompt injections must meet a minimum bar for realism and feasibility; reports that rely on victims running clearly malicious or dangerous commands are not eligible for rewards.\nIn Scope: Authorization or permission bypasses where an agent can access Connector/MCP data or perform Connector/MCP actions beyond what the user, workspace, or app integration permissions should allow (including cross-workspace or cross-tenant data exposure).\nIn Scope: Vulnerabilities that cause agents to perform tool actions without appropriate user understanding/confirmation, or where confirmations are materially misleading relative to what will be accessed/sent/done (especially for high-impact actions like sharing/exporting data, changing settings, or posting/sending messages).\nIn Scope: Misusing an agentic tool to perform a disallowed action: creating new OpenAI user accounts at scale (at least 10 accounts without human interaction).\nOut of Scope: Reports that detail issues that exist solely in third-party services that do not result in OpenAI-side remediation. For example, issues caused by poorly annotated third-party MCP servers are not in scope.\nOut of Scope: Testing that requires accessing accounts, tenants, or data you do not own or do not have explicit authorization to test.\nShow more\nName / Location\tTags\tKnown issues\nAgentic Tools\nArtificial Intelligence\nOpenAI Proprietary Information\nIn scope\nPayment reward chart\nP1\n$5500 – $7500\nP2\n$2500 – $3500\nP3\n$750 – $1500\nP4\n$250 – $500\nVulnerabilities or model issues that return OpenAI internal information, intellectual property, or otherwise confidential data.\nIn Scope: Vulnerabilities that return proprietary information related to reasoning (e.g., full unsummarized Chain of Thought).\nIn Scope (already covered by the existing Security Bug Bounty scope): Vulnerabilities that enable the exposure of other OpenAI proprietary information (e.g. insider information) — report via the Security Bug Bounty.\nOut of Scope: Model responses that appear to expose internal OpenAI proprietary information.\nOut of Scope: System prompts, or any other information present in the model context window at inference time except for CoTs.\nName / Location\tTags\tKnown issues\n*.openai.com\nWebsite Testing\nAzure\nPython\nAccount and Platform Integrity\nIn scope\nPayment reward chart\nP1\n$5500 – $7500\nP2\n$2500 – $3500\nP3\n$750 – $1500\nP4\n$250 – $500\nThe ability to bypass our safeguards against abuse on our platform.\nWe reward submissions that demonstrate a meaningful bypass of OpenAI rate limits or platform controls that enables sustained usage at significant scale beyond intended limits. Findings that do not demonstrate a scalable bypass of rate limits are out of scope for financial reward. Rate limit bypass issues must demonstrate at least 1,000 completions from the latest model generation across no more than five accounts within one day on our Sol model (any reasoning level).\nIn Scope: Vulnerabilities in our account integrity and platform integrity signals, e.g., automating mass creation of OpenAI accounts. Again, for conversation rate limit bypasses, these issues must demonstrate at least 1,000 completions from the latest model generation across no more than five accounts within one day on our Sol model (any reasoning level).\nIn Scope (already covered by the existing Security Bug Bounty scope): Exploits that allow users to access features, data, or functionalities beyond their authorized permissions — report via the Security Bug Bounty.\nOut of Scope: Evading controls around geographic access restrictions.\nOut of Scope: Testing that facilitates genuine fraud or requires social engineering, e.g., creating fraudulent OpenAI Startup Fund accounts.\nName / Location\tTags\tKnown issues\nopenai.com\nhttps://openai.com/\nWebsite Testing\nAzure\nPython\nOther Novel Abuse\nIn scope\nPayment reward chart\nP1\n$5500 – $7500\nP2\n$2500 – $3500\nP3\n$750 – $1500\nP4\n$250 – $500\nIn scope\nOutside of the examples listed above, if your report contains a flaw that facilitates a direct path to user harm and actionable, discrete remediation steps, we may still consider it in scope for rewards on a case-by-case basis.\nName / Location\tTags\tKnown issues\nOther\nArtificial Intelligence\nContent Issues\nOut of scope\nOut of scope\nThe model generates responses that violate OpenAI’s policy on disallowed content.\nAll content/model response issues are out of scope — these issues are complex and not addressable through traditional security fixes.\nName / Location\tTags\tKnown issues\nOpenAI models\nTest Accounts\nSafety and abuse testing may result in account enforcement including bans. Please use test accounts in your bughunting to ensure no complications with your personal account. Please note that authorized testing does not exempt you from all of OpenAI's terms of service. Abusing the service may result in rate limiting, blocking, or banning. Automated vulnerability scanners may trigger these outcomes. If your account or IP is rate-limited or blocked, please wait for the block to expire; we cannot manually remove it.\nYou will not be reimbursed for any upgrades or purchases made on your account.\nSafe Harbor\nOpenAI will not threaten or bring any legal action against anyone who makes a good faith effort to comply with this bug bounty policy. This includes any claim under the DMCA for circumventing technological measures to protect the services and applications eligible under this policy.\nAs long as you comply with this policy:\nWe consider your safety and security research to be \"authorized\" under the Computer Fraud and Abuse Act (and/or similar state laws), and\nWe waive any restrictions in our applicable Terms of Use and Usage Policies that would prohibit your participation in this policy, but only for the limited purpose of your safety and security research under this policy.\nOpenAI systems and services may be interconnected with third-party systems and services. If you submit a report through our bug bounty program that affects a third party service, we will limit what we share with the affected third party. Please understand that, while we can authorize your research on OpenAI’s systems and services, we cannot authorize your efforts on third-party products or guarantee they won’t pursue legal action against you. That said, if legal action is initiated by a third party against you because of your participation in this bug bounty program, and you have complied with our bug bounty policy, we will take steps to make it known that your actions were conducted in compliance with this policy. This is not, and should not be understood as, any agreement on our part to defend, indemnify, or otherwise protect you from any third party action based on your actions.\nYou are expected, as always, to comply with all applicable laws.\nIf you have concerns or are unsure whether your safety and security research aligns with this policy, please contact support@bugcrowd.com before proceeding.\nWhat’s new\nView all announcements\nJill announced The engagement Safety Bug Bounty has transitioned to public\n5 months ago\n(25 Mar 2026 16:30:09 GMT+0)\nEffective immediately, participation in this engagement has transitioned to public. This means that hackers no longer need an invitation to participate in this engagement.\nIf you have any questions, please contact Bugcrowd support.\nMore\nwinston announced Reward increases for Maximum Bounty\nover 1 year ago\n(26 Mar 2025 19:12:26 GMT+0)\nOpenAI has increased its rewards as of March 26, 2025!\nPrevious Maximum Reward Range\tNew Maximum Reward\n$20,000\t$100,000\nWe are significantly increasing the maximum bounty payout for exceptional and differentiated critical findings to $100,000 (previously $20,000). This increase reflects our commitment to rewarding meaningful, high-impact security research that helps us protect users and maintain trust in our systems.\nIf you have any questions, please create a ticket with Bugcrowd Support to get them answered.\nMore\nwinston announced Reward bonuses for IDORs\nover 1 year ago\n(26 Mar 2025 18:45:13 GMT+0)\nWe are pleased to announce that we are now offering bonuses starting as of March 26, 2025 and will end on April 30, 2025!\nBelow are the bonus details:\nPriority/Bonus Qualifications\tPrevious Reward Range\tNew Reward Range\nP(1-3) IDOR on any in scope target\t$200-$6500\t$400-$13000\nBonuses are subject to change. If you have any questions, please create a ticket with Bugcrowd Support for assistance.\nMore\nRecent activity\nView all CrowdStream activity\nSubmission accepted on target: openai.com\nBy Private userEngagement Safety Bug BountyReward $1,000Priority P3\nAccepted on 13 Aug 2026\nSubmission accepted\nBy kevinhwangEngagement Safety Bug BountyPriority P3\nAccepted on 26 Jul 2026\nSubmission accepted on target: Agentic Tools\nBy Private userEngagement Safety Bug BountyPriority P4\nAccepted on 25 Jul 2026\nCrowd highlights\nLatest hall of famers\nHall of Fame\nRecently joined this engagement\n1069 total\nThings to know\nTesting problems\nFor any testing issues (such as broken credentials, inaccessible application, or Bugcrowd Ninja email problems), please visit Bugcrowd Support and create a support ticket. We will address your issue as soon as possible.\nEngagement rules\nThis engagement follows Bugcrowd’s standard disclosure terms.\nCoordinated Disclosure\nVulnerabilities found in this engagement requires explicit permission by selecting the disclosure request option on your submission. For more information please review the Public Disclosure Policy.\nTerms & ConditionsPrivacy PolicySecurityDo Not Sell My Information\nDocsFAQResourcesBlogContactGet Help\nCopyright © 2014 – 2026 Bugcrowd, Inc. All rights reserved."
+  },
+  "analysis": {
+    "program_name": "Safety Bug Bounty",
+    "program_description": "OpenAI 사용자의 위험을 초래하는 안전·악용 이슈를 보상하는 프로그램이다. 활성 OpenAI 제품의 설계 또는 구현 문제로 공격자가 물질적 피해를 유발할 수 있어야 하며, 명확하고 실행 가능한 완화 조치가 있어야 한다. 각 인스코프 대상의 보상은 P1 $5500 – $7500, P2 $2500 – $3500, P3 $750 – $1500, P4 $250 – $500로 표시된다.",
+    "in_scope_assets": [
+      {
+        "asset_type": "OTHER",
+        "asset": "Agentic Tools Including MCP",
+        "description": "Atlas Browser, Codex, Operator, Connectors 및 기타 에이전틱 ChatGPT 도구를 포함한다. OpenAI 시스템·구성·권한·확인 UX·통합 로직의 취약점으로 민감 데이터 무단 접근, 테넌트 간 노출 또는 피해자 계정의 유해한 작업이 발생하는 경우가 대상이다. 보상: P1 $5500 – $7500 · P2 $2500 – $3500 · P3 $750 – $1500 · P4 $250 – $500.",
+        "eligibility": "버그헌터가 소유한 ‘피해자’ 테스트 계정에서 간접/제3자 프롬프트 인젝션 또는 신뢰할 수 없는 콘텐츠 공격으로 Connector/MCP 도구가 민감 데이터를 접근·유출·변환하거나 유해한 작업을 수행하게 하는 경우, 권한 범위를 넘는 접근·작업, 또는 고영향 작업에 대해 사용자 이해·확인이 부적절하거나 실질적으로 오해를 유발하는 경우가 적격이다. 사람 상호작용 없이 OpenAI 사용자 계정을 최소 10개 대량 생성하는 악용도 포함된다.",
+        "maximum_severity": "P1"
+      },
+      {
+        "asset_type": "OTHER",
+        "asset": "OpenAI Proprietary Information",
+        "description": "추론 관련 독점 정보(예: 전체 비요약 Chain of Thought)를 반환하는 취약점이 대상이다. 보상: P1 $5500 – $7500 · P2 $2500 – $3500 · P3 $750 – $1500 · P4 $250 – $500.",
+        "eligibility": "실제 취약점 또는 모델 이슈가 OpenAI 내부 정보, 지식재산 또는 기타 기밀 데이터를 반환해야 한다. 다른 OpenAI 독점 정보 노출 취약점은 기존 Security Bug Bounty를 통해 보고하도록 안내된다.",
+        "maximum_severity": "P1"
+      },
+      {
+        "asset_type": "WILDCARD",
+        "asset": "*.openai.com",
+        "description": "플랫폼의 악용 방지 보호장치 우회 및 계정/플랫폼 무결성 신호 취약점 대상이다. 보상: P1 $5500 – $7500 · P2 $2500 – $3500 · P3 $750 – $1500 · P4 $250 – $500.",
+        "eligibility": "의도된 한도를 크게 넘는 지속적·대규모 사용을 가능하게 하는 의미 있는 OpenAI 속도 제한 또는 플랫폼 제어 우회를 입증해야 한다. 대화 속도 제한 우회는 최신 모델 세대의 Sol 모델(추론 수준 무관)에서 하루 5개 이하 계정으로 최소 1,000 completions를 입증해야 한다. OpenAI 계정 대량 생성 자동화도 포함된다.",
+        "maximum_severity": "P1"
+      },
+      {
+        "asset_type": "DOMAIN",
+        "asset": "openai.com",
+        "description": "명시된 사례 외에도 사용자 피해로 이어지는 직접 경로와 실행 가능하고 구체적인 완화 조치를 포함한 신규 악용 결함은 사례별로 고려될 수 있다. 보상: P1 $5500 – $7500 · P2 $2500 – $3500 · P3 $750 – $1500 · P4 $250 – $500.",
+        "eligibility": "직접적인 사용자 피해 경로 및 개별적으로 실행 가능한 개선 조치를 제시하는 경우에 한해 사례별 보상 검토 대상이다.",
+        "maximum_severity": "P1"
+      }
+    ],
+    "out_of_scope_assets": [
+      {
+        "asset_type": "OTHER",
+        "asset": "OpenAI models",
+        "description": "OpenAI의 금지 콘텐츠 정책을 위반하는 모델 응답 생성 이슈는 범위 밖이다. 모든 콘텐츠/모델 응답 이슈는 전통적 보안 수정으로 해결하기 어렵다고 명시되어 범위 밖이다.",
+        "eligibility": "Out of scope",
+        "maximum_severity": "N/A"
+      }
+    ],
+    "allowed_activities": [
+      "버그헌터가 소유한 테스트 ‘피해자’ 계정에서 Connector 또는 MCP 관련 취약점을 재현하고 증거를 수집하는 활동",
+      "권한·워크스페이스·앱 통합 권한을 초과하는 Connector/MCP 접근 또는 작업, 교차 워크스페이스·테넌트 노출을 입증하는 활동",
+      "사용자 이해·확인이 부적절하거나 실제 동작과 실질적으로 다른 확인 UX를 입증하는 활동",
+      "사람 상호작용 없이 OpenAI 사용자 계정을 최소 10개 생성하는 에이전틱 도구 악용을 입증하는 활동",
+      "하루 5개 이하 계정에서 Sol 최신 모델 세대의 최소 1,000 completions를 보여 주는 확장 가능한 대화 속도 제한 우회를 입증하는 활동"
+    ],
+    "prohibited_activities": [
+      "타인 소유 계정·자산·서비스에 영향을 주는 테스트",
+      "실제 사용자 또는 에이전트가 발견할 수 있는 공개 표면에 프롬프트 인젝션 텍스트를 호스팅하는 등 실제 계정 손상 또는 피해 위험이 있는 테스트",
+      "OpenAI 측 수정으로 이어지지 않는 제3자 서비스에만 존재하는 이슈 보고",
+      "명시적 테스트 권한이 없는 계정·테넌트·데이터 접근",
+      "명백히 악성 또는 위험한 명령을 피해자가 실행해야 하는 프롬프트 인젝션 보고",
+      "모델 응답이 내부 독점 정보를 노출하는 것처럼 보이기만 하는 보고",
+      "CoT를 제외한 시스템 프롬프트 또는 추론 시점 모델 컨텍스트 창의 기타 정보 보고",
+      "의도된 한도를 크게 넘는 지속적·대규모 사용을 입증하지 못하는 속도 제한 우회 보고",
+      "지리적 접근 제한 제어 회피",
+      "실제 사기를 조장하거나 소셜 엔지니어링이 필요한 테스트(예: 허위 OpenAI Startup Fund 계정 생성)",
+      "OpenAI 금지 콘텐츠 정책을 위반하는 콘텐츠를 생성한다는 모델 응답 이슈"
+    ],
+    "submission_requirements": [
+      "적격 이슈는 활성 OpenAI 제품의 설계 또는 구현 문제여야 하며 공격자가 물질적 피해를 유발할 수 있어야 한다.",
+      "명확한 권장 조치 또는 완화 단계가 있어야 하며, 일반적 제품 개선 요청은 보상 대상이 아니다.",
+      "일반적 조건에서 신뢰성 있게 재현할 수 있는 충분한 절차와 증거를 제공해야 한다. 부분적·확률적 익스플로잇은 고영향임을 입증하는 경우에만 검토될 수 있다.",
+      "이미 OpenAI에 제출된 이슈는 보상하지 않는다.",
+      "조정 공개에는 제출 시 공개 요청 옵션을 선택한 명시적 허가가 필요하다."
+    ],
+    "operational_constraints": [
+      "피해자 역할의 모든 계정은 연구자 소유 테스트 계정이어야 한다.",
+      "개인 계정의 문제를 피하기 위해 버그헌팅에는 테스트 계정을 사용해야 한다.",
+      "자동 취약점 스캐너는 속도 제한·차단·계정 정지를 유발할 수 있으며, 차단된 계정 또는 IP는 만료될 때까지 기다려야 한다. 수동 해제는 제공되지 않는다.",
+      "계정 업그레이드 또는 구매 비용은 환급되지 않는다.",
+      "승인된 테스트라도 OpenAI 이용약관 전체에서 면제되는 것은 아니며, 서비스 악용은 제한·차단·정지로 이어질 수 있다.",
+      "정책 적합성이 불확실하면 진행 전에 support@bugcrowd.com으로 문의해야 한다."
+    ],
+    "safe_harbor": "정책을 선의로 준수하는 연구자에 대해 OpenAI는 법적 조치를 위협하거나 제기하지 않으며, 적격 서비스·애플리케이션의 기술적 보호조치 우회와 관련한 DMCA 청구도 포함한다. 정책 준수 시 해당 연구는 CFAA 및 유사 주법상 ‘authorized’로 간주되고, 안전·보안 연구라는 제한된 목적에 한해 참여를 금지하는 이용약관·사용 정책 제한을 면제한다. 다만 OpenAI는 제3자 시스템에 대한 연구를 승인하거나 제3자의 법적 조치로부터 방어·면책을 보장할 수 없다.",
+    "ambiguities": [
+      "제공된 캡처에는 각 대상의 구체적인 URL·API 엔드포인트 또는 제품별 세부 자산 목록이 없으며, Target Group 이름 수준의 범위만 확인된다.",
+      "‘Other Novel Abuse’는 사례별 검토 대상이므로 사전 확정된 적격성 또는 보상을 보장하지 않는다.",
+      "기존 Security Bug Bounty 범위로 안내된 다른 OpenAI 독점 정보 노출 및 권한 초과 기능·데이터 접근의 구체적 대상 범위는 이 캡처에 포함되지 않았다.",
+      "안전 이슈의 최종 보상 결정 및 금액은 OpenAI 재량이라고 명시되어 있다."
+    ],
+    "source_evidence": [
+      {
+        "section": "Overview",
+        "quote": "The OpenAI Safety Bug Bounty Program is designed to complement our existing Security Bug Bounty Program by rewarding for safety and abuse issues that pose risks to OpenAI users."
+      },
+      {
+        "section": "Program Rules",
+        "quote": "Qualifying issues must represent a design or implementation issue in an active OpenAI product that can be abused by an attacker to cause material harm."
+      },
+      {
+        "section": "Program Rules",
+        "quote": "Any accounts used as victims must be test accounts owned by the researcher. Any testing that affects accounts, assets, or services owned by others is strictly prohibited."
+      },
+      {
+        "section": "Agentic Tools Including MCP",
+        "quote": "In Scope: Indirect / third-party prompt injection or untrusted-content attacks that cause an agent to misuse a Connector or MCP tool to access, exfiltrate, or transform sensitive data from a bughunter-owned “victim” account, or to take a harmful action under that account."
+      },
+      {
+        "section": "OpenAI Proprietary Information",
+        "quote": "In Scope: Vulnerabilities that return proprietary information related to reasoning (e.g., full unsummarized Chain of Thought)."
+      },
+      {
+        "section": "Account and Platform Integrity",
+        "quote": "Rate limit bypass issues must demonstrate at least 1,000 completions from the latest model generation across no more than five accounts within one day on our Sol model (any reasoning level)."
+      },
+      {
+        "section": "Content Issues",
+        "quote": "All content/model response issues are out of scope — these issues are complex and not addressable through traditional security fixes."
+      },
+      {
+        "section": "Safe Harbor",
+        "quote": "OpenAI will not threaten or bring any legal action against anyone who makes a good faith effort to comply with this bug bounty policy."
+      }
+    ]
+  }
+}

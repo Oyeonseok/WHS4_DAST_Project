@@ -1,0 +1,29 @@
+{
+  "capture_status": "BLOCKED",
+  "capture_reason": "UNKNOWN",
+  "requested_url": "https://hackerone.com/vanguard",
+  "final_url": "https://hackerone.com/vanguard",
+  "title": "",
+  "captured_at": "2026-08-27T05:30:27.371739+00:00",
+  "captured_text": "URL https://hackerone.com/vanguard is not safe to open (non-retryable error)",
+  "analysis": {
+    "program_name": "Vanguard",
+    "program_description": "",
+    "in_scope_assets": [],
+    "out_of_scope_assets": [],
+    "allowed_activities": [],
+    "prohibited_activities": [],
+    "submission_requirements": [],
+    "operational_constraints": [],
+    "safe_harbor": "",
+    "ambiguities": [
+      "프로그램 페이지를 열 수 없어 범위, 정책, 제외 항목 및 프로그램 제목을 확인하지 못했습니다. 도구 응답: URL https://hackerone.com/vanguard is not safe to open (non-retryable error)"
+    ],
+    "source_evidence": [
+      {
+        "section": "Access attempt",
+        "quote": "URL https://hackerone.com/vanguard is not safe to open (non-retryable error)"
+      }
+    ]
+  }
+}

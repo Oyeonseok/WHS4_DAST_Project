@@ -1,0 +1,159 @@
+# Scope: Telenor Sweden Public Bug Bounty Program
+
+> Source: https://yeswehack.com/programs/telenor-sweden-public-bug-bounty-program
+> Captured at: 2026-08-27T05:18:06.712364+00:00
+> Scope ID: `scope_fab8b1116cbc47ccafde75437c4da2f4`
+
+## Program summary
+
+Telenor Sverige AB의 공개 버그 바운티 프로그램입니다. 총 24개 범위가 명시되어 있습니다. 보상은 자산 등급별 CVSS 기준으로 High: Low €200 · Medium €600 · High €2,500 · Critical €6,000, Medium: €150 · €500 · €2,000 · €5,000, Low: €100 · €400 · €1,500 · €3,000입니다.
+
+## In-scope assets
+
+| Type | Asset | Eligibility | Maximum severity | Description |
+|---|---|---|---|---|
+| DOMAIN | telenor.se | 범위 내이며 High 자산 등급입니다. | Critical | 웹 애플리케이션. 보상: Low €200 · Medium €600 · High €2,500 · Critical €6,000. |
+| WILDCARD | \*.signin.telenor.se | 범위 내이며 High 자산 등급입니다. | Critical | 웹 애플리케이션. 보상: Low €200 · Medium €600 · High €2,500 · Critical €6,000. |
+| WILDCARD | \*.profile.telenor.se | 범위 내이며 High 자산 등급입니다. | Critical | 웹 애플리케이션. 보상: Low €200 · Medium €600 · High €2,500 · Critical €6,000. |
+| WILDCARD | \*.apis.telenor.se | 범위 내이며 High 자산 등급입니다. | Critical | API. 보상: Low €200 · Medium €600 · High €2,500 · Critical €6,000. |
+| WILDCARD | \*.api-app.telenor.se | 범위 내이며 High 자산 등급입니다. | Critical | API. 보상: Low €200 · Medium €600 · High €2,500 · Critical €6,000. |
+| DOMAIN | vimla.se | 범위 내이며 High 자산 등급입니다. | Critical | 웹 애플리케이션. 보상: Low €200 · Medium €600 · High €2,500 · Critical €6,000. |
+| WILDCARD | \*.mitt.vimla.se | 범위 내이며 High 자산 등급입니다. | Critical | 웹 애플리케이션. 보상: Low €200 · Medium €600 · High €2,500 · Critical €6,000. |
+| WILDCARD | \*.api.vimla.se | 범위 내이며 High 자산 등급입니다. | Critical | API. 보상: Low €200 · Medium €600 · High €2,500 · Critical €6,000. |
+| DOMAIN | ownit.se | 범위 내이며 High 자산 등급입니다. | Critical | 웹 애플리케이션. 보상: Low €200 · Medium €600 · High €2,500 · Critical €6,000. |
+| WILDCARD | \*.foretagsportalen.telenor.se | 범위 내이며 Medium 자산 등급입니다. | Critical | 웹 애플리케이션. 보상: Low €150 · Medium €500 · High €2,000 · Critical €5,000. |
+| WILDCARD | \*.mittforetag.telenor.se | 범위 내이며 Medium 자산 등급입니다. | Critical | 웹 애플리케이션. 보상: Low €150 · Medium €500 · High €2,000 · Critical €5,000. |
+| WILDCARD | \*.stream.telenor.se | 범위 내이며 Medium 자산 등급입니다. | Critical | 웹 애플리케이션. 보상: Low €150 · Medium €500 · High €2,000 · Critical €5,000. |
+| MOBILE\_APP | https://play.google.com/store/apps/details?id=com.vimlaapp&amp;hl=en | 범위 내이며 Medium 자산 등급입니다. | Critical | Android 모바일 애플리케이션. 보상: Low €150 · Medium €500 · High €2,000 · Critical €5,000. |
+| MOBILE\_APP | https://apps.apple.com/se/app/vimla/id1233271881 https://play.google.com/store/apps/details?id=com.vimlaapp&amp;hl=en | 범위 내이며 Medium 자산 등급입니다. | Critical | iOS 모바일 애플리케이션. 보상: Low €150 · Medium €500 · High €2,000 · Critical €5,000. |
+| WILDCARD | \*.play.ownit.se | 범위 내이며 Medium 자산 등급입니다. | Critical | 웹 애플리케이션. 보상: Low €150 · Medium €500 · High €2,000 · Critical €5,000. |
+| WILDCARD | \*.inpli.se | 범위 내이며 Medium 자산 등급입니다. | Critical | 와일드카드. 보상: Low €150 · Medium €500 · High €2,000 · Critical €5,000. |
+| WILDCARD | \*.telenorinpli.se | 범위 내이며 Medium 자산 등급입니다. | Critical | 와일드카드. 보상: Low €150 · Medium €500 · High €2,000 · Critical €5,000. |
+| WILDCARD | \*.telenor.se | 범위 내이며 Low 자산 등급입니다. | Critical | 와일드카드. 보상: Low €100 · Medium €400 · High €1,500 · Critical €3,000. |
+| WILDCARD | \*.vimla.work | 범위 내이며 Low 자산 등급입니다. | Critical | 와일드카드. 보상: Low €100 · Medium €400 · High €1,500 · Critical €3,000. |
+| WILDCARD | \*.vimla.se | 범위 내이며 Low 자산 등급입니다. | Critical | 와일드카드. 보상: Low €100 · Medium €400 · High €1,500 · Critical €3,000. |
+| WILDCARD | \*.vimla.io | 범위 내이며 Low 자산 등급입니다. | Critical | 와일드카드. 보상: Low €100 · Medium €400 · High €1,500 · Critical €3,000. |
+| WILDCARD | \*.ownit.se | 범위 내이며 Low 자산 등급입니다. | Critical | 와일드카드. 보상: Low €100 · Medium €400 · High €1,500 · Critical €3,000. |
+| WILDCARD | \*.bredbandsbolaget.se | 범위 내이며 Low 자산 등급입니다. | Critical | 와일드카드. 보상: Low €100 · Medium €400 · High €1,500 · Critical €3,000. |
+| WILDCARD | \*.europolitan.se | 범위 내이며 Low 자산 등급입니다. | Critical | 와일드카드. 보상: Low €100 · Medium €400 · High €1,500 · Critical €3,000. |
+
+## Out-of-scope assets
+
+| Type | Asset | Eligibility | Maximum severity | Description |
+|---|---|---|---|---|
+| WILDCARD | \*.bbcust.telenor.se | 보상 대상이 아닙니다. |  | 명시적 범위 제외 자산입니다. |
+| WILDCARD | \*.cust.telenor.se | 보상 대상이 아닙니다. |  | 명시적 범위 제외 자산입니다. |
+| WILDCARD | \*.sme.telenor.se | 보상 대상이 아닙니다. |  | 명시적 범위 제외 자산입니다. |
+| WILDCARD | \*.cust.bredbandsbolaget.se | 보상 대상이 아닙니다. |  | 명시적 범위 제외 자산입니다. |
+| WILDCARD | \*.customers.ownit.se | 보상 대상이 아닙니다. |  | 명시적 범위 제외 자산입니다. |
+| WILDCARD | \*.cust.ownit.se | 보상 대상이 아닙니다. |  | 명시적 범위 제외 자산입니다. |
+| WILDCARD | \*.ownit.nu | 보상 대상이 아닙니다. |  | 명시적 범위 제외 자산입니다. |
+| DOMAIN | tc.ownit.se | 보상 대상이 아닙니다. |  | 명시적 범위 제외 자산입니다. |
+| DOMAIN | faq.vimla.se | 보상 대상이 아닙니다. |  | 명시적 범위 제외 자산입니다. |
+| DOMAIN | status.vimla.se | 보상 대상이 아닙니다. |  | 명시적 범위 제외 자산입니다. |
+| DOMAIN | stage-vimla-se.vimla.io | 보상 대상이 아닙니다. |  | 명시적 범위 제외 자산입니다. |
+| OTHER | Any domain that looks like it's owned by a third party or customer due to customer's privacy | 보상 대상이 아닙니다. |  | 제3자 또는 고객 소유로 보이는 모든 도메인은 고객 프라이버시를 위해 제외됩니다. |
+| OTHER | Mobile services and devices provided by Telenor Sweden and subsidiaries not reachable from Internet | 보상 대상이 아닙니다. |  | 인터넷에서 접근할 수 없는 Telenor Sweden 및 자회사 제공 모바일 서비스·장치는 제외됩니다. |
+| WILDCARD | Other business units of the Telenor Group - including \*.telenor.com | 보상 대상이 아닙니다. |  | \*.telenor.com을 포함한 Telenor Group의 다른 사업부는 제외됩니다. |
+
+## Allowed activities
+
+- 웹 애플리케이션 또는 인터페이스를 통해 무해한 명령(예: whoami, hostname, ifconfig)을 직접 주입하는 RCE 검증
+- 하드코딩된 무해한 명령의 결과만 출력하는 파일 업로드
+- 실제 보안 영향이 있는 CSRF, CORS, 클릭재킹/UI redressing 보고
+- 생산 환경에 영향을 주지 않는 비운영 환경 테스트(단, 생산 환경에서 재현·영향이 없으면 Low 보상 등급 적용)
+
+## Prohibited activities
+
+- 서비스 저하 또는 중단을 일으킬 수 있는 테스트 및 DoS
+- 사용자 데이터의 유출·조작·파괴
+- 취약한 계정에서 데이터 생성·삭제·수정
+- 탈취 계정으로 인증 후 취약점을 탐색
+- 보고서에 PII를 포함하거나 PoC 내 PII를 충분히 마스킹하지 않는 행위
+- 노출된 자격증명·시크릿의 유효성 확인을 넘는 사용
+- 노출된 민감정보의 문서·데이터를 대량 추출·복사
+- 임의 명령 실행을 허용하는 파일(웹셸) 업로드
+- 파일·데이터 또는 권한 수정
+- 파일·데이터 삭제
+- 재부팅 등 정상 운영 중단
+- 서버에 영구 연결 생성·유지
+- 취약점 입증에 필요한 범위를 넘어 파일·데이터를 의도적으로 열람
+- 취한 조치 또는 요구 정보를 공개하지 않음
+- 악용 가능한 PoC 없는 가설적 결함 또는 모범사례 문제
+- 타인에게 영향이 없는 자기 반사형 주입
+- 혼합 콘텐츠 경고
+- 사회공학 전반
+- 웹 양식의 autocomplete 속성 존재
+- TLS/SSL 문제
+- MITM 또는 피해자 기기의 물리적 접근이 필요한 공격
+- 발생 가능성이 낮은 사용자 상호작용이 필요한 문제
+- 영향이 낮거나 심각도가 낮은 CSRF
+- 잘못되었거나 누락된 SPF·DKIM·DMARC 레코드
+- 직접 보안 영향 없는 정보 노출
+- 공개·비보호 정보 또는 Telenor 통제 밖 정보의 노출
+- HSTS 헤더 문제
+- 완전한 동작 PoC 없는 서브도메인 탈취
+- 직접 영향 없는 Blind SSRF
+- 레이트리밋 부재, 무차별대입 또는 CAPTCHA 문제
+- 악용 PoC·비즈니스 영향 없는 API 키 노출·오구성
+- 신뢰된 제3자 웹사이트의 Referer를 통한 비밀번호 재설정 토큰 유출
+- 통제할 수 없는 제3자 자산에서 수집한 시크릿·자격증명·정보
+- 프로그램 범위에 적용되지 않는 자사 통제 자산의 시크릿·자격증명·정보 노출
+- 패치 배포 후 30일 미만의 최근 공개 0-day
+- Telenor 서비스 외 경로를 통한 사용자 스팸
+- 구형 브라우저 또는 플랫폼에만 영향을 주는 취약점
+- CSV injection
+- Task Hijacking
+- 자신의 애플리케이션만 충돌시키는 행위
+- 모바일 바이너리의 SSL pinning·바이너리 보호·난독화·탈옥/루팅/디버깅 탐지 등 클라이언트 보호 부재
+- 모바일 기기의 내부 DB·preference 파일 암호화 부재
+- 보고 시점에 지원되지 않는 Android 버전에서만 가능한 익스플로잇
+- 보고 시점에 지원되지 않는 iOS 버전에서만 가능한 익스플로잇
+- 탈옥 또는 루팅 기기에서만 가능한 익스플로잇
+- 일반적인 Android 또는 iOS 취약점
+
+## Submission requirements
+
+- 최초 보고자여야 합니다.
+- 적격 취약점이어야 합니다.
+- 발견 후 24시간 이내에 yeswehack.com을 통해서만 보고해야 합니다.
+- 명확한 설명과 재현 절차를 제공하고 필요한 스크린샷 또는 PoC 코드를 첨부해야 합니다.
+- 모든 제출에는 취약점의 완전한 설명, 악용 가능성, 영향 및 증거를 포함해야 합니다.
+- 증거로 동영상, 스크린샷, PoC 코드, 트래픽 로그, 웹/API 요청·응답, 테스트 계정의 이메일·사용자 ID, 테스트에 사용한 IP 주소를 제공할 수 있습니다.
+- RCE 보고서에는 출발지 IP·시간대 포함 타임스탬프, 서버 요청·응답, 업로드 파일명, 해당 시 콜백 IP·포트, 접근한 모든 데이터를 포함해야 합니다.
+- 업로드 파일명에는 “telenor\_ywh”와 타임스탬프를 포함해야 합니다.
+- XSS를 High 또는 Critical로 보상받으려면 현실적이고 입증된 단계별 악용 시나리오와 사용자 대신 가능한 수정·행동을 제공해야 합니다.
+- 유효 보고서는 공개되지 않으며, 해결·종료된 보고서를 포함해 부분 공개도 허용되지 않습니다.
+- 제출된 보고서에 최대 5명의 협업자를 추가하고 보상 분배 비율을 정할 수 있습니다.
+- 보고서 제출에는 hunter 계정 로그인이 필요합니다.
+
+## Operational constraints
+
+- 비운영 환경에서의 문제가 생산 환경에 재현되지 않거나 생산에 영향을 주지 않으면, 상위 자산 등급과 무관하게 Low 보상 그리드가 적용됩니다.
+- 같은 취약점이 생산 및 비운영 환경 모두에서 발견되면 한 번만 보상되며 두 번째 보고서는 중복 또는 정보성으로 처리됩니다.
+- Telenor 또는 Telenor 사용자에 관해 받은·수집한 기밀 정보는 기밀로 유지하고 프로그램과 관련해서만 사용해야 합니다.
+- Telenor의 사전 서면 동의 없이 제출물 및 조사 중 얻은 정보를 사용·공개·배포할 수 없습니다.
+- 연구가 정책에 부합하는지 불확실하면 계속 진행하기 전에 yeswehack@telenor.se로 문의해야 합니다.
+- 전·현직 Telenor 직원 또는 계약자는 금전 보상 대상이 아닙니다.
+
+## Safe harbor
+
+명시되지 않음.
+
+## Ambiguities requiring review
+
+- 명시적인 safe-harbor 보장 또는 법적 면책 문구는 확인되지 않았습니다.
+- XSS는 구체적으로 High 또는 Critical 상황을 입증하지 않으면 Medium으로 평가될 가능성이 있다고만 명시되어 있어, 최종 심각도 평가는 사례별 판단입니다.
+- 노출·유출 보고는 정보 출처가 범위 내이고 영향이 범위 내 또는 범위 외인 경우에만 적격이며, 출처가 조직의 범위 외 또는 제3자 범위 외이면 부적격입니다.
+
+## Source evidence
+
+- **Program:** “# Telenor Sweden Public Bug Bounty Program”
+- **Scopes:** “Scopes 24”
+- **Out of scopes:** “Out of scopes”
+- **Vulnerability types:** “Qualifying vulnerabilities”
+- **Vulnerability types:** “Non-qualifying vulnerabilities”
+- **Submission:** “To submit a vulnerability report, you need to login with your hunter account.”
+
+---
+승인하기 전에 원본 프로그램 페이지와 이 문서를 대조해 검토하세요.

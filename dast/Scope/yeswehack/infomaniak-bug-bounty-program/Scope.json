@@ -1,0 +1,501 @@
+{
+  "schema_version": "1.0",
+  "scope_id": "scope_b3915eeb3d23427a8bf8f9e5930b5bb1",
+  "created_at": "2026-08-27T05:20:44.848877Z",
+  "source": {
+    "requested_url": "https://yeswehack.com/programs/infomaniak-bug-bounty-program",
+    "final_url": "https://yeswehack.com/programs/infomaniak-bug-bounty-program",
+    "title": "Infomaniak Bug Bounty program bug bounty program - YesWeHack",
+    "captured_at": "2026-08-27T05:20:44.846973Z",
+    "capture_status": "COMPLETE",
+    "capture_reason": "NONE",
+    "content_sha256": "de3086c2aa6fea228360367a46f29b015b0db402f4c98ef65d6a9bb67a3a2c91",
+    "text": "Infomaniak Bug Bounty program\nInfomaniak is Switzerland's largest web-hosting company, also offering live-streaming and video on demand services.\n\n✅ Eligibility and Rules\nDenial of service (DoS) attacks on our applications, servers, networks or infrastructure are strictly forbidden.\nAvoid tests that could cause degradation or interruption of our services.\nDo not use automated scanners or tools that generate large amount of network traffic.\nDo not leak, manipulate, or destroy any user data or files in any of our applications/servers.\nDo not copy any files from our applications/servers and disclose them.\nNo vulnerability disclosure, full, partial or otherwise, is allowed.\n\nReward Eligibility and Amount\nYou must be the first reporter of a vulnerability.\nThe vulnerability must be a qualifying vulnerability (see below).\nThe report must contain the following elements:\nClear textual description of the vulnerability, how it can be exploited, the security impact it has on the application, its users and our organisation, and remediation advice on fixing the vulnerability\nProof of exploitation: screenshots demonstrating the exploit was performed, and showing the final impact\nProvide complete steps with the necessary information to reproduce the exploit, including (if necessary) code snippets, payloads, commands etc\nYou must not break any of the testing policy rules listed above.\nYou must not be a former or current employee of our organisation or one of its contractors.\nIf you find the same vulnerability several times, please create only one report and eventually use comments.\nThe triage team will use the \"One Fix One Reward\" process: if two or more endpoints/forms use the same code base and a single fix can be deployed to fix all the other weaknesses, only one endpoint will be considered as eligible for a reward and other reports will be closed as Informative/Duplicate.\n\nTesting precautions\nconduct your bug bounty activities in a way that does not impact the experience of our clients or our operational teams. If you are interested in testing something that may be considered critical for production, we encourage you to contact us beforehand, and we will work with you to provide the necessary testing conditions.\n\nDiscovery Methodology\nYour report must explain how you discovered the vulnerability, not just how to reproduce it. Crucially, please detail how you identified the vulnerable endpoint or asset (e.g., via directory fuzzing, client-side JavaScript analysis, exposed source code, or an external repository).\n\nAccount and Support Management\nFor any client account creation necessary for your tests, please use exclusively your YWH aliases (@yeswehack.ninja).\nDon't create unnecessary accounts: Reuse your existing client accounts as much as possible to avoid polluting our database with fictitious profiles.\nCustomer Support: Do not test contact systems like kChat or Mail support tickets intensively.\n\nTraffic Identification\nYour User-Agent header must be set to `Infomaniak-YWH-Bugbounty` for all your requests.\nWe reserve the right to block accounts or IP addresses violating these rules, especially in case of service quality impact or failure to follow identification guidelines.\n\nOut of scope services\nHousing\nVery high availability Hosting\nSynology\nJelastic cloud\nDebian community servers : example with buster-.infomaniak.ch, bookworm-.infomaniak.ch\n\nReward\nAsset value | CVSS Low | CVSS Medium | CVSS High | CVSS Critical\nCritical | €100 | €600 | €2,000 | €7,000\nHigh | €100 | €400 | €1,500 | €3,500\nMedium | €100 | €300 | €600 | €1,000\n\nScopes\nksuite.infomaniak.com | Web application | Critical\n*.kdrive.infomaniak.com | Web application | Critical\napi.infomaniak.com | API | Critical\nlogin.infomaniak.com | Web application | Critical\nmanager.infomaniak.com/v3/* | Web application | Critical\nadmin2.infomaniak.com | Web application | Critical\nshop.infomaniak.com | Web application | Critical\n*.kchat.infomaniak.com | Web application | High\ncalendar.infomaniak.com | Web application | High\ncontacts.infomaniak.com | Web application | High\netickets.infomaniak.com | Web application | High\nmail.infomaniak.com | Web application | High\nswiss-backup*.infomaniak.com | Web application | High\nvod.infomaniak.com | Web application | High\n*.vod2.infomaniak.com | Web application | High\nplayer-radio.infomaniak.com | Web application | High\nwelcome.infomaniak.com | Web application | High\nwww.swisstransfer.com | Web application | High\nswisstransfer.infomaniak.com | Web application | High\nwww.infomaniak.com | Web application | High\nchk.infomaniak.com | Web application | High\nai-tools.infomaniak.com | Mobile application | High\nkmeet.infomaniak.com | Web application | High\nkpaste.infomaniak.com | Web application | High\nsync.infomaniak.com | Web application | High\nstorage*.infomaniak.com | Web application | High\neuria.infomaniak.com | Web application | High\nhttps://play.google.com/store/apps/details?id=com.infomaniak.drive | Mobile application Android | High\nhttps://apps.apple.com/app/infomaniak-kdrive/id1482778676 | Mobile application IOS | High\nhttps://github.com/Infomaniak/desktop-kDrive | Application | High\nhttps://apps.apple.com/fr/app/infomaniak-mail/id1622596573 | Mobile application IOS | High\nhttps://play.google.com/store/apps/details?id=com.infomaniak.mail&hl=en_US | Mobile application Android | High\nmail-builder.infomaniak.com/ | Web application | High\n*.infomaniak.com | Web application | High\nix2smbdyjt.infomaniak.site | Web application | Medium\n5k8vrbdyje.infomaniak.site | Web application | Medium\nfv3lfbdyjh.infomaniak.site | Web application | Medium\nl75pvbdyjo.infomaniak.site | Web application | Medium\ninfomaniak.events | Web application | Medium\nsms.infomaniak.com | Web application | Medium\ndeveloper.infomaniak.com | Web application | Medium\ninvitation.infomaniak.com | Web application | Medium\nacademy.infomaniak.com | Web application | Medium\nnewsletter.infomaniak.com | Web application | Medium\nhosting-ik.com | Web application | Medium\nmanager.infomaniak.com/*proxy* | Web application | Medium\n\nOut of scopes\nAssets not listed in the in scope section are to be considered as out of the scope of this program and won't be eligible for reward\nhttps://api.pub1.infomaniak.cloud\nWe do not manage Open Stack dashboard which is therefore out of scope\nov-XX.infomaniak.ch and od-XX.infomaniak.ch sub domains\nThis domain https://drive.infomaniak.com/app/office/:folder:/:file: is out of scope. This is only office application, an external app to open MS office documents.\nFTP credentials from our customers, like *.ftp.infomaniak.com\nVPS instances from our customers, like *.vps.infomaniak.com\nMySQL credentials from our customers, like *.myd.infomaniak.com\nJelastic subdomains : *.jcloud.ik-server.com, *.jpc.infomaniak.com, *.jpe.infomaniak.com\nUser email verification\nWebsocket IPS-public credentials (MQTT, info-mq, IPS_RABBIT, ips-public). Public identifiers that do not allow access to information outside the scope of the user's profile.\nS3 credentials from our customers, like s3.pub*.infomaniak.cloud\nDatabase service instances from customers, like *.dbaas.infomaniak.cloud\nacronis.infomaniak.com\npartner program : pages about finding partner and sending offer / All routes ending with /partners/tender\nstorage*.infomaniak.com/newsletter/thumbnails/*\nInformation returned by /get-tickets-infos (including organizer, event_name, event_date, command_date, and masked email) is out of scope.\n\nQualifying vulnerabilities\nSQL Injection (SQLi)\nCross-Site Scripting (XSS)\nRemote Code Execution (RCE)\nInsecure Direct Object Reference (IDOR)\nHorizontal and vertical privilege escalation\nAuthentication bypass & broken authentication\nBusiness Logic Errors vulnerability with real security impact\nLocal files access and manipulation (LFI, RFI, XXE, SSRF, XSPA)\nCross-Origin Resource Sharing (CORS) with real security impact\nCross-site Request Forgery (CSRF) with real security impact\nOpen Redirect\nExposed secrets, credentials or sensitive information from an asset under our control\nInfluencing and changing the AI model in ways that impact other users\nAbility to perturb valid inputs such that the model produces incorrect outputs for other users\nCircumventing history protections and history deletion mechanisms to access other users' history\nAbility to poison the AI model or its data by tampering with its architecture, training code/data or hyperparameters\n\nNon-qualifying vulnerabilities\nInfomaniak Mirror Server\nHTML Injection in emails\nSandboxed XSS without working PoC\nTabnabbing\nMissing cookie flags\nContent/Text injections\nMixed content warnings\nClickjacking/UI redressing\nDenial of Service (DoS) attacks\nKnown CVEs without working PoC\nOpen ports without real security impact\nSocial engineering of staff or contractors\nPresence of autocomplete attribute on web forms\nVulnerabilities affecting outdated browsers or platforms\nSelf-XSS or XSS that cannot be used to impact other users\nSelf-XSS or XSS on Page editor\nOutdated libraries without a demonstrated security impact\nAny hypothetical flaw or best practices without exploitable PoC\nExpired certificate, best practices and other related issues for TLS/SSL certificates\nUnexploitable vulnerabilities (ex: XSS or Open Redirect in HTTP Host Header)\nReports with attack scenarios requiring MITM or physical access to victim's device\nMissing security-related HTTP headers which do not lead directly to a vulnerability\nUnauthenticated / Logout / Login and other low-severity Cross-Site Request Forgery (CSRF)\nInvalid or missing SPF (Sender Policy Framework), DKIM, DMARC records\nSession expiration policies (no automatic logout, invalidation after a certain time or after a password change)\nDisclosure of information without direct security impact (e.g. stack traces, path disclosure, directory listings, software versions, IP disclosure, 3rd party secrets)\nCSV injection\nHTTP Strict Transport Security Header (HSTS)\nSubdomain takeover without a full working PoC\nBlind SSRF without direct impact (e.g. DNS pingback)\nLack of rate-limiting, brute-forcing or captcha issues\nUser enumeration (email, alias, GUID, phone number)\nPassword requirements policies (length / complexity / reuse)\nAbility to spam users (email / SMS / direct messages flooding)\nDisclosed / misconfigured Google API key (including Google Maps)\nRecently disclosed 0-day vulnerabilities (less than 14 days since patch release)\nPassword reset token leak on trusted third-party website via Referer header (eg Google Analytics, Facebook…)\nPassword validation for actions like deleting user, changing settings, etc\nTask Hijacking\nCrashing your own application\nStolen secrets, credentials or information gathered from a third-party asset that we have no control over\nLack of client-side protections on mobile binaries: SSL pinning/binary protection/code obfuscation/jailbreak detection/root detection/anti-debugging controls/ etc\nLack of encryption on internal databases/preference files on mobile device\nExploits that are only possible on Android versions that are not currently supported at the time of the emission of the vulnerability report\nExploits that are only possible on IOS versions that are not currently supported at the time of the emission of the vulnerability report\nExploits that are only possible on a jailbroken/rooted device\nExploits that are only possible when a malicious third-party application is installed by the victim.\nGeneric Android or iOS vulnerabilities\nRace condition without Critical risk for PII\nBusiness logic Errors without Critical risk for PII or confidential data\nAI Command/Prompt Injection attacks that only affect the attacker or generate content that is shown only to the attacker\nAI prompts or system prompts\nModel Hallucination attacks, e.g. AI model disclosing falsely confidential data or pretending to run code provided by an attacker\nOutputs that could be considered as safety issues, that seem inaccurate or offensive\nAny issue that relies on the user installing/using an unofficial or malicious version of our mobile and desktop applications\nDesktop/mobile app vulnerabilities requiring local user access on the same machine are out of scope.\nkMeet: ANONYMOUS SASL authentication, allowing unauthenticated XMPP connections\nHigh-Entropy Identifier Guessing: Vulnerabilities that rely on brute-forcing or predicting UUIDs, tokens, or other high-entropy identifiers used for public access links across services such as kDrive, SwissTransfer, Mail, invoicing PDF, tickets PDF, kPaste, etc.\n\nHunting requirements\nMost if not all our products are available to test for free and if not you can subscribe for a reasonable price. Thus, you're more than welcomed to self-register on our applications for the purpose of your tests.\nPlease use your YWH aliases (*@yeswehack.ninja) for your main account and subaccounts as it'll greatly help us process your reports.\nPlease append to your user-agent header the following value: ' Infomaniak-YWH-Bugbounty '."
+  },
+  "analysis": {
+    "program_name": "Infomaniak Bug Bounty program",
+    "program_description": "스위스 최대 웹 호스팅 기업으로 라이브 스트리밍 및 VOD 서비스도 제공한다. 범위는 46개이며, 보상 그리드는 자산 가치 Critical: Low €100 · Medium €600 · High €2,000 · Critical €7,000, High: Low €100 · Medium €400 · High €1,500 · Critical €3,500, Medium: Low €100 · Medium €300 · High €600 · Critical €1,000이다.",
+    "in_scope_assets": [
+      {
+        "asset_type": "DOMAIN",
+        "asset": "ksuite.infomaniak.com",
+        "description": "Web application. 보상: Low €100 · Medium €600 · High €2,000 · Critical €7,000",
+        "eligibility": "보상 대상",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "WILDCARD",
+        "asset": "*.kdrive.infomaniak.com",
+        "description": "Web application. 보상: Low €100 · Medium €600 · High €2,000 · Critical €7,000",
+        "eligibility": "보상 대상",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "DOMAIN",
+        "asset": "api.infomaniak.com",
+        "description": "API. 보상: Low €100 · Medium €600 · High €2,000 · Critical €7,000",
+        "eligibility": "보상 대상",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "DOMAIN",
+        "asset": "login.infomaniak.com",
+        "description": "Web application. 보상: Low €100 · Medium €600 · High €2,000 · Critical €7,000",
+        "eligibility": "보상 대상",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "manager.infomaniak.com/v3/*",
+        "description": "Web application. 보상: Low €100 · Medium €600 · High €2,000 · Critical €7,000",
+        "eligibility": "보상 대상",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "DOMAIN",
+        "asset": "admin2.infomaniak.com",
+        "description": "Web application. 보상: Low €100 · Medium €600 · High €2,000 · Critical €7,000",
+        "eligibility": "보상 대상",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "DOMAIN",
+        "asset": "shop.infomaniak.com",
+        "description": "Web application. 보상: Low €100 · Medium €600 · High €2,000 · Critical €7,000",
+        "eligibility": "보상 대상",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "WILDCARD",
+        "asset": "*.kchat.infomaniak.com",
+        "description": "Web application. 보상: Low €100 · Medium €400 · High €1,500 · Critical €3,500",
+        "eligibility": "보상 대상",
+        "maximum_severity": "High"
+      },
+      {
+        "asset_type": "DOMAIN",
+        "asset": "calendar.infomaniak.com",
+        "description": "Web application. 보상: Low €100 · Medium €400 · High €1,500 · Critical €3,500",
+        "eligibility": "보상 대상",
+        "maximum_severity": "High"
+      },
+      {
+        "asset_type": "DOMAIN",
+        "asset": "contacts.infomaniak.com",
+        "description": "Web application. 보상: Low €100 · Medium €400 · High €1,500 · Critical €3,500",
+        "eligibility": "보상 대상",
+        "maximum_severity": "High"
+      },
+      {
+        "asset_type": "DOMAIN",
+        "asset": "etickets.infomaniak.com",
+        "description": "Web application. 보상: Low €100 · Medium €400 · High €1,500 · Critical €3,500",
+        "eligibility": "보상 대상",
+        "maximum_severity": "High"
+      },
+      {
+        "asset_type": "DOMAIN",
+        "asset": "mail.infomaniak.com",
+        "description": "Web application. 보상: Low €100 · Medium €400 · High €1,500 · Critical €3,500",
+        "eligibility": "보상 대상",
+        "maximum_severity": "High"
+      },
+      {
+        "asset_type": "WILDCARD",
+        "asset": "swiss-backup*.infomaniak.com",
+        "description": "Web application. 보상: Low €100 · Medium €400 · High €1,500 · Critical €3,500",
+        "eligibility": "보상 대상",
+        "maximum_severity": "High"
+      },
+      {
+        "asset_type": "DOMAIN",
+        "asset": "vod.infomaniak.com",
+        "description": "Web application. 보상: Low €100 · Medium €400 · High €1,500 · Critical €3,500",
+        "eligibility": "보상 대상",
+        "maximum_severity": "High"
+      },
+      {
+        "asset_type": "WILDCARD",
+        "asset": "*.vod2.infomaniak.com",
+        "description": "Web application. 보상: Low €100 · Medium €400 · High €1,500 · Critical €3,500",
+        "eligibility": "보상 대상",
+        "maximum_severity": "High"
+      },
+      {
+        "asset_type": "DOMAIN",
+        "asset": "player-radio.infomaniak.com",
+        "description": "Web application. 보상: Low €100 · Medium €400 · High €1,500 · Critical €3,500",
+        "eligibility": "보상 대상",
+        "maximum_severity": "High"
+      },
+      {
+        "asset_type": "DOMAIN",
+        "asset": "welcome.infomaniak.com",
+        "description": "Web application. 보상: Low €100 · Medium €400 · High €1,500 · Critical €3,500",
+        "eligibility": "보상 대상",
+        "maximum_severity": "High"
+      },
+      {
+        "asset_type": "DOMAIN",
+        "asset": "www.swisstransfer.com",
+        "description": "Web application. 보상: Low €100 · Medium €400 · High €1,500 · Critical €3,500",
+        "eligibility": "보상 대상",
+        "maximum_severity": "High"
+      },
+      {
+        "asset_type": "DOMAIN",
+        "asset": "swisstransfer.infomaniak.com",
+        "description": "Web application. 보상: Low €100 · Medium €400 · High €1,500 · Critical €3,500",
+        "eligibility": "보상 대상",
+        "maximum_severity": "High"
+      },
+      {
+        "asset_type": "DOMAIN",
+        "asset": "www.infomaniak.com",
+        "description": "Web application. 보상: Low €100 · Medium €400 · High €1,500 · Critical €3,500",
+        "eligibility": "보상 대상",
+        "maximum_severity": "High"
+      },
+      {
+        "asset_type": "DOMAIN",
+        "asset": "chk.infomaniak.com",
+        "description": "Web application. 보상: Low €100 · Medium €400 · High €1,500 · Critical €3,500",
+        "eligibility": "보상 대상",
+        "maximum_severity": "High"
+      },
+      {
+        "asset_type": "MOBILE_APP",
+        "asset": "ai-tools.infomaniak.com",
+        "description": "Mobile application. 보상: Low €100 · Medium €400 · High €1,500 · Critical €3,500",
+        "eligibility": "보상 대상",
+        "maximum_severity": "High"
+      },
+      {
+        "asset_type": "DOMAIN",
+        "asset": "kmeet.infomaniak.com",
+        "description": "Web application. 보상: Low €100 · Medium €400 · High €1,500 · Critical €3,500",
+        "eligibility": "보상 대상",
+        "maximum_severity": "High"
+      },
+      {
+        "asset_type": "DOMAIN",
+        "asset": "kpaste.infomaniak.com",
+        "description": "Web application. 보상: Low €100 · Medium €400 · High €1,500 · Critical €3,500",
+        "eligibility": "보상 대상",
+        "maximum_severity": "High"
+      },
+      {
+        "asset_type": "DOMAIN",
+        "asset": "sync.infomaniak.com",
+        "description": "Web application. 보상: Low €100 · Medium €400 · High €1,500 · Critical €3,500",
+        "eligibility": "보상 대상",
+        "maximum_severity": "High"
+      },
+      {
+        "asset_type": "WILDCARD",
+        "asset": "storage*.infomaniak.com",
+        "description": "Web application. 보상: Low €100 · Medium €400 · High €1,500 · Critical €3,500",
+        "eligibility": "보상 대상",
+        "maximum_severity": "High"
+      },
+      {
+        "asset_type": "DOMAIN",
+        "asset": "euria.infomaniak.com",
+        "description": "Web application. 보상: Low €100 · Medium €400 · High €1,500 · Critical €3,500",
+        "eligibility": "보상 대상",
+        "maximum_severity": "High"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "https://play.google.com/store/apps/details?id=com.infomaniak.drive",
+        "description": "Mobile application Android. 보상: Low €100 · Medium €400 · High €1,500 · Critical €3,500",
+        "eligibility": "보상 대상",
+        "maximum_severity": "High"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "https://apps.apple.com/app/infomaniak-kdrive/id1482778676",
+        "description": "Mobile application IOS. 보상: Low €100 · Medium €400 · High €1,500 · Critical €3,500",
+        "eligibility": "보상 대상",
+        "maximum_severity": "High"
+      },
+      {
+        "asset_type": "SOURCE_CODE",
+        "asset": "https://github.com/Infomaniak/desktop-kDrive",
+        "description": "Application. 보상: Low €100 · Medium €400 · High €1,500 · Critical €3,500",
+        "eligibility": "보상 대상",
+        "maximum_severity": "High"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "https://apps.apple.com/fr/app/infomaniak-mail/id1622596573",
+        "description": "Mobile application IOS. 보상: Low €100 · Medium €400 · High €1,500 · Critical €3,500",
+        "eligibility": "보상 대상",
+        "maximum_severity": "High"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "https://play.google.com/store/apps/details?id=com.infomaniak.mail&hl=en_US",
+        "description": "Mobile application Android. 보상: Low €100 · Medium €400 · High €1,500 · Critical €3,500",
+        "eligibility": "보상 대상",
+        "maximum_severity": "High"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "mail-builder.infomaniak.com/",
+        "description": "Web application. 보상: Low €100 · Medium €400 · High €1,500 · Critical €3,500",
+        "eligibility": "보상 대상",
+        "maximum_severity": "High"
+      },
+      {
+        "asset_type": "WILDCARD",
+        "asset": "*.infomaniak.com",
+        "description": "Web application. 보상: Low €100 · Medium €400 · High €1,500 · Critical €3,500",
+        "eligibility": "보상 대상",
+        "maximum_severity": "High"
+      },
+      {
+        "asset_type": "DOMAIN",
+        "asset": "ix2smbdyjt.infomaniak.site",
+        "description": "Web application. 보상: Low €100 · Medium €300 · High €600 · Critical €1,000",
+        "eligibility": "보상 대상",
+        "maximum_severity": "Medium"
+      },
+      {
+        "asset_type": "DOMAIN",
+        "asset": "5k8vrbdyje.infomaniak.site",
+        "description": "Web application. 보상: Low €100 · Medium €300 · High €600 · Critical €1,000",
+        "eligibility": "보상 대상",
+        "maximum_severity": "Medium"
+      },
+      {
+        "asset_type": "DOMAIN",
+        "asset": "fv3lfbdyjh.infomaniak.site",
+        "description": "Web application. 보상: Low €100 · Medium €300 · High €600 · Critical €1,000",
+        "eligibility": "보상 대상",
+        "maximum_severity": "Medium"
+      },
+      {
+        "asset_type": "DOMAIN",
+        "asset": "l75pvbdyjo.infomaniak.site",
+        "description": "Web application. 보상: Low €100 · Medium €300 · High €600 · Critical €1,000",
+        "eligibility": "보상 대상",
+        "maximum_severity": "Medium"
+      },
+      {
+        "asset_type": "DOMAIN",
+        "asset": "infomaniak.events",
+        "description": "Web application. 보상: Low €100 · Medium €300 · High €600 · Critical €1,000",
+        "eligibility": "보상 대상",
+        "maximum_severity": "Medium"
+      },
+      {
+        "asset_type": "DOMAIN",
+        "asset": "sms.infomaniak.com",
+        "description": "Web application. 보상: Low €100 · Medium €300 · High €600 · Critical €1,000",
+        "eligibility": "보상 대상",
+        "maximum_severity": "Medium"
+      },
+      {
+        "asset_type": "DOMAIN",
+        "asset": "developer.infomaniak.com",
+        "description": "Web application. 보상: Low €100 · Medium €300 · High €600 · Critical €1,000",
+        "eligibility": "보상 대상",
+        "maximum_severity": "Medium"
+      },
+      {
+        "asset_type": "DOMAIN",
+        "asset": "invitation.infomaniak.com",
+        "description": "Web application. 보상: Low €100 · Medium €300 · High €600 · Critical €1,000",
+        "eligibility": "보상 대상",
+        "maximum_severity": "Medium"
+      },
+      {
+        "asset_type": "DOMAIN",
+        "asset": "academy.infomaniak.com",
+        "description": "Web application. 보상: Low €100 · Medium €300 · High €600 · Critical €1,000",
+        "eligibility": "보상 대상",
+        "maximum_severity": "Medium"
+      },
+      {
+        "asset_type": "DOMAIN",
+        "asset": "newsletter.infomaniak.com",
+        "description": "Web application. 보상: Low €100 · Medium €300 · High €600 · Critical €1,000",
+        "eligibility": "보상 대상",
+        "maximum_severity": "Medium"
+      },
+      {
+        "asset_type": "DOMAIN",
+        "asset": "hosting-ik.com",
+        "description": "Web application. 보상: Low €100 · Medium €300 · High €600 · Critical €1,000",
+        "eligibility": "보상 대상",
+        "maximum_severity": "Medium"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "manager.infomaniak.com/*proxy*",
+        "description": "Web application. 보상: Low €100 · Medium €300 · High €600 · Critical €1,000",
+        "eligibility": "보상 대상",
+        "maximum_severity": "Medium"
+      }
+    ],
+    "out_of_scope_assets": [
+      {
+        "asset_type": "API",
+        "asset": "https://api.pub1.infomaniak.cloud",
+        "description": "명시적 제외",
+        "eligibility": "보상 비대상",
+        "maximum_severity": ""
+      },
+      {
+        "asset_type": "OTHER",
+        "asset": "Open Stack dashboard",
+        "description": "프로그램이 관리하지 않는 대시보드",
+        "eligibility": "보상 비대상",
+        "maximum_severity": ""
+      },
+      {
+        "asset_type": "WILDCARD",
+        "asset": "ov-XX.infomaniak.ch and od-XX.infomaniak.ch",
+        "description": "하위 도메인",
+        "eligibility": "보상 비대상",
+        "maximum_severity": ""
+      },
+      {
+        "asset_type": "URL",
+        "asset": "https://drive.infomaniak.com/app/office/:folder:/:file:",
+        "description": "외부 Office 문서 열기 애플리케이션",
+        "eligibility": "보상 비대상",
+        "maximum_severity": ""
+      },
+      {
+        "asset_type": "WILDCARD",
+        "asset": "*.ftp.infomaniak.com",
+        "description": "고객 FTP 자격 증명",
+        "eligibility": "보상 비대상",
+        "maximum_severity": ""
+      },
+      {
+        "asset_type": "WILDCARD",
+        "asset": "*.vps.infomaniak.com",
+        "description": "고객 VPS 인스턴스",
+        "eligibility": "보상 비대상",
+        "maximum_severity": ""
+      },
+      {
+        "asset_type": "WILDCARD",
+        "asset": "*.myd.infomaniak.com",
+        "description": "고객 MySQL 자격 증명",
+        "eligibility": "보상 비대상",
+        "maximum_severity": ""
+      },
+      {
+        "asset_type": "WILDCARD",
+        "asset": "*.jcloud.ik-server.com, *.jpc.infomaniak.com, *.jpe.infomaniak.com",
+        "description": "Jelastic 하위 도메인",
+        "eligibility": "보상 비대상",
+        "maximum_severity": ""
+      },
+      {
+        "asset_type": "WILDCARD",
+        "asset": "s3.pub*.infomaniak.cloud",
+        "description": "고객 S3 자격 증명",
+        "eligibility": "보상 비대상",
+        "maximum_severity": ""
+      },
+      {
+        "asset_type": "WILDCARD",
+        "asset": "*.dbaas.infomaniak.cloud",
+        "description": "고객 데이터베이스 서비스 인스턴스",
+        "eligibility": "보상 비대상",
+        "maximum_severity": ""
+      },
+      {
+        "asset_type": "DOMAIN",
+        "asset": "acronis.infomaniak.com",
+        "description": "명시적 제외",
+        "eligibility": "보상 비대상",
+        "maximum_severity": ""
+      },
+      {
+        "asset_type": "URL",
+        "asset": "storage*.infomaniak.com/newsletter/thumbnails/*",
+        "description": "명시적 제외",
+        "eligibility": "보상 비대상",
+        "maximum_severity": ""
+      }
+    ],
+    "allowed_activities": [
+      "SQL Injection (SQLi)",
+      "Cross-Site Scripting (XSS)",
+      "Remote Code Execution (RCE)",
+      "Insecure Direct Object Reference (IDOR)",
+      "수평·수직 권한 상승",
+      "인증 우회 및 취약한 인증",
+      "실질적 보안 영향이 있는 Business Logic Errors",
+      "Local files access and manipulation (LFI, RFI, XXE, SSRF, XSPA)",
+      "실질적 보안 영향이 있는 CORS",
+      "실질적 보안 영향이 있는 CSRF",
+      "Open Redirect",
+      "조직 통제 자산에서 노출된 비밀값·자격 증명·민감 정보",
+      "다른 사용자에게 영향을 주는 AI 모델 변경",
+      "다른 사용자의 결과에 영향을 주는 유효 입력 교란",
+      "다른 사용자의 기록에 접근하는 기록 보호·삭제 메커니즘 우회",
+      "AI 모델 또는 데이터의 아키텍처·학습 코드·데이터·하이퍼파라미터 변조를 통한 오염"
+    ],
+    "prohibited_activities": [
+      "DoS 공격",
+      "서비스 저하 또는 중단을 유발할 수 있는 테스트",
+      "대량 네트워크 트래픽을 발생시키는 자동화 스캐너·도구 사용",
+      "사용자 데이터·파일의 유출·조작·파괴",
+      "애플리케이션·서버 파일 복사 및 공개",
+      "취약점의 전체·일부 공개",
+      "Social engineering of staff or contractors",
+      "무차별 대입 또는 CAPTCHA 문제",
+      "고엔트로피 UUID·토큰 등의 추측·예측에 의존하는 취약점",
+      "정상 공개 공유 링크를 사용한 인증 없는 리소스 접근"
+    ],
+    "submission_requirements": [
+      "최초 제보자여야 한다.",
+      "유효한 보고서는 명확한 취약점 설명, 악용 방법, 보안 영향, 수정 조언을 포함해야 한다.",
+      "악용 수행과 최종 영향을 보이는 스크린샷 PoC를 포함해야 한다.",
+      "필요 시 코드 조각·페이로드·명령 등을 포함한 완전한 재현 절차를 제공해야 한다.",
+      "발견 방법과 취약한 엔드포인트 또는 자산을 식별한 과정을 설명해야 한다.",
+      "동일 취약점을 여러 번 발견한 경우 보고서 하나만 생성하고 댓글을 사용해야 한다.",
+      "제보 제출에는 hunter 계정 로그인이 필요하다."
+    ],
+    "operational_constraints": [
+      "테스트용 계정 생성 시 YWH 별칭(@yeswehack.ninja)만 사용해야 한다.",
+      "기존 계정을 가능한 재사용하고 불필요한 계정을 만들지 말아야 한다.",
+      "kChat 또는 Mail 지원 티켓 등 지원 채널을 집중적으로 테스트해서는 안 된다.",
+      "모든 요청의 User-Agent는 `Infomaniak-YWH-Bugbounty`로 설정해야 한다.",
+      "프로덕션에 치명적일 수 있는 테스트는 사전에 팀에 연락해야 한다.",
+      "대부분 제품은 무료로 테스트 가능하며, 그렇지 않은 경우 합리적 가격으로 구독할 수 있고 테스트 목적으로 자가 등록할 수 있다."
+    ],
+    "safe_harbor": "",
+    "ambiguities": [
+      "안전 항구(safe harbor) 조항은 명시되지 않았다.",
+      "자산 목록에는 `*.infomaniak.com`이 포함되지만, 별도 제외 목록의 특정 자산·경로 및 목록에 없는 자산은 제외된다.",
+      "OpenStack 제품에서 리소스 생성 및 구성 오류·비보호 데이터 탐색은 언급되지만 Horizon의 XSS는 제외된다고 명시되어 있다.",
+      "Business Logic Error 및 Broken Access Control은 PII·고객/기밀 데이터 유출 또는 중대한 사업·재무 영향 같은 심각 사례만 보상 대상이라는 추가 제한이 있다."
+    ],
+    "source_evidence": [
+      {
+        "section": "Program description",
+        "quote": "Infomaniak is Switzerland's largest web-hosting company, also offering live-streaming and video on demand services."
+      },
+      {
+        "section": "Scopes",
+        "quote": "ksuite.infomaniak.com | Web application | Critical"
+      },
+      {
+        "section": "Eligibility and Rules",
+        "quote": "Denial of service (DoS) attacks on our applications, servers, networks or infrastructure are strictly forbidden."
+      },
+      {
+        "section": "Hunting requirements",
+        "quote": "Please append to your user-agent header the following value: ' Infomaniak-YWH-Bugbounty '."
+      }
+    ]
+  }
+}

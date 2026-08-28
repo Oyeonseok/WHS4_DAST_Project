@@ -51,8 +51,20 @@ def flows_to_raw_endpoints(flows: list[dict]) -> list[dict]:
     """judgment.merge_and_normalize()에 넣을 수 있는 형태로 변환.
     katana/ffuf 결과와 같은 shape({"method", "path", "content_type",
     "source"})을 맞춰야 섞어서 merge할 수 있다."""
-    # TODO
-    raise NotImplementedError
+    raw_endpoints = []
+    for flow in flows:
+        path = flow.get("path")
+        if not path:
+            continue
+        raw_endpoints.append(
+            {
+                "method": flow.get("method"),
+                "path": path,
+                "content_type": flow.get("content_type"),
+                "source": "mitmproxy",
+            }
+        )
+    return raw_endpoints
 
 
 def ingest_flows_to_db(
@@ -60,6 +72,23 @@ def ingest_flows_to_db(
 ) -> None:
     """원본 flow를 http_exchanges에 감사 기록으로 남긴다.
     dbmod.insert_http_exchange()를 flow마다 호출하면 되는데, is_authenticated
-    값을 어떻게 채울지는 위 TODO 1 먼저 정할 것."""
-    # TODO
-    raise NotImplementedError
+    값은 위 TODO 1이 아직 확정되지 않았으므로, 일단 요청 헤더에 Authorization/Cookie가
+    있으면 인증된 요청으로 간주하는 러프 휴리스틱으로 채운다."""
+    for flow in flows:
+        request_headers = flow.get("request_headers") or {}
+        # 헤더 이름 대소문자를 구분하지 않고 보기 위해 키를 소문자로 맞춰 비교한다.
+        lowered_headers = {k.lower() for k in request_headers}
+        is_authenticated = "authorization" in lowered_headers or "cookie" in lowered_headers
+        dbmod.insert_http_exchange(
+            conn,
+            origin_id=origin_id,
+            session_id=session_id,
+            method=flow.get("method"),
+            path=flow.get("path"),
+            query_string=flow.get("query"),
+            request_headers=json.dumps(request_headers, ensure_ascii=False),
+            status_code=flow.get("status_code"),
+            content_type=flow.get("content_type"),
+            response_size=flow.get("response_size"),
+            is_authenticated=is_authenticated,
+        )

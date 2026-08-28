@@ -1,0 +1,844 @@
+{
+  "schema_version": "1.0",
+  "scope_id": "scope_d4f9a70b8767406eba774037b31d9e4d",
+  "created_at": "2026-08-27T09:51:07.822532Z",
+  "source": {
+    "requested_url": "https://hackerone.com/essity",
+    "final_url": "https://hackerone.com/essity?type=team",
+    "title": "Essity | Response Policy | HackerOne",
+    "captured_at": "2026-08-27T09:49:20.327082Z",
+    "capture_status": "COMPLETE",
+    "capture_reason": "NONE",
+    "content_sha256": "2a35d40b9d2663aac3c856f937f8fc2d0e254ebc31de7df0c61f1a4f056f4080",
+    "text": "=== PROGRAM PAGE: https://hackerone.com/essity?type=team ===\nSkip to main content  >\nLearn more about HackerOne\nLog in\nSecurity page\nProgram guidelines\nScope\nHacktivity\nThanks\nUpdates\nSafe harbor\nIntroduction\nEssity is committed to protecting the security of our assets, devices and customer information. We appreciate the valuable contributions of the security research community and look forward to collaborating to continuously enhance our security posture.\nProgram highlights\nOpen Scope\nAccepts reports for all owned assets based on impact, even if not listed in scope.\nGold Standard Safe Harbor\nAdheres to Gold Standard Safe Harbor.\nCoordinated Vulnerability Disclosure\nStandard\nTop Response Efficiency\nThis program's response efficiency is above 90%.\n22 hours\nAverage time to first response\n1 day\nAverage time to triage\nScope exclusions\nCore Ineligible Findings are out of scope.\nLearn more\nOverview\nLast updated on August 24, 2026. View changes\nProgram Rules\nPlease provide detailed reports with reproducible steps. If the report is not detailed enough to reproduce the issue, the issue may not be marked as triaged.\nSubmit one vulnerability per report unless you need to chain vulnerabilities to provide impact.\nWhen duplicates occur, we only triage the first report received (provided that it can be fully reproduced).\nMultiple vulnerabilities caused by one underlying issue will be treated as one valid report.\nSocial engineering (e.g., phishing, vishing, smishing) is prohibited.\nMake a good faith effort to avoid privacy violations, destruction of data, and interruption or degradation of our service.\nOnly interact with accounts you own or with explicit permission of the account holder.\nWhile you’re welcome to create accounts where they are available. We ask that you use your HackerOne alias when doing so. You can find instructions on how to find your alias here: https://docs.hackerone.com/en/articles/8404308-hacker-email-alias\nWe’re unable to provide account licenses or refund expenses incurred during testing.\nEmployees who have access to internal confidential information are prohibited from participating in this program. This restriction extends to household and immediate family members as well. This rule is meant to prevent conflict of interests or unfair advantage.\nTesting\n# Session Layer: HTTP Headers\nResearchers must include the following header to all requests:\n“X-HackerOne-Research: [H1 username]”\n# Unqualifying Vulnerabilities\nEssity is not interested in the following submissions and we reserves the right, in our sole discretion, to reject any submission:\nMissing best practices, optional security hardening or optional email security features\nVersion/banner disclosure\nLow-impact vulnerabilities\nVulnerabilities requiring unlikely circumstances (Self XSS, tabnabbing, content spoofing, applicability only for EOL browsers)\nActivities that could lead to disruption of services or data (DoS, DDoS, spamming, physical attacks)\nSocial engineering attempts\nDisclosure Policy\nResearchers may publish details about identified vulnerabilities only after Essity has fully remediated them and expressed clear consent. Please note that reports closed as informative, not applicable or spam will not be approved for disclosure.\nFollow HackerOne's disclosure guidelines.\nThank you for helping keep Essity and our users safe!\nTop hackers\nSee all hackers\n1\nmatty69v\nReputation: 119\n2\nsocky\nReputation: 112\n3\ntenzai\nReputation: 37\n4\nfirecompass-ai\nReputation: 30\n5\nlarocas\nReputation: 30\n6\nmo3094\nReputation: 28\n7\nmarioniangi\nReputation: 21\n8\nuzki\nReputation: 21\n9\nbodresha\nReputation: 16\n10\nlazyar\nReputation: 14\n11\niamabdelaal\nReputation: 14\n12\ndark_river\nReputation: 14\nEssity\nhttp://essity.com\nResponse launched in Aug 2026\nResponse efficiency: 98%\nSubmit without Report Assistant\nStats\nReports received | 90 days\t163\nLast report resolved\t3 days ago\nReports resolved\t62\nHackers thanked\t43\nAssets In Scope\t480\n© HackerOne\nOpportunities\nSecurity\nLeaderboard\nBlog\nStatus\nDocs\nSupport\nDisclosure Guidelines\nPress\nPrivacy\nTerms\n=== SCOPE VIEW: https://hackerone.com/essity/policy_scopes ===\nSkip to main content  >\nLearn more about HackerOne\nLog in\nSecurity page\nProgram guidelines\nScope\nHacktivity\nThanks\nUpdates\nSafe harbor\nSearch\nScope\nAll scopes\nMaximum severity\nAny\nBounty eligibility\nAll\nDownload Burp Suite Project Configuration File\nDownload CSV\nView changes (Last updated on August 26, 2026)\n1-100 of 480\nAsset name\n\tType\n\tCoverage\n\tMax. severity\n\tBounty\n\tLast update\n\tResolved Reports\nhttps://zewa.net/ua\tURL\nIn scope\nCritical\nIneligible\nFeb 6, 2026\n0 (0%)\nhttps://zewa.net/rs\tURL\nIn scope\nCritical\nIneligible\nFeb 6, 2026\n0 (0%)\nhttps://zewa.net/ro\tURL\nIn scope\nCritical\nIneligible\nFeb 6, 2026\n0 (0%)\nhttps://zewa.net/lv\tURL\nIn scope\nCritical\nIneligible\nFeb 6, 2026\n0 (0%)\nhttps://zewa.net/lt/\tURL\nIn scope\nCritical\nIneligible\nFeb 6, 2026\n0 (0%)\nhttps://zewa.net/hu\tURL\nIn scope\nCritical\nIneligible\nFeb 6, 2026\n0 (0%)\nhttps://zewa.net/hr\tURL\nIn scope\nCritical\nIneligible\nFeb 6, 2026\n0 (0%)\nhttps://zewa.net/gr\tURL\nIn scope\nCritical\nIneligible\nFeb 6, 2026\n0 (0%)\nhttps://zewa.net/ee\tURL\nIn scope\nCritical\nIneligible\nFeb 6, 2026\n0 (0%)\nhttps://zewa.net/de\tURL\nIn scope\nCritical\nIneligible\nFeb 6, 2026\n1 (2%)\nhttps://zewa.net/cz\tURL\nIn scope\nCritical\nIneligible\nFeb 6, 2026\n0 (0%)\nhttps://zewa.net/bg\tURL\nIn scope\nCritical\nIneligible\nFeb 6, 2026\n0 (0%)\nhttps://zewa.net/at\tURL\nIn scope\nCritical\nIneligible\nFeb 6, 2026\n1 (2%)\nhttps://zewa.net\tURL\nIn scope\nCritical\nIneligible\nFeb 6, 2026\n3 (5%)\nhttps://www.velvettissues.com\tURL\nIn scope\nCritical\nIneligible\nFeb 6, 2026\n0 (0%)\nhttps://www.torkusa.com/connect\tURL\nIn scope\nCritical\nIneligible\nFeb 6, 2026\n1 (2%)\nhttps://www.torkglobal.com/za/en\tURL\nIn scope\nCritical\nIneligible\nFeb 6, 2026\n0 (0%)\nhttps://www.torkglobal.com/us/en\tURL\nIn scope\nCritical\nIneligible\nFeb 6, 2026\n0 (0%)\nhttps://www.torkglobal.com/ua/uk\tURL\nIn scope\nCritical\nIneligible\nFeb 6, 2026\n0 (0%)\nhttps://www.torkglobal.com/tr/tr\tURL\nIn scope\nCritical\nIneligible\nFeb 6, 2026\n0 (0%)\nhttps://www.torkglobal.com/tn/fr\tURL\nIn scope\nCritical\nIneligible\nFeb 6, 2026\n0 (0%)\nhttps://www.torkglobal.com/sk/sk\tURL\nIn scope\nCritical\nIneligible\nFeb 6, 2026\n0 (0%)\nhttps://www.torkglobal.com/si/sl\tURL\nIn scope\nCritical\nIneligible\nFeb 6, 2026\n0 (0%)\nhttps://www.torkglobal.com/se/sv\tURL\nIn scope\nCritical\nIneligible\nFeb 6, 2026\n0 (0%)\nhttps://www.torkglobal.com/ro/ro\tURL\nIn scope\nCritical\nIneligible\nFeb 6, 2026\n0 (0%)\nhttps://www.torkglobal.com/pt/pt\tURL\nIn scope\nCritical\nIneligible\nFeb 6, 2026\n0 (0%)\nhttps://www.torkglobal.com/pl/pl\tURL\nIn scope\nCritical\nIneligible\nFeb 6, 2026\n0 (0%)\nhttps://www.torkglobal.com/nz/en\tURL\nIn scope\nCritical\nIneligible\nFeb 6, 2026\n1 (2%)\nhttps://www.torkglobal.com/no/no\tURL\nIn scope\nCritical\nIneligible\nFeb 6, 2026\n0 (0%)\nhttps://www.torkglobal.com/nl/nl\tURL\nIn scope\nCritical\nIneligible\nFeb 6, 2026\n0 (0%)\nhttps://www.torkglobal.com/lv/lv\tURL\nIn scope\nCritical\nIneligible\nFeb 6, 2026\n0 (0%)\nhttps://www.torkglobal.com/lt/lt\tURL\nIn scope\nCritical\nIneligible\nFeb 6, 2026\n0 (0%)\nhttps://www.torkglobal.com/kz/ru\tURL\nIn scope\nCritical\nIneligible\nFeb 6, 2026\n0 (0%)\nhttps://www.torkglobal.com/it/it\tURL\nIn scope\nCritical\nIneligible\nFeb 6, 2026\n0 (0%)\nhttps://www.torkglobal.com/in/en\tURL\nIn scope\nCritical\nIneligible\nFeb 6, 2026\n0 (0%)\nhttps://www.torkglobal.com/ie/en\tURL\nIn scope\nCritical\nIneligible\nFeb 6, 2026\n0 (0%)\nhttps://www.torkglobal.com/hu/hu\tURL\nIn scope\nCritical\nIneligible\nFeb 6, 2026\n0 (0%)\nhttps://www.torkglobal.com/hr/hr\tURL\nIn scope\nCritical\nIneligible\nFeb 6, 2026\n0 (0%)\nhttps://www.torkglobal.com/gr/el\tURL\nIn scope\nCritical\nIneligible\nFeb 6, 2026\n0 (0%)\nhttps://www.torkglobal.com/gb/en\tURL\nIn scope\nCritical\nIneligible\nFeb 6, 2026\n0 (0%)\nhttps://www.torkglobal.com/fr/fr\tURL\nIn scope\nCritical\nIneligible\nFeb 6, 2026\n0 (0%)\nhttps://www.torkglobal.com/fi/fi\tURL\nIn scope\nCritical\nIneligible\nFeb 6, 2026\n0 (0%)\nhttps://www.torkglobal.com/es/es\tURL\nIn scope\nCritical\nIneligible\nFeb 6, 2026\n0 (0%)\nhttps://www.torkglobal.com/ee/et\tURL\nIn scope\nCritical\nIneligible\nFeb 6, 2026\n0 (0%)\nhttps://www.torkglobal.com/dk/da\tURL\nIn scope\nCritical\nIneligible\nFeb 6, 2026\n0 (0%)\nhttps://www.torkglobal.com/de/de\tURL\nIn scope\nCritical\nIneligible\nFeb 6, 2026\n0 (0%)\nhttps://www.torkglobal.com/cz/cs\tURL\nIn scope\nCritical\nIneligible\nFeb 6, 2026\n0 (0%)\nhttps://www.torkglobal.com/ch/fr\tURL\nIn scope\nCritical\nIneligible\nFeb 6, 2026\n0 (0%)\nhttps://www.torkglobal.com/ch/de\tURL\nIn scope\nCritical\nIneligible\nFeb 6, 2026\n0 (0%)\nhttps://www.torkglobal.com/ca/fr\tURL\nIn scope\nCritical\nIneligible\nFeb 6, 2026\n0 (0%)\nhttps://www.torkglobal.com/ca/en\tURL\nIn scope\nCritical\nIneligible\nFeb 6, 2026\n0 (0%)\nhttps://www.torkglobal.com/be/nl\tURL\nIn scope\nCritical\nIneligible\nFeb 6, 2026\n0 (0%)\nhttps://www.torkglobal.com/be/fr\tURL\nIn scope\nCritical\nIneligible\nFeb 6, 2026\n0 (0%)\nhttps://www.torkglobal.com/be/de\tURL\nIn scope\nCritical\nIneligible\nFeb 6, 2026\n0 (0%)\nhttps://www.torkglobal.com/au/en\tURL\nIn scope\nCritical\nIneligible\nFeb 6, 2026\n0 (0%)\nhttps://www.torkglobal.com/at/de\tURL\nIn scope\nCritical\nIneligible\nFeb 6, 2026\n0 (0%)\nhttps://www.torkglobal.com/ae/en\tURL\nIn scope\nCritical\nIneligible\nFeb 26, 2026\n0 (0%)\nhttps://www.torkcr.com\tURL\nIn scope\nCritical\nIneligible\nFeb 6, 2026\n0 (0%)\nhttps://www.tork.pe\tURL\nIn scope\nCritical\nIneligible\nFeb 6, 2026\n0 (0%)\nhttps://www.tork.mx\tURL\nIn scope\nCritical\nIneligible\nFeb 6, 2026\n0 (0%)\nhttps://www.tork.it/connect\tURL\nIn scope\nCritical\nIneligible\nFeb 6, 2026\n0 (0%)\nhttps://www.tork.fr/connect\tURL\nIn scope\nCritical\nIneligible\nFeb 6, 2026\n0 (0%)\nhttps://www.tork.de/connect\tURL\nIn scope\nCritical\nIneligible\nFeb 6, 2026\n0 (0%)\nhttps://www.tork.com.py\tURL\nIn scope\nCritical\nIneligible\nFeb 6, 2026\n0 (0%)\nhttps://www.tork.co.uk/connect\tURL\nIn scope\nCritical\nIneligible\nFeb 6, 2026\n0 (0%)\nhttps://www.tork.bo\tURL\nIn scope\nCritical\nIneligible\nFeb 6, 2026\n0 (0%)\nhttps://www.tenashop.fr/\tURL\nIn scope\nCritical\nIneligible\nFeb 6, 2026\n3 (5%)\nhttps://www.tenashop.de/\tURL\nIn scope\nCritical\nIneligible\nFeb 6, 2026\n4 (6%)\nhttps://www.tenanet.sk/\tURL\nIn scope\nCritical\nIneligible\nFeb 6, 2026\n0 (0%)\nhttps://www.tenanet.se/\tURL\nIn scope\nCritical\nIneligible\nFeb 6, 2026\n0 (0%)\nhttps://www.tenanet.pt/\tURL\nIn scope\nCritical\nIneligible\nFeb 6, 2026\n0 (0%)\nhttps://www.tenanet.pl/\tURL\nIn scope\nCritical\nIneligible\nFeb 6, 2026\n0 (0%)\nhttps://www.tenanet.nl/\tURL\nIn scope\nCritical\nIneligible\nFeb 6, 2026\n0 (0%)\nhttps://www.tenanet.it/\tURL\nIn scope\nCritical\nIneligible\nFeb 6, 2026\n1 (2%)\nhttps://www.tenanet.fi/\tURL\nIn scope\nCritical\nIneligible\nFeb 6, 2026\n0 (0%)\nhttps://www.tenanet.dk/\tURL\nIn scope\nCritical\nIneligible\nFeb 6, 2026\n0 (0%)\nhttps://www.tenanet.de\tURL\nIn scope\nCritical\nIneligible\nFeb 6, 2026\n0 (0%)\nhttps://www.tenanet.cz/\tURL\nIn scope\nCritical\nIneligible\nFeb 6, 2026\n0 (0%)\nhttps://www.tenanet.com.tr/\tURL\nIn scope\nCritical\nIneligible\nFeb 6, 2026\n0 (0%)\nhttps://www.tenanet.co.uk/\tURL\nIn scope\nCritical\nIneligible\nFeb 6, 2026\n0 (0%)\nhttps://www.tenanet.ch/\tURL\nIn scope\nCritical\nIneligible\nFeb 6, 2026\n0 (0%)\nhttps://www.tenanet.be/\tURL\nIn scope\nCritical\nIneligible\nFeb 6, 2026\n0 (0%)\nhttps://www.tenanet.at\tURL\nIn scope\nCritical\nIneligible\nFeb 6, 2026\n0 (0%)\nhttps://www.tenadirect.it/\tURL\nIn scope\nCritical\nIneligible\nFeb 6, 2026\n1 (2%)\nhttps://www.tenadirect.co.uk/\tURL\nIn scope\nCritical\nIneligible\nFeb 6, 2026\n0 (0%)\nhttps://www.tena.ua/uk/uhodprinederzhanii\tURL\nIn scope\nCritical\nIneligible\nFeb 6, 2026\n0 (0%)\nhttps://www.tena.ua/ru/uhodprinederzhanii\tURL\nIn scope\nCritical\nIneligible\nFeb 6, 2026\n0 (0%)\nhttps://www.tena.in/\tURL\nIn scope\nCritical\nIneligible\nJul 30, 2026\n0 (0%)\nhttps://www.tena.es/profesionales\tURL\nIn scope\nCritical\nIneligible\nFeb 6, 2026\n0 (0%)\nhttps://www.tena.com.pr\tURL\nIn scope\nCritical\nIneligible\nFeb 6, 2026\n0 (0%)\nhttps://www.tena.com.pe\tURL\nIn scope\nCritical\nIneligible\nFeb 6, 2026\n0 (0%)\nhttps://www.tena.com.mx\tURL\nIn scope\nCritical\nIneligible\nFeb 6, 2026\n0 (0%)\nhttps://www.tena.com.ec\tURL\nIn scope\nCritical\nIneligible\nFeb 6, 2026\n0 (0%)\nhttps://www.tena.com.do\tURL\nIn scope\nCritical\nIneligible\nFeb 6, 2026\n0 (0%)\nhttps://www.tena.com.co\tURL\nIn scope\nCritical\nIneligible\nFeb 6, 2026\n0 (0%)\nhttps://www.tena.com.bo\tURL\nIn scope\nCritical\nIneligible\nFeb 6, 2026\n0 (0%)\nhttps://www.tena-check.de/\tURL\nIn scope\nCritical\nIneligible\nFeb 6, 2026\n1 (2%)\nhttps://www.tena-check.de\tURL\nIn scope\nCritical\nIneligible\nFeb 6, 2026\n0 (0%)\nhttps://www.tena-check.com\tURL\nIn scope\nCritical\nIneligible\nFeb 6, 2026\n0 (0%)\nhttps://www.tempo-world.com/nl-be/\tURL\nIn scope\nCritical\nIneligible\nFeb 6, 2026\n0 (0%)\n1-100 of 480\nEssity\nhttp://essity.com\nResponse launched in Aug 2026\nResponse efficiency: 98%\nSubmit without Report Assistant\nStats\nReports received | 90 days\t163\nLast report resolved\t3 days ago\nReports resolved\t62\nHackers thanked\t43\nAssets In Scope\t480\n© HackerOne\nOpportunities\nSecurity\nLeaderboard\nBlog\nStatus\nDocs\nSupport\nDisclosure Guidelines\nPress\nPrivacy\nTerms"
+  },
+  "analysis": {
+    "program_name": "Essity",
+    "program_description": "Essity는 자산·기기·고객 정보의 보안을 보호하기 위해 보안 연구자 커뮤니티와 협력하는 공개형 취약점 접수 프로그램입니다. 나열되지 않은 자산도 Essity가 소유하고 영향이 있는 경우 보고를 받습니다.",
+    "in_scope_assets": [
+      {
+        "asset_type": "URL",
+        "asset": "https://zewa.net/ua",
+        "description": "명시된 구조화 범위 내 URL입니다.",
+        "eligibility": "Ineligible",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "https://zewa.net/rs",
+        "description": "명시된 구조화 범위 내 URL입니다.",
+        "eligibility": "Ineligible",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "https://zewa.net/ro",
+        "description": "명시된 구조화 범위 내 URL입니다.",
+        "eligibility": "Ineligible",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "https://zewa.net/lv",
+        "description": "명시된 구조화 범위 내 URL입니다.",
+        "eligibility": "Ineligible",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "https://zewa.net/lt/",
+        "description": "명시된 구조화 범위 내 URL입니다.",
+        "eligibility": "Ineligible",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "https://zewa.net/hu",
+        "description": "명시된 구조화 범위 내 URL입니다.",
+        "eligibility": "Ineligible",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "https://zewa.net/hr",
+        "description": "명시된 구조화 범위 내 URL입니다.",
+        "eligibility": "Ineligible",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "https://zewa.net/gr",
+        "description": "명시된 구조화 범위 내 URL입니다.",
+        "eligibility": "Ineligible",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "https://zewa.net/ee",
+        "description": "명시된 구조화 범위 내 URL입니다.",
+        "eligibility": "Ineligible",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "https://zewa.net/de",
+        "description": "명시된 구조화 범위 내 URL입니다.",
+        "eligibility": "Ineligible",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "https://zewa.net/cz",
+        "description": "명시된 구조화 범위 내 URL입니다.",
+        "eligibility": "Ineligible",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "https://zewa.net/bg",
+        "description": "명시된 구조화 범위 내 URL입니다.",
+        "eligibility": "Ineligible",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "https://zewa.net/at",
+        "description": "명시된 구조화 범위 내 URL입니다.",
+        "eligibility": "Ineligible",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "https://zewa.net",
+        "description": "명시된 구조화 범위 내 URL입니다.",
+        "eligibility": "Ineligible",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "https://www.velvettissues.com",
+        "description": "명시된 구조화 범위 내 URL입니다.",
+        "eligibility": "Ineligible",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "https://www.torkusa.com/connect",
+        "description": "명시된 구조화 범위 내 URL입니다.",
+        "eligibility": "Ineligible",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "https://www.torkglobal.com/za/en",
+        "description": "명시된 구조화 범위 내 URL입니다.",
+        "eligibility": "Ineligible",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "https://www.torkglobal.com/us/en",
+        "description": "명시된 구조화 범위 내 URL입니다.",
+        "eligibility": "Ineligible",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "https://www.torkglobal.com/ua/uk",
+        "description": "명시된 구조화 범위 내 URL입니다.",
+        "eligibility": "Ineligible",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "https://www.torkglobal.com/tr/tr",
+        "description": "명시된 구조화 범위 내 URL입니다.",
+        "eligibility": "Ineligible",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "https://www.torkglobal.com/tn/fr",
+        "description": "명시된 구조화 범위 내 URL입니다.",
+        "eligibility": "Ineligible",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "https://www.torkglobal.com/sk/sk",
+        "description": "명시된 구조화 범위 내 URL입니다.",
+        "eligibility": "Ineligible",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "https://www.torkglobal.com/si/sl",
+        "description": "명시된 구조화 범위 내 URL입니다.",
+        "eligibility": "Ineligible",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "https://www.torkglobal.com/se/sv",
+        "description": "명시된 구조화 범위 내 URL입니다.",
+        "eligibility": "Ineligible",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "https://www.torkglobal.com/ro/ro",
+        "description": "명시된 구조화 범위 내 URL입니다.",
+        "eligibility": "Ineligible",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "https://www.torkglobal.com/pt/pt",
+        "description": "명시된 구조화 범위 내 URL입니다.",
+        "eligibility": "Ineligible",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "https://www.torkglobal.com/pl/pl",
+        "description": "명시된 구조화 범위 내 URL입니다.",
+        "eligibility": "Ineligible",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "https://www.torkglobal.com/nz/en",
+        "description": "명시된 구조화 범위 내 URL입니다.",
+        "eligibility": "Ineligible",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "https://www.torkglobal.com/no/no",
+        "description": "명시된 구조화 범위 내 URL입니다.",
+        "eligibility": "Ineligible",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "https://www.torkglobal.com/nl/nl",
+        "description": "명시된 구조화 범위 내 URL입니다.",
+        "eligibility": "Ineligible",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "https://www.torkglobal.com/lv/lv",
+        "description": "명시된 구조화 범위 내 URL입니다.",
+        "eligibility": "Ineligible",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "https://www.torkglobal.com/lt/lt",
+        "description": "명시된 구조화 범위 내 URL입니다.",
+        "eligibility": "Ineligible",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "https://www.torkglobal.com/kz/ru",
+        "description": "명시된 구조화 범위 내 URL입니다.",
+        "eligibility": "Ineligible",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "https://www.torkglobal.com/it/it",
+        "description": "명시된 구조화 범위 내 URL입니다.",
+        "eligibility": "Ineligible",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "https://www.torkglobal.com/in/en",
+        "description": "명시된 구조화 범위 내 URL입니다.",
+        "eligibility": "Ineligible",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "https://www.torkglobal.com/ie/en",
+        "description": "명시된 구조화 범위 내 URL입니다.",
+        "eligibility": "Ineligible",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "https://www.torkglobal.com/hu/hu",
+        "description": "명시된 구조화 범위 내 URL입니다.",
+        "eligibility": "Ineligible",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "https://www.torkglobal.com/hr/hr",
+        "description": "명시된 구조화 범위 내 URL입니다.",
+        "eligibility": "Ineligible",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "https://www.torkglobal.com/gr/el",
+        "description": "명시된 구조화 범위 내 URL입니다.",
+        "eligibility": "Ineligible",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "https://www.torkglobal.com/gb/en",
+        "description": "명시된 구조화 범위 내 URL입니다.",
+        "eligibility": "Ineligible",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "https://www.torkglobal.com/fr/fr",
+        "description": "명시된 구조화 범위 내 URL입니다.",
+        "eligibility": "Ineligible",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "https://www.torkglobal.com/fi/fi",
+        "description": "명시된 구조화 범위 내 URL입니다.",
+        "eligibility": "Ineligible",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "https://www.torkglobal.com/es/es",
+        "description": "명시된 구조화 범위 내 URL입니다.",
+        "eligibility": "Ineligible",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "https://www.torkglobal.com/ee/et",
+        "description": "명시된 구조화 범위 내 URL입니다.",
+        "eligibility": "Ineligible",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "https://www.torkglobal.com/dk/da",
+        "description": "명시된 구조화 범위 내 URL입니다.",
+        "eligibility": "Ineligible",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "https://www.torkglobal.com/de/de",
+        "description": "명시된 구조화 범위 내 URL입니다.",
+        "eligibility": "Ineligible",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "https://www.torkglobal.com/cz/cs",
+        "description": "명시된 구조화 범위 내 URL입니다.",
+        "eligibility": "Ineligible",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "https://www.torkglobal.com/ch/fr",
+        "description": "명시된 구조화 범위 내 URL입니다.",
+        "eligibility": "Ineligible",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "https://www.torkglobal.com/ch/de",
+        "description": "명시된 구조화 범위 내 URL입니다.",
+        "eligibility": "Ineligible",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "https://www.torkglobal.com/ca/fr",
+        "description": "명시된 구조화 범위 내 URL입니다.",
+        "eligibility": "Ineligible",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "https://www.torkglobal.com/ca/en",
+        "description": "명시된 구조화 범위 내 URL입니다.",
+        "eligibility": "Ineligible",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "https://www.torkglobal.com/be/nl",
+        "description": "명시된 구조화 범위 내 URL입니다.",
+        "eligibility": "Ineligible",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "https://www.torkglobal.com/be/fr",
+        "description": "명시된 구조화 범위 내 URL입니다.",
+        "eligibility": "Ineligible",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "https://www.torkglobal.com/be/de",
+        "description": "명시된 구조화 범위 내 URL입니다.",
+        "eligibility": "Ineligible",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "https://www.torkglobal.com/au/en",
+        "description": "명시된 구조화 범위 내 URL입니다.",
+        "eligibility": "Ineligible",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "https://www.torkglobal.com/at/de",
+        "description": "명시된 구조화 범위 내 URL입니다.",
+        "eligibility": "Ineligible",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "https://www.torkglobal.com/ae/en",
+        "description": "명시된 구조화 범위 내 URL입니다.",
+        "eligibility": "Ineligible",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "https://www.torkcr.com",
+        "description": "명시된 구조화 범위 내 URL입니다.",
+        "eligibility": "Ineligible",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "https://www.tork.pe",
+        "description": "명시된 구조화 범위 내 URL입니다.",
+        "eligibility": "Ineligible",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "https://www.tork.mx",
+        "description": "명시된 구조화 범위 내 URL입니다.",
+        "eligibility": "Ineligible",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "https://www.tork.it/connect",
+        "description": "명시된 구조화 범위 내 URL입니다.",
+        "eligibility": "Ineligible",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "https://www.tork.fr/connect",
+        "description": "명시된 구조화 범위 내 URL입니다.",
+        "eligibility": "Ineligible",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "https://www.tork.de/connect",
+        "description": "명시된 구조화 범위 내 URL입니다.",
+        "eligibility": "Ineligible",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "https://www.tork.com.py",
+        "description": "명시된 구조화 범위 내 URL입니다.",
+        "eligibility": "Ineligible",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "https://www.tork.co.uk/connect",
+        "description": "명시된 구조화 범위 내 URL입니다.",
+        "eligibility": "Ineligible",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "https://www.tork.bo",
+        "description": "명시된 구조화 범위 내 URL입니다.",
+        "eligibility": "Ineligible",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "https://www.tenashop.fr/",
+        "description": "명시된 구조화 범위 내 URL입니다.",
+        "eligibility": "Ineligible",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "https://www.tenashop.de/",
+        "description": "명시된 구조화 범위 내 URL입니다.",
+        "eligibility": "Ineligible",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "https://www.tenanet.sk/",
+        "description": "명시된 구조화 범위 내 URL입니다.",
+        "eligibility": "Ineligible",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "https://www.tenanet.se/",
+        "description": "명시된 구조화 범위 내 URL입니다.",
+        "eligibility": "Ineligible",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "https://www.tenanet.pt/",
+        "description": "명시된 구조화 범위 내 URL입니다.",
+        "eligibility": "Ineligible",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "https://www.tenanet.pl/",
+        "description": "명시된 구조화 범위 내 URL입니다.",
+        "eligibility": "Ineligible",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "https://www.tenanet.nl/",
+        "description": "명시된 구조화 범위 내 URL입니다.",
+        "eligibility": "Ineligible",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "https://www.tenanet.it/",
+        "description": "명시된 구조화 범위 내 URL입니다.",
+        "eligibility": "Ineligible",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "https://www.tenanet.fi/",
+        "description": "명시된 구조화 범위 내 URL입니다.",
+        "eligibility": "Ineligible",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "https://www.tenanet.dk/",
+        "description": "명시된 구조화 범위 내 URL입니다.",
+        "eligibility": "Ineligible",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "https://www.tenanet.de",
+        "description": "명시된 구조화 범위 내 URL입니다.",
+        "eligibility": "Ineligible",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "https://www.tenanet.cz/",
+        "description": "명시된 구조화 범위 내 URL입니다.",
+        "eligibility": "Ineligible",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "https://www.tenanet.com.tr/",
+        "description": "명시된 구조화 범위 내 URL입니다.",
+        "eligibility": "Ineligible",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "https://www.tenanet.co.uk/",
+        "description": "명시된 구조화 범위 내 URL입니다.",
+        "eligibility": "Ineligible",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "https://www.tenanet.ch/",
+        "description": "명시된 구조화 범위 내 URL입니다.",
+        "eligibility": "Ineligible",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "https://www.tenanet.be/",
+        "description": "명시된 구조화 범위 내 URL입니다.",
+        "eligibility": "Ineligible",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "https://www.tenanet.at",
+        "description": "명시된 구조화 범위 내 URL입니다.",
+        "eligibility": "Ineligible",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "https://www.tenadirect.it/",
+        "description": "명시된 구조화 범위 내 URL입니다.",
+        "eligibility": "Ineligible",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "https://www.tenadirect.co.uk/",
+        "description": "명시된 구조화 범위 내 URL입니다.",
+        "eligibility": "Ineligible",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "https://www.tena.ua/uk/uhodprinederzhanii",
+        "description": "명시된 구조화 범위 내 URL입니다.",
+        "eligibility": "Ineligible",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "https://www.tena.ua/ru/uhodprinederzhanii",
+        "description": "명시된 구조화 범위 내 URL입니다.",
+        "eligibility": "Ineligible",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "https://www.tena.in/",
+        "description": "명시된 구조화 범위 내 URL입니다.",
+        "eligibility": "Ineligible",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "https://www.tena.es/profesionales",
+        "description": "명시된 구조화 범위 내 URL입니다.",
+        "eligibility": "Ineligible",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "https://www.tena.com.pr",
+        "description": "명시된 구조화 범위 내 URL입니다.",
+        "eligibility": "Ineligible",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "https://www.tena.com.pe",
+        "description": "명시된 구조화 범위 내 URL입니다.",
+        "eligibility": "Ineligible",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "https://www.tena.com.mx",
+        "description": "명시된 구조화 범위 내 URL입니다.",
+        "eligibility": "Ineligible",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "https://www.tena.com.ec",
+        "description": "명시된 구조화 범위 내 URL입니다.",
+        "eligibility": "Ineligible",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "https://www.tena.com.do",
+        "description": "명시된 구조화 범위 내 URL입니다.",
+        "eligibility": "Ineligible",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "https://www.tena.com.co",
+        "description": "명시된 구조화 범위 내 URL입니다.",
+        "eligibility": "Ineligible",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "https://www.tena.com.bo",
+        "description": "명시된 구조화 범위 내 URL입니다.",
+        "eligibility": "Ineligible",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "https://www.tena-check.de/",
+        "description": "명시된 구조화 범위 내 URL입니다.",
+        "eligibility": "Ineligible",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "https://www.tena-check.de",
+        "description": "명시된 구조화 범위 내 URL입니다.",
+        "eligibility": "Ineligible",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "https://www.tena-check.com",
+        "description": "명시된 구조화 범위 내 URL입니다.",
+        "eligibility": "Ineligible",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "https://www.tempo-world.com/nl-be/",
+        "description": "명시된 구조화 범위 내 URL입니다.",
+        "eligibility": "Ineligible",
+        "maximum_severity": "Critical"
+      }
+    ],
+    "out_of_scope_assets": [],
+    "allowed_activities": [
+      "Essity 소유 자산에 대해 영향이 있는 취약점을 보고할 수 있으며, 범위표에 없는 자산도 포함될 수 있습니다.",
+      "계정을 만들 수 있는 경우 계정을 생성할 수 있습니다."
+    ],
+    "prohibited_activities": [
+      "사회 공학(피싱, 비싱, 스미싱 등)은 금지됩니다.",
+      "서비스 또는 데이터의 중단을 유발할 수 있는 활동(DoS, DDoS, 스팸 발송, 물리적 공격)은 금지됩니다.",
+      "Social engineering attempts는 접수 대상이 아닙니다."
+    ],
+    "submission_requirements": [
+      "재현 가능한 상세 단계를 포함한 보고서를 제출해야 합니다.",
+      "취약점 체인이 영향을 입증하는 데 필요한 경우를 제외하고 보고서당 취약점 하나만 제출해야 합니다.",
+      "중복 보고서는 완전히 재현 가능한 최초 보고서만 트리아지됩니다.",
+      "하나의 근본 원인에서 발생한 여러 취약점은 하나의 유효한 보고서로 처리됩니다.",
+      "Essity가 완전히 수정하고 명시적으로 동의한 후에만 취약점 세부사항을 공개할 수 있습니다.",
+      "informative, not applicable 또는 spam으로 종료된 보고서는 공개 승인을 받지 못합니다.",
+      "HackerOne의 disclosure guidelines를 따라야 합니다."
+    ],
+    "operational_constraints": [
+      "모든 요청에 “X-HackerOne-Research: [H1 username]” 헤더를 포함해야 합니다.",
+      "본인이 소유하거나 계정 소유자로부터 명시적 허가를 받은 계정으로만 상호작용해야 합니다.",
+      "계정을 만들 때 HackerOne alias를 사용해야 합니다.",
+      "개인정보 침해, 데이터 파괴, 서비스 중단 또는 성능 저하를 피하기 위해 선의의 노력을 해야 합니다.",
+      "내부 기밀 정보에 접근 가능한 직원 및 그 가구·직계 가족은 참여할 수 없습니다."
+    ],
+    "safe_harbor": "Gold Standard Safe Harbor를 준수한다고 표시되어 있으나, 제공된 캡처에는 전문이 없습니다.",
+    "ambiguities": [
+      "제공된 범위 캡처는 총 480개 중 1–100개만 포함합니다. 나머지 380개 자산은 확인할 수 없으므로 이 추출은 범위 자산 측면에서 불완전합니다.",
+      "Scope exclusions 표, Platform standards deviations / Exemplary Standards, HackerOne Policy의 완전한 out-of-scope vulnerability 목록, Response Targets 및 Safe Harbor 전문은 캡처에 없습니다.",
+      "구조화 범위에 표시된 자산은 모두 Bounty가 Ineligible입니다. 다만 프로그램 하이라이트는 영향이 있는 미열거 소유 자산도 보고를 받는다고 하므로, 보고 접수 가능성과 보상 적격성은 별도로 해석해야 합니다.",
+      "Final URL: https://hackerone.com/essity?type=team; Page title: Essity | Response Policy | HackerOne."
+    ],
+    "source_evidence": [
+      {
+        "section": "Introduction",
+        "quote": "Open Scope"
+      },
+      {
+        "section": "Introduction",
+        "quote": "Accepts reports for all owned assets based on impact, even if not listed in scope."
+      },
+      {
+        "section": "Program Rules",
+        "quote": "Please provide detailed reports with reproducible steps. If the report is not detailed enough to reproduce the issue, the issue may not be marked as triaged."
+      },
+      {
+        "section": "Program Rules",
+        "quote": "Submit one vulnerability per report unless you need to chain vulnerabilities to provide impact."
+      },
+      {
+        "section": "Program Rules",
+        "quote": "When duplicates occur, we only triage the first report received (provided that it can be fully reproduced)."
+      },
+      {
+        "section": "Program Rules",
+        "quote": "Multiple vulnerabilities caused by one underlying issue will be treated as one valid report."
+      },
+      {
+        "section": "Program Rules",
+        "quote": "Social engineering (e.g., phishing, vishing, smishing) is prohibited."
+      },
+      {
+        "section": "Program Rules",
+        "quote": "Make a good faith effort to avoid privacy violations, destruction of data, and interruption or degradation of our service."
+      },
+      {
+        "section": "Program Rules",
+        "quote": "Only interact with accounts you own or with explicit permission of the account holder."
+      },
+      {
+        "section": "Program Rules",
+        "quote": "While you’re welcome to create accounts where they are available. We ask that you use your HackerOne alias when doing so."
+      },
+      {
+        "section": "Program Rules",
+        "quote": "Employees who have access to internal confidential information are prohibited from participating in this program. This restriction extends to household and immediate family members as well."
+      },
+      {
+        "section": "Testing",
+        "quote": "Researchers must include the following header to all requests:"
+      },
+      {
+        "section": "Testing",
+        "quote": "“X-HackerOne-Research: [H1 username]”"
+      },
+      {
+        "section": "Unqualifying Vulnerabilities",
+        "quote": "Activities that could lead to disruption of services or data (DoS, DDoS, spamming, physical attacks)"
+      },
+      {
+        "section": "Unqualifying Vulnerabilities",
+        "quote": "Social engineering attempts"
+      },
+      {
+        "section": "Disclosure Policy",
+        "quote": "Researchers may publish details about identified vulnerabilities only after Essity has fully remediated them and expressed clear consent."
+      },
+      {
+        "section": "Disclosure Policy",
+        "quote": "Please note that reports closed as informative, not applicable or spam will not be approved for disclosure."
+      },
+      {
+        "section": "Disclosure Policy",
+        "quote": "Follow HackerOne's disclosure guidelines."
+      },
+      {
+        "section": "Safe harbor",
+        "quote": "Gold Standard Safe Harbor"
+      },
+      {
+        "section": "Scope",
+        "quote": "1-100 of 480"
+      },
+      {
+        "section": "Scope",
+        "quote": "Asset name\n\tType\n\tCoverage\n\tMax. severity\n\tBounty"
+      },
+      {
+        "section": "Scope",
+        "quote": "https://zewa.net/ua\tURL\nIn scope\nCritical\nIneligible"
+      }
+    ]
+  }
+}

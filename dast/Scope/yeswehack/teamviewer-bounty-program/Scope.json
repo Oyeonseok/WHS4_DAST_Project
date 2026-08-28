@@ -1,0 +1,252 @@
+{
+  "schema_version": "1.0",
+  "scope_id": "scope_b5152c374388495285fd344223a91652",
+  "created_at": "2026-08-27T04:54:24.957808Z",
+  "source": {
+    "requested_url": "https://yeswehack.com/programs/teamviewer-bounty-program",
+    "final_url": "https://yeswehack.com/programs/teamviewer-bounty-program",
+    "title": "TeamViewer - Bounty Program bug bounty program - YesWeHack",
+    "captured_at": "2026-08-27T04:53:24.826367Z",
+    "capture_status": "COMPLETE",
+    "capture_reason": "NONE",
+    "content_sha256": "c54239e0376ea16b50e47bc318a633a40b71b5ea66758e60e1a210109c87f9ed",
+    "text": "=== PROGRAM PAGE: https://yeswehack.com/programs/teamviewer-bounty-program ===\nPUBLIC PROGRAMS\nRANKING\nHACKTIVITY\nREGISTER\nLOGIN\nBug bounty\nPublic\nSUBMIT REPORT\nTeamViewer - Bounty Program\nThe TeamViewer suite of remote connectivity, augmented reality, IT management, and customer-first engagement solutions empowers you to connect to any device to support anyone, any process, or anything — from anywhere, anytime.\nREWARD\nBounty\nHall of fame\n€100\nLow\n€200\nMedium\n€1,000\nHigh\n€4,000\nCritical\n€10,000\nPROGRAM\nAvg reward\n-\nMax reward\n-\nScopes\n9\nSupported languages\nEnglish\nHACKTIVITY\nReports\n919\n1st response\n< 1 day\nReports last 24h\n2\nReports last week\n6\nReports this month\n50\nProgram description\nProgram activity\nCOMPANY\nTeamViewer Germany GmbH is the market leader for remote control.\nIt has been installed over 2.3 billions time on any type of operating system and provides connectivity for anyone, anywhere, anytime.\nPROGRAM RULES\nWe strongly believe into crowd testing and responsible disclosure model. It helps the industry, it protects users and contributes making the internet a safer place.\nIf you believe you've found a security vulnerability in our service, we are happy to work with you to resolve the issue promptly and ensure that you are fairly rewarded for your discovery\nAny type of denial of service attacks is strictly forbidden, as well as any interference with network equipment and TeamViewer Germany GmbH infrastructure. Your work should be non-destructive and remain within a proof of concept framework.\nELIGIBILITY AND RESPONSIBLE DISCLOSURE\nWe are happy to thank everyone who submits valid reports which help us improve the security of TeamViewer Germany GmbH however, only those that meet the following eligibility requirements may receive a monetary reward:\nYou must be the first reporter of a vulnerability.\nThe vulnerability must be a qualifying vulnerability (see below)\nAny vulnerability found must be reported no later than 24 hours after discovery and exclusively through yeswehack.com\nYou must send a clear textual description of the report along with steps to reproduce the issue, include attachments such as screenshots or proof of concept code as necessary.\nYou must avoid tests that could cause degradation or interruption of our service (refrain from using automated tools, and limit yourself about requests per second).\nYou must not leak, manipulate, or destroy any user data.\nYou must not be a former or current employee of TeamViewer Germany GmbH nor one of its contractor.\nReports about vulnerabilities are examined and validated by our security analysts.\nSCOPE DETAILS\nFor now, the scope of this program is limited to the following:\nTeamViewer Remote\nTeamViewer Remote Client\nTeamViewer Remote desktop client. Available for free download here: https://www.teamviewer.com/en/products/teamviewer/\nweb.teamviewer.com\nweb.teamviewer.com is the web version of the client\naccount.teamviewer.com\naccount.teamviewer.com is the associated login service\nlogin.teamviewer.com\nlogin.teamviewer.com is the management console of TeamViewer Remote\nTeamViewer Remote Control App\nTeamViewer Remote Control App is the mobile version of the TeamViewer client. Available for Android and iOS.\nTeamViewer QuickSupport App\nTeamViewer QuickSupport App is a mobile client only for incoming remote sessions. Available for Android and iOS.\nTeamviewer Host App\nTeamviewer Host App is a mobile app for unattended access to a mobile device. Only available for Android.\nBackend services you might directly interact with from the client app are considered part of the scope.\nLICENSE RESTRICTION BYPASS – REWARDS\nAll vulnerability reports that demonstrate an issue relying on bypassing our license limitations will be considered as Informative and closed without reward, except if a concrete and severe business impact can be demonstrated. In such instances, it will be a case by case analysis.\nThe vulnerability leads to a relevant financial impact on the business, can include:\nNoticeable additional infrastructure or service costs\nPersistent and scalable access to high-value, license-restricted features (beyond minor usage extensions or simple account configuration changes)\nOn the contrary, low impact vulnerabilities include:\nBypasses limited to minor or isolated increases in usage, such as:\nAdding a small number of additional users/devices within a single account\nAccessing higher-tier features in a non-scalable way\nCases where the impact is considered negligible from a financial or security perspective\nREWARD\nASSET VALUE\tCVSS\nLOW\n\tCVSS\nMEDIUM\n\tCVSS\nHIGH\n\tCVSS\nCRITICAL\nCritical\n\t€200\t€1,000\t€4,000\t€10,000\nHigh\n\t€100\t€500\t€2,000\t€5,000\nSYSTEMIC ISSUES\n1st report100%\n2nd report100%\n3rd report75%\n4th report50%\n5th report25%\n6th+ report0%\nWe appreciate all valid reports submitted to our program that enhance our security. However, please note that if a similar issue (see definition in 'More info') has already been reported, by you or any other hunter, the reward will be decreasing according to these percentages.\nMore info\nSCOPES\nExport\nSCOPE\tTYPE\tASSET VALUE\nhttps://www.teamviewer.com/en/products/teamviewer/\n\tApplication\nCritical\nLow\n€200\nMedium\n€1,000\nHigh\n€4,000\nCritical\n€10,000\nhttps://web.teamviewer.com\n\tWeb application\nCritical\nLow\n€200\nMedium\n€1,000\nHigh\n€4,000\nCritical\n€10,000\nhttps://account.teamviewer.com\n\tWeb application\nCritical\nLow\n€200\nMedium\n€1,000\nHigh\n€4,000\nCritical\n€10,000\nhttps://login.teamviewer.com\n\tWeb application\nCritical\nLow\n€200\nMedium\n€1,000\nHigh\n€4,000\nCritical\n€10,000\nhttps://play.google.com/store/apps/details?id=com.teamviewer.teamviewer.market.mobile&hl=en&gl=US\n\tMobile application Android\nHigh\nLow\n€100\nMedium\n€500\nHigh\n€2,000\nCritical\n€5,000\nhttps://play.google.com/store/apps/details?id=com.teamviewer.quicksupport.market&hl=en&gl=US\n\tMobile application Android\nHigh\nLow\n€100\nMedium\n€500\nHigh\n€2,000\nCritical\n€5,000\nhttps://play.google.com/store/apps/details?id=com.teamviewer.host.market&hl=en&gl=US\n\tMobile application Android\nHigh\nLow\n€100\nMedium\n€500\nHigh\n€2,000\nCritical\n€5,000\nhttps://apps.apple.com/de/app/teamviewer-remote-control/id692035811\n\tMobile application IOS\nHigh\nLow\n€100\nMedium\n€500\nHigh\n€2,000\nCritical\n€5,000\nhttps://apps.apple.com/de/app/teamviewer-quicksupport/id661649585\n\tMobile application IOS\nHigh\nLow\n€100\nMedium\n€500\nHigh\n€2,000\nCritical\n€5,000\nOUT OF SCOPES\nAll domains not listed In-Scope\nVULNERABILITY TYPES\nQUALIFYING VULNERABILITIES\nSQL Injection (SQLi)\nCross-Site Scripting (XSS)\nRemote Code Execution (RCE)\nInsecure Direct Object Reference (IDOR)\nHorizontal and vertical privilege escalation\nAuthentication bypass & broken authentication\nBusiness Logic Errors vulnerability with real security impact\nLocal files access and manipulation (LFI, RFI, XXE, SSRF, XSPA)\nCross-Origin Resource Sharing (CORS) with real security impact\nCross-site Request Forgery (CSRF) with real security impact\nOpen Redirect\nExposed secrets, credentials or sensitive information on an asset under our control and affecting at least one of our scopes\nNON-QUALIFYING VULNERABILITIES\nBroken Link/Social media Hijacking\nTabnabbing\nLeaked User IDs\nMissing cookie flags\nContent/Text injections\nClickjacking/UI redressing\nDenial of Service (DoS) attacks\nRecently disclosed CVEs (less than 30 days sinces patch release)\nCVEs without exploitable vulnerabilities and PoC\nOpen ports or services without exploitable vulnerabilities and PoC\nSocial engineering of staff or contractors\nPresence of autocomplete attribute on web forms\nVulnerabilities affecting outdated browsers or platforms\nSelf-XSS or XSS that cannot be used to impact other users\nAny hypothetical flaw or best practices without exploitable vulnerabilities and PoC\nSSL/TLS issues (e.g. expired certificates, best practices)\nUnexploitable vulnerabilities (e.g. Self-XSS, XSS or Open Redirect through HTTP headers...)\nReports with attack scenarios requiring MITM or physical access to victim's device\nMissing security-related HTTP headers which do not lead directly to an exploitable vulnerability and PoC\nLow severity Cross-Site Request Forgery (CSRF) (e.g. Unauthenticated / Logout / Login / Products cart updates...)\nInvalid or missing email security records (e.g. SPF, DKIM, DMARC)\nSession management issues (e.g. lack of expiration, no logout on password change, concurrent sessions)\nDisclosure of information without exploitable vulnerabilities and PoC (e.g. stack traces, path disclosure, directory listings, software versions, IP disclosure, 3rd party secrets, EXIF Metadata, Origin IP)\nCSV injection\nMalicious file upload (e.g. EICAR files, .EXE)\nHTTP Strict Transport Security Header (HSTS)\nSubdomain takeover without a full exploitable vulnerability and PoC or not applicable to the scope\nBlind SSRF without exploitable vulnerabilities and PoC (e.g. DNS & HTTP pingback, Wordpress XMLRPC)\nLack or bypass of rate-limiting, brute-forcing or captcha issues\nUser enumeration (e.g. email, alias, GUID, phone number, common CMS endpoints)\nWeak password policies (e.g. length, complexity, reuse)\nAbility to spam users (email / SMS / direct messages flooding)\nDisclosed or misconfigured public API keys (e.g. Google Maps, Firebase, analytics tools...)\nPassword reset token sent via HTTP referer to external services (e.g. analytics / ads platforms)\nStolen secrets, credentials or information gathered from a third-party asset that we have no control over\nExposed secrets, credentials or information on an asset under our control that are not applicable to the program’s scope\nPre-account takeover (e.g. account creation via oAuth)\nGraphQL Introspection is enabled\nREPORTS OF LEAKS AND EXPOSED CREDENTIALS\nIn the context of this program, we do not intend to encourage, accept or reward reports of leaks that are not applicable to our program’s scope and policy. To summarize our policy, you may refer to the below table:\nMore info\nTYPE OF LEAK\nSOURCE OF LEAK IS IN-SCOPE\nSOURCE OF LEAK BELONGS TO THE ORGANIZATION AND IS OUT-OF-SCOPE\nSOURCE OF LEAK DOES NOT BELONG TO THE ORGANIZATION AND IS OUT-OF-SCOPE\nImpact is in-scope (e.g. valid credentials on an in-scope asset)\nEligible\nEligible\nNot eligible\nImpact is out-of-scope (e.g. valid credentials for an out-of-scope asset)\nEligible\nNot eligible\nNot eligible\nHUNTING REQUIREMENTS\nACCOUNT ACCESS\nDownload and use the binary from https://www.teamviewer.com/en/products/teamviewer\nFor the Web Version go to: https://web.teamviewer.com\nLogin Service: https://account.teamviewer.com\nManagement Console (MCO): https://login.teamviewer.com\nAndroid Apps: https://play.google.com/store/apps/developer?id=TeamViewer&hl=en&gl=US&pli=1\nTeamViewer Remote Control\nTeamViewer QuickSupport\nTeamViewer Host\niOS Apps:\nTeamViewer Quick Support: https://apps.apple.com/us/app/teamviewer-quicksupport/id661649585\nTeamViewer Remote Control: https://apps.apple.com/us/app/teamviewer/id692035811\nHUNTERS COLLABORATION\nWhen submitting new report, you can add up to 5 collaborators, and define the reward split ratio.\nFor more information, see help center.\nNote: For reports that have already been rewarded, it is not possible to redistribute the rewards.\nTo submit a vulnerability report, you need to login with your hunter account.\nLogin\nTeamViewer - Bounty Program\nBug bounty description\nRewards\nScopes\nVulnerability types\nHunting requirements\nHunters collaboration\nHall Of Fame\nTo submit a vulnerability report, you need to login with your hunter account.\nLogin\n© YesWeHack 2026\nLegal notices\nGeneral Conditions of Use\nPlatform privacy policy\nContact us\n=== SCOPE VIEW: https://yeswehack.com/programs/teamviewer-bounty-program ===\nPUBLIC PROGRAMS\nRANKING\nHACKTIVITY\nREGISTER\nLOGIN\nPublic programs\nTeamViewer - Bounty Program\nBug bounty\nPublic\nSUBMIT REPORT\nTeamViewer - Bounty Program\nThe TeamViewer suite of remote connectivity, augmented reality, IT management, and customer-first engagement solutions empowers you to connect to any device to support anyone, any process, or anything — from anywhere, anytime.\nLast update on 2026-07-17\nProgram history\nREWARD\nBounty\nHall of fame\n€100\nLow\n€200\nMedium\n€1,000\nHigh\n€4,000\nCritical\n€10,000\nPROGRAM\nAvg reward\n-\nMax reward\n-\nScopes\n9\nSupported languages\nEnglish\nHACKTIVITY\nReports\n919\n1st response\n< 1 day\nReports last 24h\n2\nReports last week\n6\nReports this month\n50\nProgram description\nProgram activity\nCOMPANY\nTeamViewer Germany GmbH is the market leader for remote control.\nIt has been installed over 2.3 billions time on any type of operating system and provides connectivity for anyone, anywhere, anytime.\nPROGRAM RULES\nWe strongly believe into crowd testing and responsible disclosure model. It helps the industry, it protects users and contributes making the internet a safer place.\nIf you believe you've found a security vulnerability in our service, we are happy to work with you to resolve the issue promptly and ensure that you are fairly rewarded for your discovery\nAny type of denial of service attacks is strictly forbidden, as well as any interference with network equipment and TeamViewer Germany GmbH infrastructure. Your work should be non-destructive and remain within a proof of concept framework.\nELIGIBILITY AND RESPONSIBLE DISCLOSURE\nWe are happy to thank everyone who submits valid reports which help us improve the security of TeamViewer Germany GmbH however, only those that meet the following eligibility requirements may receive a monetary reward:\nYou must be the first reporter of a vulnerability.\nThe vulnerability must be a qualifying vulnerability (see below)\nAny vulnerability found must be reported no later than 24 hours after discovery and exclusively through yeswehack.com\nYou must send a clear textual description of the report along with steps to reproduce the issue, include attachments such as screenshots or proof of concept code as necessary.\nYou must avoid tests that could cause degradation or interruption of our service (refrain from using automated tools, and limit yourself about requests per second).\nYou must not leak, manipulate, or destroy any user data.\nYou must not be a former or current employee of TeamViewer Germany GmbH nor one of its contractor.\nReports about vulnerabilities are examined and validated by our security analysts.\nSCOPE DETAILS\nFor now, the scope of this program is limited to the following:\nTeamViewer Remote\nTeamViewer Remote Client\nTeamViewer Remote desktop client. Available for free download here: https://www.teamviewer.com/en/products/teamviewer/\nweb.teamviewer.com\nweb.teamviewer.com is the web version of the client\naccount.teamviewer.com\naccount.teamviewer.com is the associated login service\nlogin.teamviewer.com\nlogin.teamviewer.com is the management console of TeamViewer Remote\nTeamViewer Remote Control App\nTeamViewer Remote Control App is the mobile version of the TeamViewer client. Available for Android and iOS.\nTeamViewer QuickSupport App\nTeamViewer QuickSupport App is a mobile client only for incoming remote sessions. Available for Android and iOS.\nTeamviewer Host App\nTeamviewer Host App is a mobile app for unattended access to a mobile device. Only available for Android.\nBackend services you might directly interact with from the client app are considered part of the scope.\nLICENSE RESTRICTION BYPASS – REWARDS\nAll vulnerability reports that demonstrate an issue relying on bypassing our license limitations will be considered as Informative and closed without reward, except if a concrete and severe business impact can be demonstrated. In such instances, it will be a case by case analysis.\nThe vulnerability leads to a relevant financial impact on the business, can include:\nNoticeable additional infrastructure or service costs\nPersistent and scalable access to high-value, license-restricted features (beyond minor usage extensions or simple account configuration changes)\nOn the contrary, low impact vulnerabilities include:\nBypasses limited to minor or isolated increases in usage, such as:\nAdding a small number of additional users/devices within a single account\nAccessing higher-tier features in a non-scalable way\nCases where the impact is considered negligible from a financial or security perspective\nREWARD\nASSET VALUE\tCVSS\nLOW\n\tCVSS\nMEDIUM\n\tCVSS\nHIGH\n\tCVSS\nCRITICAL\nCritical\n\t€200\t€1,000\t€4,000\t€10,000\nHigh\n\t€100\t€500\t€2,000\t€5,000\nSYSTEMIC ISSUES\n1st report100%\n2nd report100%\n3rd report75%\n4th report50%\n5th report25%\n6th+ report0%\nWe appreciate all valid reports submitted to our program that enhance our security. However, please note that if a similar issue (see definition in 'More info') has already been reported, by you or any other hunter, the reward will be decreasing according to these percentages.\nMore info\nSCOPES\nExport\nSCOPE\tTYPE\tASSET VALUE\nhttps://www.teamviewer.com/en/products/teamviewer/\n\tApplication\nCritical\nLow\n€200\nMedium\n€1,000\nHigh\n€4,000\nCritical\n€10,000\nhttps://web.teamviewer.com\n\tWeb application\nCritical\nLow\n€200\nMedium\n€1,000\nHigh\n€4,000\nCritical\n€10,000\nhttps://account.teamviewer.com\n\tWeb application\nCritical\nLow\n€200\nMedium\n€1,000\nHigh\n€4,000\nCritical\n€10,000\nhttps://login.teamviewer.com\n\tWeb application\nCritical\nLow\n€200\nMedium\n€1,000\nHigh\n€4,000\nCritical\n€10,000\nhttps://play.google.com/store/apps/details?id=com.teamviewer.teamviewer.market.mobile&hl=en&gl=US\n\tMobile application Android\nHigh\nLow\n€100\nMedium\n€500\nHigh\n€2,000\nCritical\n€5,000\nhttps://play.google.com/store/apps/details?id=com.teamviewer.quicksupport.market&hl=en&gl=US\n\tMobile application Android\nHigh\nLow\n€100\nMedium\n€500\nHigh\n€2,000\nCritical\n€5,000\nhttps://play.google.com/store/apps/details?id=com.teamviewer.host.market&hl=en&gl=US\n\tMobile application Android\nHigh\nLow\n€100\nMedium\n€500\nHigh\n€2,000\nCritical\n€5,000\nhttps://apps.apple.com/de/app/teamviewer-remote-control/id692035811\n\tMobile application IOS\nHigh\nLow\n€100\nMedium\n€500\nHigh\n€2,000\nCritical\n€5,000\nhttps://apps.apple.com/de/app/teamviewer-quicksupport/id661649585\n\tMobile application IOS\nHigh\nLow\n€100\nMedium\n€500\nHigh\n€2,000\nCritical\n€5,000\nOUT OF SCOPES\nAll domains not listed In-Scope\nVULNERABILITY TYPES\nQUALIFYING VULNERABILITIES\nSQL Injection (SQLi)\nCross-Site Scripting (XSS)\nRemote Code Execution (RCE)\nInsecure Direct Object Reference (IDOR)\nHorizontal and vertical privilege escalation\nAuthentication bypass & broken authentication\nBusiness Logic Errors vulnerability with real security impact\nLocal files access and manipulation (LFI, RFI, XXE, SSRF, XSPA)\nCross-Origin Resource Sharing (CORS) with real security impact\nCross-site Request Forgery (CSRF) with real security impact\nOpen Redirect\nExposed secrets, credentials or sensitive information on an asset under our control and affecting at least one of our scopes\nNON-QUALIFYING VULNERABILITIES\nBroken Link/Social media Hijacking\nTabnabbing\nLeaked User IDs\nMissing cookie flags\nContent/Text injections\nClickjacking/UI redressing\nDenial of Service (DoS) attacks\nRecently disclosed CVEs (less than 30 days sinces patch release)\nCVEs without exploitable vulnerabilities and PoC\nOpen ports or services without exploitable vulnerabilities and PoC\nSocial engineering of staff or contractors\nPresence of autocomplete attribute on web forms\nVulnerabilities affecting outdated browsers or platforms\nSelf-XSS or XSS that cannot be used to impact other users\nAny hypothetical flaw or best practices without exploitable vulnerabilities and PoC\nSSL/TLS issues (e.g. expired certificates, best practices)\nUnexploitable vulnerabilities (e.g. Self-XSS, XSS or Open Redirect through HTTP headers...)\nReports with attack scenarios requiring MITM or physical access to victim's device\nMissing security-related HTTP headers which do not lead directly to an exploitable vulnerability and PoC\nLow severity Cross-Site Request Forgery (CSRF) (e.g. Unauthenticated / Logout / Login / Products cart updates...)\nInvalid or missing email security records (e.g. SPF, DKIM, DMARC)\nSession management issues (e.g. lack of expiration, no logout on password change, concurrent sessions)\nDisclosure of information without exploitable vulnerabilities and PoC (e.g. stack traces, path disclosure, directory listings, software versions, IP disclosure, 3rd party secrets, EXIF Metadata, Origin IP)\nCSV injection\nMalicious file upload (e.g. EICAR files, .EXE)\nHTTP Strict Transport Security Header (HSTS)\nSubdomain takeover without a full exploitable vulnerability and PoC or not applicable to the scope\nBlind SSRF without exploitable vulnerabilities and PoC (e.g. DNS & HTTP pingback, Wordpress XMLRPC)\nLack or bypass of rate-limiting, brute-forcing or captcha issues\nUser enumeration (e.g. email, alias, GUID, phone number, common CMS endpoints)\nWeak password policies (e.g. length, complexity, reuse)\nAbility to spam users (email / SMS / direct messages flooding)\nDisclosed or misconfigured public API keys (e.g. Google Maps, Firebase, analytics tools...)\nPassword reset token sent via HTTP referer to external services (e.g. analytics / ads platforms)\nStolen secrets, credentials or information gathered from a third-party asset that we have no control over\nExposed secrets, credentials or information on an asset under our control that are not applicable to the program’s scope\nPre-account takeover (e.g. account creation via oAuth)\nGraphQL Introspection is enabled\nREPORTS OF LEAKS AND EXPOSED CREDENTIALS\nIn the context of this program, we do not intend to encourage, accept or reward reports of leaks that are not applicable to our program’s scope and policy. To summarize our policy, you may refer to the below table:\nMore info\nTYPE OF LEAK\nSOURCE OF LEAK IS IN-SCOPE\nSOURCE OF LEAK BELONGS TO THE ORGANIZATION AND IS OUT-OF-SCOPE\nSOURCE OF LEAK DOES NOT BELONG TO THE ORGANIZATION AND IS OUT-OF-SCOPE\nImpact is in-scope (e.g. valid credentials on an in-scope asset)\nEligible\nEligible\nNot eligible\nImpact is out-of-scope (e.g. valid credentials for an out-of-scope asset)\nEligible\nNot eligible\nNot eligible\nHUNTING REQUIREMENTS\nACCOUNT ACCESS\nDownload and use the binary from https://www.teamviewer.com/en/products/teamviewer\nFor the Web Version go to: https://web.teamviewer.com\nLogin Service: https://account.teamviewer.com\nManagement Console (MCO): https://login.teamviewer.com\nAndroid Apps: https://play.google.com/store/apps/developer?id=TeamViewer&hl=en&gl=US&pli=1\nTeamViewer Remote Control\nTeamViewer QuickSupport\nTeamViewer Host\niOS Apps:\nTeamViewer Quick Support: https://apps.apple.com/us/app/teamviewer-quicksupport/id661649585\nTeamViewer Remote Control: https://apps.apple.com/us/app/teamviewer/id692035811\nHUNTERS COLLABORATION\nWhen submitting new report, you can add up to 5 collaborators, and define the reward split ratio.\nFor more information, see help center.\nNote: For reports that have already been rewarded, it is not possible to redistribute the rewards.\nTo submit a vulnerability report, you need to login with your hunter account.\nLogin\nTeamViewer - Bounty Program\nBug bounty description\nRewards\nScopes\nVulnerability types\nHunting requirements\nHunters collaboration\nHall Of Fame\nTo submit a vulnerability report, you need to login with your hunter account.\nLogin\n© YesWeHack 2026\nLegal notices\nGeneral Conditions of Use\nPlatform privacy policy\nContact us"
+  },
+  "analysis": {
+    "program_name": "TeamViewer - Bounty Program",
+    "program_description": "TeamViewer Germany GmbH의 원격 연결·증강현실·IT 관리 솔루션 대상 공개 버그바운티 프로그램입니다. 명시된 9개 스코프에 한정됩니다. Critical 자산 보상: Low €200 · Medium €1,000 · High €4,000 · Critical €10,000. High 자산 보상: Low €100 · Medium €500 · High €2,000 · Critical €5,000.",
+    "in_scope_assets": [
+      {
+        "asset_type": "URL",
+        "asset": "https://www.teamviewer.com/en/products/teamviewer/",
+        "description": "TeamViewer Remote desktop client 무료 다운로드 페이지. 자산 가치: Critical. 보상: Low €200 · Medium €1,000 · High €4,000 · Critical €10,000.",
+        "eligibility": "명시된 프로그램 스코프이며, qualifying vulnerability 및 기타 프로그램 요건을 충족해야 합니다.",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "https://web.teamviewer.com",
+        "description": "TeamViewer 클라이언트의 웹 버전. 자산 가치: Critical. 보상: Low €200 · Medium €1,000 · High €4,000 · Critical €10,000.",
+        "eligibility": "명시된 프로그램 스코프이며, qualifying vulnerability 및 기타 프로그램 요건을 충족해야 합니다.",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "https://account.teamviewer.com",
+        "description": "연결된 로그인 서비스. 자산 가치: Critical. 보상: Low €200 · Medium €1,000 · High €4,000 · Critical €10,000.",
+        "eligibility": "명시된 프로그램 스코프이며, qualifying vulnerability 및 기타 프로그램 요건을 충족해야 합니다.",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "https://login.teamviewer.com",
+        "description": "TeamViewer Remote 관리 콘솔. 자산 가치: Critical. 보상: Low €200 · Medium €1,000 · High €4,000 · Critical €10,000.",
+        "eligibility": "명시된 프로그램 스코프이며, qualifying vulnerability 및 기타 프로그램 요건을 충족해야 합니다.",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "MOBILE_APP",
+        "asset": "https://play.google.com/store/apps/details?id=com.teamviewer.teamviewer.market.mobile&hl=en&gl=US",
+        "description": "TeamViewer Remote Control Android 앱. 자산 가치: High. 보상: Low €100 · Medium €500 · High €2,000 · Critical €5,000.",
+        "eligibility": "명시된 프로그램 스코프이며, qualifying vulnerability 및 기타 프로그램 요건을 충족해야 합니다.",
+        "maximum_severity": "High"
+      },
+      {
+        "asset_type": "MOBILE_APP",
+        "asset": "https://play.google.com/store/apps/details?id=com.teamviewer.quicksupport.market&hl=en&gl=US",
+        "description": "TeamViewer QuickSupport Android 앱. 수신 원격 세션 전용 모바일 클라이언트입니다. 자산 가치: High. 보상: Low €100 · Medium €500 · High €2,000 · Critical €5,000.",
+        "eligibility": "명시된 프로그램 스코프이며, qualifying vulnerability 및 기타 프로그램 요건을 충족해야 합니다.",
+        "maximum_severity": "High"
+      },
+      {
+        "asset_type": "MOBILE_APP",
+        "asset": "https://play.google.com/store/apps/details?id=com.teamviewer.host.market&hl=en&gl=US",
+        "description": "Teamviewer Host Android 앱. 모바일 기기의 무인 액세스용 앱입니다. 자산 가치: High. 보상: Low €100 · Medium €500 · High €2,000 · Critical €5,000.",
+        "eligibility": "명시된 프로그램 스코프이며, qualifying vulnerability 및 기타 프로그램 요건을 충족해야 합니다.",
+        "maximum_severity": "High"
+      },
+      {
+        "asset_type": "MOBILE_APP",
+        "asset": "https://apps.apple.com/de/app/teamviewer-remote-control/id692035811",
+        "description": "TeamViewer Remote Control iOS 앱. 자산 가치: High. 보상: Low €100 · Medium €500 · High €2,000 · Critical €5,000.",
+        "eligibility": "명시된 프로그램 스코프이며, qualifying vulnerability 및 기타 프로그램 요건을 충족해야 합니다.",
+        "maximum_severity": "High"
+      },
+      {
+        "asset_type": "MOBILE_APP",
+        "asset": "https://apps.apple.com/de/app/teamviewer-quicksupport/id661649585",
+        "description": "TeamViewer QuickSupport iOS 앱. 수신 원격 세션 전용 모바일 클라이언트입니다. 자산 가치: High. 보상: Low €100 · Medium €500 · High €2,000 · Critical €5,000.",
+        "eligibility": "명시된 프로그램 스코프이며, qualifying vulnerability 및 기타 프로그램 요건을 충족해야 합니다.",
+        "maximum_severity": "High"
+      }
+    ],
+    "out_of_scope_assets": [
+      {
+        "asset_type": "WILDCARD",
+        "asset": "All domains not listed In-Scope",
+        "description": "명시적인 인스코프 목록에 없는 모든 도메인.",
+        "eligibility": "보상 및 테스트 대상이 아닙니다.",
+        "maximum_severity": "N/A"
+      }
+    ],
+    "allowed_activities": [
+      "SQL Injection (SQLi)",
+      "Cross-Site Scripting (XSS)",
+      "Remote Code Execution (RCE)",
+      "Insecure Direct Object Reference (IDOR)",
+      "수평 및 수직 권한 상승",
+      "Authentication bypass & broken authentication",
+      "실질적 보안 영향이 있는 Business Logic Errors vulnerability",
+      "Local files access and manipulation (LFI, RFI, XXE, SSRF, XSPA)",
+      "실질적 보안 영향이 있는 Cross-Origin Resource Sharing (CORS)",
+      "실질적 보안 영향이 있는 Cross-site Request Forgery (CSRF)",
+      "Open Redirect",
+      "조직이 통제하고 최소 하나의 스코프에 영향을 미치는 자산에서의 노출된 비밀정보·자격증명·민감 정보",
+      "클라이언트 앱에서 직접 상호작용하는 백엔드 서비스 테스트"
+    ],
+    "prohibited_activities": [
+      "모든 형태의 Denial of Service (DoS) attacks",
+      "네트워크 장비 및 TeamViewer Germany GmbH 인프라에 대한 간섭",
+      "서비스 저하 또는 중단을 일으킬 수 있는 테스트",
+      "자동화 도구 사용",
+      "사용자 데이터 유출, 조작 또는 파괴",
+      "Broken Link/Social media Hijacking",
+      "Tabnabbing",
+      "Leaked User IDs",
+      "Missing cookie flags",
+      "Content/Text injections",
+      "Clickjacking/UI redressing",
+      "최근 공개된 CVE(패치 릴리스 후 30일 미만)",
+      "악용 가능한 취약점과 PoC가 없는 CVE",
+      "악용 가능한 취약점과 PoC가 없는 열린 포트 또는 서비스",
+      "직원 또는 계약자 대상 사회공학",
+      "웹 폼의 autocomplete 속성 존재",
+      "구식 브라우저 또는 플랫폼에 영향을 미치는 취약점",
+      "다른 사용자에게 영향을 줄 수 없는 Self-XSS 또는 XSS",
+      "악용 가능한 취약점과 PoC가 없는 가상적 결함 또는 모범 사례 문제",
+      "SSL/TLS 문제(예: 만료된 인증서, 모범 사례)",
+      "악용 불가능한 취약점(예: Self-XSS, HTTP 헤더를 통한 XSS 또는 Open Redirect)",
+      "MITM 또는 피해자 기기의 물리적 접근이 필요한 공격 시나리오",
+      "직접 악용 가능한 취약점과 PoC로 이어지지 않는 누락된 보안 관련 HTTP 헤더",
+      "낮은 심각도의 CSRF(예: 비인증·로그아웃·로그인·장바구니 업데이트)",
+      "유효하지 않거나 누락된 이메일 보안 레코드(예: SPF, DKIM, DMARC)",
+      "세션 관리 문제(예: 만료 부재, 비밀번호 변경 시 로그아웃 없음, 동시 세션)",
+      "악용 가능한 취약점과 PoC가 없는 정보 노출(예: 스택 트레이스, 경로 노출, 디렉터리 목록, 소프트웨어 버전, IP 노출, 제3자 비밀정보, EXIF Metadata, Origin IP)",
+      "CSV injection",
+      "악성 파일 업로드(예: EICAR 파일, .EXE)",
+      "HTTP Strict Transport Security Header (HSTS)",
+      "완전한 악용 가능 취약점과 PoC가 없거나 스코프에 적용되지 않는 Subdomain takeover",
+      "악용 가능한 취약점과 PoC가 없는 Blind SSRF(예: DNS 및 HTTP pingback, Wordpress XMLRPC)",
+      "rate-limiting·brute-forcing·captcha 부족 또는 우회",
+      "User enumeration(예: 이메일, 별칭, GUID, 전화번호, 일반 CMS 엔드포인트)",
+      "약한 비밀번호 정책(예: 길이, 복잡성, 재사용)",
+      "사용자 스팸 가능성(이메일·SMS·다이렉트 메시지 플러딩)",
+      "공개되었거나 잘못 구성된 공개 API 키(예: Google Maps, Firebase, analytics tools)",
+      "외부 서비스로 HTTP referer를 통해 전송된 비밀번호 재설정 토큰",
+      "조직이 통제하지 않는 제3자 자산에서 수집한 탈취 비밀정보·자격증명·정보",
+      "프로그램 스코프에 적용되지 않는, 조직 통제 자산의 노출된 비밀정보·자격증명·정보",
+      "Pre-account takeover(예: oAuth를 통한 계정 생성)",
+      "GraphQL Introspection is enabled"
+    ],
+    "submission_requirements": [
+      "취약점은 발견 후 24시간 이내에 yeswehack.com을 통해서만 보고해야 합니다.",
+      "명확한 텍스트 설명과 재현 단계를 제출하고, 필요 시 스크린샷 또는 PoC 코드 같은 첨부물을 포함해야 합니다.",
+      "최초 보고자여야 합니다.",
+      "유효한 보고서이며 qualifying vulnerability여야 합니다.",
+      "보고하려면 hunter 계정으로 로그인해야 합니다."
+    ],
+    "operational_constraints": [
+      "테스트는 비파괴적이어야 하며 proof of concept 범위에 머물러야 합니다.",
+      "자동화 도구를 사용하지 말고 초당 요청 수를 제한해야 합니다.",
+      "바이너리는 https://www.teamviewer.com/en/products/teamviewer 에서 내려받아 사용합니다.",
+      "웹 버전은 https://web.teamviewer.com 에서, Login Service는 https://account.teamviewer.com 에서, Management Console (MCO)은 https://login.teamviewer.com 에서 접근하도록 안내됩니다.",
+      "라이선스 제한 우회에 의존하는 보고서는 구체적이고 심각한 사업 영향이 입증되지 않으면 Informative로 종료되며 보상되지 않습니다.",
+      "현직 또는 전직 TeamViewer Germany GmbH 직원이나 계약자는 금전 보상 대상이 아닙니다."
+    ],
+    "safe_harbor": "명시적인 safe harbor 조항은 확인되지 않았습니다. 프로그램은 책임 있는 공개와 비파괴적 PoC 범위의 테스트를 요구합니다.",
+    "ambiguities": [
+      "제공된 캡처 상태는 COMPLETE이며, 명시된 Scopes 9개가 모두 표에 포함되어 있습니다.",
+      "'Backend services you might directly interact with from the client app are considered part of the scope.'라고 하나, 개별 백엔드 서비스의 호스트명·URL·자산 유형은 명시되지 않았습니다.",
+      "라이선스 제한 우회는 심각한 사업 영향을 사례별로 입증한 경우에만 보상 여부를 분석하므로, 보상 적격성이 사전 확정되지 않습니다.",
+      "프로그램은 책임 있는 공개를 언급하지만, 법적 면책 또는 safe-harbor의 구체적 범위는 명시하지 않습니다."
+    ],
+    "source_evidence": [
+      {
+        "section": "SCOPE DETAILS",
+        "quote": "For now, the scope of this program is limited to the following:"
+      },
+      {
+        "section": "SCOPES",
+        "quote": "Scopes\n9"
+      },
+      {
+        "section": "SCOPES",
+        "quote": "https://www.teamviewer.com/en/products/teamviewer/\n\tApplication\nCritical"
+      },
+      {
+        "section": "SCOPES",
+        "quote": "https://web.teamviewer.com\n\tWeb application\nCritical"
+      },
+      {
+        "section": "SCOPES",
+        "quote": "https://account.teamviewer.com\n\tWeb application\nCritical"
+      },
+      {
+        "section": "SCOPES",
+        "quote": "https://login.teamviewer.com\n\tWeb application\nCritical"
+      },
+      {
+        "section": "SCOPES",
+        "quote": "https://play.google.com/store/apps/details?id=com.teamviewer.teamviewer.market.mobile&hl=en&gl=US\n\tMobile application Android\nHigh"
+      },
+      {
+        "section": "SCOPES",
+        "quote": "https://play.google.com/store/apps/details?id=com.teamviewer.quicksupport.market&hl=en&gl=US\n\tMobile application Android\nHigh"
+      },
+      {
+        "section": "SCOPES",
+        "quote": "https://play.google.com/store/apps/details?id=com.teamviewer.host.market&hl=en&gl=US\n\tMobile application Android\nHigh"
+      },
+      {
+        "section": "SCOPES",
+        "quote": "https://apps.apple.com/de/app/teamviewer-remote-control/id692035811\n\tMobile application IOS\nHigh"
+      },
+      {
+        "section": "SCOPES",
+        "quote": "https://apps.apple.com/de/app/teamviewer-quicksupport/id661649585\n\tMobile application IOS\nHigh"
+      },
+      {
+        "section": "OUT OF SCOPES",
+        "quote": "All domains not listed In-Scope"
+      },
+      {
+        "section": "PROGRAM RULES",
+        "quote": "Any type of denial of service attacks is strictly forbidden, as well as any interference with network equipment and TeamViewer Germany GmbH infrastructure. Your work should be non-destructive and remain within a proof of concept framework."
+      },
+      {
+        "section": "ELIGIBILITY AND RESPONSIBLE DISCLOSURE",
+        "quote": "Any vulnerability found must be reported no later than 24 hours after discovery and exclusively through yeswehack.com"
+      },
+      {
+        "section": "ELIGIBILITY AND RESPONSIBLE DISCLOSURE",
+        "quote": "You must avoid tests that could cause degradation or interruption of our service (refrain from using automated tools, and limit yourself about requests per second)."
+      },
+      {
+        "section": "VULNERABILITY TYPES",
+        "quote": "QUALIFYING VULNERABILITIES"
+      },
+      {
+        "section": "VULNERABILITY TYPES",
+        "quote": "NON-QUALIFYING VULNERABILITIES"
+      },
+      {
+        "section": "HUNTING REQUIREMENTS",
+        "quote": "Download and use the binary from https://www.teamviewer.com/en/products/teamviewer"
+      },
+      {
+        "section": "LICENSE RESTRICTION BYPASS – REWARDS",
+        "quote": "All vulnerability reports that demonstrate an issue relying on bypassing our license limitations will be considered as Informative and closed without reward, except if a concrete and severe business impact can be demonstrated."
+      }
+    ]
+  }
+}
