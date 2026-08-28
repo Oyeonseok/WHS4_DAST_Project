@@ -14,7 +14,7 @@ from urllib.parse import urljoin, urlparse
 
 from playwright.sync_api import BrowserContext, Page
 
-from aidast.recon.tools.login import wait_for_manual_login
+from aidast.recon.tools.login import SessionCredentials, wait_for_manual_login
 
 # 정적 자산 확장자 - 링크를 따라가봤자 새 엔드포인트가 아니므로 크롤 대상에서 뺀다.
 STATIC_EXTENSIONS = (
@@ -212,8 +212,10 @@ def run_crawl_session(
     proxy: str,
     login_path: str = "/login",
     flow_log: Path,
-) -> None:
-    """수동 로그인 -> 크롤 -> (401 시) 재로그인 -> 크롤 재개 흐름을 오케스트레이션한다."""
+) -> SessionCredentials:
+    """수동 로그인 -> 크롤 -> (401 시) 재로그인 -> 크롤 재개 흐름을 오케스트레이션한다.
+
+    캡처한 세션 정보(SessionCredentials)를 반환한다 — 호출자가 DB에 저장할 수 있도록."""
     session, context = wait_for_manual_login(base_url, login_path=login_path, proxy=proxy)
 
     print(f"\n  크롤 세션 시작: {base_url}")
@@ -256,3 +258,4 @@ def run_crawl_session(
         browser.close()
 
     print(f"\n  크롤 완료 - 총 {len(visited)}개 URL 방문")
+    return session

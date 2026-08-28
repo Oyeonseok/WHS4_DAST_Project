@@ -28,6 +28,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from urllib.parse import parse_qs, urlparse
+
 from aidast.recon import db as dbmod
 
 
@@ -92,3 +94,104 @@ def ingest_flows_to_db(
             response_size=flow.get("response_size"),
             is_authenticated=is_authenticated,
         )
+
+
+def extract_parameters_from_flows(
+    conn,
+    *,
+    flows: list[dict],
+    endpoint_lookup: dict[tuple[str, str], str],
+) -> int:
+    """flow의 query string과 request body에서 파라미터를 추출해
+    parameters 테이블에 적재한다.
+
+    endpoint_lookup: (method, normalized_path) -> endpoint_id 매핑.
+    반환값: 적재된 파라미터 수.
+    """
+    from aidast.recon.judgment import normalize_path
+
+    count = 0
+    seen: set[tuple[str, str, str]] = set()  # (endpoint_id, name, location)
+
+    for flow in flows:
+        method = flow.get("method", "GET")
+        path = flow.get("path", "")
+        normalized = normalize_path(path)
+        endpoint_id = endpoint_lookup.get((method, normalized))
+        if not endpoint_id:
+            continue
+
+        # 1) query string 파라미터
+        query = flow.get("query", "")
+        if query:
+            for name, values in parse_qs(query).items():
+                key = (endpoint_id, name, "query")
+                if key in seen:
+                    continue
+                seen.add(key)
+                example = values[0] if values else None
+                data_type = _guess_type(example)
+                conn.execute(
+                    """INSERT OR IGNORE INTO parameters
+                       (parameter_id, endpoint_id, name, location, data_type, example_value)
+                       VALUES (?, ?, ?, ?, ?, ?)""",
+                    (dbmod.new_id("param"), endpoint_id, name, "query", data_type, example),
+                )
+                count += 1
+
+        # 2) request body 파라미터 (JSON / form-urlencoded)
+        content_type = (flow.get("content_type") or "").lower()
+        request_body = flow.get("request_body", "")
+        if not request_body:
+            continue
+
+        body_params: dict[str, str] = {}
+        if "application/json" in content_type:
+            try:
+                parsed = json.loads(request_body)
+                if isinstance(parsed, dict):
+                    body_params = {k: str(v) for k, v in parsed.items()}
+            except (json.JSONDecodeError, TypeError):
+                pass
+        elif "x-www-form-urlencoded" in content_type:
+            for name, values in parse_qs(request_body).items():
+                body_params[name] = values[0] if values else ""
+
+        for name, example in body_params.items():
+            key = (endpoint_id, name, "body")
+            if key in seen:
+                continue
+            seen.add(key)
+            data_type = _guess_type(example)
+            conn.execute(
+                """INSERT OR IGNORE INTO parameters
+                   (parameter_id, endpoint_id, name, location, data_type, example_value)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (dbmod.new_id("param"), endpoint_id, name, "body", data_type, example),
+            )
+            count += 1
+
+    conn.commit()
+    return count
+
+
+def _guess_type(value: str | None) -> str:
+    """값으로부터 대략적인 데이터 타입을 추측한다."""
+    if value is None:
+        return "string"
+    if value.isdigit():
+        return "integer"
+    try:
+        float(value)
+        return "number"
+    except ValueError:
+        pass
+    if value.lower() in ("true", "false"):
+        return "boolean"
+    # JWT나 긴 토큰 패턴
+    if value.count(".") == 2 and len(value) > 20:
+        return "token"
+    # 이메일 패턴
+    if "@" in value and "." in value:
+        return "email"
+    return "string"
