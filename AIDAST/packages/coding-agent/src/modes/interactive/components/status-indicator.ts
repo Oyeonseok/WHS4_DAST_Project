@@ -27,16 +27,64 @@ export class StatusIndicator extends Loader {
 }
 
 export class WorkingStatusIndicator extends StatusIndicator {
-	constructor(ui: TUI, message: string, indicator?: WorkingIndicatorOptions) {
-		super(
-			"working",
-			ui,
-			(spinner) => theme.fg("accent", spinner),
-			(text) => theme.fg("muted", text),
-			message,
-			indicator,
-		);
-	}
+        private elapsedIntervalId: ReturnType<typeof setInterval> | undefined;
+        private readonly startedAt: number;
+        private readonly baseMessage: string;
+        private readonly workingUi: TUI;
+
+        constructor(ui: TUI, message: string, indicator?: WorkingIndicatorOptions) {
+                super(
+                        "working",
+                        ui,
+                        (spinner) => theme.fg("accent", spinner),
+                        (text) => theme.fg("muted", text),
+                        message,
+                        indicator,
+                );
+
+                this.workingUi = ui;
+                this.baseMessage = message;
+                this.startedAt = Date.now();
+
+                this.setMessage(`${this.baseMessage} 0s`);
+
+                this.elapsedIntervalId = setInterval(() => {
+                        const elapsedSeconds = Math.floor(
+                                (Date.now() - this.startedAt) / 1000,
+                        );
+
+                        this.setMessage(
+                                `${this.baseMessage} ${this.formatElapsed(elapsedSeconds)}`,
+                        );
+
+                        this.workingUi.requestRender();
+                }, 1000);
+        }
+
+        private formatElapsed(totalSeconds: number): string {
+                const hours = Math.floor(totalSeconds / 3600);
+                const minutes = Math.floor((totalSeconds % 3600) / 60);
+                const seconds = totalSeconds % 60;
+
+                if (hours > 0) {
+                        return `${hours}h ${minutes}m ${seconds}s`;
+                }
+
+                if (minutes > 0) {
+                        return `${minutes}m ${seconds}s`;
+                }
+
+                return `${seconds}s`;
+        }
+
+        override dispose(): void {
+                if (this.elapsedIntervalId) {
+                        clearInterval(this.elapsedIntervalId);
+                        this.elapsedIntervalId = undefined;
+                }
+
+                super.dispose();
+        }
 }
 
 export class RetryStatusIndicator extends StatusIndicator {
