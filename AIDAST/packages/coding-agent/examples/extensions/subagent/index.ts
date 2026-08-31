@@ -259,7 +259,7 @@ function getPiInvocation(args: string[]): { command: string; args: string[] } {
 		return { command: process.execPath, args };
 	}
 
-	return { command: "pi", args };
+	return { command: "aidast", args };
 }
 
 type OnUpdateCallback = (partial: AgentToolResult<SubagentDetails>) => void;
@@ -267,6 +267,85 @@ type OnUpdateCallback = (partial: AgentToolResult<SubagentDetails>) => void;
 interface DispatchDefaults {
 	model?: string;
 	thinkingLevel?: ThinkingLevel;
+}
+
+type SubagentTaskStatus =
+        | "running"
+        | "completed"
+        | "failed"
+        | "cancelled";
+
+interface SubagentTask {
+        id: string;
+        name: string;
+        proc: ReturnType<typeof spawn>;
+        startedAt: number;
+        status: SubagentTaskStatus;
+        lastEvent?: string;
+        lastAssistantText?: string;
+        events: string[];
+        result?: SingleResult;
+}
+
+const subagentTasks = new Map<string, SubagentTask>();
+
+function createTaskId(agentName: string): string {
+        return `${agentName}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function getBackgroundTaskLines(): string[] {
+        const runningTasks = [...subagentTasks.values()]
+                .filter((task) => task.status === "running")
+                .slice(0, 5);
+
+        if (runningTasks.length === 0) {
+                return [];
+        }
+
+        return runningTasks.map((task, index) => {
+                const elapsedSeconds = Math.floor(
+                        (Date.now() - task.startedAt) / 1000,
+                );
+
+                const minutes = Math.floor(elapsedSeconds / 60);
+                const seconds = elapsedSeconds % 60;
+                const elapsed =
+                        minutes > 0
+                                ? `${minutes}m ${seconds}s`
+                                : `${seconds}s`;
+
+                const spinner = ["⠋", "⠙", "⠹", "⠸"][
+                        Math.floor(Date.now() / 250) % 4
+                ];
+
+                const activity = task.lastEvent ?? "starting";
+
+                return `${spinner} ${task.name} · background working · ${activity} · ${elapsed}`;
+        });
+}
+
+let backgroundWidgetTimer: ReturnType<typeof setInterval> | null = null;
+
+function ensureBackgroundWidget(
+        render: (lines: string[] | undefined) => void,
+): void {
+        if (backgroundWidgetTimer) {
+                return;
+        }
+
+        const refresh = () => {
+                const lines = getBackgroundTaskLines();
+
+                render(lines.length > 0 ? lines : undefined);
+
+                if (lines.length === 0 && backgroundWidgetTimer) {
+                        clearInterval(backgroundWidgetTimer);
+                        backgroundWidgetTimer = null;
+                }
+        };
+
+        refresh();
+        backgroundWidgetTimer = setInterval(refresh, 250);
 }
 
 async function runSingleAgent(
@@ -297,7 +376,13 @@ async function runSingleAgent(
 		};
 	}
 
-	const args: string[] = ["--mode", "json", "-p", "--no-session"];
+	const args: string[] = [
+        "--mode",
+        "json",
+        "-p",
+        "--no-session",
+        "--no-extensions",
+    ];
 	const inheritsDispatchConfig = !agent.model;
 	const model = agent.model ?? dispatchDefaults.model;
 	if (model) args.push("--model", model);
@@ -335,11 +420,12 @@ async function runSingleAgent(
 			const tmp = await writePromptToTempFile(agent.name, agent.systemPrompt);
 			tmpPromptDir = tmp.dir;
 			tmpPromptPath = tmp.filePath;
-			args.push("--append-system-prompt", agent.systemPrompt);
+			args.push("--system-prompt", agent.systemPrompt);
 		}
 
 		args.push(`Task: ${task}`);
 		let wasAborted = false;
+
 
 		const exitCode = await new Promise<number>((resolve) => {
 			const invocation = getPiInvocation(args);
@@ -348,6 +434,9 @@ async function runSingleAgent(
 				shell: false,
 				stdio: ["ignore", "pipe", "pipe"],
 			});
+
+
+
 			let buffer = "";
 
 			const processLine = (line: string) => {
@@ -358,6 +447,7 @@ async function runSingleAgent(
 				} catch {
 					return;
 				}
+
 
 				if (event.type === "message_end" && event.message) {
 					const msg = event.message as Message;
@@ -400,10 +490,13 @@ async function runSingleAgent(
 
 			proc.on("close", (code) => {
 				if (buffer.trim()) processLine(buffer);
+
+
 				resolve(code ?? 0);
 			});
 
 			proc.on("error", () => {
+
 				resolve(1);
 			});
 
@@ -439,6 +532,177 @@ async function runSingleAgent(
 	}
 }
 
+function startBackgroundAgent(
+        defaultCwd: string,
+        dispatchDefaults: DispatchDefaults,
+        agents: AgentConfig[],
+        agentName: string,
+        task: string,
+        cwd?: string,
+        onComplete?: (task: SubagentTask) => void,
+): { taskId: string; error?: string } {
+        const agent = agents.find((a) => a.name === agentName);
+
+        if (!agent) {
+                const available = agents.map((a) => a.name).join(", ") || "none";
+                return {
+                        taskId: "",
+                        error: `Unknown agent: "${agentName}". Available agents: ${available}.`,
+                };
+        }
+
+        const taskId = createTaskId(agentName);
+
+        const args: string[] = [
+                "--mode",
+                "rpc",
+                "--no-session",
+                "--no-extensions",
+        ];
+
+        const inheritsDispatchConfig = !agent.model;
+        const model = agent.model ?? dispatchDefaults.model;
+
+        if (model) {
+                args.push("--model", model);
+        }
+
+        if (inheritsDispatchConfig && dispatchDefaults.thinkingLevel) {
+                args.push("--thinking", dispatchDefaults.thinkingLevel);
+        }
+
+        if (agent.tools && agent.tools.length > 0) {
+                args.push("--tools", agent.tools.join(","));
+        }
+
+        if (agent.systemPrompt.trim()) {
+                args.push("--system-prompt", agent.systemPrompt);
+        }
+
+        const invocation = getPiInvocation(args);
+
+        const proc = spawn(invocation.command, invocation.args, {
+                cwd: cwd ?? defaultCwd,
+                shell: false,
+                stdio: ["pipe", "pipe", "pipe"],
+        });
+
+        const trackedTask: SubagentTask = {
+                id: taskId,
+                name: agentName,
+                proc,
+                startedAt: Date.now(),
+                status: "running",
+                events: [],
+        };
+
+        subagentTasks.set(taskId, trackedTask);
+
+        let buffer = "";
+
+        const recordLine = (line: string) => {
+                if (!line.trim()) return;
+
+                trackedTask.events.push(line);
+
+                if (trackedTask.events.length > 200) {
+                        trackedTask.events.shift();
+                }
+
+                try {
+                        const event = JSON.parse(line);
+
+                        trackedTask.lastEvent =
+                                typeof event.type === "string"
+                                        ? event.type
+                                        : "unknown";
+
+                        if (
+                                event.type === "message_end" &&
+                                event.message?.role === "assistant"
+                        ) {
+                                const message = event.message as Message;
+                                const output = getFinalOutput([message]);
+
+                                if (output.trim()) {
+                                        trackedTask.lastAssistantText = output;
+                                }
+                        }
+
+                        if (
+                                event.type === "agent_end" &&
+                                !event.willRetry &&
+                                trackedTask.status === "running"
+                        ) {
+                                trackedTask.status = "completed";
+
+                                onComplete?.(trackedTask);
+
+                                if (
+                                        proc.stdin &&
+                                        !proc.stdin.destroyed &&
+                                        proc.stdin.writable
+                                ) {
+                                        proc.stdin.end();
+                                }
+                        }
+                } catch {
+                        trackedTask.lastEvent = "raw";
+                }
+        };
+
+        proc.stdout.on("data", (data) => {
+                buffer += data.toString();
+
+                const lines = buffer.split("\n");
+                buffer = lines.pop() || "";
+
+                for (const line of lines) {
+                        recordLine(line);
+                }
+        });
+
+        proc.stderr.on("data", (data) => {
+                const text = data.toString().trim();
+
+                if (!text) return;
+
+                trackedTask.events.push(`[stderr] ${text}`);
+
+                if (trackedTask.events.length > 200) {
+                        trackedTask.events.shift();
+                }
+        });
+
+        proc.on("error", (error) => {
+                trackedTask.status = "failed";
+                trackedTask.lastEvent = "process_error";
+                trackedTask.events.push(`[process_error] ${error.message}`);
+        });
+
+        proc.on("close", (code) => {
+                if (buffer.trim()) {
+                        recordLine(buffer);
+                }
+
+                if (trackedTask.status === "running") {
+                        trackedTask.status = code === 0 ? "completed" : "failed";
+                }
+
+                trackedTask.lastEvent = "process_close";
+        });
+
+        proc.stdin.write(
+                JSON.stringify({
+                        id: `initial-${taskId}`,
+                        type: "prompt",
+                        message: `Task: ${task}`,
+                }) + "\n",
+        );
+
+        return { taskId };
+}
+
 const TaskItem = Type.Object({
 	agent: Type.String({ description: "Name of the agent to invoke" }),
 	task: Type.String({ description: "Task to delegate to the agent" }),
@@ -469,14 +733,17 @@ const SubagentParams = Type.Object({
 });
 
 export default function (pi: ExtensionAPI) {
+
 	pi.registerTool({
 		name: "subagent",
 		label: "Subagent",
 		description: [
-			"Delegate tasks to specialized subagents with isolated context.",
-			"Modes: single (agent + task), parallel (tasks array), chain (sequential with {previous} placeholder).",
-			`Default agent scope is "user" (from ${path.join(getAgentDir(), "agents")}).`,
-			`To enable project-local agents in ${CONFIG_DIR_NAME}/agents, set agentScope: "both" (or "project").`,
+		        "Delegate tasks to specialized subagents with isolated context.",
+		        "Single mode (agent + task) starts the subagent as a background task and immediately returns a task ID.",
+		        "Use subagent_output to inspect background task progress, subagent_send to steer it, and subagent_cancel to stop it.",
+		        "Parallel and chain modes remain foreground and wait for their agents to complete.",
+		        `Default agent scope is "user" (from ${path.join(getAgentDir(), "agents")}).`,
+		        `To enable project-local agents in ${CONFIG_DIR_NAME}/agents, set agentScope: "both" (or "project").`,
 		].join(" "),
 		parameters: SubagentParams,
 
@@ -686,31 +953,80 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			if (params.agent && params.task) {
-				const result = await runSingleAgent(
-					ctx.cwd,
-					dispatchDefaults,
-					agents,
-					params.agent,
-					params.task,
-					params.cwd,
-					undefined,
-					signal,
-					onUpdate,
-					makeDetails("single"),
-				);
-				const isError = isFailedResult(result);
-				if (isError) {
-					const errorMsg = getResultOutput(result);
-					return {
-						content: [{ type: "text", text: `Agent ${result.stopReason || "failed"}: ${errorMsg}` }],
-						details: makeDetails("single")([result]),
-						isError: true,
-					};
-				}
-				return {
-					content: [{ type: "text", text: getFinalOutput(result.messages) || "(no output)" }],
-					details: makeDetails("single")([result]),
-				};
+			        const started = startBackgroundAgent(
+			                ctx.cwd,
+			                dispatchDefaults,
+			                agents,
+			                params.agent,
+			                params.task,
+			                params.cwd,
+			                (completedTask) => {
+			                        const elapsedSeconds = Math.floor(
+			                                (Date.now() - completedTask.startedAt) / 1000,
+			                        );
+
+			                        const finalOutput =
+			                                completedTask.lastAssistantText?.trim() ||
+			                                "(No final assistant output was captured.)";
+
+			                        const completionContext = [
+			                                "[AIDAST background subagent completed]",
+			                                `Task ID: ${completedTask.id}`,
+			                                `Agent: ${completedTask.name}`,
+			                                `Elapsed: ${elapsedSeconds}s`,
+			                                "",
+			                                "The specialist agent has completed its background task.",
+			                                "Respond to the user with a concise but informative completion summary.",
+			                                "Include the main findings/results, important caveats or unresolved items, and artifact paths if they appear in the result.",
+			                                "Do not redo the specialist work. Summarize only the specialist result below.",
+			                                "",
+			                                "Subagent final output:",
+			                                finalOutput.slice(0, 20000),
+			                        ].join("\n");
+
+			                        pi.sendMessage(
+			                                {
+			                                        customType: "subagent-complete",
+			                                        content: completionContext,
+			                                        display: false,
+			                                        details: {
+			                                                taskId: completedTask.id,
+			                                                agent: completedTask.name,
+			                                                elapsedSeconds,
+			                                        },
+			                                },
+			                                {
+			                                        triggerTurn: true,
+			                                        deliverAs: "followUp",
+			                                },
+			                        );
+			                },
+			        );
+
+			        ensureBackgroundWidget((lines) => {
+			                ctx.ui.setWidget("subagent-background", lines);
+			        });
+
+			        if (started.error) {
+			                return {
+			                        content: [{ type: "text", text: started.error }],
+			                        isError: true,
+			                };
+			        }
+
+			        return {
+			                content: [
+			                        {
+			                                type: "text",
+			                                text: [
+			                                        "Background subagent started.",
+			                                        `Task ID: ${started.taskId}`,
+			                                        `Agent: ${params.agent}`,
+			                                        "Use subagent_output to check progress.",
+			                                ].join("\n"),
+			                        },
+			                ],
+			        };
 			}
 
 			const available = agents.map((a) => `${a.name} (${a.source})`).join(", ") || "none";
@@ -1035,4 +1351,256 @@ export default function (pi: ExtensionAPI) {
 			return new Text(text?.type === "text" ? text.text : "(no output)", 0, 0);
 		},
 	});
+
+        pi.registerTool({
+                name: "subagent_output",
+                label: "Subagent Output",
+                description: "Get status and recent events from a background subagent task.",
+                parameters: Type.Object({
+                        taskId: Type.String({
+                                description: "Background subagent task ID",
+                        }),
+                        tailLines: Type.Optional(
+                                Type.Number({
+                                        description: "Number of recent event lines to return",
+                                        minimum: 1,
+                                        maximum: 50,
+                                        default: 20,
+                                }),
+                        ),
+                }),
+
+                async execute(_toolCallId, params) {
+                        const trackedTask = subagentTasks.get(params.taskId);
+
+                        if (!trackedTask) {
+                                return {
+                                        content: [
+                                                {
+                                                        type: "text",
+                                                        text: `Unknown subagent task: ${params.taskId}`,
+                                                },
+                                        ],
+                                        isError: true,
+                                };
+                        }
+
+                        const elapsedSeconds = Math.floor(
+                                (Date.now() - trackedTask.startedAt) / 1000,
+                        );
+
+                        const tailLines = Math.min(
+                                Math.max(params.tailLines ?? 20, 1),
+                                50,
+                        );
+
+                        const recentEvents = trackedTask.events
+                                .slice(-tailLines)
+                                .join("\n");
+
+                        const textParts = [
+                                `Task ID: ${trackedTask.id}`,
+                                `Agent: ${trackedTask.name}`,
+                                `Status: ${trackedTask.status}`,
+                                `Elapsed: ${elapsedSeconds}s`,
+                                `Last event: ${trackedTask.lastEvent ?? "none"}`,
+                        ];
+
+                        if (trackedTask.lastAssistantText) {
+                                textParts.push(
+                                        "",
+                                        trackedTask.status === "completed"
+                                                ? "Final output:"
+                                                : "Latest assistant output:",
+                                        trackedTask.lastAssistantText,
+                                );
+                        }
+
+                        textParts.push(
+                                "",
+                                "Recent events:",
+                                recentEvents || "(no events yet)",
+                        );
+
+                        const text = textParts.join("\n");
+
+                        return {
+                                content: [{ type: "text", text }],
+                        };
+                },
+        });
+
+
+        pi.registerTool({
+                name: "subagent_send",
+                label: "Subagent Send",
+                description: "Send a steering message to a running background subagent task.",
+                parameters: Type.Object({
+                        taskId: Type.String({
+                                description: "Background subagent task ID",
+                        }),
+                        message: Type.String({
+                                description: "Instruction to send to the running subagent",
+                        }),
+                }),
+
+                async execute(_toolCallId, params) {
+                        const trackedTask = subagentTasks.get(params.taskId);
+
+                        if (!trackedTask) {
+                                return {
+                                        content: [
+                                                {
+                                                        type: "text",
+                                                        text: `Unknown subagent task: ${params.taskId}`,
+                                                },
+                                        ],
+                                        isError: true,
+                                };
+                        }
+
+                        if (trackedTask.status !== "running") {
+                                return {
+                                        content: [
+                                                {
+                                                        type: "text",
+                                                        text: `Subagent task ${params.taskId} is not running (status: ${trackedTask.status}).`,
+                                                },
+                                        ],
+                                        isError: true,
+                                };
+                        }
+
+                        const { proc } = trackedTask;
+
+                        if (
+                                !proc.stdin ||
+                                proc.stdin.destroyed ||
+                                !proc.stdin.writable
+                        ) {
+                                return {
+                                        content: [
+                                                {
+                                                        type: "text",
+                                                        text: `Subagent task ${params.taskId} stdin is not writable.`,
+                                                },
+                                        ],
+                                        isError: true,
+                                };
+                        }
+
+                        proc.stdin.write(
+                                JSON.stringify({
+                                        id: `steer-${Date.now()}`,
+                                        type: "steer",
+                                        message: params.message,
+                                }) + "\n",
+                        );
+
+                        return {
+                                content: [
+                                        {
+                                                type: "text",
+                                                text: `Message sent to ${trackedTask.name} (${params.taskId}).`,
+                                        },
+                                ],
+                        };
+                },
+        });
+
+
+        pi.registerTool({
+                name: "subagent_cancel",
+                label: "Subagent Cancel",
+                description: "Cancel a running background subagent task.",
+                parameters: Type.Object({
+                        taskId: Type.String({
+                                description: "Background subagent task ID",
+                        }),
+                }),
+
+                async execute(_toolCallId, params) {
+                        const trackedTask = subagentTasks.get(params.taskId);
+
+                        if (!trackedTask) {
+                                return {
+                                        content: [
+                                                {
+                                                        type: "text",
+                                                        text: `Unknown subagent task: ${params.taskId}`,
+                                                },
+                                        ],
+                                        isError: true,
+                                };
+                        }
+
+                        if (trackedTask.status !== "running") {
+                                return {
+                                        content: [
+                                                {
+                                                        type: "text",
+                                                        text: `Subagent task ${params.taskId} is already ${trackedTask.status}.`,
+                                                },
+                                        ],
+                                };
+                        }
+
+                        const { proc } = trackedTask;
+
+                        trackedTask.status = "cancelled";
+                        trackedTask.lastEvent = "cancel_requested";
+
+                        if (
+                                proc.stdin &&
+                                !proc.stdin.destroyed &&
+                                proc.stdin.writable
+                        ) {
+                                proc.stdin.write(
+                                        JSON.stringify({
+                                                id: `clear-${Date.now()}`,
+                                                type: "clear_queue",
+                                        }) + "\n",
+                                );
+
+                                proc.stdin.write(
+                                        JSON.stringify({
+                                                id: `abort-${Date.now()}`,
+                                                type: "abort",
+                                        }) + "\n",
+                                );
+
+                                setTimeout(() => {
+                                        if (
+                                                proc.stdin &&
+                                                !proc.stdin.destroyed &&
+                                                proc.stdin.writable
+                                        ) {
+                                                proc.stdin.end();
+                                        }
+                                }, 250);
+                        }
+
+                        setTimeout(() => {
+                                if (proc.exitCode === null) {
+                                        proc.kill("SIGTERM");
+                                }
+                        }, 1000);
+
+                        setTimeout(() => {
+                                if (proc.exitCode === null) {
+                                        proc.kill("SIGKILL");
+                                }
+                        }, 5000);
+
+                        return {
+                                content: [
+                                        {
+                                                type: "text",
+                                                text: `Cancellation requested for ${trackedTask.name} (${params.taskId}).`,
+                                        },
+                                ],
+                        };
+                },
+        });
+
 }
