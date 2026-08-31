@@ -99,6 +99,27 @@ CREATE TABLE IF NOT EXISTS parameters (
     UNIQUE(endpoint_id, name, location)
 );
 
+CREATE TABLE IF NOT EXISTS dns_resolutions (
+    dns_resolution_id TEXT PRIMARY KEY,
+    asset_id TEXT NOT NULL,
+    hostname TEXT NOT NULL,
+    source TEXT,
+    discovered_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (asset_id) REFERENCES assets(asset_id),
+    UNIQUE(asset_id, hostname, source)
+);
+
+CREATE TABLE IF NOT EXISTS host_ports (
+    host_port_id TEXT PRIMARY KEY,
+    asset_id TEXT NOT NULL,
+    host TEXT NOT NULL,
+    port INTEGER NOT NULL,
+    source_tools TEXT,
+    discovered_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (asset_id) REFERENCES assets(asset_id),
+    UNIQUE(asset_id, host, port)
+);
+
 CREATE TABLE IF NOT EXISTS observations (
     observation_id TEXT PRIMARY KEY,
     origin_id TEXT NOT NULL,
@@ -321,6 +342,43 @@ def upsert_endpoint(
         )
     conn.commit()
     return endpoint_id
+
+
+def insert_dns_resolution(
+    conn: sqlite3.Connection, *, asset_id: str, hostname: str, source: str
+) -> None:
+    conn.execute(
+        """INSERT OR IGNORE INTO dns_resolutions
+           (dns_resolution_id, asset_id, hostname, source) VALUES (?, ?, ?, ?)""",
+        (new_id("dns"), asset_id, hostname, source),
+    )
+    conn.commit()
+
+
+def upsert_host_port(
+    conn: sqlite3.Connection, *, asset_id: str, host: str, port: int, source_tool: str
+) -> str:
+    row = conn.execute(
+        "SELECT host_port_id, source_tools FROM host_ports WHERE asset_id=? AND host=? AND port=?",
+        (asset_id, host, port),
+    ).fetchone()
+    if row:
+        host_port_id, existing_tools = row
+        tools = set(filter(None, (existing_tools or "").split(",")))
+        tools.add(source_tool)
+        conn.execute(
+            "UPDATE host_ports SET source_tools=? WHERE host_port_id=?",
+            (",".join(sorted(tools)), host_port_id),
+        )
+    else:
+        host_port_id = new_id("hostport")
+        conn.execute(
+            """INSERT INTO host_ports (host_port_id, asset_id, host, port, source_tools)
+               VALUES (?, ?, ?, ?, ?)""",
+            (host_port_id, asset_id, host, port, source_tool),
+        )
+    conn.commit()
+    return host_port_id
 
 
 def insert_observation(

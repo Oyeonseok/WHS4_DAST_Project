@@ -14,12 +14,13 @@ from __future__ import annotations
 
 import functools
 from pathlib import Path
+from urllib.parse import urlparse
 
 from aidast.recon import db as dbmod
 from aidast.recon.judgment import merge_and_normalize
 from aidast.recon.models import ReconStep, ReconTask, ReconTaskStatus
 from aidast.recon.origin import resolve_origin
-from aidast.recon.tools.asset_dns_port import run_dnsx, run_naabu, run_subfinder
+from aidast.recon.tools.asset_dns_port import run_dnsx, run_naabu, run_nmap, run_subfinder
 from aidast.recon.tools.endpoint_discovery import discover_endpoints
 from aidast.recon.tools.http_probe import ProbeResult, probe
 from aidast.recon.tools.mitm_proxy import ingest_mitm_capture, start_mitmproxy, stop_mitmproxy
@@ -58,6 +59,25 @@ def _stage(stage_name: str):
 
 def _as_url(asset: str) -> str:
     return asset if asset.startswith("http") else f"https://{asset}"
+
+
+def _extract_host(asset: str) -> str:
+    """dnsx/naabu/nmap에 넘길 순수 호스트만 뽑아낸다.
+
+    scope target이 URL(예: http://localhost:3000)로 주어져도 이 도구들은
+    scheme/port가 붙은 문자열이 아니라 호스트명/IP만 받아야 하므로 필요하다.
+    """
+    if asset.startswith("http://") or asset.startswith("https://"):
+        return urlparse(asset).hostname or asset
+    return asset
+
+
+def _parse_host_port(entry: str) -> tuple[str, int] | None:
+    """naabu/nmap이 내놓는 `host:port` 문자열을 (host, port)로 분리한다."""
+    host, sep, port = entry.rpartition(":")
+    if not sep or not port.isdigit():
+        return None
+    return host, int(port)
 
 
 class ReconExecutor:
@@ -138,11 +158,29 @@ class ReconExecutor:
 
     @_stage("dns_resolution")
     def _handle_dns_resolution(self, task: ReconTask) -> None:
-        run_dnsx([task.target.asset])
+        asset_id = self._ensure_asset(task)
+        host = _extract_host(task.target.asset)
+        for hostname in run_dnsx([host]):
+            dbmod.insert_dns_resolution(
+                self.conn, asset_id=asset_id, hostname=hostname, source="dnsx",
+            )
 
     @_stage("host_port_discovery")
     def _handle_host_port_discovery(self, task: ReconTask) -> None:
-        run_naabu([task.target.asset])
+        asset_id = self._ensure_asset(task)
+        host = _extract_host(task.target.asset)
+        found: list[tuple[str, str]] = (
+            [(entry, "naabu") for entry in run_naabu([host])]
+            + [(entry, "nmap") for entry in run_nmap([host])]
+        )
+        for entry, source in found:
+            parsed = _parse_host_port(entry)
+            if parsed is None:
+                continue
+            found_host, port = parsed
+            dbmod.upsert_host_port(
+                self.conn, asset_id=asset_id, host=found_host, port=port, source_tool=source,
+            )
 
     @_stage("http_probe")
     def _handle_http_probe(self, task: ReconTask) -> None:

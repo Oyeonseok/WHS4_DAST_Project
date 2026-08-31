@@ -23,7 +23,7 @@ class ProbeResult:
     headers: dict[str, str]
 
 
-def probe(url: str, *, timeout: float = 8.0) -> ProbeResult:
+def probe(url: str, *, timeout: float = 30.0) -> ProbeResult:
     parsed = urlsplit(url)
     request = Request(url, headers={"User-Agent": "aidast-recon/0.1"})
     try:
