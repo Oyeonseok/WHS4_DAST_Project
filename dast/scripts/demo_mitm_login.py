@@ -66,8 +66,13 @@ def main() -> None:
         conn, asset_id=asset_id, scheme="http", host="localhost", port=3000, base_url=TARGET_URL,
     )
 
-    ingest_flows_to_db(conn, origin_id=origin_id, session_id=None, flows=flows)
-    print(f"http_exchanges에 {len(flows)}건 저장 완료 -> {db_path.resolve()}")
+    # base_url을 넘겨서 표적 origin의 flow만 넣는다. 프록시는 브라우저가
+    # 보낸 외부 도메인 요청도 같이 봤을 수 있어서, 넣은 건수는 캡처 건수와
+    # 다를 수 있다.
+    inserted = ingest_flows_to_db(
+        conn, origin_id=origin_id, session_id=None, flows=flows, base_url=TARGET_URL,
+    )
+    print(f"http_exchanges에 {inserted}건 저장 완료 -> {db_path.resolve()}")
 
 
 if __name__ == "__main__":

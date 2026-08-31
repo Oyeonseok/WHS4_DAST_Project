@@ -105,7 +105,8 @@ def discover_with_playwright(
 
 
 def discover_with_katana(
-    base_url: str, *, mode: str = "katana_standard", header_args: list[str] | None = None
+    base_url: str, *, mode: str = "katana_standard", header_args: list[str] | None = None,
+    proxy: str | None = None,
 ) -> list[dict]:
     if shutil.which("katana") is None:
         print("  [건너뜀] katana가 설치돼 있지 않음")
@@ -118,6 +119,10 @@ def discover_with_katana(
     # 로그인 세션(쿠키/Authorization)이 있으면 -H로 붙여서 인증된 상태로
     # 크롤링한다. 없으면 그냥 비로그인 크롤링.
     command += header_args or []
+    # proxy를 주면 katana 요청이 mitmproxy를 거쳐 나가서, mitm_addon.py가
+    # 같은 트래픽을 관찰해 parameters/auth_required를 채울 수 있다.
+    if proxy:
+        command += ["-proxy", proxy]
     try:
         completed = subprocess.run(command, capture_output=True, text=True, timeout=120)
     except (subprocess.TimeoutExpired, OSError) as exc:
@@ -146,7 +151,8 @@ def discover_with_katana(
 
 
 def discover_with_ffuf(
-    base_url: str, *, wordlist: str | None = None, header_args: list[str] | None = None
+    base_url: str, *, wordlist: str | None = None, header_args: list[str] | None = None,
+    proxy: str | None = None,
 ) -> list[dict]:
     if shutil.which("ffuf") is None:
         print("  [건너뜀] ffuf가 설치돼 있지 않음")
@@ -170,6 +176,8 @@ def discover_with_ffuf(
         "-ac",
     ]
     command += header_args or []
+    if proxy:
+        command += ["-x", proxy]
     try:
         completed = subprocess.run(command, capture_output=True, text=True, timeout=180)
     except (subprocess.TimeoutExpired, OSError) as exc:
@@ -202,7 +210,9 @@ def discover_with_ffuf(
     return results
 
 
-def discover_endpoints(base_url: str, *, header_args: list[str] | None = None) -> list[dict]:
+def discover_endpoints(
+    base_url: str, *, header_args: list[str] | None = None, proxy: str | None = None
+) -> list[dict]:
     """katana_standard + katana_headless 결과만 반환한다 (ffuf 제외).
 
     팀 회의에서 정리된 순서: (1) standard+headless를 둘 다 돌려서 (2) 그
@@ -222,6 +232,6 @@ def discover_endpoints(base_url: str, *, header_args: list[str] | None = None) -
     로그인 세션이 있으면 katana도 인증된 상태로 크롤링한다.
     """
     results: list[dict] = []
-    results.extend(discover_with_katana(base_url, mode="katana_standard", header_args=header_args))
-    results.extend(discover_with_katana(base_url, mode="katana_headless", header_args=header_args))
+    results.extend(discover_with_katana(base_url, mode="katana_standard", header_args=header_args, proxy=proxy))
+    results.extend(discover_with_katana(base_url, mode="katana_headless", header_args=header_args, proxy=proxy))
     return results
