@@ -1,0 +1,434 @@
+{
+  "capture_status": "PARTIAL",
+  "capture_reason": "CONTENT_INCOMPLETE",
+  "requested_url": "https://app.intigriti.com/programs/adobe/adobepublic",
+  "final_url": "https://app.intigriti.com/programs/adobe/adobepublic/detail",
+  "title": "Adobe Public - Bug Bounty Program - Intigriti",
+  "captured_at": "2026-08-27T05:36:32.037261+00:00",
+  "captured_text": "Adobe Public\n\nDescription\nAdobe Bug Bounty Program — Launching September 1st on Intigriti\n\nBounties\nTier 1 $150 - $15,000\nTier 2 $100 - $10,000\nTier 3 $75 - $5,000\n\nTo be eligible for a reward, a report must:\n* Concern an asset that is in scope\n* Concern a vulnerability type that is eligible under this policy\n* Be previously unknown to Adobe\n* Be valid and reproducible\n* Be the first such report received\n* Include enough detail for Adobe to reproduce and validate the issue\n* Include the researcher’s testing IP address\n\nRules of engagement\nUser-Agent: <standard browser/tool user agent> <intigriti:{Username}>\nAutomated tooling\nmax. 20 requests /sec\nRequest header\nX-Intigriti-Username: {Username}\nBy participating in this program, you agree to:\n* Respect the Community Code of Conduct\n* Respect the Intigriti Terms and Conditions\n* Respect the scope of the program\n* Not discuss or disclose vulnerability information without prior written consent (including PoC's on YouTube and Vimeo)\n\nAI-assisted discovery is allowed but the researcher must have validated the finding themselves. Unvalidated AI-generated output describing a plausible but unconfirmed vulnerability will be closed as N/A, which may result in the researcher losing reputation points or potentially being banned from our program.\n\nSafe harbour for researchers is applied\nShow safe harbour\n\nAssets\nAdobe AI (Bonus Tier 1)\nAcrobat PDF Spaces\nAcrobat Create Presentations\nAcrobat Create Podcast\nAcrobat AI Assistant\nAdobe Express AI Assistant\nLightroom AI Features\nAdobe Firefly AI Features\nPhotoshop AI Assistant\nAdobe Stock AI Studio\n\nMobile Applications\nIn scope:\n* Acrobat Reader Mobile App - Android and iOS\n* Adobe Scan Mobile App - Android and iOS\n* Lightroom Mobile App - Android and iOS\n* Adobe Photoshop Express Mobile App - iOS\n* Adobe Fresco - iOS\n* Frame.io iOS Application - iOS\n\nResearchers must review and follow the attached Adobe VIP Test Plan Attachment before testing any mobile application.\nThe attachment contains the relevant product-specific setup instructions, access requirements, account requirements, limitations, and product-specific exclusions. Where test accounts or provisioned access are required, researchers must only use the approved test accounts, roles, and environments described in the relevant test plan.\nMobile submissions that rely on rooted or jailbroken devices, malicious APK installation, or mobile OAuth secret leaks without meaningful access or impact are out of scope unless Adobe explicitly confirms otherwise.\n\n*.acrobat.adobe.com\nstock.adobe.com\nfirefly.adobe.com\nAdobe ColdFusion without ColdFusion Administrator\nColdFusion Administrator\n*.lightroom.adobe.com\nphotoshop.adobe.com\nAdobe Commerce, Adobe Commerce B2B and Magento Open Source\naccount.magento.com\ncommercemarketplace.adobe.com\nrepo.magento.com\nmagento.com\nlearningmanagerstage4.adobe.com\nnet.s2stagehance.com\nnew.express.adobe.com\nportfolio.ccpsx.com\nfonts.adobe.com\naccount.adobe.com\nauth.services.adobe.com\nadobeid-na1.services.adobe.com\nims-na1.adobelogin.com\nfederatedid-na1.services.adobe.com\nhttps://opensource.contentauthenticity.org/docs/c2patool\n\nReports against ColdFusion without the Lockdown installer in place are out of scope. Adobe recommends testing on the latest available version.\nOut-of-scope:\nColdFusion API Manager, CFFiddle, coldfusion.adobe.com\nRDS-dependent findings: Vulnerabilities reachable only when Remote Development Services (RDS) is enabled.\n\nResearchers should focus only on approved Adobe assets and testing environments listed in this program. Testing must follow the relevant product-specific test plan and must remain limited to approved assets, accounts, environments, roles, and functionality.\n\nResearchers must review and follow the attached Adobe Public Policy Test Plan Attachment before testing any in-scope asset.\nProduct-specific test plan instructions take precedence over general program guidance. Researchers must only test the approved products, environments, accounts, roles, features, and workflows described in the relevant test plan.\nTesting outside the relevant product-specific test plan, including unapproved production testing, unapproved customer environments, unlisted third-party endpoints, excluded features, or activity that violates a product-specific limitation, is out of scope and may affect reward eligibility.\n\nOut of scope\nApplication\n* Denial-of-service or resource consumption testing unless it leads to sensitive memory disclosure\n* Vulnerabilities in mobile applications relying on installation of a malicious APK\n* Mobile app submissions requiring rooted or jailbroken devices\n* Mobile OAuth secret leaks without meaningful access or impact\n* Content spoofing and text injection without an attack vector or without HTML/CSS modification\n* Self-XSS that cannot be exploited through reflected, stored, or DOM-based attacks affecting another user\n* Logout and other low-severity CSRF\n* Cross-site tracing\n* Open redirects with low security impact\n* Missing HTTP security headers\n* Missing cookie flags on non-sensitive cookies\n* Password and account recovery policy observations\n* Invalid or missing SPF, DKIM, or DMARC records\n* Vulnerabilities only affecting outdated or unpatched browsers and platforms\n* SSL/TLS best-practice findings\n* Clickjacking or UI redressing without practical security impact\n* Software version disclosure\n* Username or email enumeration via login or forgot password error messages\n* Credential brute forcing\n* Methods to extend product trial periods or bypass licensing\n* CSV injection without demonstrated vulnerability\n* Vulnerabilities in custom code developed by merchants or third parties\n* Vulnerabilities in third-party extensions or marketplace extensions\n* Known-vulnerable libraries without proof of exploitation\n* Attacks requiring MITM or physical access to a user’s device\n* Vulnerabilities requiring default security features to be disabled\n* NPM package confusion or takeover claims without proof that Adobe systems download the malicious package\n* CRX/CRXDE-related flaws without PII extraction or practical security impact\n* Subdomain takeover without a working proof of concept demonstrating control of the corresponding resource\n* Reports based only on third-party breach or credential-dump services unless the exposure originated from an Adobe vulnerability\n* Reports solely based on an LLM generating misleading or factually incorrect output unless clear and reproducible security impact is demonstrated\nAI-Specific Exclusions\n* Prompt influence without backend impact\n* Prompting techniques that influence model responses but do not bypass backend authorization, access restricted data, or alter enforced system behaviour\n* Role confusion without unauthorized disclosure of internal system prompts, policies, secrets, credentials, or other non-public information\n* Model response deviation, hallucination, or safety response variation without security control bypass\n* LLM interpretation, reasoning, semantic, visual, or trust-boundary limitations without exploitability or security impact\n* Photoshop AI feature usage limits on the free tier\n* Adobe Firefly ACL-control issues in Firefly backend APIs\nGeneral\n* Assets not listed in this program\n* Adobe products, domains, subdomains, bundled extensions, or third-party extensions not listed in scope\n* Existing customer environments without explicit permission from the owner\n* Social engineering, including phishing, vishing, and smishing\n* Physical attacks\n* Denial-of-service testing\n* Resource exhaustion testing\n* Testing that interrupts or degrades Adobe services\n* Unauthorized access to data\n* Data corruption\n* Privacy violations\n* Exploitation beyond what is necessary to demonstrate impact\n* Public disclosure without Adobe’s express consent\n* Duplicate reports\n* Reports lacking enough detail to reproduce and validate the issue\n* Reports submitted against out-of-scope products where the only connection to scope is that remediation is performed by an in-scope Adobe team\n\nResearchers must also review the attached Adobe CVSS Guidelines document before submitting a report.\nFinal severity and bounty decisions remain at Adobe’s discretion based on the validated impact, affected asset, product context, exploitability, report quality, and any applicable program-specific rules or exclusions.\n\nWhere can we get credentials for the app?\nYou can self-register on the application but please don’t forget to use your @intigriti.me address.",
+  "analysis": {
+    "program_name": "Adobe Public",
+    "program_description": "Adobe Public Bug Bounty Program. 보상 등급은 Tier 1 $150 - $15,000, Tier 2 $100 - $10,000, Tier 3 $75 - $5,000이다.",
+    "in_scope_assets": [
+      {
+        "asset_type": "OTHER",
+        "asset": "Acrobat PDF Spaces",
+        "description": "Adobe AI (Bonus Tier 1) 내 AI Model 자산, Tier 1.",
+        "eligibility": "Tier 1 보상 등급.",
+        "maximum_severity": "Exceptional"
+      },
+      {
+        "asset_type": "OTHER",
+        "asset": "Acrobat Create Presentations",
+        "description": "Adobe AI (Bonus Tier 1) 내 AI Model 자산, Tier 1.",
+        "eligibility": "Tier 1 보상 등급.",
+        "maximum_severity": "Exceptional"
+      },
+      {
+        "asset_type": "OTHER",
+        "asset": "Acrobat Create Podcast",
+        "description": "Adobe AI (Bonus Tier 1) 내 AI Model 자산, Tier 1.",
+        "eligibility": "Tier 1 보상 등급.",
+        "maximum_severity": "Exceptional"
+      },
+      {
+        "asset_type": "OTHER",
+        "asset": "Acrobat AI Assistant",
+        "description": "Adobe AI (Bonus Tier 1) 내 AI Model 자산, Tier 1.",
+        "eligibility": "Tier 1 보상 등급.",
+        "maximum_severity": "Exceptional"
+      },
+      {
+        "asset_type": "OTHER",
+        "asset": "Adobe Express AI Assistant",
+        "description": "Adobe AI (Bonus Tier 1) 내 AI Model 자산, Tier 1.",
+        "eligibility": "Tier 1 보상 등급.",
+        "maximum_severity": "Exceptional"
+      },
+      {
+        "asset_type": "OTHER",
+        "asset": "Lightroom AI Features",
+        "description": "Adobe AI (Bonus Tier 1) 내 AI Model 자산, Tier 1.",
+        "eligibility": "Tier 1 보상 등급.",
+        "maximum_severity": "Exceptional"
+      },
+      {
+        "asset_type": "OTHER",
+        "asset": "Adobe Firefly AI Features",
+        "description": "Adobe AI (Bonus Tier 1) 내 AI Model 자산, Tier 1.",
+        "eligibility": "Tier 1 보상 등급.",
+        "maximum_severity": "Exceptional"
+      },
+      {
+        "asset_type": "OTHER",
+        "asset": "Photoshop AI Assistant",
+        "description": "Adobe AI (Bonus Tier 1) 내 AI Model 자산, Tier 1.",
+        "eligibility": "Tier 1 보상 등급.",
+        "maximum_severity": "Exceptional"
+      },
+      {
+        "asset_type": "OTHER",
+        "asset": "Adobe Stock AI Studio",
+        "description": "Adobe AI (Bonus Tier 1) 내 AI Model 자산, Tier 1.",
+        "eligibility": "Tier 1 보상 등급.",
+        "maximum_severity": "Exceptional"
+      },
+      {
+        "asset_type": "MOBILE_APP",
+        "asset": "Acrobat Reader Mobile App - Android and iOS",
+        "description": "모바일 애플리케이션 범위.",
+        "eligibility": "Tier 2 보상 등급.",
+        "maximum_severity": "Exceptional"
+      },
+      {
+        "asset_type": "MOBILE_APP",
+        "asset": "Adobe Scan Mobile App - Android and iOS",
+        "description": "모바일 애플리케이션 범위.",
+        "eligibility": "Tier 2 보상 등급.",
+        "maximum_severity": "Exceptional"
+      },
+      {
+        "asset_type": "MOBILE_APP",
+        "asset": "Lightroom Mobile App - Android and iOS",
+        "description": "모바일 애플리케이션 범위.",
+        "eligibility": "Tier 2 보상 등급.",
+        "maximum_severity": "Exceptional"
+      },
+      {
+        "asset_type": "MOBILE_APP",
+        "asset": "Adobe Photoshop Express Mobile App - iOS",
+        "description": "모바일 애플리케이션 범위.",
+        "eligibility": "Tier 2 보상 등급.",
+        "maximum_severity": "Exceptional"
+      },
+      {
+        "asset_type": "MOBILE_APP",
+        "asset": "Adobe Fresco - iOS",
+        "description": "모바일 애플리케이션 범위.",
+        "eligibility": "Tier 2 보상 등급.",
+        "maximum_severity": "Exceptional"
+      },
+      {
+        "asset_type": "MOBILE_APP",
+        "asset": "Frame.io iOS Application - iOS",
+        "description": "모바일 애플리케이션 범위.",
+        "eligibility": "Tier 2 보상 등급.",
+        "maximum_severity": "Exceptional"
+      },
+      {
+        "asset_type": "WILDCARD",
+        "asset": "*.acrobat.adobe.com",
+        "description": "Acrobat Web, Tier 2.",
+        "eligibility": "Tier 2 보상 등급.",
+        "maximum_severity": "Exceptional"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "stock.adobe.com",
+        "description": "Adobe Stock, Tier 2.",
+        "eligibility": "Tier 2 보상 등급.",
+        "maximum_severity": "Exceptional"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "firefly.adobe.com",
+        "description": "Adobe Firefly, Tier 2.",
+        "eligibility": "Tier 2 보상 등급.",
+        "maximum_severity": "Exceptional"
+      },
+      {
+        "asset_type": "OTHER",
+        "asset": "Adobe ColdFusion without ColdFusion Administrator",
+        "description": "ColdFusion, Tier 2.",
+        "eligibility": "Tier 2 보상 등급.",
+        "maximum_severity": "Exceptional"
+      },
+      {
+        "asset_type": "OTHER",
+        "asset": "ColdFusion Administrator",
+        "description": "ColdFusion, Tier 3.",
+        "eligibility": "Tier 3 보상 등급.",
+        "maximum_severity": "Exceptional"
+      },
+      {
+        "asset_type": "WILDCARD",
+        "asset": "*.lightroom.adobe.com",
+        "description": "Lightroom Web, Tier 2.",
+        "eligibility": "Tier 2 보상 등급.",
+        "maximum_severity": "Exceptional"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "photoshop.adobe.com",
+        "description": "Photoshop Web, Tier 2.",
+        "eligibility": "Tier 2 보상 등급.",
+        "maximum_severity": "Exceptional"
+      },
+      {
+        "asset_type": "OTHER",
+        "asset": "Adobe Commerce, Adobe Commerce B2B and Magento Open Source",
+        "description": "Adobe Commerce/Magento, Tier 2.",
+        "eligibility": "Tier 2 보상 등급.",
+        "maximum_severity": "Exceptional"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "account.magento.com",
+        "description": "Adobe Commerce/Magento, Tier 3.",
+        "eligibility": "Tier 3 보상 등급.",
+        "maximum_severity": "Exceptional"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "commercemarketplace.adobe.com",
+        "description": "Adobe Commerce/Magento, Tier 3.",
+        "eligibility": "Tier 3 보상 등급.",
+        "maximum_severity": "Exceptional"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "repo.magento.com",
+        "description": "Adobe Commerce/Magento, Tier 3.",
+        "eligibility": "Tier 3 보상 등급.",
+        "maximum_severity": "Exceptional"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "magento.com",
+        "description": "Adobe Commerce/Magento, Tier 3.",
+        "eligibility": "Tier 3 보상 등급.",
+        "maximum_severity": "Exceptional"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "learningmanagerstage4.adobe.com",
+        "description": "Adobe Learning Manager, Tier 3.",
+        "eligibility": "Tier 3 보상 등급.",
+        "maximum_severity": "Exceptional"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "net.s2stagehance.com",
+        "description": "Adobe Behance, Tier 3.",
+        "eligibility": "Tier 3 보상 등급.",
+        "maximum_severity": "Exceptional"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "new.express.adobe.com",
+        "description": "Adobe Express, Tier 3.",
+        "eligibility": "Tier 3 보상 등급.",
+        "maximum_severity": "Exceptional"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "portfolio.ccpsx.com",
+        "description": "Adobe Portfolio, Tier 3.",
+        "eligibility": "Tier 3 보상 등급.",
+        "maximum_severity": "Exceptional"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "fonts.adobe.com",
+        "description": "Adobe Fonts, Tier 3.",
+        "eligibility": "Tier 3 보상 등급.",
+        "maximum_severity": "Exceptional"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "account.adobe.com",
+        "description": "Adobe IMS, Tier 3.",
+        "eligibility": "Tier 3 보상 등급.",
+        "maximum_severity": "Exceptional"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "auth.services.adobe.com",
+        "description": "Adobe IMS, Tier 3.",
+        "eligibility": "Tier 3 보상 등급.",
+        "maximum_severity": "Exceptional"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "adobeid-na1.services.adobe.com",
+        "description": "Adobe IMS, Tier 3.",
+        "eligibility": "Tier 3 보상 등급.",
+        "maximum_severity": "Exceptional"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "ims-na1.adobelogin.com",
+        "description": "Adobe IMS, Tier 3.",
+        "eligibility": "Tier 3 보상 등급.",
+        "maximum_severity": "Exceptional"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "federatedid-na1.services.adobe.com",
+        "description": "Adobe IMS, Tier 3.",
+        "eligibility": "Tier 3 보상 등급.",
+        "maximum_severity": "Exceptional"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "https://opensource.contentauthenticity.org/docs/c2patool",
+        "description": "CAI Content Credentials, Tier 3.",
+        "eligibility": "Tier 3 보상 등급.",
+        "maximum_severity": "Exceptional"
+      }
+    ],
+    "out_of_scope_assets": [
+      {
+        "asset_type": "OTHER",
+        "asset": "ColdFusion API Manager",
+        "description": "ColdFusion 명시적 제외 대상.",
+        "eligibility": "보상 대상 아님.",
+        "maximum_severity": "N/A"
+      },
+      {
+        "asset_type": "OTHER",
+        "asset": "CFFiddle",
+        "description": "ColdFusion 명시적 제외 대상.",
+        "eligibility": "보상 대상 아님.",
+        "maximum_severity": "N/A"
+      },
+      {
+        "asset_type": "DOMAIN",
+        "asset": "coldfusion.adobe.com",
+        "description": "ColdFusion 명시적 제외 대상.",
+        "eligibility": "보상 대상 아님.",
+        "maximum_severity": "N/A"
+      },
+      {
+        "asset_type": "OTHER",
+        "asset": "RDS-dependent findings",
+        "description": "Remote Development Services (RDS)가 활성화된 경우에만 도달 가능한 취약점.",
+        "eligibility": "보상 대상 아님.",
+        "maximum_severity": "N/A"
+      }
+    ],
+    "allowed_activities": [
+      "실질적인 보안 영향을 가진 취약점의 책임 있는 공개.",
+      "AI 보조 발견은 연구자가 직접 검증한 경우 허용.",
+      "승인된 Adobe 자산·테스트 환경·계정·역할·기능 내에서 제품별 테스트 계획을 준수한 테스트."
+    ],
+    "prohibited_activities": [
+      "민감한 메모리 공개로 이어지지 않는 DoS 또는 리소스 소비 테스트.",
+      "악성 APK 설치에 의존하는 모바일 애플리케이션 취약점.",
+      "루팅 또는 탈옥 기기가 필요한 모바일 제출.",
+      "의미 있는 접근 또는 영향이 없는 모바일 OAuth 비밀 유출.",
+      "공격 벡터가 없거나 HTML/CSS 수정이 없는 콘텐츠 스푸핑 및 텍스트 인젝션.",
+      "다른 사용자에게 영향을 주는 reflected, stored, DOM-based 공격으로 악용할 수 없는 Self-XSS.",
+      "로그아웃 및 기타 저위험 CSRF.",
+      "Cross-site tracing.",
+      "낮은 보안 영향의 오픈 리다이렉트.",
+      "누락된 HTTP 보안 헤더.",
+      "민감하지 않은 쿠키의 누락된 플래그.",
+      "비밀번호 및 계정 복구 정책 관찰.",
+      "잘못되었거나 누락된 SPF, DKIM, DMARC 레코드.",
+      "구식 또는 패치되지 않은 브라우저와 플랫폼에만 영향을 주는 취약점.",
+      "SSL/TLS 모범 사례 결과.",
+      "실질적 보안 영향이 없는 클릭재킹 또는 UI redressing.",
+      "소프트웨어 버전 공개.",
+      "로그인 또는 비밀번호 찾기 오류 메시지를 통한 사용자명·이메일 열거.",
+      "자격 증명 무차별 대입.",
+      "제품 체험 기간 연장 또는 라이선스 우회 방법.",
+      "입증된 취약점이 없는 CSV 인젝션.",
+      "가맹점 또는 제3자가 개발한 커스텀 코드 취약점.",
+      "제3자 확장 또는 마켓플레이스 확장 취약점.",
+      "악용 증명 없는 알려진 취약 라이브러리.",
+      "MITM 또는 사용자 장치 물리적 접근이 필요한 공격.",
+      "기본 보안 기능을 비활성화해야 하는 취약점.",
+      "Adobe 시스템이 악성 패키지를 다운로드함을 입증하지 않은 NPM 패키지 혼동·탈취 주장.",
+      "PII 추출 또는 실질적 보안 영향이 없는 CRX/CRXDE 관련 결함.",
+      "해당 리소스 제어를 보이는 작동 PoC 없는 서브도메인 탈취.",
+      "노출이 Adobe 취약점에서 비롯된 것이 아닌 이상 제3자 침해·자격 증명 덤프 서비스만 근거로 한 보고.",
+      "명확하고 재현 가능한 보안 영향 없이 LLM이 오도하거나 사실과 다른 출력을 생성한다는 보고.",
+      "백엔드 영향 없는 프롬프트 영향.",
+      "백엔드 권한을 우회하거나 제한 데이터에 접근하거나 강제된 시스템 동작을 바꾸지 않는 프롬프팅 기법.",
+      "내부 시스템 프롬프트·정책·비밀·자격 증명·기타 비공개 정보의 무단 공개 없는 역할 혼동.",
+      "보안 통제 우회 없는 모델 응답 일탈·환각·안전 응답 변화.",
+      "악용 가능성 또는 보안 영향 없는 LLM 해석·추론·의미·시각·신뢰 경계 한계.",
+      "무료 티어의 Photoshop AI 기능 사용 제한.",
+      "Firefly 백엔드 API의 Adobe Firefly ACL-control 이슈.",
+      "프로그램에 나열되지 않은 자산.",
+      "범위에 나열되지 않은 Adobe 제품·도메인·서브도메인·번들 확장·제3자 확장.",
+      "소유자의 명시적 허가 없는 기존 고객 환경.",
+      "피싱·비싱·스미싱을 포함한 사회공학.",
+      "물리적 공격.",
+      "DoS 테스트.",
+      "리소스 고갈 테스트.",
+      "Adobe 서비스를 중단하거나 저하시키는 테스트.",
+      "데이터 무단 접근.",
+      "데이터 손상.",
+      "개인정보 침해.",
+      "영향을 입증하는 데 필요한 수준을 넘는 악용.",
+      "Adobe의 명시적 동의 없는 공개.",
+      "중복 보고.",
+      "재현 및 검증에 충분한 세부 정보가 없는 보고.",
+      "수정을 수행하는 팀만 범위 내 Adobe 팀이라는 연결고리로 범위 외 제품에 제출한 보고."
+    ],
+    "submission_requirements": [
+      "보고서는 범위 내 자산 및 정책상 적격 취약점에 관한 것이어야 한다.",
+      "이전에 Adobe에 알려지지 않았고 유효하며 재현 가능하고 최초로 접수된 보고여야 한다.",
+      "Adobe가 재현·검증할 수 있는 충분한 세부 정보와 연구자의 테스트 IP 주소를 포함해야 한다.",
+      "추가 팀원이 있으면 제출 시 이름과 발견에 대한 기여를 제공해야 한다.",
+      "제출 전 Adobe CVSS Guidelines 문서를 검토해야 한다.",
+      "Intigriti 검증 후 검증 목표: Exceptional·Critical 2 Working days, High 5 Working days, Medium·Low 15 Working days."
+    ],
+    "operational_constraints": [
+      "User-Agent: <standard browser/tool user agent> <intigriti:{Username}>",
+      "자동화 도구는 max. 20 requests /sec.",
+      "X-Intigriti-Username: {Username} 요청 헤더를 사용해야 한다.",
+      "모든 범위 내 자산 테스트 전에 Adobe Public Policy Test Plan Attachment를 검토하고 따라야 한다.",
+      "제품별 테스트 계획은 일반 프로그램 지침보다 우선한다.",
+      "승인된 제품·환경·계정·역할·기능·워크플로우만 테스트해야 한다.",
+      "모바일 테스트에서 프로비저닝된 접근 또는 테스트 계정이 필요하면 관련 계획에 지정된 승인 계정·역할·환경만 사용해야 한다.",
+      "앱 자격 증명은 자체 등록할 수 있으나 @intigriti.me 주소를 사용해야 한다."
+    ],
+    "safe_harbor": "연구자에 대한 Safe harbour가 적용된다고 표시되었으나, 전체 문구는 'Show safe harbour' 접기 컨트롤 뒤에 있어 확보하지 못했다.",
+    "ambiguities": [
+      "'Show safe harbour'로 표시된 안전항구 전문이 캡처에 확장되지 않아, 완전한 보호 범위와 조건을 확인할 수 없다.",
+      "Adobe_Bug_Bounty_Test_Plans.pdf의 제품별 설정·제한·제외 내용은 페이지에서 목록만 보이고 전문은 확보되지 않았다.",
+      "자산별 maximum severity는 명시되지 않았으며, Tier는 보상 등급이다. Exceptional은 프로그램의 최고 심각도 분류이나 각 자산별 최대 심각도를 의미한다고 단정할 수 없다."
+    ],
+    "source_evidence": [
+      {
+        "section": "Rules of engagement",
+        "quote": "User-Agent: <standard browser/tool user agent> <intigriti:{Username}>"
+      },
+      {
+        "section": "Rules of engagement",
+        "quote": "max. 20 requests /sec"
+      },
+      {
+        "section": "Assets",
+        "quote": "Acrobat PDF Spaces"
+      },
+      {
+        "section": "Assets",
+        "quote": "*.acrobat.adobe.com"
+      },
+      {
+        "section": "Assets",
+        "quote": "https://opensource.contentauthenticity.org/docs/c2patool"
+      },
+      {
+        "section": "Test Plan Attachment",
+        "quote": "Product-specific test plan instructions take precedence over general program guidance. Researchers must only test the approved products, environments, accounts, roles, features, and workflows described in the relevant test plan."
+      },
+      {
+        "section": "Out of scope",
+        "quote": "* Assets not listed in this program"
+      },
+      {
+        "section": "Safe harbour",
+        "quote": "Safe harbour for researchers is applied"
+      },
+      {
+        "section": "Safe harbour",
+        "quote": "Show safe harbour"
+      }
+    ]
+  }
+}

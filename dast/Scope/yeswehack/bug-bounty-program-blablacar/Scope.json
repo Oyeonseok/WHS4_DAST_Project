@@ -1,0 +1,244 @@
+{
+  "schema_version": "1.0",
+  "scope_id": "scope_11e9e7f989494bf79e80e3fad7758599",
+  "created_at": "2026-08-27T05:16:22.073982Z",
+  "source": {
+    "requested_url": "https://yeswehack.com/programs/bug-bounty-program-blablacar",
+    "final_url": "https://yeswehack.com/programs/bug-bounty-program-blablacar",
+    "title": "Bug Bounty Program - BlaBlaCar bug bounty program - YesWeHack",
+    "captured_at": "2026-08-27T05:16:22.072673Z",
+    "capture_status": "COMPLETE",
+    "capture_reason": "NONE",
+    "content_sha256": "d46c641c0a11cf37e1a5be7dec8ae042da9c93b9f8396898f4aaab4b67e1a01f",
+    "text": "Bug Bounty Program - BlaBlaCar\n\nBlaBlaCar is the world's leading community-based travel network enabling over 100 million active members per year to share a ride across 21 countries.\n\nReporting & Disclosure Policy\nLet us know as soon as possible upon discovery of a potential security issue, and we'll make every effort to quickly resolve the issue.\nIf you find the same vulnerability several times, please create only one report and eventually use comments. You'll be rewarded accordingly to your findings.\nNo vulnerability disclosure, full, partial or otherwise, is allowed without explicit approval.\nDenial of service (DoS) attacks on {{BU_NAME}} applications, servers, networks or infrastructure are strictly forbidden.\nAvoid tests that could cause degradation or interruption of our services.\nDo not use automated scanners or tools that generate large amount of network traffic\nDo not leak, copy, manipulate, or destroy any user data or files in any of our applications/servers.\n\nReward Eligibility\nYou must be the first reporter of a vulnerability.\nThe vulnerability must be a qualifying vulnerability\nThe report must contain the following elements:\nClear textual description of the vulnerability, how it can be exploited, the security impact it has on the application, its users and BlaBlaCar, and remediation advice on fixing the vulnerability\nProof of exploitation: screenshots demonstrating the exploit was performed, and showing the final impact\nProvide complete steps with the necessary information to reproduce the exploit, including (if necessary) code snippets, payloads, commands etc\nYou must not break any of the testing policy rules listed above\nYou must not be a former or current employee of BlaBlaCar or one of its contractors.\nReward amounts are based on:\nReward grid of the report's scope\nCVSS scoring and actual business impact of the vulnerability upon performing risk analysis\n\nScopes: 12\nhttps://edge.blablacar.(fr|de|co.uk|in|es|mx|be|hr|hu|it|nl|pl|com.br|pt|ro|ru|com|tr|com.ua)) | API | Low |\nLow €100 Medium €200 High €1,000 Critical €3,000\nhttps://auth.blablacar.(fr|de|co.uk|in|es|mx|be|hr|hu|it|nl|pl|com.br|pt|ro|ru|com|tr|com.ua) | API | Low |\nLow €100 Medium €200 High €1,000 Critical €3,000\nhttps://www.blablacar.(fr|de|co.uk|in|es|mx|be|hr|hu|it|nl|pl|com.br|pt|ro|ru|com|tr|com.ua) | Web application | Low |\nLow €100 Medium €200 High €1,000 Critical €3,000\nhttps://m.blablacar.(fr|de|co.uk|in|es|mx|be|hr|hu|it|nl|pl|com.br|pt|ro|ru|com|tr|com.ua) | Web application | Low |\nLow €100 Medium €200 High €1,000 Critical €3,000\nhttps://booking.blablacar.(fr|de|co.uk|in|es|mx|be|hr|hu|it|nl|pl|com.br|pt|ro|ru|com|tr|com.ua) | Web application | Low |\nLow €100 Medium €200 High €1,000 Critical €3,000\nhttps://play.google.com/store/apps/details?id=com.comuto&hl=en | Mobile application Android | Low |\nLow €100 Medium €200 High €1,000 Critical €3,000\nhttps://itunes.apple.com/fr/app/blablacar-trusted-carpooling/id341329033?l=en&mt=8 | Mobile application IOS | Low |\nLow €100 Medium €200 High €1,000 Critical €3,000\nhttps://api.blablalines.com | API | Low |\nLow €100 Medium €200 High €1,000 Critical €3,000\nhttps://daily.blablacar.fr | Web application | Low |\nLow €100 Medium €200 High €1,000 Critical €3,000\nhttps://blablacardaily.com | Web application | Low |\nLow €100 Medium €200 High €1,000 Critical €3,000\nhttps://play.google.com/store/apps/details?id=com.blablalines | Mobile application Android | Low |\nLow €100 Medium €200 High €1,000 Critical €3,000\nhttps://apps.apple.com/fr/app/blablalines-covoiturage/id1225543288 | Mobile application IOS | Low |\nLow €100 Medium €200 High €1,000 Critical €3,000\n\nOut of scopes\nAny website that is not listed explicitly in the scope.\nHowever, though listed in the out-of-scope list, if you really feel that a bug will leave an impact on our platform, please come up with a convincing and working POC. If that convinces us to change our code, we will reward you with a bounty.\nFinally, fraud related reports are out-of-scope if they do not exploit a security vulnerability. Therefore, fraud activity enabled by bug or incomplete business rules enforcement are out-of-scope. However, a fraud activity enabled by a CSRF exploit for example is valid.\n\nQualifying vulnerabilities\nSQL Injection (SQLi)\nCross-Site Scripting (XSS)\nRemote Code Execution (RCE)\nInsecure Direct Object Reference (IDOR)\nHorizontal and vertical privilege escalation\nAuthentication bypass & broken authentication\nBusiness Logic Errors vulnerability with real security impact\nLocal files access and manipulation (LFI, RFI, XXE, SSRF, XSPA)\nCross-Origin Resource Sharing (CORS) with real security impact\nCross-site Request Forgery (CSRF) with real security impact\nOpen Redirect\nExposed secrets, credentials or sensitive information on an asset under our control and affecting at least one of our scopes\n\nNon-qualifying vulnerabilities\nReports without an accompanying proof-of-concept demonstrating vulnerability and security impact\nSecurity best practices without a real security impact\nReports with attack scenarios requiring physical access to victim or social engineering attempts\nReports that are theoretically possible but NOT having tangible exploits, evidence of similar kinds\nReports from automated web vulnerability scanners (Acunetix, Vega, etc.) that have not been validated\nRecently disclosed 0-day vulnerabilities\nTabnabbing\nSelf-XSS or XSS that cannot be used to impact other users\nLow severity Cross-Site Request Forgery (CSRF) (e.g. Unauthenticated / Logout ...)\n\"HTTP Host Header\" XSS\nMissing cookie flags\nMissing security-related HTTP headers which do not lead directly to an exploitable vulnerability and PoC\nMixed content warnings\nClickjacking/UI redressing\nLack of rate-limiting, brute-forcing or captcha issues\nCVEs without exploitable vulnerabilities and PoC\nOpen ports or services without exploitable vulnerabilities and PoC\nLogout and other instances of low-severity Cross-Site Request Forgery\nContent spoofing without embedding an external link or JavaScript\nDenial of Service (DoS) attacks\nSSL/TLS issues (e.g. expired certificates, best practices)\nMissing HTTP Strict Transport Security Header (HSTS)\nInvalid or missing email security records (e.g. SPF, DKIM, DMARC)\nPassword reset token leak on trusted third-party website via Referer header (eg Google Analytics, Facebook…)\nPresence of autocomplete attribute on web forms\nProtocol mismatch\nBlind SSRF without exploitable vulnerabilities and PoC (e.g. DNS & HTTP pingback, Wordpress XMLRPC)\nCrashing your own application\nVulnerable/outdated software/libraries without demonstrable attack vector and PoC\nFinding your numeric user id in integer format instead of UUID4 or encrypted format\nDisclosure of information without exploitable vulnerabilities and PoC (e.g. stack traces, path disclosure, directory listings, software versions, IP disclosure, 3rd party secrets, EXIF Metadata, Origin IP)\nSession management issues (e.g. lack of expiration, no logout on password change, concurrent sessions)\nIssues that require physical access to a victim’s computer/device\nReports with attack scenarios requiring MITM or physical access to victim's device\nWeak password policies (e.g. length, complexity, reuse)\nPre-account takeover (e.g. account creation via oAuth)\nAny vulnerability on a Github repository that is \"Archived\"\nAbility to spam users (email / SMS / direct messages flooding)\nVulnerabilities involving stolen credentials or physical access to a device\nVulnerabilities affecting outdated browsers or mobile binaries - only exploits working on latest browser versions of Safari, FireFox, Chrome, Edge, IE and the versions of our application that are currently in the app stores will be accepted\nLack of SSL Pining/ binary protection/ code obfuscation / jailbreak and root detection / anti-debugging controls/ etc\nExploiting a generic Android or iOS vulnerability\nLack of encryption on internal databases/preference files on mobile device\nFinding security issues on the iOS / Android apps in a non standard usage case (jailbroken/rooted phone, making backups, ...)\nMessage moderation bypass\nNon-mandatory email validation at signup\nAPI client ID/Secret embedded in client app (web, Android, iOS)\nDisclosed or misconfigured public API keys (e.g. Google Maps, Firebase, analytics tools...)\n\nReports of leaks and exposed credentials\nSource of leak is in-scope | Source of leak belongs to the Organization and is out-of-scope | Source of leak does not belong to the Organization and is out-of-scope\nImpact is in-scope (e.g. valid credentials on an in-scope asset) | Eligible | Eligible | Not eligible\nImpact is out-of-scope (e.g. valid credentials for an out-of-scope asset) | Eligible | Not eligible | Not eligible\n\nHunting requirements\nUser agent\nPlease append to your user-agent header the following value: ' BBC-YWH-Bugbounty-<your yeswehack pseudo> '.\n\nTo submit a vulnerability report, you need to login with your hunter account."
+  },
+  "analysis": {
+    "program_name": "Bug Bounty Program - BlaBlaCar",
+    "program_description": "BlaBlaCar는 21개국에서 연간 1억 명 이상의 활성 회원을 연결하는 커뮤니티 기반 여행 네트워크입니다. 모든 명시적 범위 자산의 자산 가치는 Low이며, 보상은 CVSS Low €100 · Medium €200 · High €1,000 · Critical €3,000입니다.",
+    "in_scope_assets": [
+      {
+        "asset_type": "API",
+        "asset": "https://edge.blablacar.(fr|de|co.uk|in|es|mx|be|hr|hu|it|nl|pl|com.br|pt|ro|ru|com|tr|com.ua))",
+        "description": "API. 자산 가치 Low. 보상: Low €100 · Medium €200 · High €1,000 · Critical €3,000.",
+        "eligibility": "명시된 범위 자산이며 적격 취약점 및 보상 자격 요건을 충족해야 합니다.",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "API",
+        "asset": "https://auth.blablacar.(fr|de|co.uk|in|es|mx|be|hr|hu|it|nl|pl|com.br|pt|ro|ru|com|tr|com.ua)",
+        "description": "API. 자산 가치 Low. 보상: Low €100 · Medium €200 · High €1,000 · Critical €3,000.",
+        "eligibility": "명시된 범위 자산이며 적격 취약점 및 보상 자격 요건을 충족해야 합니다.",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "https://www.blablacar.(fr|de|co.uk|in|es|mx|be|hr|hu|it|nl|pl|com.br|pt|ro|ru|com|tr|com.ua)",
+        "description": "Web application. 자산 가치 Low. 보상: Low €100 · Medium €200 · High €1,000 · Critical €3,000.",
+        "eligibility": "명시된 범위 자산이며 적격 취약점 및 보상 자격 요건을 충족해야 합니다.",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "https://m.blablacar.(fr|de|co.uk|in|es|mx|be|hr|hu|it|nl|pl|com.br|pt|ro|ru|com|tr|com.ua)",
+        "description": "Web application. 자산 가치 Low. 보상: Low €100 · Medium €200 · High €1,000 · Critical €3,000.",
+        "eligibility": "명시된 범위 자산이며 적격 취약점 및 보상 자격 요건을 충족해야 합니다.",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "https://booking.blablacar.(fr|de|co.uk|in|es|mx|be|hr|hu|it|nl|pl|com.br|pt|ro|ru|com|tr|com.ua)",
+        "description": "Web application. 자산 가치 Low. 보상: Low €100 · Medium €200 · High €1,000 · Critical €3,000.",
+        "eligibility": "명시된 범위 자산이며 적격 취약점 및 보상 자격 요건을 충족해야 합니다.",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "MOBILE_APP",
+        "asset": "https://play.google.com/store/apps/details?id=com.comuto&hl=en",
+        "description": "Mobile application Android. 자산 가치 Low. 보상: Low €100 · Medium €200 · High €1,000 · Critical €3,000.",
+        "eligibility": "명시된 범위 자산이며 적격 취약점 및 보상 자격 요건을 충족해야 합니다.",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "MOBILE_APP",
+        "asset": "https://itunes.apple.com/fr/app/blablacar-trusted-carpooling/id341329033?l=en&mt=8",
+        "description": "Mobile application IOS. 자산 가치 Low. 보상: Low €100 · Medium €200 · High €1,000 · Critical €3,000.",
+        "eligibility": "명시된 범위 자산이며 적격 취약점 및 보상 자격 요건을 충족해야 합니다.",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "API",
+        "asset": "https://api.blablalines.com",
+        "description": "API. 자산 가치 Low. 보상: Low €100 · Medium €200 · High €1,000 · Critical €3,000.",
+        "eligibility": "명시된 범위 자산이며 적격 취약점 및 보상 자격 요건을 충족해야 합니다.",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "https://daily.blablacar.fr",
+        "description": "Web application. 자산 가치 Low. 보상: Low €100 · Medium €200 · High €1,000 · Critical €3,000.",
+        "eligibility": "명시된 범위 자산이며 적격 취약점 및 보상 자격 요건을 충족해야 합니다.",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "https://blablacardaily.com",
+        "description": "Web application. 자산 가치 Low. 보상: Low €100 · Medium €200 · High €1,000 · Critical €3,000.",
+        "eligibility": "명시된 범위 자산이며 적격 취약점 및 보상 자격 요건을 충족해야 합니다.",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "MOBILE_APP",
+        "asset": "https://play.google.com/store/apps/details?id=com.blablalines",
+        "description": "Mobile application Android. 자산 가치 Low. 보상: Low €100 · Medium €200 · High €1,000 · Critical €3,000.",
+        "eligibility": "명시된 범위 자산이며 적격 취약점 및 보상 자격 요건을 충족해야 합니다.",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "MOBILE_APP",
+        "asset": "https://apps.apple.com/fr/app/blablalines-covoiturage/id1225543288",
+        "description": "Mobile application IOS. 자산 가치 Low. 보상: Low €100 · Medium €200 · High €1,000 · Critical €3,000.",
+        "eligibility": "명시된 범위 자산이며 적격 취약점 및 보상 자격 요건을 충족해야 합니다.",
+        "maximum_severity": "Critical"
+      }
+    ],
+    "out_of_scope_assets": [
+      {
+        "asset_type": "OTHER",
+        "asset": "Any website that is not listed explicitly in the scope.",
+        "description": "명시적으로 범위에 나열되지 않은 모든 웹사이트.",
+        "eligibility": "보상 대상이 아닙니다.",
+        "maximum_severity": ""
+      },
+      {
+        "asset_type": "OTHER",
+        "asset": "fraud related reports",
+        "description": "보안 취약점을 악용하지 않는 사기 관련 보고 및 버그나 불완전한 비즈니스 규칙 집행으로 가능한 사기 활동.",
+        "eligibility": "범위 밖입니다. 단, CSRF 익스플로잇으로 가능한 사기 활동은 유효합니다.",
+        "maximum_severity": ""
+      }
+    ],
+    "allowed_activities": [
+      "SQL Injection (SQLi)",
+      "Cross-Site Scripting (XSS)",
+      "Remote Code Execution (RCE)",
+      "Insecure Direct Object Reference (IDOR)",
+      "수평 및 수직 권한 상승",
+      "인증 우회 및 취약한 인증",
+      "실제 보안 영향이 있는 비즈니스 로직 오류",
+      "로컬 파일 접근 및 조작(LFI, RFI, XXE, SSRF, XSPA)",
+      "실제 보안 영향이 있는 CORS",
+      "실제 보안 영향이 있는 CSRF",
+      "Open Redirect",
+      "조직이 통제하고 하나 이상의 범위에 영향을 미치는 자산에서 노출된 비밀정보·자격 증명·민감 정보"
+    ],
+    "prohibited_activities": [
+      "명시적 승인 없는 전체·부분 등 모든 취약점 공개",
+      "{{BU_NAME}} 애플리케이션·서버·네트워크·인프라에 대한 DoS 공격",
+      "서비스 성능 저하 또는 중단을 일으킬 수 있는 테스트",
+      "대량 네트워크 트래픽을 발생시키는 자동 스캐너 또는 도구 사용",
+      "애플리케이션·서버의 사용자 데이터나 파일 유출·복사·조작·파괴",
+      "취약점 및 보안 영향을 입증하는 PoC가 없는 보고",
+      "실제 보안 영향이 없는 보안 모범 사례 보고",
+      "피해자 물리적 접근 또는 사회공학이 필요한 공격 시나리오",
+      "실질적 익스플로잇 증거가 없는 이론적 보고",
+      "검증되지 않은 자동 웹 취약점 스캐너 보고",
+      "최근 공개된 0-day 취약점",
+      "Tabnabbing",
+      "다른 사용자에게 영향을 줄 수 없는 Self-XSS 또는 XSS",
+      "낮은 심각도의 CSRF",
+      "\"HTTP Host Header\" XSS",
+      "쿠키 플래그 누락",
+      "직접 악용 및 PoC로 이어지지 않는 보안 HTTP 헤더 누락",
+      "Mixed content 경고",
+      "Clickjacking/UI redressing",
+      "레이트 리밋·브루트포스·CAPTCHA 미비",
+      "악용 및 PoC 없는 CVE",
+      "악용 및 PoC 없는 열린 포트 또는 서비스",
+      "외부 링크나 JavaScript 삽입 없는 콘텐츠 스푸핑",
+      "SSL/TLS 모범 사례 문제",
+      "HSTS 헤더 누락",
+      "SPF·DKIM·DMARC 등 이메일 보안 레코드 누락",
+      "신뢰된 제3자 사이트 Referer 헤더를 통한 비밀번호 재설정 토큰 유출",
+      "웹 폼 autocomplete 속성 존재",
+      "프로토콜 불일치",
+      "악용 및 PoC 없는 Blind SSRF",
+      "자신의 애플리케이션 충돌",
+      "입증 가능한 공격 벡터와 PoC 없는 취약·오래된 소프트웨어·라이브러리",
+      "UUID4 또는 암호화 형식 대신 정수형 숫자 사용자 ID 노출",
+      "악용 및 PoC 없는 정보 노출",
+      "세션 관리 문제",
+      "피해자 컴퓨터·기기 물리 접근이 필요한 문제",
+      "MITM 또는 피해자 기기 물리 접근이 필요한 보고",
+      "약한 비밀번호 정책",
+      "Pre-account takeover",
+      "\"Archived\" Github 저장소의 모든 취약점",
+      "사용자 스팸 가능성",
+      "도난 자격 증명 또는 기기 물리 접근을 포함하는 취약점",
+      "최신 브라우저 또는 현재 앱스토어 버전에서 작동하지 않는 취약점",
+      "SSL Pinning·바이너리 보호·난독화·탈옥·루팅 탐지·안티디버깅 통제 부재",
+      "일반 Android 또는 iOS 취약점 악용",
+      "모바일 기기 내부 데이터베이스·환경설정 파일 암호화 부재",
+      "탈옥·루팅·백업 등 비표준 iOS/Android 사용 사례의 문제",
+      "메시지 검열 우회",
+      "가입 시 필수가 아닌 이메일 검증",
+      "클라이언트 앱 내 API client ID/Secret 포함",
+      "공개 API 키 노출 또는 잘못된 구성"
+    ],
+    "submission_requirements": [
+      "발견 즉시 잠재적 보안 문제를 알려야 합니다.",
+      "동일 취약점을 여러 번 발견하면 하나의 보고서만 만들고 댓글을 사용해야 합니다.",
+      "보고서에는 취약점·악용 방법·보안 영향·수정 조언의 명확한 설명이 포함되어야 합니다.",
+      "익스플로잇 수행 및 최종 영향을 보여 주는 스크린샷 PoC를 포함해야 합니다.",
+      "필요시 코드 스니펫·페이로드·명령을 포함한 완전한 재현 절차를 제공해야 합니다.",
+      "보상을 받으려면 최초 보고자여야 하며 적격 취약점이어야 합니다.",
+      "보상을 받으려면 BlaBlaCar 또는 계약업체의 전·현직 직원이 아니어야 합니다.",
+      "보고서를 제출하려면 hunter 계정으로 로그인해야 합니다."
+    ],
+    "operational_constraints": [
+      "User-Agent 헤더에 ' BBC-YWH-Bugbounty-<your yeswehack pseudo> ' 값을 추가해야 합니다."
+    ],
+    "safe_harbor": "",
+    "ambiguities": [
+      "범위 밖 자산이라도 플랫폼에 영향을 주며 설득력 있고 작동하는 POC가 코드 변경을 유도하면 보상될 수 있다고 명시되어 있어, 해당 예외의 사전 승인·판정 기준은 추가로 명시되지 않았습니다.",
+      "안전항구(safe harbor) 조항은 명시되어 있지 않습니다."
+    ],
+    "source_evidence": [
+      {
+        "section": "Scopes",
+        "quote": "Scopes: 12"
+      },
+      {
+        "section": "Scopes",
+        "quote": "https://edge.blablacar.(fr|de|co.uk|in|es|mx|be|hr|hu|it|nl|pl|com.br|pt|ro|ru|com|tr|com.ua)) | API | Low |"
+      },
+      {
+        "section": "Scopes",
+        "quote": "https://apps.apple.com/fr/app/blablalines-covoiturage/id1225543288 | Mobile application IOS | Low |"
+      },
+      {
+        "section": "Out of scopes",
+        "quote": "Any website that is not listed explicitly in the scope."
+      },
+      {
+        "section": "Reporting & Disclosure Policy",
+        "quote": "Denial of service (DoS) attacks on {{BU_NAME}} applications, servers, networks or infrastructure are strictly forbidden."
+      },
+      {
+        "section": "Reward Eligibility",
+        "quote": "You must be the first reporter of a vulnerability."
+      },
+      {
+        "section": "Hunting requirements",
+        "quote": "Please append to your user-agent header the following value: ' BBC-YWH-Bugbounty-<your yeswehack pseudo> '."
+      },
+      {
+        "section": "Non-qualifying vulnerabilities",
+        "quote": "Reports without an accompanying proof-of-concept demonstrating vulnerability and security impact"
+      },
+      {
+        "section": "Reports of leaks and exposed credentials",
+        "quote": "Impact is in-scope (e.g. valid credentials on an in-scope asset) | Eligible | Eligible | Not eligible"
+      }
+    ]
+  }
+}

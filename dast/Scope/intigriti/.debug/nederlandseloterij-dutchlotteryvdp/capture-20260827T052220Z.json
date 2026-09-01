@@ -1,0 +1,156 @@
+{
+  "capture_status": "PARTIAL",
+  "capture_reason": "CONTENT_INCOMPLETE",
+  "requested_url": "https://app.intigriti.com/programs/nederlandseloterij/dutchlotteryvdp",
+  "final_url": "https://app.intigriti.com/programs/nederlandseloterij/dutchlotteryvdp/detail",
+  "title": "Dutch Lottery VDP - Bug Bounty Program - Intigriti",
+  "captured_at": "2026-08-27T05:22:20.993048+00:00",
+  "captured_text": "Description\nAt Nederlandse Loterij, we consider the security of our systems to be of paramount importance. Despite our efforts to secure our systems, it is possible that a vulnerability or weakness may still occur. If you discover a vulnerability or weakness in one of our systems or the associated or underlying domains and/or specific domains of third parties and/or partners, we would appreciate it if you would inform us so that we can take measures as soon as possible.\n\nBounties\nThis is a responsible disclosure program without bounties.\n\nRules of engagement\n@intigriti.me\nRequired\nUser agent\nNot applicable\nAutomated tooling\nNot applicable\nRequest header\nNot applicable\n#### By participating in this program, you agree to:\n* Respect the Community Code of Conduct\n* Respect the Intigriti Terms and Conditions\n* Respect the scope of the program\n* Not discuss or disclose vulnerability information without prior written consent (including PoC's on YouTube and Vimeo)\n\nValidation times\nWe will validate all submissions within the below timelines, once your submission has been verified by Intigriti.\nSubmissions validated outside of this may be awarded a €25 bonus.\nVulnerability Severity | Time to validate\nExceptional | 2 Working days\nCritical | 2 Working days\nHigh | 5 Working days\nMedium | 15 Working days\nLow | 15 Working days\nThis remains at the discretion of Nederlandse Loterij to award.\nSafe harbour for researchers is applied\nShow safe harbour\n\nAssets\n8\nLottery Portfolio\nwww.staatsloterij.nederlandseloterij.nl\nURL\nTier 2\nwww.krasloten.nederlandseloterij.nl\nURL\nTier 2\nwww.eurojackpot.nederlandseloterij.nl\nURL\nTier 2\nwww.luckyday.nederlandseloterij.nl\nURL\nTier 2\nwww.lotto.nederlandseloterij.nl\nURL\nTier 2\nwww.miljoenenspel.nederlandseloterij.nl\nURL\nTier 2\nwww.nederlandseloterij.nl\nURL\nTier 2\nwww.toto.nl\nURL\nTier 2\n1\nAll other assets as listed in the In scope section\nSee the CSV file attached in the In-scope section for a full list of assets in scope\nOther\nNo bounty\n\nIn scope\nIntroduction\nWe are happy to announce our program! We've done our best to clean up our known issues and now would like to request your help to spot the ones we missed!\nOur worst-case scenarios are:\n(Examples below)\n* A malicious actor manipulates lottery systems, draw logic, ticket validation, or prize allocation processes, potentially undermining the fairness and integrity of the lottery.\n* Sensitive customer data is exposed, including identity details, payment information, account history, or documents used for age and identity verification.\n* Player accounts are compromised, allowing attackers to access balances, claim winnings, change payout details, or abuse stored payment methods.\n* The platform is abused for fraud, money laundering, bonus abuse, or automated bot activity, creating regulatory, financial, and reputational risk for the lottery provider.\n* Full list of all in scope assets attached below\nHide attachments\nDNS_domains_NLO6.csv\n\nOut of scope\n#### Application\n* Wordpress usernames disclosure\n* Pre-Auth Account takeover/OAuth squatting\n* Self-XSS that can't be used to exploit other users\n* Verbose messages/files/directory listings without disclosing any sensitive information\n* CORS misconfiguration on non-sensitive endpoints\n* Missing cookie flags\n* Missing security headers\n* Cross-site Request Forgery with no or low impact\n* Presence of autocomplete attribute on web forms\n* Reverse tabnabbing\n* Bypassing rate-limits or the non-existence of rate-limits.\n* Best practices violations (password complexity, expiration, re-use, etc.)\n* Clickjacking without proven impact/unrealistic user interaction\n* CSV Injection\n* Sessions not being invalidated (logout, enabling 2FA, etc.)\n* Tokens leaked to third parties\n* Anything related to email spoofing, SPF, DMARC or DKIM\n* Content injection without being able to modify the HTML\n* Username/email enumeration\n* Email bombing\n* HTTP Request smuggling without any proven impact\n* Homograph attacks\n* XMLRPC enabled\n* Banner grabbing/Version disclosure\n* Not stripping metadata of files\n* Same-site scripting\n* Subdomain takeover without taking over the subdomain\n* Arbitrary file upload without proof of the existence of the uploaded file\n* Blind SSRF without proven business impact (pingbacks aren't sufficient)\n* Disclosed/misconfigured Google Maps API keys\n* Host header injection without proven business impact\n#### General\n* In case that a reported vulnerability was already known to the company from their own tests, it will be flagged as a duplicate\n* Theoretical security issues with no realistic exploit scenario(s) or attack surfaces, or issues that would require complex end user interactions to be exploited\n* Spam, social engineering and physical intrusion\n* DoS/DDoS attacks or brute force attacks\n* Vulnerabilities that only work on software that no longer receive security updates\n* Attacks requiring physical access to a victim's computer/device, man in the middle or compromised user accounts\n* Recently discovered zero-day vulnerabilities found in in-scope assets within 14 days after the public release of a patch or mitigation may be reported, but are usually not eligible for a bounty\n* Reports that state that software is out of date/vulnerable without a proof-of-concept\nSeverity assessment\nThis program follows Intigriti's triage standards based on the proof of concept.\nFAQ\nWhere can we get credentials for the websites?\nYou can self-register on the application but please don’t forget to use your @intigriti.me address.\n(Please note that self regristration is limited to Dutch residents and citizens)\nAll aboard!\nPlease log in or sign up on the platform\nFor obvious reasons we can only allow submissions or applications for our program with a valid Intigriti account.",
+  "analysis": {
+    "program_name": "Dutch Lottery VDP",
+    "program_description": "Nederlandse Loterij의 책임 있는 취약점 공개 프로그램입니다. 현금 바운티는 없으며, 확인이 지연된 제출물에는 재량으로 €25 보너스가 지급될 수 있습니다.",
+    "in_scope_assets": [
+      {
+        "asset_type": "URL",
+        "asset": "www.staatsloterij.nederlandseloterij.nl",
+        "description": "Lottery Portfolio · URL · Tier 2",
+        "eligibility": "책임 있는 공개 프로그램 대상이며 바운티는 없습니다.",
+        "maximum_severity": "Tier 2"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "www.krasloten.nederlandseloterij.nl",
+        "description": "Lottery Portfolio · URL · Tier 2",
+        "eligibility": "책임 있는 공개 프로그램 대상이며 바운티는 없습니다.",
+        "maximum_severity": "Tier 2"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "www.eurojackpot.nederlandseloterij.nl",
+        "description": "Lottery Portfolio · URL · Tier 2",
+        "eligibility": "책임 있는 공개 프로그램 대상이며 바운티는 없습니다.",
+        "maximum_severity": "Tier 2"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "www.luckyday.nederlandseloterij.nl",
+        "description": "Lottery Portfolio · URL · Tier 2",
+        "eligibility": "책임 있는 공개 프로그램 대상이며 바운티는 없습니다.",
+        "maximum_severity": "Tier 2"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "www.lotto.nederlandseloterij.nl",
+        "description": "Lottery Portfolio · URL · Tier 2",
+        "eligibility": "책임 있는 공개 프로그램 대상이며 바운티는 없습니다.",
+        "maximum_severity": "Tier 2"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "www.miljoenenspel.nederlandseloterij.nl",
+        "description": "Lottery Portfolio · URL · Tier 2",
+        "eligibility": "책임 있는 공개 프로그램 대상이며 바운티는 없습니다.",
+        "maximum_severity": "Tier 2"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "www.nederlandseloterij.nl",
+        "description": "Lottery Portfolio · URL · Tier 2",
+        "eligibility": "책임 있는 공개 프로그램 대상이며 바운티는 없습니다.",
+        "maximum_severity": "Tier 2"
+      },
+      {
+        "asset_type": "URL",
+        "asset": "www.toto.nl",
+        "description": "Lottery Portfolio · URL · Tier 2",
+        "eligibility": "책임 있는 공개 프로그램 대상이며 바운티는 없습니다.",
+        "maximum_severity": "Tier 2"
+      }
+    ],
+    "out_of_scope_assets": [],
+    "allowed_activities": [
+      "프로그램 범위를 준수한 취약점 보고.",
+      "애플리케이션에서 자체 등록하여 테스트 계정을 만드는 행위."
+    ],
+    "prohibited_activities": [
+      "사전 서면 동의 없이 취약점 정보를 논의하거나 공개하는 행위(YouTube 및 Vimeo의 PoC 포함).",
+      "Wordpress 사용자명 공개.",
+      "사전 인증 계정 탈취/OAuth squatting.",
+      "다른 사용자를 악용할 수 없는 Self-XSS.",
+      "민감한 정보를 공개하지 않는 상세 메시지·파일·디렉터리 목록.",
+      "비민감 엔드포인트의 CORS 오구성.",
+      "쿠키 플래그 누락.",
+      "보안 헤더 누락.",
+      "영향이 없거나 낮은 CSRF.",
+      "웹 양식의 autocomplete 속성 존재.",
+      "Reverse tabnabbing.",
+      "속도 제한 우회 또는 속도 제한 부재.",
+      "모범 사례 위반(비밀번호 복잡성·만료·재사용 등).",
+      "입증된 영향 또는 현실적 사용자 상호작용이 없는 Clickjacking.",
+      "CSV Injection.",
+      "세션 무효화 누락(로그아웃, 2FA 활성화 등).",
+      "제3자에게 유출된 토큰.",
+      "이메일 스푸핑, SPF, DMARC 또는 DKIM 관련 모든 항목.",
+      "HTML을 수정할 수 없는 콘텐츠 주입.",
+      "사용자명/이메일 열거.",
+      "이메일 폭탄.",
+      "입증된 영향이 없는 HTTP Request smuggling.",
+      "Homograph 공격.",
+      "XMLRPC 활성화.",
+      "배너 획득/버전 공개.",
+      "파일 메타데이터 미제거.",
+      "Same-site scripting.",
+      "서브도메인을 실제로 탈취하지 않은 Subdomain takeover.",
+      "업로드 파일의 존재 증명 없는 임의 파일 업로드.",
+      "입증된 비즈니스 영향이 없는 Blind SSRF(pingback만으로는 불충분).",
+      "공개되었거나 오구성된 Google Maps API 키.",
+      "입증된 비즈니스 영향이 없는 Host header injection.",
+      "회사 자체 테스트에서 이미 알고 있던 취약점 보고.",
+      "현실적인 악용 시나리오·공격 표면이 없거나 복잡한 최종 사용자 상호작용이 필요한 이론적 보안 문제.",
+      "스팸, 사회공학, 물리적 침입.",
+      "DoS/DDoS 또는 무차별 대입 공격.",
+      "더 이상 보안 업데이트를 받지 않는 소프트웨어에서만 작동하는 취약점.",
+      "피해자 기기 물리 접근, 중간자, 또는 손상된 사용자 계정이 필요한 공격.",
+      "패치 또는 완화책 공개 후 14일 이내의 인스코프 자산 제로데이(보고 가능하나 통상 바운티 비대상).",
+      "PoC 없이 소프트웨어가 오래되었거나 취약하다고만 주장하는 보고."
+    ],
+    "submission_requirements": [
+      "Intigriti의 Community Code of Conduct를 준수해야 합니다.",
+      "Intigriti Terms and Conditions를 준수해야 합니다.",
+      "프로그램 범위를 준수해야 합니다.",
+      "Intigriti 검증 후 제출물 검증 목표: Exceptional·Critical 2영업일, High 5영업일, Medium·Low 15영업일.",
+      "유효한 Intigriti 계정으로만 제출 또는 프로그램 신청이 가능합니다."
+    ],
+    "operational_constraints": [
+      "웹사이트 자격증명은 자체 등록으로 확보할 수 있으며 @intigriti.me 주소를 사용해야 합니다.",
+      "자체 등록은 네덜란드 거주자 및 시민으로 제한됩니다.",
+      "User agent: Not applicable.",
+      "Automated tooling: Not applicable.",
+      "Request header: Not applicable."
+    ],
+    "safe_harbor": "연구자를 위한 Safe harbour가 적용됩니다.",
+    "ambiguities": [
+      "인스코프 섹션은 전체 자산 목록이 첨부된 DNS_domains_NLO6.csv에 있다고 명시하지만, 첨부 CSV의 내용은 확인할 수 없어 그 안의 추가 자산을 추출하지 못했습니다.",
+      "자산 섹션에는 Lottery Portfolio URL 8개와 별도로 “All other assets as listed in the In scope section” 항목이 표시되어 있으나, 첨부 CSV 미확인으로 그 범위가 불완전합니다.",
+      "“Show safe harbour”가 접힌 상태여서 세부 Safe harbour 조건은 확인할 수 없습니다."
+    ],
+    "source_evidence": [
+      {
+        "section": "Description",
+        "quote": "This is a responsible disclosure program without bounties."
+      },
+      {
+        "section": "Assets",
+        "quote": "See the CSV file attached in the In-scope section for a full list of assets in scope"
+      },
+      {
+        "section": "Out of scope",
+        "quote": "* DoS/DDoS attacks or brute force attacks"
+      },
+      {
+        "section": "FAQ",
+        "quote": "You can self-register on the application but please don’t forget to use your @intigriti.me address."
+      }
+    ]
+  }
+}

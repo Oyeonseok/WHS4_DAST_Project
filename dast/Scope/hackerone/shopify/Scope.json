@@ -1,0 +1,299 @@
+{
+  "schema_version": "1.0",
+  "scope_id": "scope_0634ed9dd59c4484bd671abd0d0f67f8",
+  "created_at": "2026-08-27T04:06:20.202234Z",
+  "source": {
+    "requested_url": "https://hackerone.com/shopify?type=team",
+    "final_url": "https://hackerone.com/shopify?type=team",
+    "title": "Shopify | Bounty Policy | HackerOne",
+    "captured_at": "2026-08-27T04:05:32.040681Z",
+    "capture_status": "COMPLETE",
+    "capture_reason": "NONE",
+    "content_sha256": "e094d128e9bfaee2917920dc8e2d349d1502c4d41165e88852b9574760b629b4",
+    "text": "=== PROGRAM PAGE: https://hackerone.com/shopify?type=team ===\nSkip to main content  >\nLearn more about HackerOne\nLog in\nSecurity page\nProgram guidelines\nScope\nHacktivity\nThanks\nUpdates\nCollaborators\nSafe harbor\nProgram highlights\nGold Standard Safe Harbor\nAdheres to Gold Standard Safe Harbor.\nPlatform Standards\nFully compliant with Platform Standards.\nCollaboration Enabled\nIncludes Retesting\n4 days, 10 hours\nAverage time to first response\n2 weeks, 2 days\nAverage time to triage\n1 week, 5 days\nAverage time to bounty\n4 weeks, 1 day\nAverage time from submission to bounty\n4 months, 1 week\nAverage time to resolution\nRewards summary\nLast updated on February 11, 2026. View changes\nEach severity lists the 90-day average bounty and the percentage of total resolved reports, if applicable.\nLow\nAvg. bounty $500\n33.72% submissions\nMedium\nAvg. bounty $2,925\n55.11% submissions\nHigh\nAvg. bounty $5,821\n8.54% submissions\nCritical\nAvg. bounty $62,648\n2.63% submissions\n$500 – $1,000\n$1,000 – $14,000\n$14,000 – $50,000\n$50,000 – $200,000\nOur max bounty is $200,000 for a Critical vulnerability. Valid Shopify non-core (defined below) vulnerabilities are calculated with Confidentiality, Integrity and Availability Requirements set to Low.\nScope exclusions\nCore Ineligible Findings are out of scope.\nLearn more\nExemplary Standards\nThis program has committed to awarding the submissions below.\nBounty awards for discovered leaked credentials\nCheck here for the full Exemplary Standards page list.\nOverview\nLast updated on July 6, 2026. View changes\nShopify's Bug Bounty Program\nWe reward security researchers for finding and reporting vulnerabilities that help keep our platform secure. Our bug bounty program offers rewards up to $200,000 and bonuses for outstanding contributions.\nHere’s what you can expect:\nQuick review and triage of reports with high-quality evaluations.\nFull transparency on report decisions.\nPrompt bounty awards after triage, except in rare cases.\nWe value all contributions, from minor issues to critical vulnerabilities, as they help enhance Shopify’s security.\nEarly Access Program\nA special invite-only program where select researchers get early access to Shopify features before they're widely released. This exclusive opportunity lets you discover vulnerabilities in our newest innovations while earning bounties.\nCriteria for invitation:\nSubmitted 4 or more reports over the past 2 years.\n50% or higher rate of success on those reports\nPlease note, invitations are extended at Shopify's discretion based on quality contributions to our security ecosystem.\nGetting started\nReview and understand the participation rules, the list of assets in scope, and the list of ineligible issues.\nFamiliarize yourself with the @wearehackerone.com email address which must be used when creating a Shopify account. This alias is provided by HackerOne and you can learn more about it in their documentation.\nCreate a Shopify account using this link and follow the registration process.\nYou must test only against stores you have created. Testing against live merchants is prohibited and can result in reports being closed as Not Applicable and/or your disqualification from the Shopify bug bounty program.\nConsult Shopify Help Center for further information on how to build a store and to discover platform features. For newest product updates, keep an eye on our Core Change Log and Partners Blog.\nIf you need further clarification of the rules or scope of our bug bounty program, please don't hesitate to contact us at bugbounty@shopify.com.\nEligibility\nThe scope of the bug bounty program is limited to the assets listed on the scope page for this program. Valid vulnerabilities on any asset not explicitly listed in scope may be accepted but are ineligible for a reward. As a general rule:\nReports which do not demonstrate relevant security impact to Shopify or our Merchants by providing a functional proof of concept will be closed as N/A.\nWe reward researchers based on the scenario that yields the highest overall severity score , provided that the scenario is plausible and directly linked to the root issue. In cases where multiple reports share the same root cause, these will be closed as Duplicate.\nWe will only award and triage reports when the root cause is under our control.\nIDOR eligibility will be evaluated considering the identifier predictability, the data accessed and overall impact on the service.\nReports of a vulnerability disclosing sensitive PII will be evaluated on a case by case basis, considering the overall impact on Shopify's merchant data.\nTypical Bounty Amounts\nBounty amounts will be determined using Shopify's Bug Bounty Calculator. In most cases, we will only triage and reward vulnerabilities with a score greater than 0. A score under 3 will result in a $500 bounty. Scores greater than or equal to 3 will be determined by the calculator. In rare cases, we may choose to accept and award a bonus for an issue with a score of 0 when we see a high potential for future security impact and make a change as a result of the report. Bonuses are determined as a percentage (10% of what the bounty is estimated at for an exploitable issue), with a minimum of $500 and a maximum of $5,000.\nWhile our bounty table states the minimum bounty per severity, scores for non-core properties listed in scope will be determined with Environment Score modifiers set to Low for Confidentiality, Integrity, and Availability Requirements.\nLeaked Credentials\nIn alignment with HackerOne’s guidance and terms, Shopify accepts reports of leaked credentials, including Authentication material for Shopify APIs and/or Shopify infrastructure. Hackers should submit the leaked credentials to the program and should not test their validity beyond authenticating and then immediately deauthenticating - without exercising any functionality. Likewise, Hackers should not share these credentials beyond their report to the program.\nRules for participation\nThe following rules must be followed in order for any rewards to be paid:\nEligibility for Rewards\nOnly test against stores you created using your HackerOne YOURHANDLE @ wearehackerone.com registered email.\nDo not attempt to gain access to, or interact with stores you didn’t create.\nFollow all reporting rules.\nDo not disclose issues publicly before resolution or without permission.\nProgram Modifications\nShopify reserves the right to modify rules or invalidate submissions at any time.\nShopify may cancel the bug bounty program without notice at any time.\nContact Restrictions\nDo not contact Shopify Support as part of your testing or to ask about the bounty program, to pre-validate reports nor to ask for updates. Violating this will disqualify you from receiving a reward and may result in a program ban.\nEmployment Status\nYou are not an employee of Shopify\nShopify employees must report bugs to the internal bug bounty program.\nVulnerability Reporting\nYou must report any discovered vulnerability to Shopify as soon as you have validated the vulnerability.\nFailure to follow any of the foregoing rules will disqualify you from participating in this program.\nGeneral Rules\nReports must demonstrate relevant CVSS impact to Shopify, Shop users, our partners or our merchants with a functional proof of concept. Reports without this will be closed as N/A.\nRewards are based on the highest CVSS score scenario that is plausible and linked to the root issue. Multiple reports with the same root cause will be closed as Duplicate.\nYou hereby represent, warrant and covenant that any content you submit to Shopify is an original work of authorship and that you are legally entitled to grant the rights and privileges conveyed by these terms. You further represent, warrant and covenant that the consent of no other person or entity is or will be necessary for Shopify to use the submitted content.\nBy submitting content to Shopify, you irrevocably waive all moral rights which you may have in the content.\nAll content submitted by you to Shopify under this program is licensed under the MIT License.\nNotes\nThis program is not open to individuals who are on sanctions lists, or who are in countries on sanctions lists.\nYou are responsible for any tax implications resulting from payouts depending on your country of residency and citizenship.\nShopify reserves the right to cancel this program at any time and the decision to pay a bounty is entirely at our discretion. Your testing and submission must not violate any law, or disrupt or compromise any data that is not your own.\nThere may be additional restrictions on your ability to submit content or receive a bounty depending on your local laws.\nTop hackers\nSee all hackers\n1\nh13-\nReputation: 3k\n2\nmatanber\nReputation: 2k\n3\nluc1d\nReputation: 1k\n4\n82af5ddffbb795\nReputation: 1k\n5\nsaltymermaid\nReputation: 1k\n6\ncafecito\nReputation: 1k\n7\nimgnotfound\nReputation: 1k\n8\nzombiehelp54\nReputation: 906\n9\njmp_35p\nReputation: 906\n10\nngalog\nReputation: 839\n11\nurfavenemy01\nReputation: 705\n12\nbhavukjain1\nReputation: 649\nShopify\nhttps://www.shopify.com\nShopify is a multi-channel commerce platform that helps people sell online, in-store, and everywhere in between.\nBounty launched in Apr 2015\nResponse efficiency: 43%\nSubmit without Report Assistant\nRewards\nSeverity\nRewards\nLow\nAvg. bounty $500\n33.72% submissions\n$500 – $1,000\nMedium\nAvg. bounty $2,925\n55.11% submissions\n$1,000 – $14,000\nHigh\nAvg. bounty $5,821\n8.54% submissions\n$14,000 – $50,000\nCritical\nAvg. bounty $62,648\n2.63% submissions\n$50,000 – $200,000\nStats\nTotal bounties paid\t$9,544,328\nAverage bounty range\t$500 - $900\nTop bounty range\t$6,900 - $200,000\nBounties paid | 90 days\t$414,580\nReports received | 90 days\t2023\nLast report resolved\t8 days ago\nReports resolved\t2425\nHackers thanked\t1154\nAssets In Scope\t21\n© HackerOne\nOpportunities\nSecurity\nLeaderboard\nBlog\nStatus\nDocs\nSupport\nDisclosure Guidelines\nPress\nPrivacy\nTerms\n=== SCOPE VIEW: https://hackerone.com/shopify/policy_scopes ===\nSkip to main content  >\nLearn more about HackerOne\nLog in\nSecurity page\nProgram guidelines\nScope\nHacktivity\nThanks\nUpdates\nCollaborators\nSafe harbor\nSearch\nScope\nAll scopes\nMaximum severity\nAny\nBounty eligibility\nAll\nDownload Burp Suite Project Configuration File\nDownload CSV\nView changes (Last updated on June 6, 2026)\n1-30 of 30\nAsset name\n\tType\n\tCoverage\n\tMax. severity\n\tBounty\n\tLast update\n\tResolved Reports\nyour-store.myshopify.com\nEnvironment: Core\nYour development store hosted at *.myshopify.com. Create a development store by signing up at https://partners.shopify.com/\n\tDomain\nIn scope\nCritical\nEligible\nJun 27, 2025\n500 (21%)\nshopify.plus\nEnvironment: Core\n\tDomain\nIn scope\nCritical\nEligible\nJun 27, 2025\n2 (0%)\nShopify Mobile Applications\nEnvironment: Non-core\nAndroid: https://play.google.com/store/apps/dev?id=8929232438554100687\niOS: https://itunes.apple.com/ca/developer/shopify-inc/id371294475\nNote: any services operated by a third party without a proof of concept demonstrating impact on Shopify users will likely be ineligible for a bounty.\n\tOther\nIn scope\nCritical\nEligible\nJun 27, 2025\n53 (2%)\nshop.app\nEnvironment: Core\n\tDomain\nIn scope\nCritical\nEligible\nJun 27, 2025\n54 (2%)\npartners.shopify.com\nEnvironment: Core\n\tDomain\nIn scope\nCritical\nEligible\nJun 27, 2025\n102 (4%)\nAuthentication & ATO\tOther\nIn scope\nCritical\nEligible\nJun 5, 2026\n1 (0%)\narrive-server.shopifycloud.com\nEnvironment: Core\n\tDomain\nIn scope\nCritical\nEligible\nJun 27, 2025\n2 (0%)\nadmin.shopify.com\nEnvironment: Core\n\tDomain\nIn scope\nCritical\nEligible\nJun 27, 2025\n128 (5%)\naccounts.shopify.com\nEnvironment: Core\n\tDomain\nIn scope\nCritical\nEligible\nJun 27, 2025\n121 (5%)\n*.shopifycs.com\nEnvironment: Non-core\nShopify's service for handling credit card data in a PCI compliant way.\n\tWildcard\nIn scope\nCritical\nEligible\nJun 27, 2025\n2 (0%)\n*.pci.shopifyinc.com\nEnvironment: Core\n\tWildcard\nIn scope\nCritical\nEligible\nJun 27, 2025\n1 (0%)\nshopifyinbox.com\nEnvironment: Non-core\n\tDomain\nIn scope\nMedium\nEligible\nJun 27, 2025\n6 (0%)\nShopify Third Party Store\nEnvironment: Non-core\nYou may only test against shops you have created.\n\tOther\nIn scope\nMedium\nIneligible\nJun 27, 2025\n3 (0%)\nShopify Third Party Apps\nEnvironment: Non-core\nVulnerabilities found in Shopify third party apps should be reported to the responsible developer. You should only report vulnerabilities in Shopify third party apps to Shopify under this program if you do not receive a satisfactory response from the responsible developer.\n\tOther\nIn scope\nMedium\nIneligible\nJun 27, 2025\n24 (1%)\nShopify Developed Apps\nEnvironment: Non-core\nShopify apps and sales channels means everything installed via the following link https://apps.shopify.com/collections/made-by-shopify\n\tOther\nIn scope\nMedium\nEligible\nJun 27, 2025\n238 (10%)\nlinkpop.com\nEnvironment: Non-core\n\tDomain\nIn scope\nMedium\nEligible\nJun 27, 2025\n11 (0%)\nhttps://github.com/Shopify/*\nEnvironment: Non-core\nPublic repositories available under the Shopify organization in Github.\n\tSource code\nIn scope\nMedium\nEligible\nJun 27, 2025\n35 (1%)\n*.shopifykloud.com\nEnvironment: Non-core\nShopify Kloud includes all .shopifykloud.com applications. Please note, there may be developer test or third party applications launched on the domain which may have low security implications for Shopify. If you are unsure about a subdomain on .shopifykloud.com and it looks like a test application, email us at bugbounty AT shopify.com before spending time on it.\n\tWildcard\nIn scope\nMedium\nEligible\nJun 27, 2025\n36 (1%)\n*.shopifycloud.com\nEnvironment: Non-core\n.shopifycloud.com may include developer test or third party applications. For example, devdegree.shopifycloud.com, vendorvoice.shopifycloud.com, nsolid-test-console.shopifycloud.com. These types of domains are not considered in scope and reports pertaining to them will be closed Informative. If you are unsure about a domain and it looks like a test application, please email us at bugbounty@shopify.com before spending time on it.\n\tWildcard\nIn scope\nMedium\nEligible\nJun 27, 2025\n84 (3%)\n*.shopify.io\nEnvironment: Non-core\n*.shopify.io may include developer test or third party applications. If you are unsure about a domain and it looks like a test or third party application, please email us at bugbounty@shopify.com before spending time on it.\n\tWildcard\nIn scope\nMedium\nEligible\nJun 27, 2025\n34 (1%)\n*.shopify.com\nEnvironment: Non-core\nReports involving .shopify.com are reviewed on a per case basis for bounty eligibility, this includes shopifycompass.com. Any services operated by a third party without a proof of concept demonstrating impact on .myshopify.com users will likely be ineligible for a bounty.\n\tWildcard\nIn scope\nMedium\nEligible\nJun 27, 2025\n249 (10%)\nsupplier-portal.shopifycloud.com\nEnvironment: Non-core\nIncludes invoices.shopify.io, factures.shopify.io, invoices.shopify.cn, invoices.shopify.de, invoices.shopify.fr, invoices.shopify.jp\n\tOther\nOut of scope\nNone\nIneligible\nJun 27, 2025\n0 (0%)\nOther\nEnvironment: Non-core\n\tOther\nOut of scope\nNone\nIneligible\nJun 27, 2025\n0 (0%)\nlivechat.shopify.com\nEnvironment: Non-core\nContacting Shopify Support over chat, email or phone about your HackerOne report is not allowed.\n\tDomain\nOut of scope\nNone\nIneligible\nJun 27, 2025\n0 (0%)\ninvestors.shopify.com\nEnvironment: Non-core\nOperated by a third party.\n\tDomain\nOut of scope\nNone\nIneligible\nJun 27, 2025\n0 (0%)\ncommunity.shopify.dev\nEnvironment: Non-core\ncommunity.shopify.dev is a third party service and not in scope of our bug bounty program. Please do not test this subdomain.\n\tDomain\nOut of scope\nNone\nIneligible\nJun 27, 2025\n0 (0%)\ncommunity.shopify.com\nEnvironment: Non-core\ncommunity.shopify.com is a third party service and not in scope of our bug bounty program. Please do not test this subdomain.\n\tDomain\nOut of scope\nNone\nIneligible\nJun 27, 2025\n0 (0%)\ncdn.shopify.com\nEnvironment: Non-core\nShopify allows merchants to upload any file they want on our content delivery network. Being able to upload a file is not a vulnerability, this is the intended functionality.\n\tDomain\nOut of scope\nNone\nIneligible\nJun 27, 2025\n0 (0%)\nacademy.shopify.com\nEnvironment: Non-core\nOperated by a third party.\n\tDomain\nOut of scope\nNone\nIneligible\nJun 27, 2025\n0 (0%)\n*.email.shopify.com\nEnvironment: Non-core\nOperated by a third party.\n\tWildcard\nOut of scope\nNone\nIneligible\nJun 27, 2025\n0 (0%)\n1-30 of 30\nShopify\nhttps://www.shopify.com\nShopify is a multi-channel commerce platform that helps people sell online, in-store, and everywhere in between.\nBounty launched in Apr 2015\nResponse efficiency: 43%\nSubmit without Report Assistant\nRewards\nSeverity\nRewards\nLow\nAvg. bounty $500\n33.72% submissions\n$500 – $1,000\nMedium\nAvg. bounty $2,925\n55.11% submissions\n$1,000 – $14,000\nHigh\nAvg. bounty $5,821\n8.54% submissions\n$14,000 – $50,000\nCritical\nAvg. bounty $62,648\n2.63% submissions\n$50,000 – $200,000\nStats\nTotal bounties paid\t$9,544,328\nAverage bounty range\t$500 - $900\nTop bounty range\t$6,900 - $200,000\nBounties paid | 90 days\t$414,580\nReports received | 90 days\t2023\nLast report resolved\t8 days ago\nReports resolved\t2425\nHackers thanked\t1154\nAssets In Scope\t21\n© HackerOne\nOpportunities\nSecurity\nLeaderboard\nBlog\nStatus\nDocs\nSupport\nDisclosure Guidelines\nPress\nPrivacy\nTerms"
+  },
+  "analysis": {
+    "program_name": "Shopify",
+    "program_description": "Shopify의 버그 바운티 프로그램으로, 플랫폼 보안에 영향을 주는 취약점 제보에 대해 최대 $200,000의 보상을 제공합니다. 명시된 범위 외 자산의 유효한 취약점은 접수될 수 있으나 보상 대상이 아닙니다.",
+    "in_scope_assets": [
+      {
+        "asset_type": "DOMAIN",
+        "asset": "your-store.myshopify.com",
+        "description": "*.myshopify.com에 호스팅되는 본인의 개발 스토어입니다. https://partners.shopify.com/에서 개발 스토어를 생성해야 합니다.",
+        "eligibility": "Eligible",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "DOMAIN",
+        "asset": "shopify.plus",
+        "description": "Environment: Core",
+        "eligibility": "Eligible",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "OTHER",
+        "asset": "Shopify Mobile Applications",
+        "description": "Android 및 iOS Shopify 모바일 애플리케이션입니다. 제3자 운영 서비스는 Shopify 사용자 영향의 PoC 없이는 보상 대상이 아닐 수 있습니다.",
+        "eligibility": "Eligible",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "DOMAIN",
+        "asset": "shop.app",
+        "description": "Environment: Core",
+        "eligibility": "Eligible",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "DOMAIN",
+        "asset": "partners.shopify.com",
+        "description": "Environment: Core",
+        "eligibility": "Eligible",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "OTHER",
+        "asset": "Authentication & ATO",
+        "description": "Environment: Core",
+        "eligibility": "Eligible",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "DOMAIN",
+        "asset": "arrive-server.shopifycloud.com",
+        "description": "Environment: Core",
+        "eligibility": "Eligible",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "DOMAIN",
+        "asset": "admin.shopify.com",
+        "description": "Environment: Core",
+        "eligibility": "Eligible",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "DOMAIN",
+        "asset": "accounts.shopify.com",
+        "description": "Environment: Core",
+        "eligibility": "Eligible",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "WILDCARD",
+        "asset": "*.shopifycs.com",
+        "description": "PCI 준수 방식으로 신용카드 데이터를 처리하는 Shopify 서비스입니다.",
+        "eligibility": "Eligible",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "WILDCARD",
+        "asset": "*.pci.shopifyinc.com",
+        "description": "Environment: Core",
+        "eligibility": "Eligible",
+        "maximum_severity": "Critical"
+      },
+      {
+        "asset_type": "DOMAIN",
+        "asset": "shopifyinbox.com",
+        "description": "Environment: Non-core",
+        "eligibility": "Eligible",
+        "maximum_severity": "Medium"
+      },
+      {
+        "asset_type": "OTHER",
+        "asset": "Shopify Third Party Store",
+        "description": "본인이 생성한 상점에 대해서만 테스트할 수 있습니다.",
+        "eligibility": "Ineligible",
+        "maximum_severity": "Medium"
+      },
+      {
+        "asset_type": "OTHER",
+        "asset": "Shopify Third Party Apps",
+        "description": "제3자 Shopify 앱 취약점은 책임 개발자에게 보고해야 하며, 만족스러운 응답을 받지 못한 경우에만 이 프로그램으로 보고할 수 있습니다.",
+        "eligibility": "Ineligible",
+        "maximum_severity": "Medium"
+      },
+      {
+        "asset_type": "OTHER",
+        "asset": "Shopify Developed Apps",
+        "description": "https://apps.shopify.com/collections/made-by-shopify 에 설치되는 Shopify 앱 및 판매 채널입니다.",
+        "eligibility": "Eligible",
+        "maximum_severity": "Medium"
+      },
+      {
+        "asset_type": "DOMAIN",
+        "asset": "linkpop.com",
+        "description": "Environment: Non-core",
+        "eligibility": "Eligible",
+        "maximum_severity": "Medium"
+      },
+      {
+        "asset_type": "SOURCE_CODE",
+        "asset": "https://github.com/Shopify/*",
+        "description": "Shopify GitHub 조직의 공개 저장소입니다.",
+        "eligibility": "Eligible",
+        "maximum_severity": "Medium"
+      },
+      {
+        "asset_type": "WILDCARD",
+        "asset": "*.shopifykloud.com",
+        "description": "개발자 테스트 또는 제3자 애플리케이션이 포함될 수 있습니다. 테스트 앱처럼 보이는 하위 도메인은 조사 전에 프로그램에 문의해야 합니다.",
+        "eligibility": "Eligible",
+        "maximum_severity": "Medium"
+      },
+      {
+        "asset_type": "WILDCARD",
+        "asset": "*.shopifycloud.com",
+        "description": "개발자 테스트 또는 제3자 앱이 포함될 수 있으며, 예시로 제시된 테스트성 도메인은 범위에 포함되지 않습니다. 불확실한 테스트성 도메인은 사전에 문의해야 합니다.",
+        "eligibility": "Eligible",
+        "maximum_severity": "Medium"
+      },
+      {
+        "asset_type": "WILDCARD",
+        "asset": "*.shopify.io",
+        "description": "개발자 테스트 또는 제3자 애플리케이션이 포함될 수 있습니다. 테스트 또는 제3자 앱처럼 보이는 경우 사전에 문의해야 합니다.",
+        "eligibility": "Eligible",
+        "maximum_severity": "Medium"
+      },
+      {
+        "asset_type": "WILDCARD",
+        "asset": "*.shopify.com",
+        "description": ".shopify.com 관련 보고는 보상 적격성을 사안별로 검토합니다. 제3자 운영 서비스는 .myshopify.com 사용자 영향 PoC 없이는 보상 대상이 아닐 수 있습니다.",
+        "eligibility": "Eligible",
+        "maximum_severity": "Medium"
+      }
+    ],
+    "out_of_scope_assets": [
+      {
+        "asset_type": "OTHER",
+        "asset": "supplier-portal.shopifycloud.com",
+        "description": "invoices.shopify.io, factures.shopify.io, invoices.shopify.cn, invoices.shopify.de, invoices.shopify.fr, invoices.shopify.jp를 포함합니다.",
+        "eligibility": "Ineligible",
+        "maximum_severity": "None"
+      },
+      {
+        "asset_type": "OTHER",
+        "asset": "Other",
+        "description": "명시적으로 기타 자산은 범위 밖입니다.",
+        "eligibility": "Ineligible",
+        "maximum_severity": "None"
+      },
+      {
+        "asset_type": "DOMAIN",
+        "asset": "livechat.shopify.com",
+        "description": "HackerOne 보고서 관련하여 Shopify Support에 채팅, 이메일 또는 전화로 연락하는 것은 허용되지 않습니다.",
+        "eligibility": "Ineligible",
+        "maximum_severity": "None"
+      },
+      {
+        "asset_type": "DOMAIN",
+        "asset": "investors.shopify.com",
+        "description": "제3자가 운영합니다.",
+        "eligibility": "Ineligible",
+        "maximum_severity": "None"
+      },
+      {
+        "asset_type": "DOMAIN",
+        "asset": "community.shopify.dev",
+        "description": "제3자 서비스이며 테스트해서는 안 됩니다.",
+        "eligibility": "Ineligible",
+        "maximum_severity": "None"
+      },
+      {
+        "asset_type": "DOMAIN",
+        "asset": "community.shopify.com",
+        "description": "제3자 서비스이며 테스트해서는 안 됩니다.",
+        "eligibility": "Ineligible",
+        "maximum_severity": "None"
+      },
+      {
+        "asset_type": "DOMAIN",
+        "asset": "cdn.shopify.com",
+        "description": "판매자가 임의 파일을 업로드할 수 있으며, 파일 업로드 가능 자체는 의도된 기능입니다.",
+        "eligibility": "Ineligible",
+        "maximum_severity": "None"
+      },
+      {
+        "asset_type": "DOMAIN",
+        "asset": "academy.shopify.com",
+        "description": "제3자가 운영합니다.",
+        "eligibility": "Ineligible",
+        "maximum_severity": "None"
+      },
+      {
+        "asset_type": "WILDCARD",
+        "asset": "*.email.shopify.com",
+        "description": "제3자가 운영합니다.",
+        "eligibility": "Ineligible",
+        "maximum_severity": "None"
+      }
+    ],
+    "allowed_activities": [
+      "HackerOne YOURHANDLE @ wearehackerone.com 등록 이메일로 생성한 스토어만 테스트합니다.",
+      "유출 자격 증명은 인증 후 즉시 로그아웃하는 범위에서만 유효성을 확인할 수 있습니다.",
+      "Shopify 제3자 앱은 책임 개발자에게 먼저 보고하고 만족스러운 응답을 받지 못한 경우에만 이 프로그램에 보고합니다."
+    ],
+    "prohibited_activities": [
+      "본인이 생성하지 않은 스토어에 접근하거나 상호작용해서는 안 됩니다.",
+      "해결 전 또는 허가 없이 이슈를 공개해서는 안 됩니다.",
+      "테스트 또는 포상 관련 문의, 사전 검증, 상태 확인을 위해 Shopify Support에 연락해서는 안 됩니다.",
+      "유출 자격 증명으로 인증 이외의 기능을 실행하거나, 보고서 외의 다른 사람에게 자격 증명을 공유해서는 안 됩니다.",
+      "법률을 위반하거나 본인 소유가 아닌 데이터를 방해 또는 손상시키는 테스트를 해서는 안 됩니다."
+    ],
+    "submission_requirements": [
+      "취약점을 검증한 즉시 Shopify에 보고해야 합니다.",
+      "Shopify, Shop 사용자, 파트너 또는 판매자에 대한 관련 CVSS 영향을 보여주는 기능적 PoC를 제출해야 합니다.",
+      "모든 보고 규칙을 따라야 합니다.",
+      "제출 콘텐츠는 본인의 원저작물이어야 하며 필요한 권리를 보유해야 합니다."
+    ],
+    "operational_constraints": [
+      "보상은 범위 페이지에 명시된 자산으로 제한됩니다.",
+      "동일한 근본 원인의 복수 보고서는 Duplicate로 처리됩니다.",
+      "근본 원인이 Shopify의 통제 하에 있는 경우에만 트리아지 및 보상합니다.",
+      "IDOR은 식별자 예측 가능성, 접근 데이터 및 전체 서비스 영향을 고려해 평가합니다.",
+      "Non-core 자산은 기밀성·무결성·가용성 요구사항을 Low로 설정하여 점수화합니다.",
+      "Shopify는 규칙 또는 제출을 변경·무효화하거나 프로그램을 예고 없이 취소할 수 있습니다."
+    ],
+    "safe_harbor": "Gold Standard Safe Harbor를 준수한다고 표시되어 있습니다. 다만 캡처에는 세부 세이프하버 조항이 포함되어 있지 않습니다.",
+    "ambiguities": [
+      "Gold Standard Safe Harbor의 구체적 보호 범위와 조건은 캡처에 제공되지 않았습니다.",
+      "범위 외 자산의 유효한 취약점은 접수될 수 있으나 보상 비적격이라고만 명시되어 있으며, 트리아지 여부는 명확하지 않습니다.",
+      "*.shopify.com 및 일부 wildcard 자산은 테스트·제3자 서비스에 대해 개별 판단 또는 사전 문의를 요구하므로, 개별 하위 도메인의 적격성은 확정할 수 없습니다."
+    ],
+    "source_evidence": [
+      {
+        "section": "Scope",
+        "quote": "1-30 of 30"
+      },
+      {
+        "section": "Eligibility",
+        "quote": "The scope of the bug bounty program is limited to the assets listed on the scope page for this program. Valid vulnerabilities on any asset not explicitly listed in scope may be accepted but are ineligible for a reward."
+      },
+      {
+        "section": "Getting started",
+        "quote": "You must test only against stores you have created. Testing against live merchants is prohibited and can result in reports being closed as Not Applicable and/or your disqualification from the Shopify bug bounty program."
+      },
+      {
+        "section": "Rules for participation",
+        "quote": "Only test against stores you created using your HackerOne YOURHANDLE @ wearehackerone.com registered email."
+      },
+      {
+        "section": "Vulnerability Reporting",
+        "quote": "You must report any discovered vulnerability to Shopify as soon as you have validated the vulnerability."
+      },
+      {
+        "section": "Leaked Credentials",
+        "quote": "Hackers should submit the leaked credentials to the program and should not test their validity beyond authenticating and then immediately deauthenticating - without exercising any functionality."
+      },
+      {
+        "section": "Scope",
+        "quote": "Reports involving .shopify.com are reviewed on a per case basis for bounty eligibility, this includes shopifycompass.com. Any services operated by a third party without a proof of concept demonstrating impact on .myshopify.com users will likely be ineligible for a bounty."
+      },
+      {
+        "section": "Scope exclusions",
+        "quote": "Core Ineligible Findings are out of scope."
+      }
+    ]
+  }
+}
