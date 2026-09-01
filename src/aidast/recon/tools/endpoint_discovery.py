@@ -47,6 +47,7 @@ import subprocess
 import tempfile
 
 from pathlib import Path
+from typing import Callable
 from urllib.parse import (
     urljoin,
     urlparse,
@@ -60,6 +61,11 @@ from .playwright_driver import (
     InteractionConfig,
     ManualSessionConfig,
     PlaywrightDriver,
+)
+
+from .ffuf_root_selector import (
+    FfufRootSelectionError,
+    select_ffuf_roots_from_endpoints,
 )
 
 
@@ -827,6 +833,7 @@ def discover_with_ffuf(
     seed_endpoints: list[dict],
     auth_headers: dict[str, str] | None,
     proxy_url: str | None = None,
+    root_selector: Callable[[list[dict]], list[str]] | None = None,
 ) -> list[dict]:
 
     if shutil.which(
@@ -859,11 +866,22 @@ def discover_with_ffuf(
 
         return []
 
-    roots = (
-        _build_ffuf_roots(
-            seed_endpoints
+    selector = root_selector or select_ffuf_roots_from_endpoints
+    try:
+        roots = selector(seed_endpoints)
+    except FfufRootSelectionError as exc:
+        print(
+            "  [경고] ffuf Root 선택 Agent 실패, "
+            f"기존 Prefix 방식으로 대체: {exc}"
         )
-    )
+        roots = _build_ffuf_roots(seed_endpoints)
+
+    if not roots:
+        print(
+            "  [경고] 선택된 ffuf Root가 없어 "
+            "기존 Prefix 방식으로 대체"
+        )
+        roots = _build_ffuf_roots(seed_endpoints)
 
     print(
         f"  ffuf Root : "
@@ -948,6 +966,14 @@ def discover_with_ffuf(
             command,
             auth_headers,
         )
+
+        if proxy_url:
+            command.extend(
+                [
+                    "-x",
+                    proxy_url,
+                ]
+            )
 
         try:
 
