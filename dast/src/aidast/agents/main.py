@@ -343,3 +343,109 @@ Scope ID: {scope_id}
                 raise MainAgentError(
                     f"Codex returned an ungrounded source quote: {evidence.section}"
                 )
+
+    # ------------------------------------------------------------------
+    # Attack / Validator / Report — shell 활성화된 실행
+    # ------------------------------------------------------------------
+
+    def _run_attack_agent(
+        self,
+        *,
+        prompt: str,
+        model_type: type[ModelT],
+        artifact_name: str,
+        operation: str,
+        native_skill: tuple[str, str],
+    ) -> ModelT:
+        """shell이 활성화된 Codex 실행. Attack/Validator에서 curl로
+        실제 HTTP 요청을 보내야 하므로 shell_tool을 켠다.
+
+        scope 수집과 다른 점:
+        - shell_tool 활성화 (curl 사용)
+        - sandbox 해제 (네트워크 접근)
+        - browser 비활성화 (API 테스트에 불필요)
+        - 타임아웃 확장 (공격은 시간이 더 걸림)
+        """
+        executable = shutil.which(self._executable)
+        if executable is None:
+            raise MainAgentError(
+                f"Codex CLI executable not found: {self._executable}"
+            )
+        self._require_login(executable)
+
+        with tempfile.TemporaryDirectory(prefix="aidast-codex-") as tmp:
+            work_dir = Path(tmp)
+            schema_path = work_dir / f"{artifact_name}.schema.json"
+            result_path = work_dir / f"{artifact_name}.json"
+
+            self._stage_native_skill(
+                work_dir=work_dir,
+                package=native_skill[0],
+                skill_name=native_skill[1],
+            )
+            schema_path.write_text(
+                json.dumps(model_type.model_json_schema(), ensure_ascii=False),
+                encoding="utf-8",
+            )
+
+            command = [
+                executable,
+                "exec",
+                "--skip-git-repo-check",
+                "--ephemeral",
+                "--ignore-user-config",
+                "--enable", "shell_tool",
+                "--disable", "unified_exec",
+                "--disable", "apps",
+                "--disable", "standalone_web_search",
+                "--disable", "browser_use",
+                "--disable", "computer_use",
+                "--disable", "in_app_browser",
+                "--sandbox", "none",
+                "--color", "never",
+                "--cd", str(work_dir),
+                "--output-schema", str(schema_path),
+                "--output-last-message", str(result_path),
+                "-",
+            ]
+
+            attack_timeout = self._timeout_seconds * 3
+
+            try:
+                completed = subprocess.run(
+                    command,
+                    input=prompt,
+                    text=True,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
+                    timeout=attack_timeout,
+                    check=False,
+                )
+            except subprocess.TimeoutExpired as exc:
+                raise MainAgentError(
+                    f"Codex {operation} timed out after {attack_timeout}s"
+                ) from exc
+
+            if completed.returncode != 0:
+                diagnostic = completed.stderr.strip()[-2_000:]
+                raise MainAgentError(
+                    f"Codex {operation} failed with exit code "
+                    f"{completed.returncode}: {diagnostic}"
+                )
+            if not result_path.exists():
+                raise MainAgentError(
+                    f"Codex completed without a structured {artifact_name} result"
+                )
+            if result_path.stat().st_size > self._max_result_bytes:
+                raise MainAgentError(
+                    f"Codex result exceeds the {self._max_result_bytes}-byte budget"
+                )
+
+            try:
+                return model_type.model_validate_json(
+                    result_path.read_text(encoding="utf-8")
+                )
+            except (OSError, ValidationError, ValueError) as exc:
+                raise MainAgentError(
+                    f"Codex returned an invalid {artifact_name} result: {exc}"
+                ) from exc

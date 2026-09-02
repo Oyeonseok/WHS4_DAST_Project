@@ -83,17 +83,96 @@ aidast recon "<PROGRAM_URL>"
 
 현재 Recon Plan과 Task는 같은 프로세스 안의 구조화된 객체로 전달되며 DB나 파일에 저장하지 않습니다. Recon Agent 실행은 아직 포함되지 않습니다.
 
-## Skills
+## Attack → Validator → Report 파이프라인
 
-Scope 수집과 의미 해석은 Main Agent의 Codex 네이티브 Skill로 관리됩니다.
+Recon 완료 후, IDOR 취약점을 자동으로 탐지하고 검증하고 보고서를 생성합니다.
 
-```text
-src/aidast/skills/scope/SKILL.md
+```
+Recon 완료 (DB에 endpoints, parameters, sessions 적재)
+    ↓
+Attack Agent — curl로 IDOR 공격 수행, 취약점 발견
+    ↓
+Validator Agent — 7 Gate Question으로 독립 재검증
+    ↓ (CONFIRMED만)
+Report Agent — 버그바운티 제출용 보고서 작성
+    ↓
+reports/{finding_id}_report.md 파일 출력
 ```
 
-실행 시 Skill은 Codex 표준 경로인 `.agents/skills/aidast-scope/SKILL.md`에 임시 배치되고 `$aidast-scope`로 명시적으로 호출됩니다. Codex가 URL을 직접 열어 동적 Scope와 정책을 수집합니다.
+### 핵심 원칙
 
-HackerOne이나 Bugcrowd처럼 Codex 네이티브 브라우저가 JavaScript 페이지를 완전히 렌더링하지 못하면, 코드가 제한된 Playwright 브라우저로 같은 URL을 수집하고 Codex가 동일한 네이티브 Skill로 해당 캡처를 해석합니다. 사용자 승인, 원문 근거 검증, 무결성 검사와 공식 저장은 코드가 담당합니다.
+- **LLM이 공격의 주체, Python은 결과 저장만**
+- LLM이 curl로 직접 HTTP 요청 전송, 응답 해석, 취약점 판정
+- Python은 LLM이 반환한 JSON을 DB에 저장하는 역할만 수행
+- 모든 공격/검증/보고 지식은 SKILL.md에 담겨있음
+
+### Attack (IDOR 탐지)
+
+1. 오케스트레이터가 Recon DB에서 엔드포인트/파라미터/세션 추출
+2. LLM이 IDOR 후보 선별 (is_identifier, RESTful 패턴 등)
+3. LLM이 User A(소유자) / User B(공격자) / 비인증 3개 컨텍스트로 curl 요청
+4. LLM이 응답을 비교하여 IDOR 여부 판정 + 오탐 검증
+5. 결과 JSON → 오케스트레이터가 DB 저장
+
+### Validator (7 Gate Question)
+
+각 finding에 대해 7단계 독립 검증 수행:
+
+| Gate | 검증 내용 |
+|---|---|
+| G1 | 재현 가능성 — curl로 공격 재실행 |
+| G2 | 권한 경계 침해 — 다른 사용자 데이터 접근 확인 |
+| G3 | 비즈니스 영향 — 민감 데이터(PII, 금융, 인증) 노출 여부 |
+| G4 | 서버 측 검증 부재 — 200 + 데이터 반환 확인 |
+| G5 | 의도된 동작 제외 — 공개 엔드포인트가 아닌지 확인 |
+| G6 | 스코프 준수 — 승인된 범위 내 테스트인지 확인 |
+| G7 | 중복 확인 — 기존 confirmed finding과 같은 근본 원인이 아닌지 확인 |
+
+- 7개 전부 PASS → CONFIRMED
+- 1개라도 FAIL → REJECTED
+- G1만 FAIL 또는 N/A → INCONCLUSIVE
+
+### Report (보고서 생성)
+
+CONFIRMED된 finding에 대해 버그바운티 제출용 보고서 자동 생성:
+- 10개 섹션 구조 (Title, Severity, Summary, PoC, Impact, Remediation 등)
+- 실제 HTTP 요청/응답 증거 포함
+- CVSS v3.1 점수 + CWE 분류
+- `reports/` 디렉토리에 마크다운 파일로 저장
+
+## Skills
+
+각 Agent는 전용 SKILL.md를 로드하여 동작합니다.
+
+```text
+src/aidast/skills/scope/SKILL.md          — Scope 수집/해석
+src/aidast/skills/attack/idor/SKILL.md    — IDOR 블랙박스 동적 분석
+src/aidast/skills/validator/SKILL.md      — 7 Gate Question 검증
+src/aidast/skills/report/SKILL.md         — 버그바운티 보고서 작성
+```
+
+실행 시 Skill은 Codex 표준 경로인 `.agents/skills/` 아래에 임시 배치되고 Codex가 이를 읽어 동작합니다.
+
+## 프로젝트 구조
+
+```
+src/aidast/
+├── agents/main.py                  Codex CLI 실행 (Scope/Recon/Attack 공통)
+├── orchestration/
+│   ├── scope.py                    Scope 수집 오케스트레이터
+│   ├── recon.py                    Recon 오케스트레이터
+│   └── attack.py                   Attack→Validator→Report 오케스트레이터
+├── attack/
+│   ├── db.py                       DB 스키마 + 저장 헬퍼 (findings, attack_requests, validations)
+│   └── models.py                   Pydantic output schema (Codex --output-schema용)
+├── recon/                          Recon 모듈 (기존)
+├── scope/                          Scope 모듈 (기존)
+└── skills/
+    ├── scope/SKILL.md              Scope 수집 지침
+    ├── attack/idor/SKILL.md        IDOR 공격 지침
+    ├── validator/SKILL.md          7 Gate 검증 지침
+    └── report/SKILL.md             보고서 작성 지침
+```
 
 ## Development
 
