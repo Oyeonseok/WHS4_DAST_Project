@@ -21,3 +21,4 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 "aidast.skills.scope" = ["SKILL.md"]
+"aidast.skills.ffuf_root_selection" = ["SKILL.md"]
