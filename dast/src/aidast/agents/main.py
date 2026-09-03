@@ -36,13 +36,15 @@ class MainAgentError(RuntimeError):
 class CodexMainAgent:
     """Uses the locally authenticated Codex CLI as the planning-only Main Agent."""
 
-    # MVP 모델 설정
-    # - scope/recon: 텍스트 파싱, 계획 수립 → o4-mini로 충분
-    # - attack/validator: IDOR 판단, 7 Gate 추론 → o3 (추론 특화)
-    # - report: 증거 정리, 글쓰기 → o4-mini로 충분
-    DEFAULT_MODEL = "o4-mini"
-    DEFAULT_ATTACK_MODEL = "o3"
-    DEFAULT_REPORT_MODEL = "o4-mini"
+    # MVP 권장 모델 설정
+    # ChatGPT 구독 계정: --model 플래그 지원 안 됨 → None (Codex 기본 모델 사용)
+    # API 키 계정: o3, o4-mini 등 지정 가능
+    # - scope/recon: 텍스트 파싱, 계획 수립
+    # - attack/validator: IDOR 판단, 7 Gate 추론
+    # - report: 증거 정리, 글쓰기
+    DEFAULT_MODEL: str | None = None
+    DEFAULT_ATTACK_MODEL: str | None = None
+    DEFAULT_REPORT_MODEL: str | None = None
 
     def __init__(
         self,
@@ -177,7 +179,6 @@ class CodexMainAgent:
             command = [
                 executable,
                 "exec",
-                "--model", self._model,
                 "--skip-git-repo-check",
                 "--ephemeral",
                 "--ignore-user-config",
@@ -201,6 +202,8 @@ class CodexMainAgent:
                 str(result_path),
                 "-",
             ]
+            if self._model:
+                command[2:2] = ["--model", self._model]
             if allow_browser:
                 command[2:2] = [
                     "--enable",
@@ -444,10 +447,10 @@ Scope ID: {scope_id}
                 encoding="utf-8",
             )
 
+            effective_model = model_override or self._attack_model
             command = [
                 executable,
                 "exec",
-                "--model", model_override or self._attack_model,
                 "--skip-git-repo-check",
                 "--ephemeral",
                 "--ignore-user-config",
@@ -465,6 +468,8 @@ Scope ID: {scope_id}
                 "--output-last-message", str(result_path),
                 "-",
             ]
+            if effective_model:
+                command[2:2] = ["--model", effective_model]
 
             attack_timeout = self._timeout_seconds * 3
 

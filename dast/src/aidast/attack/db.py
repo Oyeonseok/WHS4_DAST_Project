@@ -104,6 +104,7 @@ def save_finding_with_evidence(
     오케스트레이터가 LLM 출력 JSON을 파싱한 뒤 이 함수를 호출한다.
     """
     finding_id = new_id("finding")
+    raw_ep_id = finding.get("endpoint_id")
     conn.execute(
         """INSERT INTO findings
            (finding_id, scan_id, endpoint_id, vuln_type, severity, title,
@@ -112,7 +113,7 @@ def save_finding_with_evidence(
         (
             finding_id,
             scan_id,
-            finding.get("endpoint_id"),
+            raw_ep_id if raw_ep_id else None,
             finding.get("vuln_type", "IDOR"),
             finding.get("severity"),
             finding.get("title", "Untitled Finding"),
