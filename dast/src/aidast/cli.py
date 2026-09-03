@@ -8,8 +8,10 @@ from typing import Sequence
 
 from aidast.agents.main import CodexMainAgent, MainAgentError
 from aidast.auth.codex import CodexAuth, CodexAuthError
+from aidast.orchestration.attack import AttackCoordinator, AttackCoordinatorError
 from aidast.orchestration.recon import ReconCoordinator, ReconCoordinatorError
 from aidast.orchestration.scope import CoordinatorError, ScopeCoordinator
+from aidast.recon.db import init_db
 from aidast.scope.paths import ScopePathError, resolve_scope_directory
 from aidast.scope.reader import PlaywrightProgramPageReader, ProgramPageError
 
@@ -38,6 +40,40 @@ def _parser() -> argparse.ArgumentParser:
     )
     recon.add_argument("program_url", help="bug bounty program URL")
     _add_workflow_options(recon)
+
+    attack = commands.add_parser(
+        "attack",
+        help="run Attack → Validator → Report pipeline on recon results",
+    )
+    attack.add_argument(
+        "--db",
+        type=Path,
+        required=True,
+        help="path to the recon SQLite DB file",
+    )
+    attack.add_argument(
+        "--scan-id",
+        required=True,
+        help="scan_id to attack (from recon DB)",
+    )
+    attack.add_argument(
+        "--scope-dir",
+        type=Path,
+        required=True,
+        help="directory containing Scope.md",
+    )
+    attack.add_argument(
+        "--report-dir",
+        type=Path,
+        default=Path("reports"),
+        help="directory to save report files (default: reports)",
+    )
+    attack.add_argument(
+        "--codex-timeout",
+        type=int,
+        default=300,
+        help="maximum Codex interpretation time in seconds (default: 300)",
+    )
     return parser
 
 
@@ -94,8 +130,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _run_scope(args, parser)
         if args.command == "recon":
             return _run_recon(args)
+        if args.command == "attack":
+            return _run_attack(args)
         parser.error(f"unsupported command: {args.command}")
     except (
+        AttackCoordinatorError,
         CoordinatorError,
         CodexAuthError,
         MainAgentError,
@@ -186,6 +225,40 @@ def _run_recon(args: argparse.Namespace) -> int:
     for task in tasks:
         print(f"- {task.task_type.value}: {task.target.asset}")
     return 0
+
+
+def _run_attack(args: argparse.Namespace) -> int:
+    db_path = args.db
+    if not db_path.exists():
+        print(f"aidast: DB 파일을 찾을 수 없습니다: {db_path}", file=sys.stderr)
+        return 1
+
+    scope_dir = args.scope_dir
+    if not (scope_dir / "Scope.md").exists():
+        print(
+            f"aidast: Scope.md를 찾을 수 없습니다: {scope_dir / 'Scope.md'}",
+            file=sys.stderr,
+        )
+        return 1
+
+    conn = init_db(db_path)
+    try:
+        agent = CodexMainAgent(timeout_seconds=args.codex_timeout)
+        coordinator = AttackCoordinator(
+            agent=agent,
+            conn=conn,
+            scope_dir=scope_dir,
+            report_dir=args.report_dir,
+        )
+        confirmed = coordinator.run(args.scan_id)
+        print(
+            f"Attack 파이프라인 완료: {len(confirmed)}개 취약점 confirmed"
+        )
+        for fid in confirmed:
+            print(f"  - {fid} → {args.report_dir / f'{fid}_report.md'}")
+        return 0
+    finally:
+        conn.close()
 
 
 def _collect_scope(
