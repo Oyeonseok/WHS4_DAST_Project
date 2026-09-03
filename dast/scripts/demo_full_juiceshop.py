@@ -128,6 +128,83 @@ def get_token(email: str, password: str) -> str:
     return body["authentication"]["token"]
 
 
+def seed_test_data(token_a: str) -> None:
+    """User A의 장바구니에 상품을 추가하여 민감 데이터를 만든다.
+    Validator G3(Business Impact)가 PASS되려면 실제 데이터가 필요하다."""
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {token_a}",
+    }
+
+    # 1) User A의 basket ID 확인 (로그인 시 자동 생성됨)
+    #    JWT에서 user id를 추출하여 basket 조회
+    import base64
+    payload = token_a.split(".")[1]
+    payload += "=" * (-len(payload) % 4)  # padding
+    user_data = json.loads(base64.b64decode(payload))
+    basket_id = user_data["data"]["id"]
+    print(f"  User A basket ID: {basket_id}")
+
+    # 2) 장바구니에 상품 추가 (product 1~5)
+    added = 0
+    for product_id in [1, 2, 3, 4, 5]:
+        data = json.dumps({
+            "ProductId": product_id,
+            "BasketId": str(basket_id),
+            "quantity": product_id,  # 각각 다른 수량
+        }).encode()
+        req = urllib.request.Request(
+            f"{TARGET_URL}/api/BasketItems/",
+            data=data,
+            headers=headers,
+        )
+        try:
+            urllib.request.urlopen(req, timeout=10)
+            added += 1
+        except urllib.error.HTTPError:
+            pass  # 이미 존재하거나 실패
+    print(f"  장바구니에 상품 {added}개 추가")
+
+    # 3) 주소 추가 (PII 데이터)
+    address_data = json.dumps({
+        "fullName": "Kim Test User",
+        "mobileNum": "01012345678",
+        "zipCode": "12345",
+        "streetAddress": "123 Test Street, Seoul",
+        "city": "Seoul",
+        "state": "Seoul",
+        "country": "South Korea",
+    }).encode()
+    req = urllib.request.Request(
+        f"{TARGET_URL}/api/Addresss/",
+        data=address_data,
+        headers=headers,
+    )
+    try:
+        urllib.request.urlopen(req, timeout=10)
+        print("  주소(PII) 추가 완료")
+    except urllib.error.HTTPError:
+        print("  주소 추가 실패 (이미 존재할 수 있음)")
+
+    # 4) 카드 정보 추가 (금융 데이터)
+    card_data = json.dumps({
+        "fullName": "Kim Test User",
+        "cardNum": "4111111111111111",
+        "expMonth": 12,
+        "expYear": 2030,
+    }).encode()
+    req = urllib.request.Request(
+        f"{TARGET_URL}/api/Cards/",
+        data=card_data,
+        headers=headers,
+    )
+    try:
+        urllib.request.urlopen(req, timeout=10)
+        print("  카드(금융정보) 추가 완료")
+    except urllib.error.HTTPError:
+        print("  카드 추가 실패 (이미 존재할 수 있음)")
+
+
 def register_sessions(conn: sqlite3.Connection, token_a: str, token_b: str) -> None:
     """JWT 토큰을 sessions 테이블에 등록한다."""
     row = conn.execute("SELECT origin_id FROM origins LIMIT 1").fetchone()
@@ -381,10 +458,14 @@ def main() -> None:
         print("[오류] 엔드포인트가 발견되지 않았습니다.")
         sys.exit(1)
 
-    # 5. 세션 토큰 발급 + 등록
+    # 5. 세션 토큰 발급 + 테스트 데이터 + 등록
     print("\n=== Phase 2: 세션 준비 ===")
     token_a = get_token(EMAIL_A, PASSWORD_A)
     token_b = get_token(EMAIL_B, PASSWORD_B)
+
+    # User A에 테스트 데이터 추가 (장바구니, 주소, 카드)
+    seed_test_data(token_a)
+
     register_sessions(executor.conn, token_a, token_b)
 
     # 4. Scope.md 생성
