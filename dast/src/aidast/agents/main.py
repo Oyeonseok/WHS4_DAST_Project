@@ -36,6 +36,14 @@ class MainAgentError(RuntimeError):
 class CodexMainAgent:
     """Uses the locally authenticated Codex CLI as the planning-only Main Agent."""
 
+    # MVP 모델 설정
+    # - scope/recon: 텍스트 파싱, 계획 수립 → o4-mini로 충분
+    # - attack/validator: IDOR 판단, 7 Gate 추론 → o3 (추론 특화)
+    # - report: 증거 정리, 글쓰기 → o4-mini로 충분
+    DEFAULT_MODEL = "o4-mini"
+    DEFAULT_ATTACK_MODEL = "o3"
+    DEFAULT_REPORT_MODEL = "o4-mini"
+
     def __init__(
         self,
         *,
@@ -43,11 +51,17 @@ class CodexMainAgent:
         timeout_seconds: int = 300,
         max_page_chars: int = 250_000,
         max_result_bytes: int = 1_000_000,
+        model: str | None = None,
+        attack_model: str | None = None,
+        report_model: str | None = None,
     ) -> None:
         self._executable = executable
         self._timeout_seconds = timeout_seconds
         self._max_page_chars = max_page_chars
         self._max_result_bytes = max_result_bytes
+        self._model = model or self.DEFAULT_MODEL
+        self._attack_model = attack_model or self.DEFAULT_ATTACK_MODEL
+        self._report_model = report_model or self.DEFAULT_REPORT_MODEL
 
     def collect_scope(self, program_url: str) -> tuple[ProgramPage, ScopeAnalysis]:
         identify_program(program_url)
@@ -163,6 +177,7 @@ class CodexMainAgent:
             command = [
                 executable,
                 "exec",
+                "--model", self._model,
                 "--skip-git-repo-check",
                 "--ephemeral",
                 "--ignore-user-config",
@@ -395,6 +410,7 @@ Scope ID: {scope_id}
         artifact_name: str,
         operation: str,
         native_skill: tuple[str, str],
+        model_override: str | None = None,
     ) -> ModelT:
         """shell이 활성화된 Codex 실행. Attack/Validator에서 curl로
         실제 HTTP 요청을 보내야 하므로 shell_tool을 켠다.
@@ -431,6 +447,7 @@ Scope ID: {scope_id}
             command = [
                 executable,
                 "exec",
+                "--model", model_override or self._attack_model,
                 "--skip-git-repo-check",
                 "--ephemeral",
                 "--ignore-user-config",

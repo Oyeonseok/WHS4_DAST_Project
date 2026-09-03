@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import argparse
 import getpass
+import logging
 import sys
 from pathlib import Path
 from typing import Sequence
+from uuid import uuid4
 
 from aidast.agents.main import CodexMainAgent, MainAgentError
 from aidast.auth.codex import CodexAuth, CodexAuthError
@@ -12,6 +14,7 @@ from aidast.orchestration.attack import AttackCoordinator, AttackCoordinatorErro
 from aidast.orchestration.recon import ReconCoordinator, ReconCoordinatorError
 from aidast.orchestration.scope import CoordinatorError, ScopeCoordinator
 from aidast.recon.db import init_db
+from aidast.recon.executor import ReconExecutor, ReconExecutionError
 from aidast.scope.paths import ScopePathError, resolve_scope_directory
 from aidast.scope.reader import PlaywrightProgramPageReader, ProgramPageError
 
@@ -74,6 +77,61 @@ def _parser() -> argparse.ArgumentParser:
         default=300,
         help="maximum Codex interpretation time in seconds (default: 300)",
     )
+    attack.add_argument(
+        "--model",
+        default=None,
+        help="Codex model for attack/validator/report (default: o4-mini)",
+    )
+
+    scan = commands.add_parser(
+        "scan",
+        help="full pipeline: Scope -> Recon -> Attack -> Validate -> Report",
+    )
+    scan.add_argument("program_url", help="target URL to scan")
+    _add_workflow_options(scan)
+    scan.add_argument(
+        "--login-email",
+        help="login email for authenticated crawling",
+    )
+    scan.add_argument(
+        "--login-password",
+        help="login password for authenticated crawling",
+    )
+    scan.add_argument(
+        "--login-path",
+        default="/login",
+        help="login page path (default: /login)",
+    )
+    scan.add_argument(
+        "--report-dir",
+        type=Path,
+        default=Path("reports"),
+        help="directory to save report files (default: reports)",
+    )
+    scan.add_argument(
+        "--db",
+        type=Path,
+        default=None,
+        help="path to the SQLite DB file (default: auto-generated)",
+    )
+    scan.add_argument(
+        "--ffuf-wordlist",
+        help="path to ffuf wordlist for brute-force endpoint discovery",
+    )
+    scan.add_argument(
+        "--proxy",
+        help="HTTP proxy for mitmproxy observation (e.g. http://127.0.0.1:8080)",
+    )
+    scan.add_argument(
+        "--model",
+        default=None,
+        help="Codex model for scope/recon (default: o4-mini)",
+    )
+    scan.add_argument(
+        "--attack-model",
+        default=None,
+        help="Codex model for attack/validator/report (default: o4-mini)",
+    )
     return parser
 
 
@@ -132,6 +190,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _run_recon(args)
         if args.command == "attack":
             return _run_attack(args)
+        if args.command == "scan":
+            return _run_scan(args)
         parser.error(f"unsupported command: {args.command}")
     except (
         AttackCoordinatorError,
@@ -140,6 +200,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         MainAgentError,
         ProgramPageError,
         ReconCoordinatorError,
+        ReconExecutionError,
         ScopePathError,
     ) as exc:
         print(f"aidast: {exc}", file=sys.stderr)
@@ -243,7 +304,10 @@ def _run_attack(args: argparse.Namespace) -> int:
 
     conn = init_db(db_path)
     try:
-        agent = CodexMainAgent(timeout_seconds=args.codex_timeout)
+        agent = CodexMainAgent(
+            timeout_seconds=args.codex_timeout,
+            attack_model=getattr(args, "model", None),
+        )
         coordinator = AttackCoordinator(
             agent=agent,
             conn=conn,
@@ -259,6 +323,107 @@ def _run_attack(args: argparse.Namespace) -> int:
         return 0
     finally:
         conn.close()
+
+
+def _run_scan(args: argparse.Namespace) -> int:
+    """Scope -> Recon -> Attack -> Validate -> Report 전체 파이프라인."""
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
+    program_url = args.program_url
+    program_dir = resolve_scope_directory(program_url, args.output_dir)
+    scope_coordinator = ScopeCoordinator(program_dir)
+    main_agent = CodexMainAgent(
+        timeout_seconds=args.codex_timeout,
+        model=getattr(args, "model", None),
+        attack_model=getattr(args, "attack_model", None),
+    )
+
+    # --- Phase 1: Scope ---
+    print("\n=== Phase 1: Scope Collection ===")
+    if program_dir.exists():
+        scope_document, scope_markdown = scope_coordinator.load_approved_scope()
+        print(f"기존 Scope 재사용: {program_dir / 'Scope.md'}")
+    else:
+        scope_document = _collect_scope(
+            program_url=program_url,
+            args=args,
+            coordinator=scope_coordinator,
+            main_agent=main_agent,
+        )
+        if scope_document is None:
+            print("Scope 승인 거부됨. 스캔을 중단합니다.")
+            return 1
+        scope_document, scope_markdown = scope_coordinator.load_approved_scope()
+        print(f"Scope 저장됨: {program_dir / 'Scope.md'}")
+
+    # --- Phase 2: Recon Plan ---
+    print("\n=== Phase 2: Recon Plan ===")
+    plan = main_agent.create_recon_plan(
+        scope_id=scope_document.scope_id,
+        scope_markdown=scope_markdown,
+    )
+    tasks = ReconCoordinator().create_tasks(plan=plan, scope=scope_document)
+    print(f"Recon Plan: {len(plan.targets)} targets, {len(tasks)} tasks")
+
+    # --- Phase 3: Recon Execution ---
+    print("\n=== Phase 3: Recon Execution ===")
+    scan_id = f"scan_{uuid4().hex[:12]}"
+    # in_scope_assets에서 첫 번째 URL 타겟을 scope_value로 사용
+    scope_value = program_url
+    for asset in scope_document.analysis.in_scope_assets:
+        if asset.asset.startswith("http"):
+            scope_value = asset.asset
+            break
+
+    db_path = args.db or Path(f"recon_{scan_id}.db")
+    executor = ReconExecutor(
+        scan_id=scan_id,
+        scope_type="url",
+        scope_value=scope_value,
+        db_path=db_path,
+        ffuf_wordlist=args.ffuf_wordlist,
+        login_email=args.login_email,
+        login_password=args.login_password,
+        login_path=args.login_path,
+        proxy=args.proxy,
+    )
+    executor.run(tasks)
+    print(f"Recon 완료: DB={db_path}, scan_id={scan_id}")
+
+    # DB 상태 확인
+    ep_count = executor.conn.execute(
+        "SELECT count(*) FROM endpoints"
+    ).fetchone()[0]
+    sess_count = executor.conn.execute(
+        "SELECT count(*) FROM sessions"
+    ).fetchone()[0]
+    print(f"  endpoints: {ep_count}개, sessions: {sess_count}개")
+
+    if ep_count == 0:
+        print("엔드포인트가 발견되지 않았습니다. Attack을 건너뜁니다.")
+        executor.conn.close()
+        return 0
+
+    # --- Phase 4: Attack -> Validate -> Report ---
+    print("\n=== Phase 4: Attack -> Validate -> Report ===")
+    coordinator = AttackCoordinator(
+        agent=main_agent,
+        conn=executor.conn,
+        scope_dir=program_dir,
+        report_dir=args.report_dir,
+    )
+    confirmed = coordinator.run(scan_id)
+
+    # --- 결과 출력 ---
+    print(f"\n=== 스캔 완료 ===")
+    print(f"Confirmed 취약점: {len(confirmed)}개")
+    for fid in confirmed:
+        report_path = args.report_dir / f"{fid}_report.md"
+        print(f"  - {fid}")
+        if report_path.exists():
+            print(f"    보고서: {report_path}")
+
+    executor.conn.close()
+    return 0
 
 
 def _collect_scope(

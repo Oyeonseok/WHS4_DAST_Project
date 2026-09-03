@@ -169,6 +169,7 @@ class AttackCoordinator:
             artifact_name="report",
             operation="Report Generation",
             native_skill=("aidast.skills.report", "aidast-report"),
+            model_override=self._agent._report_model,
         )
 
         # 보고서 파일 저장
