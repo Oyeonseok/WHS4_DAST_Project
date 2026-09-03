@@ -99,7 +99,7 @@ def ensure_scope_md(scope_dir: Path) -> None:
 def register_manual_sessions(conn: sqlite3.Connection) -> None:
     """환경변수로 전달된 JWT 토큰을 sessions 테이블에 등록한다."""
     if not USER_A_TOKEN and not USER_B_TOKEN:
-        print("USER_A_TOKEN / USER_B_TOKEN 환경변수 없음 — 기존 세션 사용")
+        print("USER_A_TOKEN / USER_B_TOKEN 환경변수 없음 -기존 세션 사용")
         return
 
     # origin_id 조회
@@ -107,7 +107,7 @@ def register_manual_sessions(conn: sqlite3.Connection) -> None:
         "SELECT origin_id FROM origins LIMIT 1"
     ).fetchone()
     if not row:
-        print("[경고] origins 테이블이 비어있음 — Recon을 먼저 실행하세요")
+        print("[경고] origins 테이블이 비어있음 -Recon을 먼저 실행하세요")
         return
     origin_id = row[0]
 

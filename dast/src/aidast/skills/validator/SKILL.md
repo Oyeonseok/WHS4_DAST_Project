@@ -109,15 +109,15 @@ Return ONLY the JSON object matching the output schema:
 {
   "finding_id": "...",
   "verdict": "CONFIRMED",
-  "gate_results": {
-    "G1_reproducibility": {"passed": true, "detail": "..."},
-    "G2_authorization_boundary": {"passed": true, "detail": "..."},
-    "G3_business_impact": {"passed": true, "detail": "..."},
-    "G4_server_enforcement": {"passed": true, "detail": "..."},
-    "G5_intentional_design": {"passed": true, "detail": "..."},
-    "G6_scope_compliance": {"passed": true, "detail": "..."},
-    "G7_deduplication": {"passed": true, "detail": "..."}
-  },
+  "gate_results": [
+    {"gate": "G1_reproducibility", "passed": "true", "detail": "..."},
+    {"gate": "G2_authorization_boundary", "passed": "true", "detail": "..."},
+    {"gate": "G3_business_impact", "passed": "true", "detail": "..."},
+    {"gate": "G4_server_enforcement", "passed": "true", "detail": "..."},
+    {"gate": "G5_intentional_design", "passed": "true", "detail": "..."},
+    {"gate": "G6_scope_compliance", "passed": "true", "detail": "..."},
+    {"gate": "G7_deduplication", "passed": "true", "detail": "..."}
+  ],
   "reasoning": "전체 판정 근거",
   "confidence": 0.92
 }

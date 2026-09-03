@@ -345,6 +345,45 @@ Scope ID: {scope_id}
                 )
 
     # ------------------------------------------------------------------
+    # JSON Schema 후처리 — Structured Output 호환
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _make_all_required(schema: dict) -> dict:
+        """Structured Output API 제약을 맞추기 위해 스키마를 후처리한다.
+
+        - 모든 object의 properties 키를 required에 추가
+        - additionalProperties: false 보장
+        - $defs 내 중첩 스키마도 재귀 처리
+        """
+        defs = schema.pop("$defs", {})
+
+        def _resolve(obj):
+            """$ref를 인라인으로 풀고, Structured Output 제약을 적용한다."""
+            if not isinstance(obj, dict):
+                return obj
+            if "$ref" in obj:
+                ref_name = obj["$ref"].split("/")[-1]
+                return _resolve(dict(defs[ref_name]))
+            if "properties" in obj:
+                obj["required"] = list(obj["properties"].keys())
+                obj["additionalProperties"] = False
+                for key in obj["properties"]:
+                    obj["properties"][key] = _resolve(obj["properties"][key])
+                    obj["properties"][key].pop("default", None)
+                    obj["properties"][key].pop("title", None)
+            if "items" in obj:
+                obj["items"] = _resolve(obj["items"])
+            if "additionalProperties" in obj and isinstance(obj["additionalProperties"], dict):
+                obj["additionalProperties"] = _resolve(obj["additionalProperties"])
+            if "anyOf" in obj:
+                obj["anyOf"] = [_resolve(i) for i in obj["anyOf"]]
+            obj.pop("title", None)
+            return obj
+
+        return _resolve(schema)
+
+    # ------------------------------------------------------------------
     # Attack / Validator / Report — shell 활성화된 실행
     # ------------------------------------------------------------------
 
@@ -383,8 +422,9 @@ Scope ID: {scope_id}
                 package=native_skill[0],
                 skill_name=native_skill[1],
             )
+            schema = self._make_all_required(model_type.model_json_schema())
             schema_path.write_text(
-                json.dumps(model_type.model_json_schema(), ensure_ascii=False),
+                json.dumps(schema, ensure_ascii=False),
                 encoding="utf-8",
             )
 
@@ -401,7 +441,7 @@ Scope ID: {scope_id}
                 "--disable", "browser_use",
                 "--disable", "computer_use",
                 "--disable", "in_app_browser",
-                "--sandbox", "none",
+                "--sandbox", "danger-full-access",
                 "--color", "never",
                 "--cd", str(work_dir),
                 "--output-schema", str(schema_path),
@@ -416,6 +456,7 @@ Scope ID: {scope_id}
                     command,
                     input=prompt,
                     text=True,
+                    encoding="utf-8",
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.PIPE,
                     timeout=attack_timeout,

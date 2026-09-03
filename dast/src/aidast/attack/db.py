@@ -136,12 +136,10 @@ def save_finding_with_evidence(
                 req.get("role", "unknown"),
                 req.get("method", "GET"),
                 req.get("url", ""),
-                json.dumps(req["request_headers"], ensure_ascii=False)
-                if req.get("request_headers") else None,
+                req.get("request_headers") or None,
                 _truncate(req.get("request_body")),
                 req.get("response_status"),
-                json.dumps(req["response_headers"], ensure_ascii=False)
-                if req.get("response_headers") else None,
+                req.get("response_headers") or None,
                 _truncate(req.get("response_body")),
                 req.get("response_time_ms"),
                 now(),
