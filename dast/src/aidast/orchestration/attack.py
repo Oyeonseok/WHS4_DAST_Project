@@ -140,8 +140,12 @@ class AttackCoordinator:
         )
 
         evidence = attackdb.get_attack_requests(self._conn, finding_id)
+
+        # Attack Agent가 토큰을 마스킹하므로, recon DB에서 실제 세션 토큰을 가져온다
+        sessions = self._load_sessions(scan_id)
+
         prompt = self._build_validator_prompt(
-            finding_id, finding, evidence, scope_markdown, existing
+            finding_id, finding, evidence, scope_markdown, existing, sessions
         )
         return self._agent._run_attack_agent(
             prompt=prompt,
@@ -189,6 +193,22 @@ class AttackCoordinator:
                 f"Scope.md not found: {scope_md}"
             )
         return scope_md.read_text(encoding="utf-8")
+
+    def _load_sessions(self, scan_id: str) -> list[dict]:
+        """Recon DB에서 실제 세션 토큰을 가져온다.
+        Attack Agent가 토큰을 마스킹하므로 Validator에 원본을 전달해야 한다."""
+        self._conn.row_factory = sqlite3.Row
+        rows = self._conn.execute(
+            """
+            SELECT s.target, s.auth_state
+            FROM sessions s
+            JOIN origins o ON s.origin_id = o.origin_id
+            JOIN assets a ON o.asset_id = a.asset_id
+            WHERE a.scan_id = ?
+            """,
+            (scan_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
 
     def _load_recon_data(self, scan_id: str) -> str:
         """Recon DB에서 attack에 필요한 데이터를 JSON으로 추출한다."""
@@ -273,12 +293,22 @@ output schema. If no IDOR is found, return empty findings with a summary.
         evidence: list[dict],
         scope_markdown: str,
         existing_confirmed: list[dict],
+        sessions: list[dict] | None = None,
     ) -> str:
         finding_json = (
             finding.model_dump_json(indent=2)
             if hasattr(finding, "model_dump_json")
             else json.dumps(finding, ensure_ascii=False, indent=2)
         )
+        sessions_block = ""
+        if sessions:
+            sessions_block = f"""
+<session_credentials>
+The attack evidence may contain redacted tokens. Use these ACTUAL session
+credentials from the database when re-executing curl requests for Gate 1.
+{json.dumps(sessions, ensure_ascii=False, indent=2)}
+</session_credentials>
+"""
         return f"""$aidast-validator
 
 You are the validation agent. Follow the aidast-validator Skill.
@@ -291,7 +321,7 @@ Validate finding {finding_id} using the 7 Gate Question framework.
 <evidence>
 {json.dumps(evidence, ensure_ascii=False, indent=2)}
 </evidence>
-
+{sessions_block}
 <approved_scope>
 {scope_markdown}
 </approved_scope>
@@ -301,6 +331,8 @@ Validate finding {finding_id} using the 7 Gate Question framework.
 </existing_confirmed_findings>
 
 Re-execute the attack requests using curl to verify reproducibility (Gate 1).
+If evidence contains redacted tokens like [REDACTED_USER_A_TOKEN], use the
+actual tokens from <session_credentials> instead.
 Analyze all evidence for the remaining gates. Return the validation result
 as the structured JSON required by the output schema.
 """
