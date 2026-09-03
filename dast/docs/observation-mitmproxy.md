@@ -1,10 +1,13 @@
 # 정책 기반 mitmproxy 실행 구조
 
-`aidast policy-run`은 승인된 `scope.md`에서 컴파일된
-`recon-policy.json`을 실행 시점의 유일한 정책 입력으로 사용한다.
+`aidast recon` 또는 `aidast policy-compile`은 승인된 `Scope.md`를 번들된
+`aidast-recon-policy` Skill로 컴파일한다. `aidast policy-run`은 그렇게 생성되고
+schema 1.0 검증을 통과한 `recon-policy.json`만 실행 정책으로 사용한다.
 
 ```text
-recon-policy.json
+approved Scope.md
+        ↓ aidast-recon-policy Skill
+recon-policy.json (schema 1.0)
         ↓ validate
 PolicyToolRunner
         ├─ tool/target/runtime input 검사

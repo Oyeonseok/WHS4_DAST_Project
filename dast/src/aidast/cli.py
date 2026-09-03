@@ -8,6 +8,7 @@ from typing import Sequence
 
 from aidast.agents.main import CodexMainAgent, MainAgentError
 from aidast.auth.codex import CodexAuth, CodexAuthError
+from aidast.orchestration.policy import ReconPolicyCoordinator
 from aidast.orchestration.recon import ReconCoordinator, ReconCoordinatorError
 from aidast.orchestration.scope import CoordinatorError, ScopeCoordinator
 from aidast.recon.policy import PolicyError, load_policy
@@ -41,6 +42,27 @@ def _parser() -> argparse.ArgumentParser:
     )
     recon.add_argument("program_url", help="bug bounty program URL")
     _add_workflow_options(recon)
+
+    policy_compile = commands.add_parser(
+        "policy-compile",
+        help="compile an approved Scope.md into recon-policy.json schema 1.0",
+    )
+    policy_compile.add_argument(
+        "scope",
+        type=Path,
+        help="path to the approved Scope.md produced by the scope pipeline",
+    )
+    policy_compile.add_argument(
+        "--output",
+        type=Path,
+        help="output path; defaults to recon-policy.json beside Scope.md",
+    )
+    policy_compile.add_argument(
+        "--codex-timeout",
+        type=int,
+        default=300,
+        help="maximum Codex policy compilation time in seconds",
+    )
 
     policy_run = commands.add_parser(
         "policy-run",
@@ -159,6 +181,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _run_scope(args, parser)
         if args.command == "recon":
             return _run_recon(args)
+        if args.command == "policy-compile":
+            return _run_policy_compile(args)
         if args.command == "policy-run":
             return _run_policy_tools(args)
         parser.error(f"unsupported command: {args.command}")
@@ -242,6 +266,16 @@ def _run_recon(args: argparse.Namespace) -> int:
         scope_document, scope_markdown = scope_coordinator.load_approved_scope()
         print(f"Approved Scope saved: {program_dir / 'Scope.md'}")
 
+    policy_path, policy = _compile_policy(
+        scope_path=program_dir / "Scope.md",
+        policy_path=program_dir / "recon-policy.json",
+        scope_markdown=scope_markdown,
+        main_agent=main_agent,
+    )
+    print(
+        f"Recon policy compiled: {policy_path} "
+        f"(schema={policy.schema_version}, status={policy.policy_status.value})"
+    )
     plan = main_agent.create_recon_plan(
         scope_id=scope_document.scope_id,
         scope_markdown=scope_markdown,
@@ -309,6 +343,43 @@ def _run_policy_tools(args: argparse.Namespace) -> int:
             )
     print(f"Audit database: {args.db}")
     return 0
+
+
+def _run_policy_compile(args: argparse.Namespace) -> int:
+    scope_path = args.scope
+    try:
+        scope_markdown = scope_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise PolicyError(f"failed to read approved Scope.md: {exc}") from exc
+    policy_path = args.output or scope_path.with_name("recon-policy.json")
+    if policy_path.resolve() == scope_path.resolve():
+        raise PolicyError("policy output must not overwrite Scope.md")
+    policy_path, policy = _compile_policy(
+        scope_path=scope_path,
+        policy_path=policy_path,
+        scope_markdown=scope_markdown,
+        main_agent=CodexMainAgent(timeout_seconds=args.codex_timeout),
+    )
+    print(
+        f"Recon policy compiled: {policy_path} "
+        f"(schema={policy.schema_version}, status={policy.policy_status.value})"
+    )
+    return 0
+
+
+def _compile_policy(
+    *,
+    scope_path: Path,
+    policy_path: Path,
+    scope_markdown: str,
+    main_agent: CodexMainAgent,
+):
+    policy = ReconPolicyCoordinator(policy_path).compile(
+        scope_path=scope_path,
+        scope_markdown=scope_markdown,
+        main_agent=main_agent,
+    )
+    return policy_path, policy
 
 
 def _print_policy_plan(plan: PolicyExecutionPlan) -> None:

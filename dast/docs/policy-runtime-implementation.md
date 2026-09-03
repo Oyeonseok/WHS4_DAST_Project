@@ -3,21 +3,36 @@
 이 문서는 `recon-policy-compiler`가 만든 정형 JSON을 읽어 버그바운티의 여러
 대상과 허용 도구를 안전하게 연결하는 코드의 역할을 설명한다.
 
+허용, 입력 누락, 범위 이탈, wildcard 및 구버전 정책에 따른 실제 분기는
+`docs/policy-execution-scenarios.md`에 정리되어 있다.
+
 ## 실행 흐름
 
-1. `recon-policy.json`을 schema 1.0 모델로 검증한다.
-2. 정책의 allow 대상 중 URL, host, IP를 구체적인 HTTP(S) URL로 변환한다.
-3. `execution_decision: allow`이고 blocking review가 없으며 전체 HTTP proxy를
+1. 승인된 `Scope.md`를 번들된 `aidast-recon-policy` Skill로 해석한다.
+2. Codex의 구조화 출력을 schema 1.0 모델과 tool catalog로 검증한다.
+3. 검증된 `recon-policy.json`을 Scope 디렉터리에 원자적으로 저장한다.
+4. 정책의 allow 대상 중 URL, host, IP를 구체적인 HTTP(S) URL로 변환한다.
+5. `execution_decision: allow`이고 blocking review가 없으며 전체 HTTP proxy를
    지원하는 등록 adapter만 선택한다.
-4. 대상 하나마다 mitmdump와 정책 addon을 시작한다.
-5. addon이 실제 요청마다 deny 우선으로 scheme, host, port, path를 재검사한다.
-6. 실행 결과와 redacted flow를 execution ID로 묶어 SQLite에 저장한다.
+6. 대상 하나마다 mitmdump와 정책 addon을 시작한다.
+7. addon이 실제 요청마다 deny 우선으로 scheme, host, port, path를 재검사한다.
+8. 실행 결과와 redacted flow를 execution ID로 묶어 SQLite에 저장한다.
 
 wildcard host와 CIDR은 가능한 주소의 범위를 임의로 확대할 수 있어 자동으로
 열거하지 않는다. 별도 발견 단계에서 얻은 구체 URL을 `--target`으로 전달하면
 동일한 deny 우선 정책 검사를 거쳐 사용할 수 있다.
 
 ## 만든 파일
+
+### `src/aidast/skills/recon_policy/SKILL.md`
+
+승인 Scope를 실행 가능한 정책과 차단·검토 정책으로 분류하는 Codex-native
+Skill이다. 프록시 시작과 도구 실행을 금지하고 schema 1.0 정책 판단만 수행한다.
+
+### `src/aidast/orchestration/policy.py`
+
+Main Agent의 구조화 정책 결과를 다시 검증하고 임시 파일에 쓴 뒤
+`recon-policy.json`으로 원자적으로 교체한다. 잘못된 결과는 공개하지 않는다.
 
 ### `src/aidast/recon/policy.py`
 
@@ -59,9 +74,10 @@ header 보호, 민감 값 마스킹, SQLite 연결을 검증하는 테스트다.
 
 ### `src/aidast/cli.py`
 
-`aidast policy-run` 명령을 추가했다. 인자 없이 정책 전체를 계획하거나 실행할 수
-있으며 `--plan-only`, 반복 가능한 `--target`/`--tool`, runtime input, header,
-ffuf wordlist 옵션을 제공한다.
+`aidast recon`이 정책을 먼저 컴파일하도록 연결하고, 승인 Scope에서 정책만 다시
+만드는 `aidast policy-compile`과 실행용 `aidast policy-run`을 제공한다.
+`policy-run`은 `--plan-only`, 반복 가능한 `--target`/`--tool`, runtime input,
+header, ffuf wordlist 옵션을 지원한다.
 
 ### `pyproject.toml`과 `uv.lock`
 

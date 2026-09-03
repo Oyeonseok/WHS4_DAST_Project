@@ -11,7 +11,7 @@ from unittest.mock import MagicMock, patch
 
 from mitmproxy.http import Headers
 
-from aidast.recon.policy import PolicyError, ReconPolicy, ScopeGuard
+from aidast.recon.policy import PolicyError, ReconPolicy, ScopeGuard, load_policy
 from aidast.recon.policy_plan import build_execution_plan
 from aidast.recon.policy_runner import PolicyToolRunner, _redact_arguments
 from aidast.recon.policy_store import PolicyRunStore
@@ -126,6 +126,24 @@ class ScopeGuardTests(unittest.TestCase):
             policy.require_executable_tool("nuclei")
         with self.assertRaisesRegex(PolicyError, "does not contain"):
             policy.require_executable_tool("unknown")
+
+    def test_legacy_policy_has_a_clear_regeneration_error(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            policy_path = Path(temporary_dir) / "recon-policy.json"
+            policy_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "0.1",
+                        "exact_allowlist": ["https://example.com"],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                PolicyError, "regenerate.*aidast-recon-policy"
+            ):
+                load_policy(policy_path)
 
 
 class PolicyExecutionPlanTests(unittest.TestCase):
@@ -270,6 +288,28 @@ class MitmAddonTests(unittest.TestCase):
 
 
 class PolicyToolRunnerTests(unittest.TestCase):
+    def test_missing_required_header_blocks_before_proxy_or_run_creation(self) -> None:
+        policy = ReconPolicy.model_validate(policy_payload())
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            runner = PolicyToolRunner(
+                policy=policy,
+                policy_path=root / "policy.json",
+                target="https://example.com/api",
+                db_path=root / "audit.sqlite3",
+                flow_log_path=root / "flows.jsonl",
+            )
+            try:
+                with self.assertRaisesRegex(PolicyError, "missing required header"):
+                    runner.run(["katana"])
+                run_count = runner.store.conn.execute(
+                    "SELECT COUNT(*) FROM policy_runs"
+                ).fetchone()[0]
+            finally:
+                runner.close()
+
+        self.assertEqual(run_count, 0)
+
     def test_all_tool_prerequisites_are_checked_before_a_run_is_created(self) -> None:
         payload = policy_payload()
         payload["tools"]["ffuf"] = payload["tools"]["katana"].copy()

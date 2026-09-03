@@ -13,6 +13,16 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 INTERNAL_EXECUTION_HEADER = "X-AIDAST-Execution"
+DEFAULT_RECON_TOOL_CATALOG = (
+    "curl",
+    "httpx",
+    "katana",
+    "playwright",
+    "subfinder",
+    "ffuf",
+    "nuclei",
+    "nmap",
+)
 
 
 class PolicyError(RuntimeError):
@@ -229,7 +239,15 @@ class ReconPolicy(StrictModel):
 def load_policy(path: Path) -> ReconPolicy:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict) or payload.get("schema_version") != "1.0":
+            version = payload.get("schema_version") if isinstance(payload, dict) else None
+            raise PolicyError(
+                f"unsupported recon policy schema {version!r}; regenerate it with "
+                "the aidast-recon-policy compiler"
+            )
         return ReconPolicy.model_validate(payload)
+    except PolicyError:
+        raise
     except (OSError, json.JSONDecodeError, ValueError) as exc:
         raise PolicyError(f"invalid recon policy {path}: {exc}") from exc
 

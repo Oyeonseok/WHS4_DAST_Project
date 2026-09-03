@@ -85,19 +85,29 @@ aidast recon "<PROGRAM_URL>"
 
 ## Run Policy-Gated Recon Tools
 
-`recon-policy-compiler`가 생성한 `recon-policy.json`에서 명시적으로
+`aidast recon`은 승인된 `Scope.md`를 번들된 `aidast-recon-policy` Skill에
+전달하고 같은 Scope 디렉터리에 schema 1.0 `recon-policy.json`을 먼저
+생성합니다. 기존 승인 Scope의 정책만 다시 생성하려면 다음 명령을 사용합니다.
+
+```bash
+aidast policy-compile ./artifacts/<program>/scope.md \
+  --output ./artifacts/<program>/recon/recon-policy.json
+```
+
+컴파일 단계는 프록시를 시작하거나 도구를 실행하지 않습니다. 생성된 정책에서
+명시적으로
 `execution_decision: allow`인 HTTP 도구만 실행할 수 있습니다. target과
 `--tool`을 모두 생략하면 정책의 모든 구체적인 HTTP(S) 대상과 실행 가능한
 등록 adapter를 자동으로 선택합니다.
 
 ```bash
-aidast policy-run ./recon-policy.json
+aidast policy-run ./Scope/<platform>/<program>/recon-policy.json
 ```
 
 실제 요청 없이 자동 생성된 계획만 확인할 수도 있습니다.
 
 ```bash
-aidast policy-run ./recon-policy.json --plan-only
+aidast policy-run ./Scope/<platform>/<program>/recon-policy.json --plan-only
 ```
 
 ```bash
@@ -138,6 +148,7 @@ wildcard host와 CIDR은 임의로 확장하지 않으며, 발견된 구체 URL�
 전달했을 때 전체 정책 검사를 통과한 경우에만 실행합니다.
 
 구현 파일별 설명은 `docs/policy-runtime-implementation.md`에 정리되어 있습니다.
+상황별 실행·차단 흐름은 `docs/policy-execution-scenarios.md`에서 확인할 수 있습니다.
 
 ## Skills
 

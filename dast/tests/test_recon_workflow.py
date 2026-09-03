@@ -22,6 +22,7 @@ from aidast.recon.models import (
     ReconPlanTarget,
     ReconStep,
 )
+from aidast.recon.policy import DEFAULT_RECON_TOOL_CATALOG, ReconPolicy
 from aidast.scope.models import (
     AssetType,
     CaptureReason,
@@ -100,6 +101,78 @@ def plan(scope_id: str, *, asset: str = "*.example.com") -> ReconPlan:
     )
 
 
+def compiled_policy(scope_path: Path) -> ReconPolicy:
+    tools = {}
+    for tool_id in DEFAULT_RECON_TOOL_CATALOG:
+        is_curl = tool_id == "curl"
+        tools[tool_id] = {
+            "program_permission": "allowed" if is_curl else "unknown",
+            "execution_decision": "allow" if is_curl else "review",
+            "traffic_class": (
+                "provider_http"
+                if tool_id == "subfinder"
+                else "raw_network"
+                if tool_id == "nmap"
+                else "target_http"
+            ),
+            "proxy": {
+                "mode": "required" if tool_id != "nmap" else "unsupported",
+                "coverage": "full" if tool_id != "nmap" else "none",
+            },
+            "enforced_controls": {
+                "maximum_requests_per_second": 2,
+                "maximum_concurrency": 1,
+                "maximum_duration_seconds": 30,
+                "required_arguments": ["--proxy"] if is_curl else [],
+                "forbidden_arguments": [],
+            },
+            "conditions": [],
+            "evidence": (
+                [
+                    {
+                        "source_section": "Allowed activities",
+                        "rule": "Non-destructive security testing",
+                    }
+                ]
+                if is_curl
+                else []
+            ),
+            "reason": "Explicitly allowed" if is_curl else "Needs review",
+        }
+    return ReconPolicy.model_validate(
+        {
+            "schema_version": "1.0",
+            "source": {"scope_md_path": str(scope_path)},
+            "policy_status": "needs_review",
+            "default_execution_decision": "block",
+            "target_rules": {
+                "allow": [
+                    {
+                        "asset_type": "wildcard_host",
+                        "value": "*.example.com",
+                        "schemes": ["https"],
+                        "ports": [443],
+                        "path_prefixes": ["/"],
+                        "source_section": "In-scope assets",
+                    }
+                ],
+                "deny": [],
+            },
+            "global_controls": {
+                "proxy_required_for_http": True,
+                "maximum_requests_per_second": 2,
+                "maximum_concurrency": 1,
+                "maximum_duration_seconds": 30,
+                "follow_off_scope_redirects": False,
+                "revalidate_each_redirect": True,
+                "required_headers": [],
+            },
+            "tools": tools,
+            "runtime_inputs": [],
+            "review_items": [],
+        }
+    )
+
 class FakeReconMainAgent:
     def __init__(self) -> None:
         self.received_scope_markdown: str | None = None
@@ -113,6 +186,12 @@ class FakeReconMainAgent:
     def create_recon_plan(self, *, scope_id: str, scope_markdown: str) -> ReconPlan:
         self.received_scope_markdown = scope_markdown
         return plan(scope_id)
+
+    def compile_recon_policy(
+        self, *, scope_path: Path, scope_markdown: str
+    ) -> ReconPolicy:
+        self.received_scope_markdown = scope_markdown
+        return compiled_policy(scope_path)
 
 
 class ReconCoordinatorTests(unittest.TestCase):
@@ -263,8 +342,68 @@ class ReconMainAgentTests(unittest.TestCase):
         self.assertEqual(result.plan_type, "RECON")
         self.assertEqual(result.targets[0].asset, "*.example.com")
 
+    def test_codex_compiles_policy_with_native_skill_and_schema_1(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            scope_path = root / "Scope.md"
+            policy = compiled_policy(scope_path)
+            executable = root / "codex-test"
+            executable.write_text(
+                "#!/usr/bin/env python3\n"
+                "import pathlib, sys\n"
+                "if sys.argv[1:3] == ['login', 'status']:\n"
+                "    raise SystemExit(0)\n"
+                "output = pathlib.Path(sys.argv[sys.argv.index('--output-last-message') + 1])\n"
+                f"output.write_text({policy.model_dump_json()!r})\n",
+                encoding="utf-8",
+            )
+            executable.chmod(executable.stat().st_mode | 0o111)
+
+            result = CodexMainAgent(
+                executable=str(executable), timeout_seconds=10
+            ).compile_recon_policy(
+                scope_path=scope_path,
+                scope_markdown="## In-scope assets\n| WILDCARD | \\*.example.com |",
+            )
+
+        self.assertEqual(result.schema_version, "1.0")
+        self.assertEqual(set(result.tools), set(DEFAULT_RECON_TOOL_CATALOG))
 
 class ReconCliTests(unittest.TestCase):
+    def test_policy_compile_rebuilds_schema_1_from_approved_scope(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir) / "Scope"
+            program_dir = root / "bugcrowd" / "example"
+            ScopeCoordinator(program_dir).collect(
+                PROGRAM_URL,
+                main_agent=FakeReconMainAgent(),
+                approved_by="reviewer",
+                review=lambda _: True,
+            )
+            output = io.StringIO()
+            with (
+                patch(
+                    "aidast.cli.CodexMainAgent",
+                    return_value=FakeReconMainAgent(),
+                ),
+                redirect_stdout(output),
+            ):
+                result = main(
+                    [
+                        "policy-compile",
+                        str(program_dir / "Scope.md"),
+                    ]
+                )
+
+            policy_path = program_dir / "recon-policy.json"
+            policy = ReconPolicy.model_validate_json(
+                policy_path.read_text(encoding="utf-8")
+            )
+
+        self.assertEqual(result, 0)
+        self.assertEqual(policy.schema_version, "1.0")
+        self.assertIn("schema=1.0", output.getvalue())
+
     def test_recon_collects_and_approves_scope_before_planning(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_dir:
             root = Path(temporary_dir) / "Scope"
@@ -282,6 +421,11 @@ class ReconCliTests(unittest.TestCase):
             program_dir = root / "bugcrowd" / "example"
             self.assertEqual(result, 0)
             self.assertTrue((program_dir / "Scope.md").is_file())
+            self.assertTrue((program_dir / "recon-policy.json").is_file())
+            saved_policy = ReconPolicy.model_validate_json(
+                (program_dir / "recon-policy.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(saved_policy.schema_version, "1.0")
             self.assertIsNotNone(fake_main.received_scope_markdown)
             self.assertIn("Recon Plan created", output.getvalue())
             self.assertIn("3 tasks", output.getvalue())
