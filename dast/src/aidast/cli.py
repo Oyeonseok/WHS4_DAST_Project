@@ -10,6 +10,9 @@ from aidast.agents.main import CodexMainAgent, MainAgentError
 from aidast.auth.codex import CodexAuth, CodexAuthError
 from aidast.orchestration.recon import ReconCoordinator, ReconCoordinatorError
 from aidast.orchestration.scope import CoordinatorError, ScopeCoordinator
+from aidast.recon.policy import PolicyError, load_policy
+from aidast.recon.policy_plan import PolicyExecutionPlan, build_execution_plan
+from aidast.recon.policy_runner import PolicyToolRunner, supported_tool_ids
 from aidast.scope.paths import ScopePathError, resolve_scope_directory
 from aidast.scope.reader import PlaywrightProgramPageReader, ProgramPageError
 
@@ -38,6 +41,68 @@ def _parser() -> argparse.ArgumentParser:
     )
     recon.add_argument("program_url", help="bug bounty program URL")
     _add_workflow_options(recon)
+
+    policy_run = commands.add_parser(
+        "policy-run",
+        help="run explicitly selected recon tools through the policy mitmproxy",
+    )
+    policy_run.add_argument("policy", type=Path, help="recon-policy.json path")
+    policy_run.add_argument(
+        "target",
+        nargs="?",
+        help="optional HTTP(S) target; omitted means every concrete policy target",
+    )
+    policy_run.add_argument(
+        "--target",
+        action="append",
+        default=[],
+        dest="extra_targets",
+        help="additional policy-approved target; repeat for multiple targets",
+    )
+    policy_run.add_argument(
+        "--tool",
+        action="append",
+        dest="tools",
+        help=(
+            "canonical tool ID to execute; repeat for multiple tools; omitted "
+            "means every executable registered tool in the policy"
+        ),
+    )
+    policy_run.add_argument(
+        "--db",
+        type=Path,
+        default=Path("recon-policy.sqlite3"),
+        help="SQLite audit database path",
+    )
+    policy_run.add_argument(
+        "--flow-log",
+        type=Path,
+        default=Path("recon-policy-flows.jsonl"),
+        help="temporary redacted mitmproxy JSONL log path",
+    )
+    policy_run.add_argument(
+        "--proxy-port", type=int, default=18080, help="local mitmdump listen port"
+    )
+    policy_run.add_argument(
+        "--header",
+        action="append",
+        default=[],
+        help="required target header in NAME:VALUE form",
+    )
+    policy_run.add_argument(
+        "--runtime-input",
+        action="append",
+        default=[],
+        help="resolved policy input in ID=VALUE form; values are not persisted",
+    )
+    policy_run.add_argument(
+        "--wordlist", type=Path, help="wordlist required by the ffuf adapter"
+    )
+    policy_run.add_argument(
+        "--plan-only",
+        action="store_true",
+        help="print the policy-derived execution plan without network activity",
+    )
     return parser
 
 
@@ -94,6 +159,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _run_scope(args, parser)
         if args.command == "recon":
             return _run_recon(args)
+        if args.command == "policy-run":
+            return _run_policy_tools(args)
         parser.error(f"unsupported command: {args.command}")
     except (
         CoordinatorError,
@@ -102,6 +169,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         ProgramPageError,
         ReconCoordinatorError,
         ScopePathError,
+        PolicyError,
     ) as exc:
         print(f"aidast: {exc}", file=sys.stderr)
         return 1
@@ -186,6 +254,73 @@ def _run_recon(args: argparse.Namespace) -> int:
     for task in tasks:
         print(f"- {task.task_type.value}: {task.target.asset}")
     return 0
+
+
+def _parse_pairs(values: list[str], *, separator: str, label: str) -> dict[str, str]:
+    parsed: dict[str, str] = {}
+    for value in values:
+        key, found, item_value = value.partition(separator)
+        if not found or not key.strip() or not item_value:
+            raise PolicyError(f"invalid {label}: {value}")
+        key = key.strip()
+        if key.casefold() in {existing.casefold() for existing in parsed}:
+            raise PolicyError(f"duplicate {label}: {key}")
+        parsed[key] = item_value.strip()
+    return parsed
+
+
+def _run_policy_tools(args: argparse.Namespace) -> int:
+    policy = load_policy(args.policy)
+    headers = _parse_pairs(args.header, separator=":", label="header")
+    runtime_inputs = _parse_pairs(
+        args.runtime_input, separator="=", label="runtime input"
+    )
+    explicit_targets = ([args.target] if args.target else []) + args.extra_targets
+    plan = build_execution_plan(
+        policy,
+        supported_tool_ids=supported_tool_ids(),
+        requested_targets=explicit_targets or None,
+        requested_tool_ids=args.tools,
+    )
+    _print_policy_plan(plan)
+    if args.plan_only:
+        return 0
+
+    for target in plan.targets:
+        runner = PolicyToolRunner(
+            policy=policy,
+            policy_path=args.policy,
+            target=target,
+            db_path=args.db,
+            flow_log_path=args.flow_log,
+            proxy_port=args.proxy_port,
+            headers=headers,
+            runtime_inputs=runtime_inputs,
+            wordlist=args.wordlist,
+        )
+        try:
+            results = runner.run(list(plan.tool_ids))
+        finally:
+            runner.close()
+        for result in results:
+            print(
+                f"{target} -> {result.tool_id}: completed "
+                f"(execution_id={result.execution_id}, exit_code={result.exit_code})"
+            )
+    print(f"Audit database: {args.db}")
+    return 0
+
+
+def _print_policy_plan(plan: PolicyExecutionPlan) -> None:
+    print("Policy execution plan:")
+    for target in plan.targets:
+        print(f"  target: {target}")
+    for tool_id in plan.tool_ids:
+        print(f"  tool: {tool_id}")
+    for item in plan.skipped_targets:
+        print(f"  skipped target: {item.item_id} ({item.reason})")
+    for item in plan.skipped_tools:
+        print(f"  skipped tool: {item.item_id} ({item.reason})")
 
 
 def _collect_scope(

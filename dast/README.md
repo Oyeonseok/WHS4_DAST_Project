@@ -83,6 +83,62 @@ aidast recon "<PROGRAM_URL>"
 
 현재 Recon Plan과 Task는 같은 프로세스 안의 구조화된 객체로 전달되며 DB나 파일에 저장하지 않습니다. Recon Agent 실행은 아직 포함되지 않습니다.
 
+## Run Policy-Gated Recon Tools
+
+`recon-policy-compiler`가 생성한 `recon-policy.json`에서 명시적으로
+`execution_decision: allow`인 HTTP 도구만 실행할 수 있습니다. target과
+`--tool`을 모두 생략하면 정책의 모든 구체적인 HTTP(S) 대상과 실행 가능한
+등록 adapter를 자동으로 선택합니다.
+
+```bash
+aidast policy-run ./recon-policy.json
+```
+
+실제 요청 없이 자동 생성된 계획만 확인할 수도 있습니다.
+
+```bash
+aidast policy-run ./recon-policy.json --plan-only
+```
+
+```bash
+aidast policy-run ./recon-policy.json https://app.example.com \
+  --tool katana \
+  --db ./recon-policy.sqlite3 \
+  --header "X-Bug-Bounty:researcher-name"
+```
+
+특정 대상이나 도구만 제한하려면 positional target, 반복 가능한 `--target`,
+`--tool`을 사용합니다. ffuf에는 워드리스트가 필요합니다.
+
+```bash
+aidast policy-run ./recon-policy.json https://app.example.com \
+  --tool curl \
+  --tool ffuf \
+  --target https://api.example.com/v1 \
+  --wordlist ./paths.txt
+```
+
+실행기는 다음 조건을 모두 만족해야 도구를 시작합니다.
+
+- 정책과 대상 URL이 schema 1.0 검증을 통과해야 합니다.
+- 도구의 `execution_decision`이 `allow`여야 합니다.
+- blocking review item과 누락된 runtime input이 없어야 합니다.
+- 도구가 target HTTP 트래픽용 안전한 adapter를 지원해야 합니다.
+- 모든 요청이 로컬 mitmproxy addon을 지나야 합니다.
+
+addon은 deny 규칙을 먼저 적용하고, scope 밖 요청과 제한 초과 요청에는
+로컬 403/429 응답을 반환합니다. 내부 실행 식별 헤더는 대상 서버로 보내기
+전에 제거합니다. 도구 결과와 redacted proxy flow는 각각
+`tool_executions`, `proxy_flows` 테이블에 같은 execution ID로 저장됩니다.
+
+현재 안전한 adapter는 `curl`, `httpx`, `katana`, `playwright`, `ffuf`, `nuclei`를
+지원합니다. provider API로 나가는 `subfinder`와 HTTP 프록시가 전체 트래픽을
+보장하지 못하는 `nmap`은 별도 목적지 정책이 생기기 전까지 차단됩니다.
+wildcard host와 CIDR은 임의로 확장하지 않으며, 발견된 구체 URL을 `--target`으로
+전달했을 때 전체 정책 검사를 통과한 경우에만 실행합니다.
+
+구현 파일별 설명은 `docs/policy-runtime-implementation.md`에 정리되어 있습니다.
+
 ## Skills
 
 Scope 수집과 의미 해석은 Main Agent의 Codex 네이티브 Skill로 관리됩니다.
