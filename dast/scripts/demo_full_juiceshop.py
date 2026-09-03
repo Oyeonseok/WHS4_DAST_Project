@@ -23,8 +23,12 @@ import hashlib
 import json
 import logging
 import os
+import shutil
+import signal
 import sqlite3
+import subprocess
 import sys
+import time
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
@@ -37,6 +41,12 @@ from aidast.recon import db as dbmod
 from aidast.recon.executor import ReconExecutor
 from aidast.recon.models import ReconPlan, ReconPlanProposal, ReconPlanTarget, ReconStep
 from aidast.recon.surface import export_surface
+from aidast.recon.tools.mitm_ingest import (
+    extract_parameters_from_flows,
+    flows_to_raw_endpoints,
+    ingest_flows_to_db,
+    load_flows,
+)
 from aidast.scope.models import (
     AssetType,
     CaptureReason,
@@ -62,6 +72,10 @@ DB_PATH = Path("recon_juiceshop.db")
 SCOPE_DIR = Path("scope_juiceshop")
 REPORT_DIR = Path("reports")
 SCAN_ID = "scan_juiceshop_local"
+MITM_PORT = 8080
+MITM_PROXY = f"http://127.0.0.1:{MITM_PORT}"
+FLOW_LOG = Path("mitm_flows.jsonl")
+MITM_ADDON = Path("src/aidast/recon/tools/mitm_addon.py")
 
 
 # ------------------------------------------------------------------
@@ -266,10 +280,33 @@ def main() -> None:
     ensure_user(EMAIL_B, PASSWORD_B)
 
     # 1. 이전 결과 정리
-    for p in [DB_PATH, Path(f"{DB_PATH}-wal"), Path(f"{DB_PATH}-shm"), Path("Surface.json")]:
+    for p in [DB_PATH, Path(f"{DB_PATH}-wal"), Path(f"{DB_PATH}-shm"), Path("Surface.json"), FLOW_LOG]:
         p.unlink(missing_ok=True)
 
-    # 2. Recon
+    # 2. mitmproxy 시작
+    mitm_proc = None
+    mitmdump_path = shutil.which("mitmdump")
+    if mitmdump_path and MITM_ADDON.exists():
+        print("\n=== mitmproxy 시작 ===")
+        mitm_proc = subprocess.Popen(
+            [
+                mitmdump_path,
+                "-s", str(MITM_ADDON),
+                "--set", f"flow_log={FLOW_LOG}",
+                "-p", str(MITM_PORT),
+                "--quiet",
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        time.sleep(2)
+        print(f"  mitmdump PID={mitm_proc.pid}, proxy={MITM_PROXY}")
+    else:
+        print("\n[참고] mitmdump 미설치 - 프록시 없이 진행")
+
+    proxy_url = MITM_PROXY if mitm_proc else None
+
+    # 3. Recon
     print("\n=== Phase 1: Recon ===")
     scope = build_scope()
     plan = build_plan(scope)
@@ -284,20 +321,67 @@ def main() -> None:
         login_email=EMAIL_A,
         login_password=PASSWORD_A,
         login_path="/#/login",
+        proxy=proxy_url,
     )
     executor.run(tasks)
+
+    # 4. mitmproxy 트래픽 적재
+    if mitm_proc:
+        print("\n=== 관찰(mitmproxy) 적재 ===")
+        mitm_proc.terminate()
+        mitm_proc.wait(timeout=10)
+        print(f"  mitmdump 종료")
+
+        if FLOW_LOG.exists():
+            flows = load_flows(FLOW_LOG)
+            print(f"  flow {len(flows)}건 로드")
+            row = executor.conn.execute("SELECT origin_id FROM origins LIMIT 1").fetchone()
+            if row and flows:
+                origin_id = row[0]
+                ingest_flows_to_db(
+                    executor.conn, origin_id=origin_id, session_id=None,
+                    flows=flows,
+                )
+                # flow에서 발견된 엔드포인트를 DB에 추가
+                from aidast.recon.judgment import merge_and_normalize
+                raw_eps = flows_to_raw_endpoints(flows)
+                merged = merge_and_normalize(raw_eps)
+                from aidast.recon import db as recon_db
+                for ep in merged:
+                    recon_db.upsert_endpoint(
+                        executor.conn,
+                        origin_id=origin_id,
+                        method=ep["method"],
+                        path=ep["path"],
+                        normalized_path=ep["normalized_path"],
+                        content_type=ep.get("content_type"),
+                        source_tool=ep.get("source", "mitmproxy"),
+                    )
+                # endpoint_lookup 구성 후 파라미터 추출
+                ep_rows = executor.conn.execute(
+                    "SELECT method, normalized_path, endpoint_id FROM endpoints WHERE origin_id = ?",
+                    (origin_id,),
+                ).fetchall()
+                endpoint_lookup = {(r[0], r[1]): r[2] for r in ep_rows}
+                param_count = extract_parameters_from_flows(
+                    executor.conn, flows=flows, endpoint_lookup=endpoint_lookup,
+                )
+                print(f"  endpoints {len(merged)}건, parameters {param_count}건 적재")
+        else:
+            print("  [경고] flow 로그 없음")
 
     export_surface(executor.conn, scan_id=SCAN_ID, output_path=Path("Surface.json"))
 
     ep_count = executor.conn.execute("SELECT count(*) FROM endpoints").fetchone()[0]
     sess_count = executor.conn.execute("SELECT count(*) FROM sessions").fetchone()[0]
-    print(f"  endpoints: {ep_count}개, sessions: {sess_count}개")
+    param_count = executor.conn.execute("SELECT count(*) FROM parameters").fetchone()[0]
+    print(f"\n  endpoints: {ep_count}개, sessions: {sess_count}개, parameters: {param_count}개")
 
     if ep_count == 0:
         print("[오류] 엔드포인트가 발견되지 않았습니다.")
         sys.exit(1)
 
-    # 3. 세션 토큰 발급 + 등록
+    # 5. 세션 토큰 발급 + 등록
     print("\n=== Phase 2: 세션 준비 ===")
     token_a = get_token(EMAIL_A, PASSWORD_A)
     token_b = get_token(EMAIL_B, PASSWORD_B)
