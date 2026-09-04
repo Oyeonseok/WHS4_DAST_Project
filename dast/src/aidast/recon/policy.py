@@ -277,6 +277,11 @@ def _path_matches(path: str, prefix: str) -> bool:
     return path == prefix or path.startswith(prefix + "/")
 
 
+_EXACT_ASSET_TYPES = frozenset(
+    {AssetType.URL, AssetType.HOST, AssetType.IP}
+)
+
+
 class ScopeGuard:
     """Deterministically applies deny-first target rules to HTTP requests."""
 
@@ -296,6 +301,23 @@ class ScopeGuard:
         ):
             return False, "unsupported or incomplete URL"
 
+        # 1) An exact deny is the most specific rule and always wins.
+        for rule in self.policy.target_rules.deny:
+            if rule.asset_type in _EXACT_ASSET_TYPES and self._matches_deny(
+                parsed, rule
+            ):
+                return False, f"matched deny rule: {rule.reason}"
+
+        # 2) An explicitly listed asset outranks a broad wildcard/CIDR deny,
+        #    which is how bug bounty programs word "*.example.com is out of
+        #    scope unless separately listed".
+        for rule in self.policy.target_rules.allow:
+            if rule.asset_type in _EXACT_ASSET_TYPES and self._matches_allow(
+                parsed, rule
+            ):
+                return True, f"matched allow rule from {rule.source_section}"
+
+        # 3) Broad denies block everything that was not explicitly listed.
         for rule in self.policy.target_rules.deny:
             if self._matches_deny(parsed, rule):
                 return False, f"matched deny rule: {rule.reason}"

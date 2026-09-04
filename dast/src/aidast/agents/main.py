@@ -30,6 +30,51 @@ from aidast.scope.paths import identify_program
 ModelT = TypeVar("ModelT", bound=BaseModel)
 
 
+_UNSUPPORTED_SCHEMA_KEYS = frozenset({
+    "minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum",
+    "minLength", "maxLength", "pattern", "format",
+    "minItems", "maxItems", "default",
+})
+
+
+def _strict_json_schema(
+    model_type: type[BaseModel],
+    *,
+    tool_catalog: tuple[str, ...] | None = None,
+) -> dict:
+    """Adapt a Pydantic schema to the OpenAI structured-output strict subset.
+
+    The parsed result is still validated by the Pydantic model, so dropping the
+    constraint keywords here does not weaken any runtime guarantee.
+    """
+    schema = model_type.model_json_schema()
+
+    if tool_catalog:
+        tools = schema.get("properties", {}).get("tools")
+        if isinstance(tools, dict) and isinstance(
+            tools.get("additionalProperties"), dict
+        ):
+            entry = tools.pop("additionalProperties")
+            tools["properties"] = {name: dict(entry) for name in tool_catalog}
+
+    def enforce(node: object) -> None:
+        if isinstance(node, dict):
+            for key in list(node):
+                if key in _UNSUPPORTED_SCHEMA_KEYS:
+                    del node[key]
+            if node.get("type") == "object" and "properties" in node:
+                node["required"] = list(node["properties"])
+                node["additionalProperties"] = False
+            for value in node.values():
+                enforce(value)
+        elif isinstance(node, list):
+            for value in node:
+                enforce(value)
+
+    enforce(schema)
+    return schema
+
+
 class MainAgentError(RuntimeError):
     pass
 
@@ -137,6 +182,7 @@ class CodexMainAgent:
             artifact_name="recon-policy",
             operation="Recon policy compilation",
             native_skill=("aidast.skills.recon_policy", "aidast-recon-policy"),
+            tool_catalog=tool_catalog,
         )
         if policy.source.scope_md_path != str(scope_path):
             raise MainAgentError("recon policy references an unexpected Scope.md path")
@@ -193,6 +239,7 @@ class CodexMainAgent:
         operation: str,
         native_skill: tuple[str, str] | None = None,
         allow_browser: bool = False,
+        tool_catalog: tuple[str, ...] | None = None,
     ) -> ModelT:
         executable = shutil.which(self._executable)
         if executable is None:
@@ -210,7 +257,10 @@ class CodexMainAgent:
                     skill_name=native_skill[1],
                 )
             schema_path.write_text(
-                json.dumps(model_type.model_json_schema(), ensure_ascii=False),
+                json.dumps(
+                    _strict_json_schema(model_type, tool_catalog=tool_catalog),
+                    ensure_ascii=False,
+                ),
                 encoding="utf-8",
             )
 

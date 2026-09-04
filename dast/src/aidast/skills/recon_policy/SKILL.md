@@ -25,6 +25,10 @@ verified.
 
 # Target Rules
 
+- Copy every `target_rules` value verbatim from the supplied `Scope.md`.
+  Never paraphrase, summarize, pluralize, or relabel it. The runtime rejects
+  any rule whose value does not appear in the document text, so quote the
+  exact substring even for prose exclusions.
 - Convert only explicit in-scope assets into `target_rules.allow`.
 - Normalize scheme, host, port and path without broadening the source asset.
 - Preserve wildcard hosts and CIDRs as their own asset types; never enumerate
@@ -73,6 +77,14 @@ discovery, and port scanning require explicit supporting permission.
 
 # Controls and Unresolved Values
 
+- `required_arguments` and `forbidden_arguments` are compared literally against
+  the runner's command-line tokens, and each adapter spells its flags
+  differently (`--proxy`, `-proxy`, `-http-proxy`, `-x`). Put an exact token
+  there only when you are certain the adapter emits it. Never write prose: an
+  unmatched required entry aborts the run, and an unmatched forbidden entry
+  silently disables the check. Leave both arrays empty by default and express
+  the requirement in `conditions` instead, which is where human-readable
+  constraints belong.
 - Represent request rate, concurrency, duration, redirect and header rules in
   `global_controls` and tool-specific `enforced_controls`.
 - Do not treat an omitted limit as unlimited. Use `null`; if safe execution
