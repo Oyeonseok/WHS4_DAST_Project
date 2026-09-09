@@ -91,8 +91,8 @@ class AttackCatalogTests(unittest.TestCase):
         manifest = json.loads(package.joinpath("manifest.json").read_text())
         self.assertEqual(manifest["catalog"]["catalog_version"], CATALOG_VERSION)
         self.assertFalse(manifest["catalog"]["enabled"])
-        self.assertFalse(manifest["provenance"]["upstream_content_included"])
-        self.assertEqual(manifest["resources"], ["controller.md"])
+        self.assertTrue(manifest["provenance"]["upstream_content_included"])
+        self.assertEqual(manifest["resources"], ["controller.md", "controller/SKILL.md", "library/*/SKILL.md"])
         self.assertTrue(package.joinpath(manifest["catalog"]["resource"]).is_file())
 
 

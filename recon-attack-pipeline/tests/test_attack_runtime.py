@@ -194,8 +194,8 @@ class ReviewRuntimeTests(unittest.TestCase):
     def test_resource_manifest_does_not_install_upstream_attack_playbooks(self):
         prepare_review(self.handoff, self.output)
         manifest = json.loads((self.output / "resource-manifest.json").read_text())
-        self.assertFalse(manifest["provenance"]["upstream_content_included"])
-        self.assertEqual(manifest["resources"], ["controller.md"])
+        self.assertTrue(manifest["provenance"]["upstream_content_included"])
+        self.assertEqual(manifest["resources"], ["controller.md", "controller/SKILL.md", "library/*/SKILL.md"])
 
 
 if __name__ == "__main__":

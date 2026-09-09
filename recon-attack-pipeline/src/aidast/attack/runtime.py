@@ -14,7 +14,7 @@ from pathlib import Path
 
 from aidast.pipeline.models import HandoffManifest
 
-from .evidence import EvidenceReader, EvidenceSnapshot, SQLiteEvidenceReader
+from .evidence import EvidenceReader, EvidenceSnapshot, ObservationSummary, SQLiteEvidenceReader
 
 
 class ReviewPreparationError(ValueError):
@@ -30,6 +30,7 @@ class ReviewTask:
     observation_ids: tuple[str, ...]
     annotations: tuple[tuple[str, str, str, str], ...]
     review_checks: tuple[str, ...]
+    observation_summaries: tuple[ObservationSummary, ...] = ()
     status: str = "pending"
     kind: str = "evidence_review"
 
@@ -98,10 +99,12 @@ def _build_tasks(snapshot: EvidenceSnapshot) -> tuple[ReviewTask, ...]:
             "path": endpoint.path,
             "observation_ids": observations,
             "annotations": annotations,
+            "observation_summaries": [asdict(item) for item in endpoint.observation_summaries],
         })
         tasks.append(ReviewTask(
             "review_" + hashlib.sha256(identity).hexdigest(), endpoint.endpoint_id,
             endpoint.method, endpoint.path, observations, annotations, tuple(checks),
+            endpoint.observation_summaries,
         ))
     return tuple(tasks)
 

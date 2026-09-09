@@ -380,6 +380,7 @@ def migrate_attack_schema(conn: sqlite3.Connection) -> None:
         "findings": {
             "run_id": "TEXT REFERENCES attack_runs(run_id)",
             "plan_task_id": "TEXT", "plan_revision": "INTEGER", "reviewer_id": "TEXT",
+            "hypothesis_id": "TEXT",
         },
     }
     for table, columns in additions.items():

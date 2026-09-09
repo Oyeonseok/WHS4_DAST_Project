@@ -3,11 +3,22 @@
 from __future__ import annotations
 
 import sqlite3
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
 from aidast.recon.annotations import TAXONOMY, safe_url
+
+
+@dataclass(frozen=True)
+class ObservationSummary:
+    observation_id: str
+    source_tool: str
+    discovery_kind: str
+    observed_url: str
+    auth_state: str
+    metadata: tuple[tuple[str, str | int], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -18,6 +29,7 @@ class EndpointEvidence:
     observation_ids: tuple[str, ...] = ()
     # (annotation ID, observation ID, category, tag)
     annotations: tuple[tuple[str, str, str, str], ...] = ()
+    observation_summaries: tuple[ObservationSummary, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -64,6 +76,34 @@ class SQLiteEvidenceReader:
                         "SELECT observation_id FROM endpoint_observations WHERE endpoint_id=? ORDER BY observation_id",
                         (endpoint_id,),
                     ))
+                    summaries = []
+                    for record in conn.execute(
+                        """SELECT ob.observation_id,ob.source_tool,ob.discovery_kind,
+                        COALESCE(ob.observed_url,''),COALESCE(dc.auth_state,'unknown'),
+                        COALESCE(ob.evidence_json,'{}')
+                        FROM endpoint_observations ob
+                        LEFT JOIN discovery_contexts dc ON dc.context_id=ob.context_id
+                        WHERE ob.endpoint_id=? ORDER BY ob.observation_id""", (endpoint_id,),
+                    ):
+                        try:
+                            raw_metadata = json.loads(record[5])
+                        except (TypeError, ValueError):
+                            raw_metadata = {}
+                        allowed = {}
+                        if isinstance(raw_metadata, dict):
+                            for key in ("response_status", "content_length", "word_count", "line_count",
+                                        "content_type", "html_tag", "html_attribute"):
+                                value = raw_metadata.get(key)
+                                if isinstance(value, (str, int)) and not isinstance(value, bool):
+                                    allowed[key] = value if isinstance(value, int) else value[:200]
+                        summaries.append(ObservationSummary(
+                            str(record[0]), str(record[1])[:128], str(record[2])[:128],
+                            safe_url(str(record[3])), str(record[4])[:64],
+                            tuple(sorted(allowed.items())),
+                        ))
+                    observation_summaries = tuple(summaries)
+                else:
+                    observation_summaries = ()
                 if {"endpoint_observations", "endpoint_annotations", "annotation_runs"} <= tables:
                     candidates = conn.execute(
                         """SELECT an.annotation_id, an.observation_id, an.category, an.tag
@@ -79,6 +119,7 @@ class SQLiteEvidenceReader:
                     normalized_method = "UNKNOWN"
                 endpoints.append(EndpointEvidence(
                     endpoint_id, normalized_method, safe_url(str(path or "")), observations, annotations,
+                    observation_summaries,
                 ))
             return EvidenceSnapshot(str(scan[0]), str(scan[1]), scan[2], tuple(endpoints))
         finally:

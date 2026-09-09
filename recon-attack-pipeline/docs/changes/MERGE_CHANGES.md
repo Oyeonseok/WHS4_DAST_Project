@@ -2,6 +2,20 @@
 
 이 문서는 `AI-Dast-main`의 Recon 기능을 유지하면서 `Scope 수집 → Recon Agent → Attack Agent` 단계 계약을 통합하는 작업의 전후 차이를 누적 기록한다.
 
+## 2026-09-09: Recon 기반 SKILL Attack 루프 연결
+
+기존 Attack은 검토 plan과 응답 메타데이터 관찰까지만 연결되어 가설 생성,
+SKILL 본문 사용, Finding 생성이 기본 실행 계약에 포함되지 않았다. 공급받은
+controller 1개와 library SKILL 59개를 패키지에 포함하고, 해시 검증 후 Recon
+annotation으로 선택하도록 변경했다.
+
+`SkillAttackAgent`는 모델이 Recon 근거와 선택된 SKILL을 보고 가설을 만들게
+하고, 신뢰된 executor가 노출한 승인 테스트 ID만 실행한다. 결과를 다시 모델이
+평가하되, Python이 hypothesis/test/evidence 귀속을 검증하고 confirmed 결과만
+`Attack.db`의 Finding과 request로 저장한다. 이 결과는 기존 Validation Agent가
+추가 변환 없이 읽는다. 상세 설계와 통합 방법은 `SKILL_ATTACK_AGENT.md`에
+기록했다.
+
 ## 2026-09-08: 통합 기반 및 안전 경계
 
 ### HTTP 요청 경계
