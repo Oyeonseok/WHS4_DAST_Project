@@ -168,6 +168,10 @@ class AttackStore:
             if conn.execute("PRAGMA user_version").fetchone()[0] != 6 or conn.execute(
                     "SELECT 1 FROM main.sqlite_master WHERE type='table' AND name IN ('scans','assets','origins','endpoints')").fetchone():
                 raise AttackStoreError("expected a thin v6 review database; legacy copied databases require a new output directory")
+            # Reapply the idempotent thin-schema migration so databases created
+            # by an earlier v6 build receive newly added optional columns.
+            migrate_attack_schema(conn)
+            conn.commit()
             if run_id is None:
                 rows = conn.execute("SELECT run_id FROM attack_runs").fetchall()
                 if len(rows) != 1:
@@ -306,6 +310,12 @@ class AttackStore:
             (self.run_id, self.scan_id, revision))
         return [{**dict(row), "document": json.loads(row["document_json"])} for row in rows]
 
+    def list_finding_ids(self) -> list[str]:
+        return [row[0] for row in self.conn.execute(
+            "SELECT finding_id FROM findings WHERE run_id=? AND scan_id=? ORDER BY finding_id",
+            (self.run_id, self.scan_id),
+        )]
+
     def set_status(self, status: str, *, cursor: Mapping | None = None) -> None:
         with self.conn:
             run = self.get_run()
@@ -383,6 +393,206 @@ class AttackStore:
 
         return self._write(identifier, "evidence", operation)
 
+    def record_attempt(self, *, attempt_id: str, task_id: str, endpoint_id: str,
+                       skill_name: str, test_id: str, hypothesis_id: str,
+                       status: str = "started") -> WriteResult:
+        """Persist an attempt before an authorized test is dispatched."""
+        identifier = _identifier(attempt_id)
+
+        def operation() -> str:
+            for value in (task_id, skill_name, test_id, hypothesis_id, status):
+                _identifier(value)
+            self._endpoint(endpoint_id)
+            revision = self.get_run()["plan_revision"]
+            if not self.conn.execute("""SELECT 1 FROM attack_plan_tasks
+                    WHERE run_id=? AND scan_id=? AND plan_revision=? AND task_id=?""",
+                    (self.run_id, self.scan_id, revision, task_id)).fetchone():
+                raise AttackStoreError("attempt task does not belong to current plan")
+            fingerprint = _sha(_json({"run_id": self.run_id, "hypothesis_id": hypothesis_id,
+                                      "test_id": test_id}))
+            values = (identifier, self.scan_id, skill_name, endpoint_id, fingerprint,
+                      "unauthenticated", test_id, status, self.run_id, task_id,
+                      revision, hypothesis_id, test_id)
+            row = self.conn.execute("""SELECT attempt_id,scan_id,skill_name,endpoint_id,
+                    request_fingerprint,identity_role,payload_variant,outcome,run_id,
+                    plan_task_id,plan_revision,logical_check_id,execution_id
+                    FROM attack_attempts WHERE attempt_id=?""", (identifier,)).fetchone()
+            if row:
+                if tuple(row) != values:
+                    raise AttackStoreError("attempt identifier already contains different data")
+                return "duplicate"
+            self.conn.execute("""INSERT INTO attack_attempts
+                (attempt_id,scan_id,skill_name,endpoint_id,request_fingerprint,
+                 identity_role,payload_variant,outcome,run_id,plan_task_id,
+                 plan_revision,logical_check_id,execution_id)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""", values)
+            return "inserted"
+
+        return self._write(identifier, "attempt", operation)
+
+    def complete_attempt(self, attempt_id: str, *, outcome: str,
+                         response_status: int | None = None) -> None:
+        if outcome not in {"supports", "refutes", "inconclusive", "error", "outcome_unknown"}:
+            raise AttackStoreError("invalid attempt outcome")
+        if response_status is not None and not 100 <= response_status <= 599:
+            raise AttackStoreError("invalid attempt response status")
+        with self.conn:
+            changed = self.conn.execute("""UPDATE attack_attempts
+                SET outcome=?,response_status=?
+                WHERE attempt_id=? AND run_id=? AND scan_id=? AND outcome='started'""",
+                (outcome, response_status, _identifier(attempt_id), self.run_id, self.scan_id)).rowcount
+            if changed != 1:
+                raise AttackStoreError("attempt is missing or already completed")
+            self._audit("attempt.completed", {"attempt_id": attempt_id, "outcome": outcome})
+
+    def record_finding(self, *, finding_id: str, task_id: str, endpoint_id: str,
+                       skill_name: str, hypothesis_id: str,
+                       assessment: Mapping) -> WriteResult:
+        identifier = _identifier(finding_id)
+
+        def operation() -> str:
+            self._bound(assessment)
+            self._endpoint(endpoint_id)
+            for value in (task_id, skill_name, hypothesis_id):
+                _identifier(value)
+            revision = self.get_run()["plan_revision"]
+            if not self.conn.execute("""SELECT 1 FROM attack_plan_tasks
+                    WHERE run_id=? AND scan_id=? AND plan_revision=? AND task_id=?""",
+                    (self.run_id, self.scan_id, revision, task_id)).fetchone():
+                raise AttackStoreError("finding task does not belong to current plan")
+            if assessment.get("disposition") != "confirmed":
+                raise AttackStoreError("only confirmed Attack assessments become findings")
+            severity = assessment.get("severity")
+            if severity not in {"CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"}:
+                raise AttackStoreError("invalid finding severity")
+            description = _redact(assessment.get("description", ""))
+            values = (identifier, self.scan_id, endpoint_id, _identifier(assessment["vuln_type"]),
+                      severity, _identifier(assessment["title"]), description, assessment.get("cwe_id"),
+                      "unreviewed", self.run_id, task_id, revision, hypothesis_id)
+            row = self.conn.execute("""SELECT finding_id,scan_id,endpoint_id,vuln_type,severity,
+                    title,description,cwe_id,status,run_id,plan_task_id,plan_revision,hypothesis_id
+                    FROM findings WHERE finding_id=?""", (identifier,)).fetchone()
+            if row:
+                if tuple(row) != values:
+                    raise AttackStoreError("finding identifier already contains different data")
+                return "duplicate"
+            self.conn.execute("""INSERT INTO findings
+                (finding_id,scan_id,endpoint_id,vuln_type,severity,title,description,cwe_id,
+                 status,run_id,plan_task_id,plan_revision,hypothesis_id)
+                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""", values)
+            return "inserted"
+
+        return self._write(identifier, "finding", operation)
+
+    def record_request(self, *, finding_id: str, test_id: str, method: str, url: str,
+                       response_status: int | None, response_headers: Sequence[str],
+                       response_body: bytes) -> WriteResult:
+        identifier = "request_" + _sha(_json({"run_id": self.run_id,
+                                               "finding_id": finding_id, "test_id": test_id}))
+
+        def operation() -> str:
+            _identifier(finding_id)
+            _identifier(test_id)
+            if method.upper() not in {"GET", "HEAD", "OPTIONS", "POST", "PUT", "PATCH", "DELETE"}:
+                raise AttackStoreError("invalid recorded request method")
+            if response_status is not None and not 100 <= response_status <= 599:
+                raise AttackStoreError("invalid recorded response status")
+            if not isinstance(response_body, bytes) or len(response_body) > 200_000:
+                raise AttackStoreError("recorded response body exceeds limit")
+            if not self.conn.execute("SELECT 1 FROM findings WHERE finding_id=? AND run_id=? AND scan_id=?",
+                                     (finding_id, self.run_id, self.scan_id)).fetchone():
+                raise AttackStoreError("request finding does not belong to current run")
+            safe_url = _redact(url)
+            safe_headers = _json([str(name).lower()[:128] for name in response_headers[:256]])
+            values = (identifier, finding_id, "unknown", method.upper(), safe_url, response_status,
+                      safe_headers, response_body)
+            row = self.conn.execute("""SELECT request_id,finding_id,role,method,url,response_status,
+                    response_headers,response_body FROM attack_requests WHERE request_id=?""",
+                    (identifier,)).fetchone()
+            if row:
+                if tuple(row) != values:
+                    raise AttackStoreError("request identifier already contains different data")
+                return "duplicate"
+            self.conn.execute("""INSERT INTO attack_requests
+                (request_id,finding_id,role,method,url,response_status,response_headers,response_body)
+                VALUES (?,?,?,?,?,?,?,?)""", values)
+            return "inserted"
+
+        return self._write(identifier, "request", operation)
+
+    def record_finding_bundle(self, *, finding_id: str, task_id: str, endpoint_id: str,
+                              skill_name: str, hypothesis_id: str, assessment: Mapping,
+                              requests: Sequence[Mapping]) -> WriteResult:
+        """Atomically publish one confirmed finding and all supporting requests."""
+        identifier = _identifier(finding_id)
+
+        def operation() -> str:
+            self._bound(assessment)
+            self._endpoint(endpoint_id)
+            for value in (task_id, skill_name, hypothesis_id):
+                _identifier(value)
+            revision = self.get_run()["plan_revision"]
+            if not self.conn.execute("""SELECT 1 FROM attack_plan_tasks
+                    WHERE run_id=? AND scan_id=? AND plan_revision=? AND task_id=?""",
+                    (self.run_id, self.scan_id, revision, task_id)).fetchone():
+                raise AttackStoreError("finding task does not belong to current plan")
+            if assessment.get("disposition") != "confirmed":
+                raise AttackStoreError("only confirmed Attack assessments become findings")
+            severity = assessment.get("severity")
+            if severity not in {"CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"}:
+                raise AttackStoreError("invalid finding severity")
+            finding_values = (
+                identifier, self.scan_id, endpoint_id, _identifier(assessment["vuln_type"]),
+                severity, _identifier(assessment["title"]), _redact(assessment.get("description", "")),
+                assessment.get("cwe_id"), "unreviewed", self.run_id, task_id, revision, hypothesis_id,
+            )
+            existing = self.conn.execute("""SELECT finding_id,scan_id,endpoint_id,vuln_type,severity,
+                    title,description,cwe_id,status,run_id,plan_task_id,plan_revision,hypothesis_id
+                    FROM findings WHERE finding_id=?""", (identifier,)).fetchone()
+            if existing and tuple(existing) != finding_values:
+                raise AttackStoreError("finding identifier already contains different data")
+            request_values = []
+            for request in requests:
+                test_id = _identifier(request["test_id"])
+                method = str(request["method"]).upper()
+                status = request.get("response_status")
+                body = request.get("response_body", b"")
+                if method not in {"GET", "HEAD", "OPTIONS", "POST", "PUT", "PATCH", "DELETE"}:
+                    raise AttackStoreError("invalid recorded request method")
+                if status is not None and not 100 <= status <= 599:
+                    raise AttackStoreError("invalid recorded response status")
+                if not isinstance(body, bytes) or len(body) > 200_000:
+                    raise AttackStoreError("recorded response body exceeds limit")
+                request_id = "request_" + _sha(_json({"run_id": self.run_id,
+                                                       "finding_id": identifier, "test_id": test_id}))
+                headers = tuple(request.get("response_headers", ()))
+                values = (request_id, identifier, str(request.get("identity_role", "unknown"))[:128],
+                          method, _redact(str(request.get("url", ""))), status,
+                          _json([str(name).lower()[:128] for name in headers[:256]]), body)
+                row = self.conn.execute("""SELECT request_id,finding_id,role,method,url,response_status,
+                        response_headers,response_body FROM attack_requests WHERE request_id=?""",
+                        (request_id,)).fetchone()
+                if row and tuple(row) != values:
+                    raise AttackStoreError("request identifier already contains different data")
+                request_values.append((values, row is not None))
+            if existing:
+                if not all(already_exists for _, already_exists in request_values):
+                    raise AttackStoreError("existing finding has an incomplete request bundle")
+                return "duplicate"
+            self.conn.execute("""INSERT INTO findings
+                (finding_id,scan_id,endpoint_id,vuln_type,severity,title,description,cwe_id,
+                 status,run_id,plan_task_id,plan_revision,hypothesis_id)
+                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""", finding_values)
+            for values, already_exists in request_values:
+                if already_exists:
+                    raise AttackStoreError("request exists without its finding bundle")
+                self.conn.execute("""INSERT INTO attack_requests
+                    (request_id,finding_id,role,method,url,response_status,response_headers,response_body)
+                    VALUES (?,?,?,?,?,?,?,?)""", values)
+            return "inserted"
+
+        return self._write(identifier, "finding_bundle", operation)
+
     def save_authorization(self, document: Mapping) -> WriteResult:
         """Archive an exact binding; this method does not verify signatures."""
         identifier = document.get("authorization_id", "")
@@ -426,8 +636,39 @@ class AttackStore:
 
         return self._write(identifier, "authorization", operation)
 
-    def revoke_run(self, reason: str = "operator revoked") -> int:
+    def activate_authorization(self, authorization_id: str) -> None:
         with self.conn:
+            changed = self.conn.execute("""UPDATE attack_runs
+                SET authorization_id=?,status='ready',updated_at=?
+                WHERE run_id=? AND scan_id=?
+                AND status IN ('created','awaiting_approval','ready')
+                AND EXISTS (SELECT 1 FROM run_authorizations a
+                    WHERE a.authorization_id=?
+                    AND a.run_id=attack_runs.run_id AND a.scan_id=attack_runs.scan_id
+                    AND a.plan_revision=attack_runs.plan_revision AND a.revoked_at IS NULL)""",
+                (_identifier(authorization_id), _now(), self.run_id, self.scan_id,
+                 authorization_id)).rowcount
+            if changed != 1:
+                raise AttackStoreError(
+                    "authorization is invalid, revoked, or cannot be activated from the current run state"
+                )
+            self._audit("authorization.activated", {"authorization_id": authorization_id})
+
+    def revoke_run(self, reason: str = "operator revoked", *,
+                   revoke_authorization: Callable[[str], None] | None = None) -> int:
+        # Serialize the complete external/local authorization transition with
+        # activation. If an external revocation raises, the local transaction
+        # rolls back and every outstanding identifier remains retryable.
+        self.conn.execute("BEGIN IMMEDIATE")
+        with self.conn:
+            authorization_ids = [row[0] for row in self.conn.execute(
+                """SELECT authorization_id FROM run_authorizations
+                   WHERE run_id=? AND scan_id=? AND revoked_at IS NULL
+                   ORDER BY authorization_id""", (self.run_id, self.scan_id)
+            )]
+            if revoke_authorization is not None:
+                for authorization_id in authorization_ids:
+                    revoke_authorization(authorization_id)
             self.conn.execute("""UPDATE attack_runs SET revocation_generation=revocation_generation+1,
                 authorization_id=NULL,status=CASE WHEN status IN ('completed','failed','cancelled')
                 THEN status ELSE 'paused' END,updated_at=? WHERE run_id=? AND scan_id=?""",
@@ -435,7 +676,8 @@ class AttackStore:
             self.conn.execute("""UPDATE run_authorizations SET revoked_at=?
                 WHERE run_id=? AND scan_id=? AND revoked_at IS NULL""", (_now(), self.run_id, self.scan_id))
             generation = self.get_run()["revocation_generation"]
-            self._audit("run.revoked", {"reason": reason, "generation": generation})
+            self._audit("run.revoked", {"reason": reason, "generation": generation,
+                                         "authorization_ids": authorization_ids})
             return generation
 
     def acquire_lease(self, lease_key: str, worker_id: str, *, ttl_seconds: float = 30) -> int:

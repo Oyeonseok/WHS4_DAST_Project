@@ -25,7 +25,7 @@ scope_rules_*.json
 .vscode/
 
 # 통합 파이프라인 로컬 입력·실행 산출물
-Scope/
+/Scope/
 Runs/
 AttackRuns/
 ValidationRuns/

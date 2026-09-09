@@ -14,18 +14,16 @@ Upstream byte identity and authorship of the local controller have not been
 independently verified. The inventory records local provenance, not a claim
 that all 60 files are unmodified upstream files.
 
-AI-Dast includes only the 59 library entries' identifiers, locally written
-titles, broad reference categories, hashes, and local evidence-tag mappings
-in `src/aidast/skills/attack/catalog/index.json`.
-The source playbooks, controller, SQL scripts, commands, and payloads are not
-redistributed or loaded. The original license and community attribution are
-retained for provenance.
+AI-Dast packages the supplied controller and 59 library `SKILL.md` documents
+under `src/aidast/skills/attack/`. Runtime loading verifies each document
+against the SHA-256 inventory before it is supplied to the Attack planner.
+The original license and community attribution are retained for provenance.
 
-Every catalog entry is disabled and restricted to metadata. A signal match
-suggests a reference topic for human evidence review; it is not a vulnerability
-finding, permission to test, or a request to execute a playbook. An empty mapping
-means that the current evidence taxonomy does not justify automatic routing.
-Mappings were authored locally and are not extracted executable source guidance.
+Catalog entries remain non-executable metadata. A signal match allows the
+matching document to be loaded as model guidance; it is not itself a finding,
+permission to test, or an executable playbook. Tests are exposed separately as
+pre-authorized IDs by the trusted Attack executor. An empty mapping means that
+the current evidence taxonomy does not justify automatic routing.
 
 The upstream repository identified by the supplied bundle is
 <https://github.com/elementalsouls/Claude-BugHunter>.

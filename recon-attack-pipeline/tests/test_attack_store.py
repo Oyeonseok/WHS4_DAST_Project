@@ -309,7 +309,19 @@ class AttackStoreTests(unittest.TestCase):
         self.assertEqual(store.save_authorization({**document, "plan_digest": "wrong"}).status, "invalid")
         self.assertEqual(store.save_authorization(document).status, "inserted")
         self.assertIsNone(store.get_run()["authorization_id"])
-        self.assertEqual(store.revoke_run("operator cancelled"), 1)
+        store.activate_authorization("auth")
+        self.assertEqual(store.get_run()["authorization_id"], "auth")
+        self.assertEqual(store.get_run()["status"], "ready")
+        second_document = {**document, "authorization_id": "auth2"}
+        self.assertEqual(store.save_authorization(second_document).status, "inserted")
+        store.activate_authorization("auth2")
+        revoked = []
+        self.assertEqual(store.revoke_run(
+            "operator cancelled", revoke_authorization=revoked.append,
+        ), 1)
+        self.assertEqual(revoked, ["auth", "auth2"])
+        with self.assertRaisesRegex(AttackStoreError, "state"):
+            store.activate_authorization("auth")
         self.assertIsNotNone(store.conn.execute("SELECT revoked_at FROM run_authorizations").fetchone()[0])
         self.assertEqual(store.save_authorization(document).status, "invalid")
         self.assertEqual(store.get_run()["status"], "paused")
@@ -317,6 +329,29 @@ class AttackStoreTests(unittest.TestCase):
             store.conn.execute("UPDATE run_authorizations SET revoked_at=NULL")
         with self.assertRaises(sqlite3.IntegrityError), store.conn:
             store.conn.execute("UPDATE attack_runs SET revocation_generation=0")
+
+    def test_external_revocation_failure_rolls_back_local_revocation_for_retry(self):
+        store = self.store()
+        self.plan(store)
+        now = datetime.now(timezone.utc)
+        document = {"authorization_id": "auth", "run_id": "run", "scan_id": "scan",
+                    "plan_revision": 1, "plan_digest": store.get_plan()["plan_digest"],
+                    "scope_digest": "", "policy_digest": "", "catalog_digest": "",
+                    "revocation_generation": 0, "issuer": "issuer", "approver": "reviewer",
+                    "issued_at": now.isoformat(), "not_before": now.isoformat(),
+                    "expires_at": (now + timedelta(hours=1)).isoformat()}
+        self.assertEqual(store.save_authorization(document).status, "inserted")
+        store.activate_authorization("auth")
+        with self.assertRaisesRegex(RuntimeError, "provider unavailable"):
+            store.revoke_run(
+                "stop", revoke_authorization=lambda _: (_ for _ in ()).throw(
+                    RuntimeError("provider unavailable")
+                ),
+            )
+        self.assertEqual(store.get_run()["authorization_id"], "auth")
+        self.assertIsNone(store.conn.execute(
+            "SELECT revoked_at FROM run_authorizations WHERE authorization_id='auth'"
+        ).fetchone()[0])
 
     def test_demonstrated_chains_require_and_preserve_confirmed_findings(self):
         store = self.store()

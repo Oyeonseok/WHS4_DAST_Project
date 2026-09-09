@@ -28,7 +28,7 @@ scope_rules_*.json
 .aidast_db_backups/
 
 # Local pipeline inputs and run outputs
-Scope/
+/Scope/
 Runs/
 AttackRuns/
 ValidationRuns/

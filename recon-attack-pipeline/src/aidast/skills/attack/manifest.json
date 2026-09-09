@@ -4,7 +4,7 @@
   "mode": "plan",
   "network_enabled": false,
   "external_processes_enabled": false,
-  "resources": ["controller.md"],
+  "resources": ["controller.md", "controller/SKILL.md", "library/*/SKILL.md"],
   "catalog": {
     "resource": "catalog/index.json",
     "catalog_version": "1.0",
@@ -17,10 +17,10 @@
     "reviewed_source_bundle": "attack",
     "reviewed_upstream": "https://github.com/elementalsouls/Claude-BugHunter",
     "reviewed_upstream_commit": "e49b9da698bfe830302f0ae49ea02e41cc5cf876",
-    "upstream_content_included": false,
+    "upstream_content_included": true,
     "attribution_directory": "docs/third-party/claude-bughunter",
     "source_inventory": "docs/third-party/claude-bughunter/inventory.json",
     "source_notices_included": true,
-    "note": "This controller is original local evidence-review guidance. The reviewed upstream attack controller and playbooks are not copied or executed. Disabled catalog metadata and source attribution notices are included."
+    "note": "The supplied controller and 59 library SKILL documents are packaged as verified model guidance. They are never executable code; authorized test adapters remain the only execution boundary."
   }
 }

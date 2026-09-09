@@ -121,10 +121,20 @@ def read_source(database: Path, *, run_id: str | None = None,
                     raise ValidationError("finding task does not belong to the selected run")
                 evidence = []
                 if task_id is not None:
-                    evidence_rows = conn.execute(
-                        "SELECT * FROM attack_evidence WHERE run_id=? AND scan_id=? AND task_id=? AND plan_revision=? ORDER BY evidence_id LIMIT 1001",
-                        (run_id, run["scan_id"], task_id, revision),
-                    ).fetchall()
+                    hypothesis_id = finding.get("hypothesis_id")
+                    if hypothesis_id is None:
+                        evidence_rows = conn.execute(
+                            "SELECT * FROM attack_evidence WHERE run_id=? AND scan_id=? AND task_id=? AND plan_revision=? ORDER BY evidence_id LIMIT 1001",
+                            (run_id, run["scan_id"], task_id, revision),
+                        ).fetchall()
+                    else:
+                        evidence_rows = conn.execute(
+                            """SELECT e.* FROM attack_evidence e
+                               JOIN attack_attempts a ON a.attempt_id=e.attempt_id
+                               WHERE e.run_id=? AND e.scan_id=? AND e.task_id=? AND e.plan_revision=?
+                               AND a.logical_check_id=? ORDER BY e.evidence_id LIMIT 1001""",
+                            (run_id, run["scan_id"], task_id, revision, hypothesis_id),
+                        ).fetchall()
                     if len(evidence_rows) > 1000:
                         raise ValidationError("finding evidence exceeds the bounded review budget")
                     for evidence_row in evidence_rows:
@@ -166,6 +176,7 @@ def read_source(database: Path, *, run_id: str | None = None,
                     "finding": {key: finding[key] for key in (
                         "finding_id", "endpoint_id", "plan_task_id", "plan_revision", "severity", "status", "created_at",
                         "cvss_score", "cvss_vector", "cwe_id")}
+                    | {"hypothesis_id": finding.get("hypothesis_id")}
                     | {key: safe_text(finding.get(key)) for key in ("vuln_type", "title", "description")},
                     "evidence": evidence, "requests": requests,
                     "limitations": ["untrusted_evidence_data", "no_reproduction_performed", "raw_bodies_and_headers_omitted",
