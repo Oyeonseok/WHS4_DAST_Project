@@ -23,3 +23,15 @@ scope_rules_*.json
 # OS / 에디터
 .DS_Store
 .vscode/
+
+# 통합 파이프라인 로컬 입력·실행 산출물
+Scope/
+Runs/
+AttackRuns/
+ValidationRuns/
+ReportRuns/
+dist/
+*.db
+*.db-wal
+*.db-shm
+*-surface*.json
