@@ -559,17 +559,6 @@ class PlaywrightDriver:
         # 기존 Runtime 종료
         self._shutdown_runtime()
 
-        executable = (
-            self.playwright
-            .chromium
-            .executable_path
-        )
-
-        self.profile_path.mkdir(
-            parents=True,
-            exist_ok=True,
-        )
-
         self.session_path.parent.mkdir(
             parents=True,
             exist_ok=True,
@@ -581,24 +570,12 @@ class PlaywrightDriver:
 
         self._cdp_port = port
 
-        command = [
-            executable,
-
+        launch_args = [
             f"--remote-debugging-port={port}",
-
             "--remote-allow-origins=*",
-
-            (
-                "--user-data-dir="
-                f"{self.profile_path}"
-            ),
-
             "--no-first-run",
-
             "--no-default-browser-check",
-
             "--disable-dev-shm-usage",
-
             # WSLg 가상 GPU에서 Chromium의 GPU 가속(WebGL/비디오 디코드 등)이
             # 호스트 그래픽 드라이버를 크래시시켜 화면 전체가 검게 변하고
             # 강제 재부팅이 필요해지는 사례가 있다. GPU 가속만 끄고
@@ -607,37 +584,26 @@ class PlaywrightDriver:
             # 페인트하지 못해 "로드 완료" 신호를 못 주고, katana가 180초
             # 내내 그 탭을 기다리다 타임아웃나는 부작용이 있었다.
             "--disable-gpu",
-
             "--ignore-certificate-errors",
-
-            "about:blank",
         ]
 
+        launch_options = {
+            "headless": False,
+            "args": launch_args,
+        }
         if self.proxy_url:
+            launch_options["proxy"] = {
+                "server": self.proxy_url,
+                # Chromium otherwise bypasses configured proxies for loopback.
+                "bypass": "<-loopback>",
+            }
 
-            command.insert(
-                -1,
-                (
-                    "--proxy-server="
-                    f"{self.proxy_url}"
-                ),
-            )
-            # Chromium otherwise bypasses configured proxies for loopback.
-            command.insert(-1, "--proxy-bypass-list=<-loopback>")
-
-        self._chrome_process = (
-            subprocess.Popen(
-                command,
-
-                stdout=(
-                    subprocess.DEVNULL
-                ),
-
-                stderr=(
-                    subprocess.DEVNULL
-                ),
-            )
-        )
+        # Keep Playwright's native connection authoritative. Launching Chromium
+        # separately and reconnecting with connect_over_cdp() can leave a visible
+        # page permanently loading while even title()/storage_state() stop
+        # responding. The debugging port remains available to Katana.
+        self.browser = self.playwright.chromium.launch(**launch_options)
+        self._browser_kind = "managed"
 
         self._chrome_ws_url = (
             self._wait_for_cdp(
@@ -645,51 +611,16 @@ class PlaywrightDriver:
             )
         )
 
-        self.browser = (
-            self.playwright
-            .chromium
-            .connect_over_cdp(
-                (
-                    "http://127.0.0.1:"
-                    f"{port}"
-                )
-            )
+        self.context = self.browser.new_context(
+            ignore_https_errors=True,
+            service_workers=(
+                "block" if self.target_policy is not None else "allow"
+            ),
         )
-
-        self._browser_kind = "cdp"
-
-        contexts = (
-            self.browser.contexts
-        )
-
-        if not contexts:
-
-            raise RuntimeError(
-                "Chromium BrowserContext를 "
-                "찾을 수 없습니다."
-            )
-
-        self.context = contexts[0]
 
         self._register_context_handlers()
-
-        pages = self.context.pages
-
-        if pages:
-
-            self.page = pages[0]
-
-        else:
-
-            self.page = (
-                self.context.new_page()
-            )
-
-        for page in self.context.pages:
-
-            self._register_page_handlers(
-                page
-            )
+        self.page = self.context.new_page()
+        self._register_page_handlers(self.page)
 
     # =====================================================
     # HTTP Network Observation
@@ -1518,21 +1449,22 @@ class PlaywrightDriver:
         self,
     ) -> str | None:
 
-        if self._chrome_process is None:
+        if self.browser is None or self._chrome_ws_url is None:
             return None
 
-        try:
+        if self._chrome_process is not None:
+            try:
 
-            if (
-                self._chrome_process.poll()
-                is not None
-            ):
+                if (
+                    self._chrome_process.poll()
+                    is not None
+                ):
+
+                    return None
+
+            except Exception:
 
                 return None
-
-        except Exception:
-
-            return None
 
         return (
             self._chrome_ws_url

@@ -76,6 +76,40 @@ class ReconBrowserTransportTests(unittest.TestCase):
         self.driver.context.route_web_socket.call_args.args[1](websocket)
         websocket.close.assert_called_once_with()
 
+    def test_manual_browser_is_playwright_managed_while_exposing_cdp(self):
+        chromium = Mock()
+        managed_browser = Mock()
+        managed_context = Mock()
+        managed_context.pages = []
+        managed_page = Mock()
+        managed_context.new_page.return_value = managed_page
+        managed_browser.new_context.return_value = managed_context
+        chromium.launch.return_value = managed_browser
+        chromium.executable_path = "/legacy/chromium"
+        legacy_context = Mock()
+        legacy_context.pages = []
+        chromium.connect_over_cdp.return_value = Mock(contexts=[legacy_context])
+        self.driver.playwright = SimpleNamespace(chromium=chromium)
+
+        with patch.object(self.driver, "_find_free_port", return_value=9222), patch.object(
+            self.driver, "_wait_for_cdp", return_value="ws://127.0.0.1:9222/devtools/browser/id"
+        ), patch("aidast.recon.tools.playwright_driver.subprocess.Popen"):
+            self.driver._launch_manual_browser()
+
+        self.assertIs(self.driver.browser, managed_browser)
+        self.assertIs(self.driver.context, managed_context)
+        self.assertIs(self.driver.page, managed_page)
+        self.assertEqual(self.driver._browser_kind, "managed")
+        self.assertEqual(
+            self.driver.get_chrome_ws_url(),
+            "ws://127.0.0.1:9222/devtools/browser/id",
+        )
+        launch = chromium.launch.call_args.kwargs
+        self.assertFalse(launch["headless"])
+        self.assertIn("--remote-debugging-port=9222", launch["args"])
+        self.assertEqual(launch["proxy"]["server"], "http://127.0.0.1:8080")
+        chromium.connect_over_cdp.assert_not_called()
+
     def test_auth_check_uses_policy_transport(self):
         self.config.auth_check_url = "me"
         self.driver.context = Mock()
