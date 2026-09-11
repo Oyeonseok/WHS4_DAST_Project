@@ -2,6 +2,31 @@
 
 이 문서는 `AI-Dast-main`의 Recon 기능을 유지하면서 `Scope 수집 → Recon Agent → Attack Agent` 단계 계약을 통합하는 작업의 전후 차이를 누적 기록한다.
 
+## 2026-09-11: Katana 대량 결과 AI 태깅 상한 추가
+
+변경 전에는 Katana가 반환한 모든 관측을 50건씩 나눠 Codex로 동기 태깅했다.
+3,908건이면 79회의 모델 호출이 순차 실행되지만 진행 로그가 없어, Standard
+Katana 완료 직후 파이프라인이 멈춘 것처럼 보이고 실행 시간이 수 시간까지 늘어날
+수 있었다.
+
+변경 후에는 각 대상의 관측은 전부 DB에 보존하되 AI 태깅은 전체 100건 및 모델
+호출 3회까지만 실행한다. 50건 단위 배치 진행률과 생략된 관측 수를 출력하며,
+생략은 원본 관측과 최종 endpoint 병합에 영향을 주지 않는다.
+
+## 2026-09-11: Playwright 수동 인증 브라우저 무한 로딩 수정
+
+변경 전에는 Chromium을 `subprocess.Popen`으로 실행한 뒤
+`connect_over_cdp()`로 다시 연결했다. 브라우저 창과 CDP endpoint는 살아 있어도
+Playwright의 페이지 명령과 storage state 추출이 함께 멈추면서 대상 사이트가
+무한 로딩되는 현상이 발생했다.
+
+변경 후에는 Playwright가 화면이 보이는 Chromium을 처음부터 직접 관리한다.
+새 Context/Page를 만들고 기존 프록시·TargetPolicy·service worker·WebSocket
+경계를 유지했으며, Katana가 사용할 CDP endpoint도 계속 제공한다. 상세한 원인
+분리, 전후 비교, 검증 결과는
+[`PLAYWRIGHT_MANUAL_AUTH_LOADING_FIX.md`](PLAYWRIGHT_MANUAL_AUTH_LOADING_FIX.md)에
+기록했다.
+
 ## 2026-09-09: Recon 기반 SKILL Attack 루프 연결
 
 기존 Attack은 검토 plan과 응답 메타데이터 관찰까지만 연결되어 가설 생성,
