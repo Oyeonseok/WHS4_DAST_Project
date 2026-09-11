@@ -89,7 +89,7 @@ class ObservationTests(unittest.TestCase):
         for _ in range(2):
             conn = db.init_db(legacy)
             self.assertEqual(conn.execute('SELECT http_transaction_id, origin_id FROM http_transactions').fetchall(), [('old', None)])
-            self.assertEqual(conn.execute('PRAGMA user_version').fetchone()[0], 4)
+            self.assertEqual(conn.execute('PRAGMA user_version').fetchone()[0], 8)
             self.assertEqual(conn.execute('PRAGMA foreign_key_check').fetchall(), [])
             conn.close()
 
