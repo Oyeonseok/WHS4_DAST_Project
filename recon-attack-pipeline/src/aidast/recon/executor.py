@@ -325,6 +325,34 @@ class ReconExecutor:
             main_crawler_mode=resolution.main_crawler_mode,
         )
         self._origin_ids[task.target.asset] = origin_id
+        parsed = urlparse(url)
+        content_type = next(
+            (value for name, value in probe_result.headers.items()
+             if name.casefold() == "content-type"),
+            None,
+        )
+        endpoint_id = dbmod.upsert_endpoint(
+            self.conn,
+            origin_id=origin_id,
+            method="GET",
+            path=parsed.path or "/",
+            normalized_path=parsed.path or "/",
+            content_type=content_type,
+            auth_required=probe_result.status_code in {401, 403},
+            source_tool="http_probe",
+        )
+        dbmod.insert_http_transaction(
+            self.conn,
+            endpoint_id=endpoint_id,
+            source="http_probe",
+            method="GET",
+            url=url,
+            request_headers={"User-Agent": "aidast-recon/0.1"},
+            response_status=probe_result.status_code,
+            response_headers=probe_result.headers,
+            response_body=probe_result.body.encode("utf-8"),
+            content_type=content_type,
+        )
         print(
             f"   SPA={resolution.spa_detected} "
             f"({resolution.framework_signature or '시그니처 없음'}) "

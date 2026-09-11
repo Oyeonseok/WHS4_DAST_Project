@@ -242,6 +242,3 @@ class AttackAgent:
                 pass
             return AttackResult(self.run_id, "failed", tuple(sorted(completed)), tuple(collected),
                                 "planner_or_persistence_failure")
-
-
-AttackCoordinator = AttackAgent
