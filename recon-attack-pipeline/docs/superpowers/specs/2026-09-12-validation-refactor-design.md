@@ -27,6 +27,7 @@
 - 기존 Attack Hunt Skill을 취약점 의미 지식으로 재사용하되 Validation의 실행 규칙은 코드가 강제한다.
 - Recon, Attack, Chaining과 같은 `Pipeline.db`를 사용하면서 Validation의 쓰기 영역과 HTTP ledger를 분리한다.
 - Finding과 demonstrated Chain을 검증하고 `CONFIRMED` 결과만 Report 입력으로 허용한다.
+- `UNDERPOWERED` Finding은 부족한 영향 축과 후속 입증 방안을 구조화하되, 제안 자체를 검증 증거나 점수 상승으로 취급하지 않는다.
 - 중단된 Validation stage를 기존 증거 손실 없이 재개할 수 있게 한다.
 
 ### 2.2 비목표
@@ -51,6 +52,7 @@
 6. 기존 Chaining 순서와 테이블은 변경하지 않는다. Validation은 Chaining 결과를 읽기만 하고 별도 Validation case로 재현한다.
 7. Impact 축과 severity 구간은 §8의 승인된 기준을 사용한다. 이는 PDF의 잠정 점수표를 대체한다.
 8. 신규 Validation과 Report는 shared `Pipeline.db` schema v9만 사용한다.
+9. `UNDERPOWERED` Finding에는 제안 전용 ImpactGapAnalyzer를 실행한다. MVP는 영향 확장 가설을 저장할 뿐 추가 요청을 실행하거나 impact를 재평가하지 않는다.
 
 ## 4. 전체 아키텍처
 
@@ -92,6 +94,9 @@ AttackClaim reveal + semantic comparison
         v
 DecisionEngine + ImpactEvaluator
         |
+        +--> UNDERPOWERED Finding: ImpactGapAnalyzer
+             (analysis only, no dispatch)
+        |
         v
 validation_cases current snapshot
         |
@@ -116,6 +121,7 @@ validation_cases current snapshot
 | `Restricted Validation Agent` | 재현 수행, signal·blocker·impact 근거 제출 | staged BlindCase와 제한 helper |
 | `DecisionEngine` | 횟수·control·blocker·상태 전이를 결정론적으로 판정 | structured observations |
 | `ImpactEvaluator` | 증거에 묶인 세 축 점수와 severity 계산 | Skill profile, evidence IDs |
+| `ImpactGapAnalyzer` | UNDERPOWERED Finding의 부족한 축과 후속 입증 가설을 구조화 | 현재 Validation evidence, Hunt Skill, machine profile |
 | `ChainValidator` | 검증된 node를 전제로 demonstrated chain을 end-to-end 재현 | Chaining read model, ReproductionPort |
 
 각 컴포넌트는 Protocol 또는 명시적 DTO 경계로 연결한다. Agent 응답, SQLite row, HTTP library 객체를 다른 계층에 직접 노출하지 않는다.
@@ -162,7 +168,7 @@ CandidateIntegrityGate는 아래 조건을 모두 확인한다.
 
 1. 공통 Validation base Skill: Blind 규칙, evidence 인용, 출력 schema를 정의한다.
 2. 연결된 Attack Hunt Skill: 취약점별 메커니즘과 관찰 의미를 제공한다.
-3. `validation/profiles/<attack_skill_name>.json`: control, signal, timing baseline, impact mapping, 허용 development action을 기계 판독 형태로 정의한다.
+3. `validation/profiles/<attack_skill_name>.json`: control, signal, timing baseline, impact mapping, 허용 development action과 영향 확장 경로를 기계 판독 형태로 정의한다.
 
 profile 필수 키는 다음과 같다.
 
@@ -183,11 +189,12 @@ profile 필수 키는 다음과 같다.
   },
   "baseline_samples": 3,
   "impact_rules": {},
-  "allowed_development_actions": []
+  "allowed_development_actions": [],
+  "impact_expansion_paths": []
 }
 ```
 
-`baseline_samples`는 timing 계열에서만 필수다. 선택된 Hunt Skill의 profile이 없거나 이름·schema·해시가 맞지 않으면 해당 case는 `INCONCLUSIVE`다. 구현 완료 기준은 chain을 제외한 packaged Hunt Skill 각각에 정확히 하나의 유효 profile이 존재하는 것이다.
+`baseline_samples`는 timing 계열에서만 필수다. `impact_expansion_paths`의 각 항목은 stable `path_id`, 부족한 `gap_axis`, `hypothesis_kind`, 필요한 전제조건, 기대 signal, 권장 action, `execution_owner`를 정의한다. `execution_owner`는 `validation`, `chaining`, `manual` 중 하나이며 MVP에서는 분류 정보일 뿐 어느 경로도 자동 실행하지 않는다. 선택된 Hunt Skill의 profile이 없거나 이름·schema·해시가 맞지 않으면 해당 case는 `INCONCLUSIVE`다. 구현 완료 기준은 chain을 제외한 packaged Hunt Skill 각각에 정확히 하나의 유효 profile이 존재하는 것이다.
 
 ## 6. Blind 실행 경계
 
@@ -249,7 +256,7 @@ claim 공개 후의 `ClaimComparison`은 다음을 포함한다.
 
 ## 7. shared Pipeline.db schema v9
 
-기존 `stage_runs`에 `stage='validation'`을 사용한다. 별도 `validation_runs` 테이블은 만들지 않는다. 신규 테이블은 아래 여섯 개다.
+기존 `stage_runs`에 `stage='validation'`을 사용한다. 별도 `validation_runs` 테이블은 만들지 않는다. 신규 테이블은 아래 일곱 개다.
 
 기존 `attack_http_requests`에는 nullable `policy_sha256` column을 추가한다. v9에서 새로 실행되는 Attack request는 반드시 이 값을 기록하고, 새 reproduction spec은 모든 source request의 digest가 `source_policy_sha256`과 같은 경우에만 생성할 수 있다. migration 이전 request는 값이 null일 수 있지만 reproduction spec이 없으므로 새 Validation 입력으로 자동 승격하지 않는다.
 
@@ -320,7 +327,29 @@ Finding 또는 Chain 하나의 현재 Validation snapshot이다.
 
 `(case_id, stage_run_id, ordinal)`은 unique다. 한 stage에서 action 2개를 초과하는 insert는 거절한다.
 
-### 7.5 `validation_http_requests`
+### 7.5 `validation_impact_hypotheses`
+
+`UNDERPOWERED` Finding의 현재 증거에서 도출한 후속 입증 제안을 저장한다.
+
+- `hypothesis_id` PK
+- `case_id`, `stage_run_id` FK
+- `ordinal`: case와 stage 안에서 1부터 시작하며 최대 3
+- `gap_axis`: `boundary`, `sensitivity`, `actor_requirements`
+- `path_id`, `hypothesis_kind`: 현재 Validation profile에 선언된 값
+- `current_score`: 해당 축의 현재 검증 점수
+- `reason_json`: 부족 판정의 evidence-bound 이유
+- `required_preconditions_json`, `recommended_actions_json`
+- `expected_signal_json`
+- `supporting_evidence_ids_json`: 같은 case와 현재 stage의 Validation evidence만 허용
+- `execution_owner`: `validation`, `chaining`, `manual`
+- `feasibility`: `low`, `medium`, `high`
+- `potential_impact_json`: 성공 시 예상 가능한 축 변화이며 비권위 정보
+- `skill_sha256`, `validation_profile_sha256`
+- `proposal_sha256`, `created_at`
+
+`(case_id, stage_run_id, ordinal)`과 `(case_id, stage_run_id, path_id)`는 unique다. 가설은 Validation evidence가 아니며 `ImpactEvaluator`, `DecisionEngine`, Report eligibility의 입력으로 사용할 수 없다. `potential_impact_json`은 예상값일 뿐 현재 점수·severity·status를 변경하지 않는다. 가설 row와 advisory warning은 `decision_json` 및 `decision_sha256` 계산에서도 제외한다. JSON 내부 evidence ID와 profile path는 Coordinator가 저장 전에 검증한다.
+
+### 7.6 `validation_http_requests`
 
 기존 `attack_http_requests`와 같은 공통 safety 의미를 따르되 저장과 예산 계산은 Validation 전용이다.
 
@@ -335,11 +364,11 @@ Finding 또는 Chain 하나의 현재 Validation snapshot이다.
 
 target/control 요청은 `attempt_id`, setup 등 보정 요청은 `development_action_id`를 참조하며 둘 중 정확히 하나만 non-null이다. header·cookie·token·민감 query value와 response 증거는 저장 전에 redaction한다. raw secret을 ledger나 Agent output에 넣지 않는다.
 
-### 7.6 `finding_reproduction_specs`
+### 7.7 `finding_reproduction_specs`
 
 §5.1의 Attack-to-Validation 계약을 저장한다. JSON 배열 내부 ID는 SQLite FK로 검증할 수 없으므로 CandidateIntegrityGate가 각 ID의 존재와 scan·finding 관계를 매 실행마다 확인한다.
 
-### 7.7 상태 enum과 종결성
+### 7.8 상태 enum과 종결성
 
 | 상태 | 종결 | 의미 |
 |---|---:|---|
@@ -473,6 +502,17 @@ boundary == 0 OR sensitivity == 0 OR impact_score < 3
 
 Skill profile은 각 점수를 인정할 취약점별 evidence 기준을 정의한다. 코드는 enum, evidence ownership, 축 범위, 합계, severity 구간과 UNDERPOWERED predicate를 강제한다. Validation 점수가 Attack과 다르면 Validation evidence로 계산한 severity를 사용한다.
 
+Finding이 `UNDERPOWERED` predicate를 만족하면 current snapshot을 종결하기 전에 `ImpactGapAnalyzer`를 한 번 실행한다. Analyzer는 현재 stage의 Validation evidence, 연결된 Hunt Skill, 검증된 profile의 `impact_expansion_paths`만 입력으로 받으며 Attack 당시 response 원문이나 범용 DB·요청 helper를 받지 않는다. 다음 규칙을 모두 적용한다.
+
+1. 점수가 부족한 축마다 profile에 선언된 path만 후보로 만들며 case당 최대 3개로 제한한다.
+2. 각 후보는 현재 점수가 부족한 evidence-bound 이유, 필요한 전제조건, 권장 action, 기대 signal과 실행 담당을 포함한다.
+3. 같은 endpoint와 취약점 범위에서 향후 안전하게 입증할 수 있는 후보는 `validation`, 여러 Finding·단계의 결합이 필요한 후보는 `chaining`, 파괴적이거나 사람의 승인이 필요한 후보는 `manual`로 분류한다.
+4. Agent가 profile 밖의 path, 존재하지 않는 evidence, 허용되지 않은 enum을 반환하면 해당 후보만 버린다. 유효 후보가 없어도 case 판정은 `UNDERPOWERED`로 정상 완료한다.
+5. MVP에서 Analyzer는 네트워크 요청, credential 사용, development action, 새 payload 탐색을 수행하지 않는다.
+6. 저장된 가설은 설명과 후속 작업 입력일 뿐 증거가 아니다. 가설 존재 여부와 예상 점수는 현재 impact, severity, `UNDERPOWERED` 판정을 바꾸지 않는다.
+
+예를 들어 IDOR가 자신의 객체에 대한 반응 차이만 재현해 Boundary 0이라면, `cross_role_access` path는 보조 저권한 계정과 그 계정 소유 객체를 전제조건으로, 타 사용자 고유 데이터 반환을 기대 signal로 제안할 수 있다. 이 제안을 아직 실행하지 않았으므로 현재 점수는 그대로이며 case도 `UNDERPOWERED`다.
+
 ### 8.8 최종 판정 우선순위
 
 DecisionEngine은 아래 순서를 고정하여 하나의 case가 여러 상태 조건을 동시에 만족하지 않게 한다.
@@ -486,7 +526,7 @@ DecisionEngine은 아래 순서를 고정하여 하나의 case가 여러 상태 
 7. resolvable blocker: `DEVELOPING`을 거쳐 성공 시 새 batch 평가, 실패 시 `BLOCKED`
 8. 불안정 5회 결과: `INCONCLUSIVE`
 9. 깨끗한 3/3 이후 evidence-backed 핵심 claim 충돌: `CONTESTED`
-10. 깨끗한 3/3 이후 UNDERPOWERED predicate 충족: `UNDERPOWERED`
+10. 깨끗한 3/3 이후 UNDERPOWERED predicate 충족: Finding은 유효한 영향 확장 가설을 최대 3개 저장한 뒤 `UNDERPOWERED`; Chain은 바로 `UNDERPOWERED`
 11. 깨끗한 3/3, control 통과, claim 정렬, 충분한 impact: `CONFIRMED`
 
 9번은 Attack claim에도 연결된 양성 evidence가 있을 때만 적용한다. 단순 severity 숫자 차이는 9번 조건이 아니며 Validation severity를 채택하여 10번 또는 11번으로 진행한다.
@@ -510,6 +550,8 @@ node gate에서 replay를 생략할 때 chain 상태는 다음과 같이 결정�
 
 Validation은 chain node, edge, binding 또는 기존 execution status를 수정하지 않는다. 이 불변식은 팀원이 완료한 Chaining 구현과의 독립성을 보장한다.
 
+개별 Finding의 영향 확장 가설이 `execution_owner='chaining'`이어도 MVP Validation은 새 chain candidate를 생성하거나 기존 Chaining 테이블을 수정하지 않는다. 이 값은 후속 연동을 위한 분류이며 현재는 CLI status에서만 노출한다.
+
 ## 10. 요청 안전 경계
 
 Attack과 Validation은 scope, redirect, method, rate, concurrency, credential 처리를 제공하는 공통 request safety core를 사용한다. stage별 차이는 adapter가 담당한다.
@@ -531,6 +573,8 @@ CandidateIntegrityGate와 KnownMatcher 이후 replay가 필요한 case가 하나
 
 Agent가 제출한 case object가 schema 검증에 실패하면 Coordinator는 오류 필드만 알려 한 번 수정 기회를 준다. 두 번째 제출도 실패하면 해당 case를 `INCONCLUSIVE`로 종결하고 다음 case를 계속한다. Agent 프로세스 자체가 종료되거나 이후 case를 처리할 수 없으면 §12.2의 stage 실패다.
 
+유효한 BlindAssessment와 ClaimComparison이 이미 고정된 뒤 수행하는 ImpactGapAnalyzer는 비판정성 advisory pass다. 이 pass의 schema 오류, profile에 맞는 후보 부재 또는 생성 실패는 운영 log에 warning을 남기고 가설 없이 `UNDERPOWERED`를 확정한다. 기존 판정 입력이 완성됐으므로 advisory 실패만으로 case를 `INCONCLUSIVE`로 낮추거나 stage를 실패시키지 않는다.
+
 Coordinator의 외부 결과 DTO는 `ValidationStageResult`이며 `stage='VALIDATION'`, `status`, `scan_id`, `db_path`, `stage_run_id`, 선택된 `case_ids`, `validation_agent_ids`, 요약을 포함한다. `validation_agent_ids`는 replay가 없으면 빈 배열, 있으면 정확히 한 항목이다. `status`와 case ID 목록은 Agent가 주장한 값이 아니라 durable DB를 다시 조회해 구성한다.
 
 ### 11.2 CLI 계약
@@ -547,6 +591,8 @@ aidast validate status Pipeline.db --case-id <case_id>
 ```
 
 `--finding-id`와 `--chain-id`는 상호 배타적이다. 같은 scan에는 active Validation stage를 하나만 허용한다. 정상 pipeline 명령은 Chaining 종료 후 `run`과 같은 Coordinator API를 자동 호출한다.
+
+`validate status --case-id`는 `UNDERPOWERED` Finding에서 현재 세 축 점수와 함께 영향 확장 가설을 ordinal 순서로 표시한다. 각 가설은 부족한 축, 전제조건, 기대 signal, 권장 action, 실행 담당과 예상 영향임을 명시하며 실제 검증 결과처럼 표현하지 않는다. scan 단위 status는 가설 개수와 실행 담당별 개수만 요약한다.
 
 ### 11.3 재검증
 
@@ -617,6 +663,7 @@ Pipeline.db는 이후 재검증으로 변경될 수 있으므로 Report는 DB �
 | Retry | 3/3, 0/3, mixed->5, development->fresh 3의 모든 전이 검증 |
 | Development | cycle 1회·action 2개 제한과 topology INCONCLUSIVE 검증 |
 | Impact | evidence ownership, 점수 합계, severity 경계, UNDERPOWERED predicate 검증 |
+| Impact gap | UNDERPOWERED Finding에서만 profile path·동일 stage evidence·최대 3개 제한을 검증하고, 후보 오류·부재가 판정과 점수를 바꾸지 않음 |
 | CONTESTED | 단순 점수 차이는 제외하고 evidence-backed semantic conflict만 허용 |
 | Request safety | 최초·redirect scope, rate/concurrency, credential redaction, 분리 ledger 검증 |
 | Chain | node gate, read-only Chaining tables, terminal impact 재평가 검증 |
@@ -639,13 +686,14 @@ Pipeline.db는 이후 재검증으로 변경될 수 있으므로 Report는 DB �
 7. stage crash 후 resume이 완료된 시도나 보고서를 중복 생성하지 않는다.
 8. `CONFIRMED`가 아닌 case에서 신규 제출용 보고서 생성이 불가능하다.
 9. 기존 Recon·Attack·Chaining 테스트와 신규 Validation·Report 테스트가 모두 통과한다.
+10. `UNDERPOWERED` Finding의 유효한 영향 확장 가설이 status에서 조회되며, 어떤 가설도 요청을 dispatch하거나 current impact·severity·status·decision hash를 변경하지 않는다.
 
 ## 14. 구현 분할 원칙
 
 상세 implementation plan은 다음 dependency 순서로 작업을 나눈다.
 
 1. schema v9와 reproduction spec 계약
-2. DTO, Repository, KnownMatcher, DecisionEngine, ImpactEvaluator
+2. DTO, Repository, KnownMatcher, DecisionEngine, ImpactEvaluator, ImpactGapAnalyzer
 3. 공통 request safety core 추출과 Validation ledger adapter
 4. ReproductionPort와 fake/real adapters
 5. Validation base Skill, per-Hunt profiles, restricted helper
