@@ -129,6 +129,17 @@ def finish_stage_run(
         ).fetchall()
         if status == "completed" and any(item[1] not in {"completed", "skipped"} for item in tasks):
             raise ValueError("completed stages require completed or skipped tasks")
+        stage_name = conn.execute(
+            "SELECT stage FROM stage_runs WHERE stage_run_id=?", (stage_run_id,)
+        ).fetchone()[0]
+        if status == "completed" and stage_name == "validation":
+            incomplete = conn.execute(
+                """SELECT count(*) FROM validation_cases WHERE latest_stage_run_id=? AND
+                (processing_phase!='completed' OR current_status IS NULL
+                 OR decision_stage_run_id!=latest_stage_run_id)""", (stage_run_id,),
+            ).fetchone()[0]
+            if incomplete:
+                raise ValueError("completed Validation stages require terminal current case decisions")
         timestamp = now()
         for task_id, previous in tasks:
             if previous not in TERMINAL_STATUSES:
@@ -138,11 +149,49 @@ def finish_stage_run(
                 )
                 _audit(conn, scan_id=row[0], stage_run_id=stage_run_id, task_id=task_id,
                        event_type="task.cancelled", details={"reason": "stage finished"})
+        if status == "failed" and stage_name == "validation":
+            conn.execute("""UPDATE validation_attempts SET outcome='outcome_unknown',finished_at=?
+                WHERE stage_run_id=? AND finished_at IS NULL""", (timestamp, stage_run_id))
+            conn.execute("""UPDATE validation_development_actions
+                SET status='outcome_unknown',finished_at=? WHERE stage_run_id=?
+                AND status IN ('planned','running')""", (timestamp, stage_run_id))
+            conn.execute("""UPDATE validation_http_requests SET status='outcome_unknown',finished_at=?
+                WHERE stage_run_id=? AND status IN ('reserved','running')""", (timestamp, stage_run_id))
+            conn.execute("""UPDATE validation_cases SET processing_phase='interrupted',updated_at=?
+                WHERE latest_stage_run_id=? AND processing_phase NOT IN ('completed','queued')""",
+                (timestamp, stage_run_id))
         conn.execute(
             "UPDATE stage_runs SET status=?, finished_at=?, error_message=? WHERE stage_run_id=?",
             (status, timestamp, error_message, stage_run_id),
         )
         _audit(conn, scan_id=row[0], stage_run_id=stage_run_id, event_type=f"stage.{status}")
+
+
+def resume_validation_stage_run(conn: sqlite3.Connection, stage_run_id: str) -> None:
+    """Resume one failed Validation stage while preserving its failure audit."""
+    with conn:
+        row = conn.execute(
+            "SELECT scan_id,stage,status,error_message FROM stage_runs WHERE stage_run_id=?",
+            (stage_run_id,),
+        ).fetchone()
+        if row is None or row[1] != "validation" or row[2] != "failed":
+            raise ValueError("resume requires a failed Validation stage")
+        if conn.execute(
+            """SELECT 1 FROM stage_runs WHERE scan_id=? AND stage='validation'
+            AND status IN ('pending','running') AND stage_run_id!=?""", (row[0], stage_run_id),
+        ).fetchone():
+            raise ValueError("another Validation stage is active for this scan")
+        if not conn.execute(
+            """SELECT 1 FROM validation_cases WHERE latest_stage_run_id=?
+            AND processing_phase IN ('queued','interrupted')""", (stage_run_id,),
+        ).fetchone():
+            raise ValueError("failed Validation stage has no resumable cases")
+        conn.execute(
+            """UPDATE stage_runs SET status='running',finished_at=NULL,error_message=NULL
+            WHERE stage_run_id=?""", (stage_run_id,),
+        )
+        _audit(conn, scan_id=row[0], stage_run_id=stage_run_id,
+               event_type="stage.resumed", details={"previous_error": row[3]})
 
 
 def register_credential_reference(

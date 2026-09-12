@@ -217,6 +217,9 @@ def _parser() -> argparse.ArgumentParser:
         "status", help="verify and inspect a Validation.db"
     )
     validation_status_parser.add_argument("database", type=Path)
+    validation_status_selection = validation_status_parser.add_mutually_exclusive_group()
+    validation_status_selection.add_argument("--scan-id")
+    validation_status_selection.add_argument("--case-id")
 
     report = commands.add_parser(
         "report", help="draft a platform report from confirmed Validation.db"
@@ -231,7 +234,9 @@ def _parser() -> argparse.ArgumentParser:
         choices=("hackerone", "intigriti", "bugcrowd"),
     )
     report_run.add_argument("--output-dir", type=Path, default=Path("ReportRun"))
-    report_run.add_argument("--validation-id")
+    report_source_selection = report_run.add_mutually_exclusive_group()
+    report_source_selection.add_argument("--validation-id")
+    report_source_selection.add_argument("--case-id")
     report_status_parser = report_commands.add_parser(
         "status", help="verify and inspect a Report.db"
     )
@@ -743,7 +748,11 @@ def _run_attack(
 
 def _run_validation(args: argparse.Namespace, *, reviewer: object | None = None) -> int:
     if args.validation_command == "status":
-        result = validation_status(args.database)
+        if args.scan_id is not None or args.case_id is not None:
+            from aidast.validation import shared_validation_status
+            result = shared_validation_status(args.database, scan_id=args.scan_id, case_id=args.case_id)
+        else:
+            result = validation_status(args.database)
     else:
         raw = ValidationAgent(reviewer or CodexValidationReviewer()).run(
             args.database,
@@ -775,11 +784,11 @@ def _run_report(args: argparse.Namespace, *, writer: object | None = None) -> in
     if args.report_command == "status":
         result = report_status(args.database)
     else:
+        options = {"platform": args.platform, "validation_id": args.validation_id}
+        if args.case_id is not None:
+            options = {"platform": args.platform, "case_id": args.case_id}
         result = ReportAgent(writer or CodexReportWriter()).run(
-            args.database,
-            args.output_dir,
-            platform=args.platform,
-            validation_id=args.validation_id,
+            args.database, args.output_dir, **options,
         )
     print(json.dumps(result, ensure_ascii=False, sort_keys=True, default=str))
     return 0

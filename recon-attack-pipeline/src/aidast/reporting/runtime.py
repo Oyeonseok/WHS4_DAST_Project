@@ -240,6 +240,10 @@ def prepare_report(validation_db: Path, output_dir: Path, *, platform: str,
 def record_report(report_db: Path, draft: dict) -> dict:
     """Check model output and store one immutable local draft."""
     path = _path(report_db, existing=True)
+    with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True)) as version_conn:
+        if version_conn.execute("PRAGMA user_version").fetchone()[0] == 2:
+            from .case_runtime import record_case_report
+            return record_case_report(path, draft)
     run, context, stored = _load(path)
     model = validate_draft(draft, context)
     encoded = _json(model.model_dump())
@@ -267,6 +271,10 @@ def record_report(report_db: Path, draft: dict) -> dict:
 
 def report_status(report_db: Path) -> dict:
     path = _path(report_db, existing=True)
+    with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True)) as version_conn:
+        if version_conn.execute("PRAGMA user_version").fetchone()[0] == 2:
+            from .case_runtime import case_report_status
+            return case_report_status(path)
     run, context, stored = _load(path)
     return {"report_id": run["report_id"], "status": "prepared" if stored is None else "drafted",
             "platform": context["platform"], "validation_id": run["validation_id"],
@@ -287,7 +295,21 @@ class ReportAgent:
         self.writer = writer
 
     def run(self, validation_db: Path, output_dir: Path, *, platform: str,
-            validation_id: str | None = None) -> dict:
+            validation_id: str | None = None, case_id: str | None = None) -> dict:
+        if case_id is not None:
+            if validation_id is not None:
+                raise ReportError("validation_id and case_id are mutually exclusive")
+            from .case_runtime import _load as load_case_report
+            from .case_runtime import prepare_case_report, record_case_report
+            result = prepare_case_report(validation_db, output_dir, platform=platform, case_id=case_id)
+            if result.get("eligibility") in {"known", "review_only"}:
+                return result
+            if self.writer is None or result["status"] == "drafted":
+                return result
+            _, context, _, _ = load_case_report(Path(result["report_db"]))
+            writer_context = json.loads(_json(context))
+            writer_context["output_schema"] = ReportDraft.model_json_schema()
+            return record_case_report(Path(result["report_db"]), self.writer.write(writer_context))
         result = prepare_report(validation_db, output_dir, platform=platform, validation_id=validation_id)
         if self.writer is None or result["status"] == "drafted":
             return result

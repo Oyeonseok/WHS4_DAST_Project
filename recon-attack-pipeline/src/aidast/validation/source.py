@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
 import sqlite3
 from contextlib import closing
 from pathlib import Path
@@ -14,6 +13,7 @@ from aidast.attack.runtime import _require_standalone_database
 from aidast.attack.store import _redact, _verify_handoff
 
 from .models import ValidationError
+from .evidence_policy import redact_text, sanitize_metadata
 
 
 def canonical(value: Any) -> str:
@@ -43,22 +43,14 @@ def _row_digest(row: dict) -> str:
 
 
 def safe_text(value: Any) -> Any:
-    value = _redact(value)
-    if isinstance(value, str):
-        value = re.sub(r"(?im)\b(?:authorization|proxy-authorization|cookie|set-cookie)\s*[:=]\s*[^\r\n]+",
-                       "[SENSITIVE HEADER OMITTED]", value)
-    return value
+    return redact_text(value)
 
 
-def _safe_metadata(value: Any, *, depth: int = 0) -> Any:
-    if depth > 12:
-        return "[NESTING OMITTED]"
-    if isinstance(value, dict):
-        return {str(key): _safe_metadata(item, depth=depth + 1) for key, item in value.items()
-                if "header" not in str(key).casefold() and "body" not in str(key).casefold()}
-    if isinstance(value, list):
-        return [_safe_metadata(item, depth=depth + 1) for item in value[:64]]
-    return safe_text(value)
+def _safe_metadata(value: Any) -> Any:
+    try:
+        return sanitize_metadata(value)
+    except ValidationError:
+        return {"omitted": "metadata exceeds the safe review format or budget"}
 
 
 def read_source(database: Path, *, run_id: str | None = None,
@@ -144,7 +136,7 @@ def read_source(database: Path, *, run_id: str | None = None,
                             (item["attempt_id"], run_id, run["scan_id"], task_id, revision),
                         ).fetchone():
                             raise ValidationError("evidence attempt does not match the finding task")
-                        metadata = _safe_metadata(_redact(json.loads(item["metadata_json"])))
+                        metadata = _safe_metadata(json.loads(item["metadata_json"]))
                         if len(canonical(metadata).encode()) > 8192:
                             metadata = {"omitted": "metadata exceeds the 8 KiB review budget"}
                         evidence.append({key: item[key] for key in (

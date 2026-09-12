@@ -20,7 +20,7 @@ def _cited(value: CitedText) -> str:
 
 def render_report(draft: ReportDraft) -> str:
     blocks = [f"# {_plain(draft.title.text)}", "Local draft — not submitted.",
-              f"Platform: {draft.platform}\n\nValidation: `{draft.validation_id}`",
+              f"Platform: {draft.platform}\n\nValidation: `{draft.case_id or draft.validation_id}`",
               "Title evidence: " + ", ".join(f"`{item}`" for item in draft.title.evidence_ids)]
 
     def section(heading: str, content: CitedText | str | None) -> None:

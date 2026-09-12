@@ -62,6 +62,16 @@ class ValidationReportCliTests(unittest.TestCase):
         self.assertEqual(json.loads(stdout), expected)
         status.assert_called_once_with(Path("Validation.db"))
 
+    def test_shared_validation_status_selects_one_scan_or_case(self):
+        expected = {"database": "Pipeline.db", "case": {"case_id": "case"}}
+        with patch("aidast.validation.shared_validation_status", return_value=expected) as status:
+            code, stdout, stderr = self.invoke(
+                ["validate", "status", "Pipeline.db", "--case-id", "case"]
+            )
+        self.assertEqual(code, 0, stderr)
+        self.assertEqual(json.loads(stdout), expected)
+        status.assert_called_once_with(Path("Pipeline.db"), scan_id=None, case_id="case")
+
     def test_report_run_accepts_only_three_platforms_and_injected_writer(self):
         writer, agent = Mock(), Mock()
         agent.run.return_value = {
@@ -79,6 +89,19 @@ class ValidationReportCliTests(unittest.TestCase):
         agent.run.assert_called_once_with(
             Path("Validation.db"), Path("report"),
             platform="intigriti", validation_id="validation_1",
+        )
+
+    def test_report_run_accepts_shared_pipeline_case(self):
+        agent = Mock()
+        agent.run.return_value = {"report_id": "report_1", "status": "prepared", "case_id": "case"}
+        with patch("aidast.cli.ReportAgent", return_value=agent):
+            code, _, stderr = self.invoke([
+                "report", "run", "Pipeline.db", "--platform", "hackerone",
+                "--output-dir", "report", "--case-id", "case",
+            ])
+        self.assertEqual(code, 0, stderr)
+        agent.run.assert_called_once_with(
+            Path("Pipeline.db"), Path("report"), platform="hackerone", case_id="case",
         )
 
     def test_report_status_does_not_construct_writer(self):

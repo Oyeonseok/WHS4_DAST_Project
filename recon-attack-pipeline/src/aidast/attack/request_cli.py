@@ -360,6 +360,9 @@ def _reserve(
             if task != ("running", "running", scan_id, stage_run_id):
                 raise RequestGuardError("HTTP requests require the configured running Attack task")
             policy_id = policy["policy_id"]
+            policy_sha256 = hashlib.sha256(json.dumps(
+                policy, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False,
+            ).encode("utf-8")).hexdigest()
             used = conn.execute(
                 "SELECT COUNT(*) FROM attack_http_requests WHERE scan_id=? AND policy_id=?",
                 (scan_id, policy_id),
@@ -383,11 +386,11 @@ def _reserve(
             scheduled = max(now, (float(previous) + interval) if previous is not None else now)
             conn.execute(
                 """INSERT INTO attack_http_requests
-                   (request_id,scan_id,stage_run_id,task_id,policy_id,method,url,
+                   (request_id,scan_id,stage_run_id,task_id,policy_id,policy_sha256,method,url,
                     request_fingerprint,status,scheduled_at)
-                   VALUES (?,?,?,?,?,?,?,?, 'reserved',?)""",
+                   VALUES (?,?,?,?,?,?,?,?,?, 'reserved',?)""",
                 (
-                    request_id, scan_id, stage_run_id, task_id, policy_id, method,
+                    request_id, scan_id, stage_run_id, task_id, policy_id, policy_sha256, method,
                     _redacted_url(url), fingerprint, scheduled,
                 ),
             )
