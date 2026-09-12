@@ -1,4 +1,4 @@
-"""SQLite contracts: Recon v4 and separate writable review storage v6."""
+"""SQLite contracts: shared pipeline v8 and legacy review storage v6."""
 
 from __future__ import annotations
 
@@ -71,11 +71,41 @@ CREATE TABLE IF NOT EXISTS attack_attempts (
     response_status INTEGER CHECK(response_status IS NULL OR response_status BETWEEN 100 AND 599),
     response_signature TEXT,
     outcome TEXT,
+    finding_id TEXT REFERENCES findings(finding_id),
+    resolution_reason TEXT,
+    resolved_at TEXT,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY(task_id, scan_id) REFERENCES attack_tasks(task_id, scan_id),
     UNIQUE(scan_id, skill_name, request_fingerprint, identity_role, payload_variant)
 );
 CREATE INDEX IF NOT EXISTS idx_attack_attempts_task ON attack_attempts(task_id);
+
+CREATE TABLE IF NOT EXISTS attack_http_requests (
+    request_id TEXT PRIMARY KEY NOT NULL,
+    scan_id TEXT NOT NULL REFERENCES scans(scan_id),
+    stage_run_id TEXT NOT NULL,
+    task_id TEXT NOT NULL,
+    policy_id TEXT NOT NULL CHECK(length(trim(policy_id)) > 0),
+    method TEXT NOT NULL CHECK(length(trim(method)) > 0),
+    url TEXT NOT NULL CHECK(length(trim(url)) > 0),
+    request_fingerprint TEXT NOT NULL CHECK(length(request_fingerprint) = 64),
+    status TEXT NOT NULL CHECK(status IN
+        ('reserved','running','completed','failed','outcome_unknown')),
+    response_status INTEGER CHECK(response_status IS NULL OR response_status BETWEEN 100 AND 599),
+    response_bytes INTEGER CHECK(response_bytes IS NULL OR response_bytes >= 0),
+    result_json TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(result_json)),
+    error_message TEXT,
+    scheduled_at REAL NOT NULL,
+    dispatched_at REAL,
+    finished_at REAL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(stage_run_id, scan_id) REFERENCES stage_runs(stage_run_id, scan_id),
+    FOREIGN KEY(task_id, scan_id) REFERENCES attack_tasks(task_id, scan_id)
+);
+CREATE INDEX IF NOT EXISTS idx_attack_http_budget
+    ON attack_http_requests(scan_id, policy_id, scheduled_at);
+CREATE INDEX IF NOT EXISTS idx_attack_http_active
+    ON attack_http_requests(stage_run_id, status);
 
 CREATE TABLE IF NOT EXISTS attack_facts (
     fact_id TEXT PRIMARY KEY NOT NULL,
@@ -128,6 +158,116 @@ CREATE TABLE IF NOT EXISTS finding_chain_nodes (
     UNIQUE(chain_id, position)
 );
 
+CREATE TABLE IF NOT EXISTS chain_candidates (
+    candidate_id TEXT PRIMARY KEY NOT NULL,
+    scan_id TEXT NOT NULL REFERENCES scans(scan_id),
+    stage_run_id TEXT NOT NULL,
+    task_id TEXT NOT NULL,
+    source_finding_id TEXT NOT NULL,
+    chain_id TEXT REFERENCES finding_chains(chain_id),
+    status TEXT NOT NULL DEFAULT 'proposed'
+        CHECK(status IN ('proposed','testing','evidence_collected','rejected','inconclusive')),
+    title TEXT NOT NULL CHECK(length(trim(title)) > 0),
+    hypothesis TEXT NOT NULL CHECK(length(trim(hypothesis)) > 0),
+    terminal_impact TEXT,
+    confidence REAL NOT NULL DEFAULT 0 CHECK(confidence BETWEEN 0 AND 1),
+    hypothesis_sha256 TEXT NOT NULL CHECK(length(hypothesis_sha256) = 64),
+    resolution_reason TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    resolved_at TEXT,
+    FOREIGN KEY(stage_run_id, scan_id) REFERENCES stage_runs(stage_run_id, scan_id),
+    FOREIGN KEY(task_id, scan_id) REFERENCES attack_tasks(task_id, scan_id),
+    FOREIGN KEY(source_finding_id, scan_id) REFERENCES findings(finding_id, scan_id),
+    UNIQUE(stage_run_id, source_finding_id, hypothesis_sha256)
+);
+CREATE INDEX IF NOT EXISTS idx_chain_candidates_run
+    ON chain_candidates(stage_run_id, status);
+
+CREATE TABLE IF NOT EXISTS chain_candidate_nodes (
+    candidate_id TEXT NOT NULL REFERENCES chain_candidates(candidate_id),
+    position INTEGER NOT NULL CHECK(position >= 0),
+    finding_id TEXT REFERENCES findings(finding_id),
+    expected_vuln_type TEXT NOT NULL CHECK(length(trim(expected_vuln_type)) > 0),
+    node_role TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY(candidate_id, position)
+);
+
+CREATE TABLE IF NOT EXISTS chain_candidate_edges (
+    candidate_id TEXT NOT NULL REFERENCES chain_candidates(candidate_id),
+    edge_position INTEGER NOT NULL CHECK(edge_position >= 0),
+    from_position INTEGER NOT NULL CHECK(from_position >= 0),
+    to_position INTEGER NOT NULL CHECK(to_position > from_position),
+    relationship TEXT NOT NULL CHECK(length(trim(relationship)) > 0),
+    evidence_summary TEXT,
+    PRIMARY KEY(candidate_id, edge_position),
+    FOREIGN KEY(candidate_id, from_position)
+        REFERENCES chain_candidate_nodes(candidate_id, position),
+    FOREIGN KEY(candidate_id, to_position)
+        REFERENCES chain_candidate_nodes(candidate_id, position)
+);
+
+CREATE TABLE IF NOT EXISTS chain_evidence (
+    chain_evidence_id TEXT PRIMARY KEY NOT NULL,
+    candidate_id TEXT NOT NULL REFERENCES chain_candidates(candidate_id),
+    evidence_kind TEXT NOT NULL CHECK(length(trim(evidence_kind)) > 0),
+    details_json TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(details_json)),
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_chain_evidence_candidate
+    ON chain_evidence(candidate_id);
+
+CREATE TABLE IF NOT EXISTS chain_executions (
+    execution_id TEXT PRIMARY KEY NOT NULL,
+    candidate_id TEXT NOT NULL UNIQUE REFERENCES chain_candidates(candidate_id),
+    chain_id TEXT UNIQUE REFERENCES finding_chains(chain_id),
+    scan_id TEXT NOT NULL REFERENCES scans(scan_id),
+    stage_run_id TEXT NOT NULL,
+    task_id TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'running'
+        CHECK(status IN ('running','succeeded','rejected','inconclusive','outcome_unknown')),
+    reason TEXT,
+    terminal_impact TEXT,
+    terminal_assertion_json TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(terminal_assertion_json)),
+    started_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    finished_at TEXT,
+    FOREIGN KEY(stage_run_id, scan_id) REFERENCES stage_runs(stage_run_id, scan_id),
+    FOREIGN KEY(task_id, scan_id) REFERENCES attack_tasks(task_id, scan_id),
+    CHECK((status='succeeded' AND chain_id IS NOT NULL)
+          OR (status!='succeeded' AND chain_id IS NULL))
+);
+CREATE INDEX IF NOT EXISTS idx_chain_executions_run
+    ON chain_executions(stage_run_id, status);
+
+CREATE TABLE IF NOT EXISTS chain_execution_steps (
+    execution_id TEXT NOT NULL REFERENCES chain_executions(execution_id),
+    position INTEGER NOT NULL CHECK(position >= 0),
+    candidate_node_position INTEGER NOT NULL CHECK(candidate_node_position >= 0),
+    finding_id TEXT NOT NULL REFERENCES findings(finding_id),
+    request_id TEXT NOT NULL UNIQUE REFERENCES attack_http_requests(request_id),
+    attempt_id TEXT NOT NULL UNIQUE REFERENCES attack_attempts(attempt_id),
+    input_binding_hashes_json TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(input_binding_hashes_json)),
+    output_capture_hashes_json TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(output_capture_hashes_json)),
+    assertion_results_json TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(assertion_results_json)),
+    evidence_summary TEXT NOT NULL CHECK(length(trim(evidence_summary)) > 0),
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY(execution_id, position),
+    UNIQUE(execution_id, candidate_node_position)
+);
+
+CREATE TABLE IF NOT EXISTS chain_execution_bindings (
+    execution_id TEXT NOT NULL,
+    edge_position INTEGER NOT NULL CHECK(edge_position >= 0),
+    from_step_position INTEGER NOT NULL CHECK(from_step_position >= 0),
+    to_step_position INTEGER NOT NULL CHECK(to_step_position > from_step_position),
+    binding_name TEXT NOT NULL CHECK(length(trim(binding_name)) > 0),
+    value_sha256 TEXT NOT NULL CHECK(length(value_sha256) = 64),
+    PRIMARY KEY(execution_id, edge_position, binding_name),
+    FOREIGN KEY(execution_id, from_step_position)
+        REFERENCES chain_execution_steps(execution_id, position),
+    FOREIGN KEY(execution_id, to_step_position)
+        REFERENCES chain_execution_steps(execution_id, position)
+);
+
 CREATE TABLE IF NOT EXISTS audit_events (
     audit_event_id TEXT PRIMARY KEY NOT NULL,
     scan_id TEXT NOT NULL REFERENCES scans(scan_id),
@@ -172,9 +312,31 @@ BEGIN SELECT RAISE(ABORT, 'finding relationship crosses scans'); END;
 
 
 def migrate_pipeline_schema(conn: sqlite3.Connection) -> None:
-    """Create v4 tables without rebuilding or deleting pre-existing tables."""
+    """Create shared pipeline tables without rebuilding existing data."""
     # executescript commits an existing transaction; caller owns initialization.
     conn.executescript(PIPELINE_SCHEMA)
+    attempt_columns = {
+        row[1] for row in conn.execute("PRAGMA table_info(attack_attempts)")
+    }
+    for name, declaration in (
+        ("finding_id", "TEXT REFERENCES findings(finding_id)"),
+        ("resolution_reason", "TEXT"),
+        ("resolved_at", "TEXT"),
+    ):
+        if name not in attempt_columns:
+            conn.execute(f"ALTER TABLE attack_attempts ADD COLUMN {name} {declaration}")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_attack_attempts_finding "
+        "ON attack_attempts(finding_id)"
+    )
+    request_columns = {
+        row[1] for row in conn.execute("PRAGMA table_info(attack_http_requests)")
+    }
+    if "result_json" not in request_columns:
+        conn.execute(
+            "ALTER TABLE attack_http_requests ADD COLUMN result_json "
+            "TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(result_json))"
+        )
     for table, column, relation in (
         ("attack_tasks", "endpoint_id", "endpoints e JOIN origins o ON o.origin_id=e.origin_id"),
         ("attack_attempts", "endpoint_id", "endpoints e JOIN origins o ON o.origin_id=e.origin_id"),
@@ -191,8 +353,8 @@ def migrate_pipeline_schema(conn: sqlite3.Connection) -> None:
                     WHERE e.{relation_id}=NEW.{column} AND a.scan_id=NEW.scan_id)
                 BEGIN SELECT RAISE(ABORT, 'reference does not belong to scan'); END""")
     version = conn.execute("PRAGMA user_version").fetchone()[0]
-    if version < 4:
-        conn.execute("PRAGMA user_version=4")
+    if version < 8:
+        conn.execute("PRAGMA user_version=8")
 
 
 ATTACK_SCHEMA = """

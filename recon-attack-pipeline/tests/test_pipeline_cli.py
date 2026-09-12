@@ -11,16 +11,18 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from aidast.cli import _write_recon_handoff, main
+from aidast.attack.models import AttackStageResult
+from aidast.chaining.models import ChainingStageResult
 from aidast.recon import db
 
 
 class PipelineCliTests(unittest.TestCase):
-    def test_run_prepares_thin_database_and_offline_plan(self) -> None:
+    def test_run_uses_shared_database_and_starts_native_attack(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_dir:
             root = Path(temporary_dir)
             program_dir = root / "scope"
             program_dir.mkdir()
-            for name in ("Scope.json", "Approval.json"):
+            for name in ("Scope.md", "Scope.json", "Approval.json"):
                 (program_dir / name).write_text("{}\n", encoding="utf-8")
             scope = SimpleNamespace(
                 scope_id="pipeline-fixture", analysis=SimpleNamespace(in_scope_assets=[]),
@@ -42,6 +44,8 @@ class PipelineCliTests(unittest.TestCase):
                 patch("aidast.cli.ReconCoordinator") as recon,
                 patch("aidast.cli.ReconExecutor", side_effect=fixture_executor),
                 patch("aidast.cli.OfflineReconReview") as review,
+                patch("aidast.cli.AttackCoordinator") as attack,
+                patch("aidast.cli.ChainingCoordinator") as chaining,
                 patch("socket.create_connection", side_effect=AssertionError("network forbidden")),
                 patch("subprocess.run", side_effect=AssertionError("external process forbidden")),
                 redirect_stdout(stdout),
@@ -51,19 +55,28 @@ class PipelineCliTests(unittest.TestCase):
                 planner.return_value.create_target_policies.return_value = {}
                 recon.return_value.create_tasks.return_value = []
                 review.return_value.review.return_value.model_dump_json.return_value = "{}"
+                attack.return_value.run.return_value = AttackStageResult(
+                    status="COMPLETED", scan_id="fixture-scan", db_path="Pipeline.db",
+                    stage_run_id="fixture-stage", attack_agent_ids=["agent-fixture"],
+                )
+                chaining.return_value.run.return_value = ChainingStageResult(
+                    status="SKIPPED", scan_id="fixture-scan", db_path="Pipeline.db",
+                    stage_run_id="fixture-chain-stage",
+                )
                 result = main([
                     "run", "https://example.test/program", "--all-targets",
                     "--run-root", str(root / "Runs"),
                     "--attack-output-root", str(root / "AttackRuns"),
                 ])
             self.assertEqual(result, 0)
-            self.assertIn("Attack Agent offline plan saved:", stdout.getvalue())
-            database, = (root / "AttackRuns").glob("*/Attack.db")
-            self.assertTrue((database.parent / "review/evidence-review-queue.json").is_file())
+            self.assertIn("Native Attack Agent completed: agent-fixture", stdout.getvalue())
+            database, = (root / "Runs").glob("*/Pipeline.db")
             with closing(sqlite3.connect(database)) as conn:
-                self.assertEqual(conn.execute("SELECT COUNT(*) FROM attack_plans").fetchone()[0], 1)
+                self.assertEqual(conn.execute("SELECT COUNT(*) FROM scans").fetchone()[0], 1)
                 self.assertEqual(conn.execute("SELECT COUNT(*) FROM attack_attempts").fetchone()[0], 0)
-                self.assertIsNone(conn.execute("SELECT name FROM sqlite_master WHERE name='endpoints'").fetchone())
+                self.assertIsNotNone(conn.execute("SELECT name FROM sqlite_master WHERE name='endpoints'").fetchone())
+            attack.assert_called_once()
+            chaining.assert_called_once()
 
     def test_recon_handoff_is_consumed_by_attack_command(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_dir:

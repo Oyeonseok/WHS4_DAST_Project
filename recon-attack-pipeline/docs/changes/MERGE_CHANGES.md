@@ -260,3 +260,64 @@ annotation으로 선택하도록 변경했다.
 변경 전: 루트 구버전과 `dast/` 구현, Scope·백업·디버그 파일이 새 통합 폴더와 중복됐다. 변경 후: 루트 안내 파일과 `recon-attack-pipeline/`만 남겼다.
 
 이유: 사용자가 실행할 버전을 하나로 명확히 하고, 로컬 실행 산출물이나 오래된 구현을 실수로 사용하는 문제를 막기 위해서다.
+
+## 2026-09-12: Recon → Native Attack Agent 자동 실행 및 공유 DB 통합
+
+문제/이유: Recon 완료 후 Attack review plan과 전용 thin DB까지만 준비되고 실제 Attack Agent는 자동 생성되지 않았다. Recon·Attack 단계가 서로 다른 DB를 사용해 실행 상태와 Finding을 한 scan 흐름으로 조회하기도 어려웠다.
+
+| 변경 전 | 변경 후 |
+|---|---|
+| Recon 완료 후 Attack plan 준비에서 실행 종료 | `aidast run`이 Recon 완료를 검증한 뒤 Native Attack Orchestrator를 호출하고 Attack Agent를 자동 생성 |
+| Main Agent와 Attack Agent의 실행 계약이 불명확 | Main은 `gpt-5.6-sol` 기반 `aidast_attack` Agent를 정확히 한 개 생성하고, 실제 공격 판단과 실행은 자식 Agent가 담당 |
+| Attack이 전체 Hunt Skill을 한 번에 읽거나 고정 관찰만 수행 | Recon annotation과 task의 취약점 유형을 기준으로 관련 Hunt Skill만 최대 8개 선택해 Agent에 제공 |
+| 모델이 임의 URL·메서드·요청을 직접 실행할 위험 | Python 요청 helper가 scope, host, path, method, rate, concurrency, 전체 request budget을 요청마다 검사 |
+| Recon DB와 별도 `Attack.db`에 실행 정보가 분산 | Native Attack 실행의 stage, task, attempt, HTTP request, fact, evidence, Finding을 동일한 `Pipeline.db`에 저장 |
+| 응답 상태나 모델 설명만으로 Finding이 승격될 가능성 | 요청 증거와 assertion이 연결된 Attack attempt만 `confirmed`로 승격하고 나머지는 `lead` 또는 terminal 실패로 보존 |
+| Attack Agent 완료 여부를 Main이 모델 응답만 보고 판단 | Main이 공유 DB의 stage run, agent 수, task/attempt/request terminal 상태와 반환 JSON을 교차 검증 |
+
+기존 offline review용 thin schema v6 `Attack.db` 계약은 호환성을 위해 유지한다. 새 Native Attack 및 이후 Chaining 단계만 하나의 `Pipeline.db`를 사용하며, 공유 schema version은 v8로 확장했다.
+
+영향 파일:
+
+- `src/aidast/agents/main.py`
+- `src/aidast/orchestration/attack.py`
+- `src/aidast/attack/db_cli.py`, `models.py`, `request_cli.py`, `skill_selector.py`
+- `src/aidast/attack/agent.py`
+- `src/aidast/pipeline/schema.py`
+- `src/aidast/recon/executor.py`
+- `src/aidast/cli.py`, `pyproject.toml`
+- `src/aidast/skills/attack/live/`, `src/aidast/skills/attack/orchestrator/`
+- `tests/test_attack_request_guard.py`, `test_attack_skill_selector.py`, `test_native_attack_orchestration.py`
+
+## 2026-09-12: Native Chaining Agent 및 전체 공격 흐름 재현 추가
+
+문제/이유: Attack에서 여러 독립 취약점이 확인돼도 서로 연결 가능한지 판단하고, 실제 요청 흐름으로 최종 영향까지 재현하는 단계가 없었다. 단순히 취약점 이름을 조합한 시나리오가 성공한 체인으로 저장되는 것도 방지해야 했다.
+
+| 변경 전 | 변경 후 |
+|---|---|
+| Attack 완료 후 후속 Agent 없음 | Main이 Attack 완료를 검증한 뒤 `gpt-5.6-sol` 기반 `aidast_chaining` Agent를 정확히 한 개 자동 생성 |
+| 독립 Finding 사이의 연결 규칙 없음 | Finding 유형별 연관 Hunt Skill mapping으로 관련 Skill을 최대 8개 선택하고 2~4개 node의 chain candidate 생성 |
+| 단일 취약점이나 다음 단계가 없어도 완성 체인처럼 보일 수 있음 | 검증된 다음 node가 없으면 예상 연결만 기록하고 candidate를 `inconclusive`로 종료 |
+| 취약점 설명을 연결하는 것만으로 성공 판단 가능 | candidate마다 새로운 execution을 만들고 모든 node를 실제 HTTP 요청으로 순서대로 재현 |
+| 앞 단계 결과가 다음 요청에 사용됐는지 확인 불가 | 응답에서 capture한 scalar 값의 hash를 저장하고, 다음 요청 URL·header·body에 실제 반영됐는지 binding으로 검증 |
+| HTTP 200 응답만으로 최종 영향 판단 가능 | 마지막 node에서 `json_equals`, `header_equals`, `body_contains` 중 하나의 비상태 terminal assertion이 통과해야 성공 |
+| 체이닝 결과 저장 계약 없음 | candidate, node, edge, execution, step, binding, evidence, proposed finding chain을 동일한 `Pipeline.db`에 저장 |
+| 모델이 임의 성공 결과를 반환할 수 있음 | Main이 현재 stage에서 성공한 replay execution이 없는 신규 chain을 거부하고 DB의 모든 terminal 상태를 교차 검증 |
+
+Chaining Agent는 Attack에서 실제로 확인된 Finding만 입력으로 사용한다. 실행 재현이 성공하면 `chain_executions.status='succeeded'`와 `finding_chains.status='proposed'`로 저장하며, 최종 `demonstrated` 승격은 추후 Validation 단계가 담당한다.
+
+영향 파일:
+
+- `src/aidast/agents/main.py`
+- `src/aidast/orchestration/chaining.py`
+- `src/aidast/chaining/models.py`, `selector.py`, `db_cli.py`
+- `src/aidast/attack/request_cli.py`
+- `src/aidast/pipeline/schema.py`
+- `src/aidast/cli.py`, `pyproject.toml`
+- `src/aidast/skills/chaining/live/`, `src/aidast/skills/chaining/orchestrator/`
+- `tests/test_native_chaining_orchestration.py`
+- `scripts/e2e_native_attack_smoke.py`
+
+검증: 로컬 허가 대상 fixture에서 실제 Sol Chaining Agent가 CORS 응답의 `account_id`를 capture하고 이를 인증 없는 IDOR 요청에 binding한 뒤, private record terminal assertion까지 통과하는 2단계 체인을 재현했다. 성공 execution 1건, step 2건, binding 1건, evidence 2건과 proposed chain 1건이 공유 `Pipeline.db`에 저장되는 것을 확인했다. 반대로 terminal assertion이 거짓인 경우 HTTP 200이어도 chain을 생성하지 않는 fail-closed 동작도 확인했다.
+
+관련 집중 테스트는 15개가 모두 통과했다. 전체 테스트는 297개 중 280개가 통과했으며, 나머지 17개는 기존 Windows symlink 권한, CP949 기본 decoding, Unix 실행 파일 가정, 경로 구분자 및 기존 Hunt Skill digest 불일치와 관련된 환경·선행 문제다. 신규 Native Attack/Chaining 테스트 실패는 없었다.

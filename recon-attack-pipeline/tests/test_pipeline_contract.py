@@ -51,18 +51,18 @@ class PipelineSchemaTests(unittest.TestCase):
         for _ in range(2):
             connection = db.init_db(legacy)
             try:
-                self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 4)
+                self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 8)
                 self.assertEqual(connection.execute("SELECT pipeline_run_id FROM pipeline_runs").fetchall(), [("old",)])
                 self.assertEqual(connection.execute("PRAGMA foreign_key_check").fetchall(), [])
             finally:
                 connection.close()
 
     def test_future_schema_version_is_not_downgraded(self):
-        self.conn.execute("PRAGMA user_version=8")
+        self.conn.execute("PRAGMA user_version=9")
         self.conn.commit()
         connection = db.init_db(self.path)
         try:
-            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 8)
+            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 9)
         finally:
             connection.close()
 

@@ -19,6 +19,8 @@ from aidast.agents.main import (
 )
 from aidast.auth.codex import CodexAuth, CodexAuthError
 from aidast.attack.runtime import ReviewPreparationError, prepare_review
+from aidast.orchestration.attack import AttackCoordinator, AttackCoordinatorError
+from aidast.orchestration.chaining import ChainingCoordinator, ChainingCoordinatorError
 from aidast.orchestration.recon import ReconCoordinator, ReconCoordinatorError
 from aidast.orchestration.scope import CoordinatorError, ScopeCoordinator
 from aidast.recon.executor import ReconExecutionError, ReconExecutor
@@ -130,7 +132,7 @@ def _parser() -> argparse.ArgumentParser:
 
     run = commands.add_parser(
         "run",
-        help="run approved Scope collection, Recon, and offline Attack review preparation",
+        help="run approved Scope collection, Recon, and a native Hunt Skill Attack Agent",
     )
     run.add_argument("program_url", help="bug bounty program URL")
     _add_workflow_options(run)
@@ -159,7 +161,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     run.add_argument(
         "--attack-output-root", type=Path, default=Path("AttackRuns"),
-        help="root for offline Attack review queues (default: AttackRuns)",
+        help="deprecated compatibility option; Attack now writes to the shared pipeline DB",
     )
 
     attack = commands.add_parser(
@@ -361,6 +363,8 @@ def main(
         parser.error(f"unsupported command: {args.command}")
     except (
         CoordinatorError,
+        AttackCoordinatorError,
+        ChainingCoordinatorError,
         CodexAuthError,
         MainAgentError,
         ProgramPageError,
@@ -509,7 +513,7 @@ def _run_recon(args: argparse.Namespace, *, prepare_attack: bool = False) -> int
         if prepare_attack:
             run_dir = (args.run_root / scan_id).resolve()
             run_dir.mkdir(parents=True, exist_ok=False)
-            db_path = run_dir / "Recon.db"
+            db_path = run_dir / "Pipeline.db"
             surface_path = run_dir / "Surface.json"
         else:
             run_dir = None
@@ -575,23 +579,42 @@ def _run_recon(args: argparse.Namespace, *, prepare_attack: bool = False) -> int
         print(f"Recon Surface saved: {surface_path}")
         try:
             if prepare_attack and run_dir is not None:
-                handoff_path = _write_recon_handoff(
-                    executor=executor,
-                    run_dir=run_dir,
-                    program_dir=program_dir,
-                    policy_path=policy_path,
-                    surface_path=surface_path,
-                    review_path=review_path,
-                    stage_run_id=stage_run_id,
-                )
-                attack_output = args.attack_output_root / scan_id
-                attack_plan = _plan_attack(handoff_path, attack_output)
-                print(f"Recon handoff saved: {handoff_path}")
+                run_context = {
+                    "Scope.md": program_dir / "Scope.md",
+                    "Scope.json": program_dir / "Scope.json",
+                    "Approval.json": program_dir / "Approval.json",
+                    "TargetPolicy.json": policy_path,
+                }
+                for name, source in run_context.items():
+                    shutil.copy2(source, run_dir / name)
+                attack_result = AttackCoordinator(
+                    agent=main_agent,
+                    db_path=db_path,
+                    scope_path=run_dir / "Scope.md",
+                    policy_path=run_dir / "TargetPolicy.json",
+                ).run(scan_id)
+                print(f"Shared Recon/Attack DB: {db_path}")
                 print(
-                    f"Attack Agent offline plan saved: {attack_plan['database']} "
-                    f"({attack_plan['task_count']} tasks); "
-                    f"review queue: {attack_plan['queue_path']}"
+                    "Native Attack Agent completed: "
+                    f"{attack_result.attack_agent_ids[0]} "
+                    f"({len(attack_result.finding_ids)} findings)"
                 )
+                chaining_result = ChainingCoordinator(
+                    agent=main_agent,
+                    db_path=db_path,
+                    scope_path=run_dir / "Scope.md",
+                    policy_path=run_dir / "TargetPolicy.json",
+                ).run(scan_id)
+                if chaining_result.status == "SKIPPED":
+                    print("Native Chaining stage skipped: no Attack-proven findings")
+                else:
+                    print(
+                        "Native Chaining Agent completed: "
+                        f"{chaining_result.chaining_agent_ids[0]} "
+                        f"({len(chaining_result.candidate_ids)} candidates, "
+                        f"{len(chaining_result.execution_ids)} executions, "
+                        f"{len(chaining_result.chain_ids)} proposed chains)"
+                    )
         finally:
             executor.conn.close()
     return 0
