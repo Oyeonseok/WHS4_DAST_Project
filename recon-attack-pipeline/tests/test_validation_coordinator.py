@@ -4,6 +4,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from aidast.pipeline.lifecycle import create_task, finish_stage_run, start_stage_run, transition_task
 from aidast.recon import db
@@ -214,6 +215,21 @@ class ValidationCoordinatorTests(unittest.TestCase):
             row = conn.execute("SELECT current_status,processing_phase FROM validation_cases").fetchone()
             self.assertEqual(row, ("CONFIRMED", "completed"))
             self.assertEqual(conn.execute("SELECT count(*) FROM validation_attempts").fetchone()[0], 5)
+
+    def test_replay_lazily_creates_exactly_one_native_agent(self):
+        port = FakePort()
+        with patch(
+            "aidast.validation.codex_runner.CodexBlindValidationRunner",
+            return_value=FakeAgent(),
+        ) as factory:
+            result = ValidationCoordinator(
+                db_path=self.path, agent=None, reproduction=port,
+                policy_provider=lambda endpoint, method: self.policy,
+            ).run("scan")
+
+        factory.assert_called_once_with()
+        self.assertEqual(result.validation_agent_ids, ("validation_agent_fixture",))
+        self.assertEqual(len(port.calls), 5)
 
     def test_integrity_failure_sends_no_requests_and_finishes_inconclusive(self):
         with db.connect(self.path) as conn:

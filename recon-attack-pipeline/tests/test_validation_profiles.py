@@ -1,13 +1,17 @@
 """Packaged Validation profile coverage and strictness."""
 
 import json
+import tempfile
 import unittest
 from importlib.resources import files
-from unittest.mock import Mock
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 from pydantic import ValidationError as PydanticValidationError
 
 from aidast.attack.catalog import load_catalog
+from aidast.agents.main import CodexMainAgent
 from aidast.validation import (ImpactGapAnalyzer, SkillProfileResolver,
                                ValidationProfile, evaluate_impact,
                                CodexBlindValidationRunner, BlindAssessment,
@@ -65,6 +69,7 @@ class ValidationProfileTests(unittest.TestCase):
         agent = Mock()
         agent._run_structured.side_effect = [assessment, comparison]
         runner = CodexBlindValidationRunner(agent)
+        self.addCleanup(runner.close)
         blind = {
             "case_id": "case", "attack_skill_name": "hunt-idor",
             "attack_skill_sha256": resolved.attack_skill_sha256,
@@ -78,6 +83,95 @@ class ValidationProfileTests(unittest.TestCase):
             {"claimed_impact": "cross-user read"}, assessment.model_dump(mode="json")
         ), comparison)
         self.assertIn("claimed_impact", agent._run_structured.call_args_list[1].kwargs["prompt"])
+
+    def test_codex_runner_resumes_one_native_session_for_unblinding(self):
+        resolved = SkillProfileResolver().resolve("hunt-idor")
+        axis = {"score": 1, "evidence_ids": ("evidence",), "reason": "Evidence-bound score."}
+        assessment = BlindAssessment(
+            case_id="case", blind_case_sha256="a" * 64, reproduced=True,
+            signal_types=("authorization_boundary",), target_attempt_ids=("target",),
+            control_attempt_ids=("control",), evidence_ids=("evidence",),
+            impact_boundary=axis, impact_sensitivity=axis,
+            impact_actor_requirements=axis, conclusion="Observed consistently.",
+        )
+        comparison = ClaimComparison(
+            case_id="case", blind_assessment_sha256="b" * 64,
+            attack_claim_sha256="c" * 64, alignment="aligned", conflict_axes=(),
+            validation_evidence_ids=("evidence",), attack_evidence_ids=("attack",),
+            reason="Claims align.",
+        )
+
+        class SessionAgent:
+            def __init__(self):
+                self.results = [assessment, comparison]
+                self.calls = []
+
+            def _run_structured_session(self, **kwargs):
+                self.calls.append(kwargs)
+                return self.results.pop(0), kwargs["session_id"] or "thread-validation"
+
+        agent = SessionAgent()
+        runner = CodexBlindValidationRunner(agent)
+        self.addCleanup(runner.close)
+        blind = {
+            "case_id": "case", "attack_skill_name": "hunt-idor",
+            "attack_skill_sha256": resolved.attack_skill_sha256,
+            "validation_skill_sha256": resolved.validation_skill_sha256,
+            "validation_profile_sha256": resolved.profile_sha256,
+        }
+        runner.assess(blind, ())
+        runner.compare({"claimed_impact": "cross-user read"}, assessment.model_dump(mode="json"))
+
+        self.assertEqual([item["session_id"] for item in agent.calls],
+                         [None, "thread-validation"])
+        self.assertEqual(agent.calls[0]["work_dir"], agent.calls[1]["work_dir"])
+        self.assertNotIn("claimed_impact", agent.calls[0]["prompt"])
+        self.assertIn("claimed_impact", agent.calls[1]["prompt"])
+        self.assertEqual(runner.agent_id, "thread-validation")
+
+    def test_native_structured_session_uses_sol_and_exact_thread_resume(self):
+        axis = {"score": 1, "evidence_ids": ("evidence",), "reason": "Evidence-bound score."}
+        assessment = BlindAssessment(
+            case_id="case", blind_case_sha256="a" * 64, reproduced=True,
+            signal_types=("response_diff",), target_attempt_ids=("target",),
+            control_attempt_ids=("control",), evidence_ids=("evidence",),
+            impact_boundary=axis, impact_sensitivity=axis,
+            impact_actor_requirements=axis, conclusion="Observed consistently.",
+        )
+        commands = []
+
+        def fake_run(command, **kwargs):
+            commands.append(command)
+            result_path = Path(command[command.index("--output-last-message") + 1])
+            result_path.write_text(assessment.model_dump_json(), encoding="utf-8")
+            return SimpleNamespace(
+                returncode=0, stderr="",
+                stdout='{"type":"thread.started","thread_id":"thread-validation"}\n',
+            )
+
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            patch("aidast.agents.main.shutil.which", return_value="codex.exe"),
+            patch.object(CodexMainAgent, "_require_login"),
+            patch("aidast.agents.main.subprocess.run", side_effect=fake_run),
+        ):
+            agent = CodexMainAgent()
+            first, session_id = agent._run_structured_session(
+                prompt="blind", model_type=BlindAssessment,
+                artifact_name="blind", operation="blind", work_dir=Path(temporary),
+            )
+            second, resumed_id = agent._run_structured_session(
+                prompt="unblind", model_type=BlindAssessment,
+                artifact_name="unblind", operation="unblind", work_dir=Path(temporary),
+                session_id=session_id,
+            )
+
+        self.assertEqual((first, second), (assessment, assessment))
+        self.assertEqual((session_id, resumed_id),
+                         ("thread-validation", "thread-validation"))
+        self.assertEqual(commands[0][commands[0].index("--model") + 1], "gpt-5.6-sol")
+        self.assertNotIn("resume", commands[0])
+        self.assertEqual(commands[1][-3:], ["resume", "thread-validation", "-"])
 
 
 if __name__ == "__main__":

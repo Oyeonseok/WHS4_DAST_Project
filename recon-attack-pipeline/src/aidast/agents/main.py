@@ -162,6 +162,7 @@ class CodexMainAgent:
     DEFAULT_MAIN_MODEL = "gpt-5.6-sol"
     DEFAULT_ATTACK_MODEL = "gpt-5.6-sol"
     DEFAULT_CHAINING_MODEL = "gpt-5.6-sol"
+    DEFAULT_VALIDATION_MODEL = "gpt-5.6-sol"
 
     def __init__(
         self,
@@ -173,6 +174,7 @@ class CodexMainAgent:
         main_model: str | None = None,
         attack_model: str | None = None,
         chaining_model: str | None = None,
+        validation_model: str | None = None,
         python_executable: str | None = None,
     ) -> None:
         self._executable = executable
@@ -182,6 +184,7 @@ class CodexMainAgent:
         self._main_model = main_model or self.DEFAULT_MAIN_MODEL
         self._attack_model = attack_model or self.DEFAULT_ATTACK_MODEL
         self._chaining_model = chaining_model or self.DEFAULT_CHAINING_MODEL
+        self._validation_model = validation_model or self.DEFAULT_VALIDATION_MODEL
         base_executable = getattr(sys, "_base_executable", None)
         stable_executable = (
             base_executable
@@ -540,6 +543,83 @@ class CodexMainAgent:
                 raise MainAgentError(
                     f"Codex returned an invalid {artifact_name} result: {exc}"
                 ) from exc
+
+    def _run_structured_session(
+        self, *, prompt: str, model_type: type[ModelT], artifact_name: str,
+        operation: str, work_dir: Path, session_id: str | None = None,
+    ) -> tuple[ModelT, str]:
+        """Run or resume one tool-disabled Codex session with a fresh strict schema."""
+        executable = shutil.which(self._executable)
+        if executable is None:
+            raise MainAgentError(f"Codex CLI executable not found: {self._executable}")
+        self._require_login(executable)
+        work_dir = Path(work_dir).resolve(strict=True)
+        schema_path = work_dir / f"{artifact_name}.schema.json"
+        result_path = work_dir / f"{artifact_name}.json"
+        schema_path.write_text(
+            json.dumps(_codex_output_schema(model_type), ensure_ascii=False),
+            encoding="utf-8",
+        )
+        result_path.unlink(missing_ok=True)
+        common = [
+            "--skip-git-repo-check", "--ignore-user-config", "--model",
+            self._validation_model, "--disable", "shell_tool", "--disable",
+            "unified_exec", "--disable", "apps", "--disable",
+            "standalone_web_search", "--disable", "browser_use", "--disable",
+            "computer_use", "--disable", "in_app_browser", "--json",
+            "--output-schema", str(schema_path), "--output-last-message", str(result_path),
+        ]
+        if session_id is None:
+            command = [
+                executable, "exec", *common, "--sandbox", "read-only",
+                "--cd", str(work_dir), "-",
+            ]
+        else:
+            command = [executable, "exec", *common, "resume", session_id, "-"]
+        try:
+            completed = subprocess.run(
+                command, input=prompt, text=True, encoding="utf-8",
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                timeout=self._timeout_seconds, check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise MainAgentError(
+                f"Codex {operation} timed out after {self._timeout_seconds}s"
+            ) from exc
+        if completed.returncode != 0:
+            diagnostic = completed.stderr.strip()[-2_000:]
+            raise MainAgentError(
+                f"Codex {operation} failed with exit code {completed.returncode}: {diagnostic}"
+            )
+        if len(completed.stdout.encode("utf-8")) > self._max_result_bytes:
+            raise MainAgentError("Codex session event stream exceeds the result budget")
+        observed_ids = set()
+        for line in completed.stdout.splitlines():
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(event, dict) and isinstance(event.get("thread_id"), str):
+                observed_ids.add(event["thread_id"])
+        if session_id is None:
+            if len(observed_ids) != 1:
+                raise MainAgentError("Codex session did not return one thread ID")
+            active_session_id = observed_ids.pop()
+        else:
+            if observed_ids and observed_ids != {session_id}:
+                raise MainAgentError("Codex resumed a different Validation session")
+            active_session_id = session_id
+        if not result_path.is_file():
+            raise MainAgentError(f"Codex completed without a structured {artifact_name} result")
+        if result_path.stat().st_size > self._max_result_bytes:
+            raise MainAgentError(f"Codex result exceeds the {self._max_result_bytes}-byte budget")
+        try:
+            result = model_type.model_validate_json(result_path.read_text(encoding="utf-8"))
+        except (OSError, ValidationError, ValueError) as exc:
+            raise MainAgentError(
+                f"Codex returned an invalid {artifact_name} result: {exc}"
+            ) from exc
+        return result, active_session_id
 
     @staticmethod
     def _stage_native_skill(

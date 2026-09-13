@@ -47,6 +47,7 @@ class ValidationCoordinator:
                  prerequisite_resolver: PrerequisiteResolverPort | None = None):
         self.db_path = Path(db_path).expanduser().resolve()
         self.agent = agent
+        self._owns_agent = False
         self.reproduction = reproduction
         self.policy_provider = policy_provider
         self.prerequisite_resolver = prerequisite_resolver
@@ -94,6 +95,8 @@ class ValidationCoordinator:
                 if isinstance(exc, ValidationCoordinatorError):
                     raise
                 raise ValidationCoordinatorError(str(exc)) from exc
+            finally:
+                self._close_owned_agent()
 
     def resume(self, stage_run_id: str) -> ValidationStageResult:
         if not self.db_path.is_file():
@@ -125,17 +128,20 @@ class ValidationCoordinator:
                 finish_stage_run(conn, stage_run_id, status="completed")
             except Exception as exc:
                 finish_stage_run(conn, stage_run_id, status="failed", error_message=type(exc).__name__)
+                self._close_owned_agent()
                 raise ValidationCoordinatorError(str(exc)) from exc
             case_ids = tuple(row[0] for row in conn.execute(
                 "SELECT case_id FROM validation_cases WHERE latest_stage_run_id=? ORDER BY created_at,case_id",
                 (stage_run_id,),
             ))
-            return ValidationStageResult(
+            result = ValidationStageResult(
                 status="completed", scan_id=scan_id, db_path=str(self.db_path),
                 stage_run_id=stage_run_id, case_ids=case_ids,
                 validation_agent_ids=((self.agent.agent_id,) if agent_used and self.agent else ()),
                 summary={"resumed": True, "case_count": len(case_ids)},
             )
+            self._close_owned_agent()
+            return result
 
     @staticmethod
     def _require_scan_ready(conn: sqlite3.Connection, scan_id: str) -> None:
@@ -282,8 +288,8 @@ class ValidationCoordinator:
                 (case["case_id"], stage_run_id),
             ).fetchone())
         else:
-            if self.agent is None or self.reproduction is None:
-                raise ValidationCoordinatorError("blind replay requires injected Agent and ReproductionPort")
+            if self.reproduction is None:
+                raise ValidationCoordinatorError("blind replay requires an injected ReproductionPort")
             recovered = self._completed_batch(conn, case["case_id"], stage_run_id) if resuming else None
             if recovered is None:
                 batch_no = 1 if not resuming else conn.execute(
@@ -364,8 +370,6 @@ class ValidationCoordinator:
             candidate.staged.attack_claim_sha256,
         )
         if stored_comparison is None:
-            if self.agent is None:
-                raise ValidationCoordinatorError("claim comparison requires an injected Agent")
             try:
                 comparison = self._comparison(claim, assessment.model_dump(mode="json"))
             except ValidationCoordinatorError:
@@ -651,6 +655,10 @@ class ValidationCoordinator:
         return self._agent_call("compare", claim, assessment, model=ClaimComparison)
 
     def _agent_call(self, method: str, first: Any, second: Any, *, model):
+        if self.agent is None:
+            from .codex_runner import CodexBlindValidationRunner
+            self.agent = CodexBlindValidationRunner()
+            self._owns_agent = True
         correction = None
         for attempt in range(2):
             try:
@@ -661,6 +669,15 @@ class ValidationCoordinator:
                     raise ValidationCoordinatorError(f"Agent {method} output failed schema correction") from None
                 correction = "The previous object failed schema validation; correct only invalid fields."
         raise AssertionError("unreachable")
+
+    def _close_owned_agent(self) -> None:
+        if not self._owns_agent or self.agent is None:
+            return
+        close = getattr(self.agent, "close", None)
+        if callable(close):
+            close()
+        self.agent = None
+        self._owns_agent = False
 
     @staticmethod
     def _validate_assessment_refs(assessment: BlindAssessment, case_id: str,

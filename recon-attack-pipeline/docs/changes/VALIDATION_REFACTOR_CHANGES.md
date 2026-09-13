@@ -2,6 +2,44 @@
 
 이 문서는 Validation 재구조화 구현 변경을 누적 기록한다. 관련 구현을 완료할 때마다 최신 날짜의 항목을 문서 상단에 추가한다.
 
+## 2026-09-13: 단일 native Validation Agent 세션
+
+- `CodexMainAgent`에 Validation 전용 structured session 실행 경계를 추가했다.
+  첫 Blind pass에서 받은 Codex thread ID를 고정하고, claim comparison과 다음 case는
+  `codex exec resume <thread-id>`로 같은 세션에서 이어간다.
+- Validation 모델은 요청대로 낮춘 `gpt-5.6-sol`을 별도 기본값으로 고정했다.
+  각 pass마다 `BlindAssessment` 또는 `ClaimComparison` strict output schema를 새로
+  적용하며, resume 결과가 다른 thread ID를 반환하면 실패한다.
+- 해당 세션은 read-only sandbox에서 shell, unified exec, apps, web, browser와
+  computer 도구를 모두 비활성화한다. replay가 필요한 첫 case에서만 runner를
+  lazy 생성하므로 KNOWN·무결성 실패 등 network 전 종결 case만 있으면 Agent ID가 없다.
+- demonstrated Chain은 합성 hash를 다시 검증하고 모든 node의 연결 Hunt Skill과
+  profile을 순서대로 같은 세션에 제공하되 terminal profile을 판정 기준으로 표시한다.
+- Coordinator가 직접 만든 native runner의 임시 staging directory는 stage 성공 또는
+  실패 시 정리한다. 외부에서 주입한 runner의 lifecycle은 호출자가 계속 소유한다.
+
+  설계와 다른 점 및 이유: §6.3은 Agent에게 target/control 실행용 restricted helper를
+  제공하는 형태를 설명한다. 현재 구현은 Agent의 도구를 전부 제거하고 Coordinator가
+  고정한 batch를 trusted `ReproductionPort`로 먼저 실행한 뒤, Agent에는 정제된 observation
+  DTO만 전달한다. LLM이 요청 시점·대상·payload를 선택할 권한 자체를 없애 scope 및 횟수
+  제한을 Python 상태 머신 한곳에서 강제하기 위해 더 좁은 권한 경계를 택했다.
+
+  설계와 다른 점 및 이유: 같은 native Agent를 unblind pass까지 유지하려면 Codex의
+  persisted thread가 필요하므로 이 경로에는 `--ephemeral`을 사용하지 않는다. staging
+  파일은 stage 종료 시 삭제하지만 Codex 자체의 로컬 session 보존 정책은 따른다.
+
+검증:
+
+- Blind prompt에는 claim이 없고 같은 work directory와 정확한 thread ID로 unblind
+  prompt가 resume되는지 검증
+- native command가 `gpt-5.6-sol`, tool-disabled read-only 시작, exact thread resume를
+  사용하는지 subprocess fixture로 검증
+- replay case에서 runner가 정확히 한 번 lazy 생성되고 결과의 Agent ID가 실제 thread
+  ID와 연결되는지 검증
+- `TMPDIR=/private/tmp` 기준 전체 unittest 351개 중 코드 테스트 350개 통과.
+  `.venv`의 pytest 미설치로 import되지 않은 Reporting module은 시스템 pytest에서
+  34개 통과
+
 ## 2026-09-12: demonstrated Chain 종단간 Blind replay
 
 - 모든 node의 최신 Validation 결과가 `CONFIRMED|KNOWN`인 demonstrated Chain을
@@ -122,7 +160,6 @@
 남은 작업:
 
 - 58개 profile의 취약점별 signal, control, timing, impact 및 development 규칙 검토
-- native 단일 Validation Agent와 restricted helper staging
 - 실제 HTTP/browser/OOB request builder와 signal evaluator 연결
 - 기본 native adapter 구성으로 `Recon -> Attack -> Chaining` 자동 호출 활성화
 - 새 실행 경로가 기본 동작이 된 뒤 legacy 7 Question Validation.db 제거

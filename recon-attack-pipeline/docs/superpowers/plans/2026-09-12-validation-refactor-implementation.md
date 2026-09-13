@@ -9,7 +9,8 @@
   ReproductionPort와 Validation request ledger의 1차 실행 경로, 완료 batch 및
   고정 BlindAssessment 이후의 실행 재개가 구현됐다.
   demonstrated Chain의 injected end-to-end Blind replay도 구현됐다.
-  native Agent·real 취약점별 adapter·pipeline 자동 실행은 미구현이다.
+  native 단일 Codex session도 tool-disabled lazy runner로 연결됐다.
+  real 취약점별 adapter·pipeline 자동 실행은 미구현이다.
 
 ## 구현 진행 기록
 
@@ -39,7 +40,8 @@
 
 ReproductionPort, request broker/ledger, profile 파일 전체와 injected Coordinator는
 구현됐다. completed node만 허용하는 demonstrated Chain replay도 같은 Coordinator에
-연결됐다. 다만 profile 대부분은 보수적인 공통 초안이며 native 단일 Agent,
+연결됐다. native Validation runner는 `gpt-5.6-sol`의 동일 thread를 Blind/unblind
+pass와 case 사이에 유지한다. 다만 profile 대부분은 보수적인 공통 초안이며
 취약점별 real adapter와 pipeline 자동 실행은 아직 구현되지 않았다.
 Blind claim 공개 시점은 Coordinator가 assessment digest를 먼저 고정하도록 연결됐다.
 
@@ -222,7 +224,7 @@ PYTHONPATH=src .venv/bin/python -m unittest discover -s tests -v
 | 명세 영역 | 이 계획의 처리 | 전체 구현 완료를 위해 남는 부분 |
 |---|---|---|
 | §5 reproduction 계약 | 저장 schema와 provenance 제약 | Attack 확정 transaction의 실제 producer 연동 |
-| §6 Blind 경계 | DTO, 공개 필드, hash와 접근 제약 | native Agent 격리·실행 통합 |
+| §6 Blind 경계 | DTO, 공개 필드, hash, tool-disabled 단일 native session | Codex local persisted-thread 운영 정책 정리 |
 | §7 shared DB | migration, repository, ownership | 실행 producer별 ledger 기록 통합 |
 | §8 판정 | evidence·점수·가설의 데이터 검증 | 실제 관측을 만드는 재현 및 실행 상태 머신 |
 | §9 Chain | node gate, injected end-to-end Blind replay, terminal impact 재평가, Chaining table 불변 검증 | 실제 transport adapter를 통한 다단계 binding 재실행 |
