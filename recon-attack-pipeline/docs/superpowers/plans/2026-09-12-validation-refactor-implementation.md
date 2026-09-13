@@ -1,7 +1,7 @@
 # Validation 재구조화 구현 계획 — 데이터 무결성과 보고서 연동
 
 - 작성일: 2026-09-12
-- 상태: 실행 계층 1차 연결 진행 중
+- 상태: HTTP native 실행과 env credential 완료, 확장 adapter 진행 중
 - 기준 명세: [Validation 재구조화 설계](../specs/2026-09-12-validation-refactor-design.md)
 - 대상: `recon-attack-pipeline`
 - 구현 여부: shared DB v9, DTO, 결정론적 판정, Repository, 복구, Report v2,
@@ -11,7 +11,10 @@
   demonstrated Chain의 injected end-to-end Blind replay도 구현됐다.
   native 단일 Codex session도 tool-disabled lazy runner로 연결됐다.
   58개 profile의 Skill별 target effect와 signal-class control/impact/development 의미도
-  구체화했다. real 취약점별 assertion adapter·pipeline 자동 실행은 미구현이다.
+  구체화했다. Attack이 target별로 저장하는 HTTP request/assertion runtime contract와
+  generic HTTP adapter도 구현됐다. 이 adapter와 current policy를 사용하는 native
+  Coordinator가 pipeline과 shared CLI의 기본 경로에 연결됐다. `env://` JSON header
+  credential resolver도 연결했으며 browser·OOB·keyring/vault·Chain adapter는 미구현이다.
 
 ## 구현 진행 기록
 
@@ -19,7 +22,7 @@
 
 - `src/aidast/pipeline/schema.py`: shared Pipeline.db schema v9와 Validation 7개 테이블, active stage·target·ordinal·append-only 제약, Attack request policy digest.
 - `src/aidast/validation/models.py`: BlindAssessment, ClaimComparison, case snapshot, stage result와 canonical digest 계약.
-- `src/aidast/validation/{matching,impact,decision}.py`: 임베딩 없는 Levenshtein KNOWN 판정, 영향 점수와 우선순위 상태 판정.
+- `src/aidast/validation/{matching,impact,decision}.py`: 취약점·요청·identity·Hunt Skill 실행 메타데이터 exact KNOWN 판정, 영향 점수와 우선순위 상태 판정.
 - `src/aidast/validation/repository.py`: case·stage·evidence 소유권, 낙관적 동시성, snapshot commit과 KNOWN source 무효화.
 - `src/aidast/pipeline/lifecycle.py`: Validation 실패 record 정리와 동일 stage 복구.
 - `src/aidast/validation/evidence_policy.py`: 중첩 JSON의 민감 필드와 헤더 형태 문자열 제거, raw body/header 필드 제외, 깊이·컨테이너 크기·전체 노드 수·UTF-8 바이트 제한.
@@ -33,6 +36,8 @@
   case 격리.
 - `src/aidast/validation/{request_broker,http_adapter,policy}.py`: current policy를
   매 hop 재검사하는 Validation ledger 및 실제 transport adapter 계약.
+- `src/aidast/validation/runtime_contract.py`: Attack이 고정한 target/control HTTP 요청과
+  status/header/body/JSON/duration assertion의 schema·렌더링·결정론적 평가.
 - `src/aidast/validation/gaps.py`: profile과 현재 evidence에 제한된 비실행
   impact expansion proposal.
 - `src/aidast/attack/db_cli.py`: native Finding과 reproduction spec의 원자적 producer.
@@ -44,7 +49,9 @@ ReproductionPort, request broker/ledger, profile 파일 전체와 injected Coord
 연결됐다. native Validation runner는 `gpt-5.6-sol`의 동일 thread를 Blind/unblind
 pass와 case 사이에 유지한다. 다만 profile 대부분은 보수적인 공통 초안이며
 취약점별 target effect criterion은 고유하게 작성됐지만 runtime marker·selector와
-정량 threshold를 적용하는 real adapter, pipeline 자동 실행은 아직 구현되지 않았다.
+정량 threshold를 적용하는 target별 HTTP adapter와 pipeline 자동 실행까지 구현됐다.
+`env://` credential은 dispatch 시점에만 resolve한다. browser·OOB·keyring/vault·Chain
+runtime은 아직 구현되지 않았다.
 Blind claim 공개 시점은 Coordinator가 assessment digest를 먼저 고정하도록 연결됐다.
 
 검증 명령은 macOS의 심볼릭 링크 임시 경로 문제를 피하도록 실제 경로를 지정한다.
@@ -53,7 +60,10 @@ Blind claim 공개 시점은 Coordinator가 assessment digest를 먼저 고정�
 TMPDIR=/private/tmp PYTHONPATH=src:tests .venv/bin/python -m unittest test_validation_evidence_policy test_validation_agent test_validation_store test_validation_report_cli -q
 ```
 
-최종 관련 unittest 53개와 기존 pytest 보고서 테스트 31개가 통과했다. 전체 unittest는 330개를 실행했으며 코드 테스트는 통과했고 `.venv`에 pytest가 없어 `test_reporting_agent` import 한 건만 실패했다. 이후 추가한 두 migration/Blind 테스트는 관련 suite에서 통과했다. 시스템 pytest는 plugin autoload를 끄고 별도로 실행해 31개가 통과했다.
+최신 전체 unittest는 360개를 실행했으며 코드 테스트 359개가 통과했다. `.venv`와 기본
+Python에 pytest가 없어 `test_reporting_agent` import 한 건만 실패했고, 해당 모듈은
+`/opt/anaconda3/bin/pytest`로 별도 실행해 30개가 통과했다. compileall과 diff whitespace
+검사도 통과했다.
 
 ## 1. 범위와 완료의 의미
 
@@ -122,7 +132,7 @@ Task 1 DTO와 fixture
 - [x] 실제 v8 request table 형태의 fixture를 준비해 nullable policy digest와 기존 row 보존을 검증한다.
 - [x] 미래 schema version을 낮추지 않으며 legacy Validation.db를 자동 import하지 않는다.
 
-**검증·완료:** migration 전후 Recon·Attack·Chaining rows가 같고 `PRAGMA foreign_key_check`가 비어 있다. 두 번째 migration은 동일 결과를 만들며 v8이 v9로 올라간다.
+**검증·완료:** migration 전후 Recon·Attack·Chaining rows가 같고 `PRAGMA foreign_key_check`가 비어 있다. 두 번째 migration은 동일 결과를 만들며 v8이 v9로 올라간다. 이전 v9 DB의 `known_similarity` column은 case를 보존한 채 제거된다.
 
 ## Task 3. Repository와 증거 소유권
 
@@ -201,7 +211,7 @@ Task 1 DTO와 fixture
 - [ ] 기존 7 Question API와 Skill의 제거는 모든 consumer가 전환된 뒤 진행한다. 실행 계층 미완성 상태에서 기존 경로부터 삭제하지 않는다.
 - [x] shared `run`, `resume`과 finding/chain targeted selector를 injected Coordinator에 연결한다.
 - [x] 정상 pipeline은 injected Coordinator가 있으면 Chaining 직후 같은 API를 자동 호출한다.
-- [ ] native adapter를 기본 구성한 뒤 injection 없이도 자동 Validation을 활성화한다.
+- [x] native HTTP adapter를 기본 구성해 unauthenticated HTTP Finding의 자동 Validation을 활성화한다. 미지원 case는 요청 없이 `INCONCLUSIVE`로 격리한다.
 
 **검증·완료:** status가 DB를 변경하지 않으며 잘못된 ID·schema와 허용되지 않은 Report 상태는 명확한 오류 및 non-zero exit를 반환한다.
 
@@ -225,14 +235,14 @@ PYTHONPATH=src .venv/bin/python -m unittest discover -s tests -v
 
 | 명세 영역 | 이 계획의 처리 | 전체 구현 완료를 위해 남는 부분 |
 |---|---|---|
-| §5 reproduction 계약 | 저장 schema와 provenance 제약 | Attack 확정 transaction의 실제 producer 연동 |
+| §5 reproduction 계약 | 저장 schema, provenance 제약, Attack producer와 HTTP runtime request/assertion hash binding | browser·OOB·Chain runtime 계약 |
 | §6 Blind 경계 | DTO, 공개 필드, hash, tool-disabled 단일 native session | Codex local persisted-thread 운영 정책 정리 |
 | §7 shared DB | migration, repository, ownership | 실행 producer별 ledger 기록 통합 |
-| §8 판정 | evidence·점수·가설의 데이터 검증 | 실제 관측을 만드는 재현 및 실행 상태 머신 |
+| §8 판정 | evidence·점수·가설 검증과 HTTP response assertion 실행 | browser·OOB 관측 adapter |
 | §9 Chain | node gate, injected end-to-end Blind replay, terminal impact 재평가, Chaining table 불변 검증 | 실제 transport adapter를 통한 다단계 binding 재실행 |
-| §10 요청 안전 | redaction과 저장 경계 검증 | 공통 safety core와 실제 transport 통합 |
-| §11 CLI | status, 보고서 입력, injected Coordinator 기반 run·resume·targeted 실행 | native adapter 기본 연결과 pipeline 자동 호출 |
+| §10 요청 안전 | redaction, 저장 경계, current policy per-hop HTTP transport와 env credential resolver | keyring/vault backend 연결 |
+| §11 CLI | status, 보고서 입력, native HTTP Coordinator 기반 run·resume·targeted 실행과 pipeline 자동 호출 | browser·OOB·인증·Chain adapter 선택 |
 | §12 복구·Report | lifecycle 저장 복구, 완료 batch·고정 assessment 재사용, snapshot·eligibility·stale | transport 완료와 local commit 사이의 outcome-unknown 운영 처리 |
-| §13 테스트 | 합성 fixture 기반 포함 범위 회귀 | 실제 adapter 및 전체 pipeline 수용 검증 |
+| §13 테스트 | 합성 fixture 및 HTTP adapter 통합 회귀 | 외부 test target과 전체 pipeline 수용 검증 |
 
 이 표의 남은 의존성이 해소되기 전에는 legacy 경로의 최종 제거와 새 Validation의 기본 활성화를 릴리스 완료 항목으로 처리하지 않는다.

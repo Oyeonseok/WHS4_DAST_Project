@@ -63,8 +63,33 @@ candidate and submit it as another guarded request only if needed.
 them to the finding. It also requires exactly one `reproduction` object:
 
 ```json
-{"method":"GET","endpoint_template":"/api/items","injection_location":"query","parameter_name":"object_id","payload_template":{"object_id":"<slot:string>"},"required_identity_roles":[],"source_request_ids":["HTTP ledger request ID"]}
+{"method":"GET","endpoint_template":"/api/items/{id}","injection_location":"path","parameter_name":"id","payload_template":{"id":"<slot:string>"},"required_identity_roles":[],"source_request_ids":["HTTP ledger request ID"],"runtime_contract":{"schema_version":1,"target":{"request":{"path_parameters":{"id":"target-object"}},"assertions":[{"assertion_id":"target-effect","kind":"status_equals","expected":200}]},"positive_control":{"request":{"path_parameters":{"id":"owned-object"}},"assertions":[{"assertion_id":"healthy-path","kind":"status_equals","expected":200}]},"negative_control":{"request":{"path_parameters":{"id":"inert-object"}},"assertions":[{"assertion_id":"target-effect","kind":"status_equals","expected":200}]}}}
 ```
+
+For HTTP findings, include `runtime_contract` whenever the target effect can be
+expressed with bounded response assertions. Each attempt declares path/query
+values, non-secret headers, one JSON or text body, and one to sixteen assertions.
+Supported assertion kinds are `status_equals`, `header_equals`, `body_contains`,
+`json_equals`, `duration_at_least_ms`, and `duration_at_most_ms`.
+
+The target assertions describe the vulnerability effect and should pass when it
+is reproduced. The positive-control assertions describe a healthy transport,
+identity, and parser path and should pass. Negative-control assertions also
+describe the vulnerability effect, so they should fail for the inert input. Do
+not write an "effect is absent" assertion for the negative control because a
+passing assertion means `signal_observed=true`.
+
+Do not place credentials in runtime headers. Declare `required_identity_roles`
+and let the trusted Validation runtime resolve their opaque references. Browser,
+OOB, and multi-step findings may omit this HTTP-only contract until their
+dedicated runtime contract is available.
+
+The native Validation runtime currently resolves `env://NAME` references. The
+environment variable must contain a JSON object whose keys and values are the
+HTTP credential headers, for example `{"Authorization":"Bearer ..."}`. The
+resolved object exists only in memory at dispatch; the request ledger sanitizes
+sensitive header values. `keyring://` and `vault://` references require a future
+configured backend and are treated as unavailable by the default runtime.
 
 Every source request must be completed, share the supporting attempt's task and
 fingerprint, and have one non-null TargetPolicy digest. Each evidence item contains role, method, URL, redacted

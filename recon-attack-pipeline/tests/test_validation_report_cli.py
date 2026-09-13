@@ -90,6 +90,27 @@ class ValidationReportCliTests(unittest.TestCase):
         self.assertEqual(code, 0, stderr)
         coordinator.resume.assert_called_once_with("stage")
 
+    def test_shared_validation_run_builds_native_coordinator_from_policy(self):
+        coordinator = Mock()
+        coordinator.run.return_value = {"status": "completed", "stage_run_id": "stage"}
+        with patch(
+            "aidast.validation.build_native_validation_coordinator",
+            return_value=coordinator,
+        ) as factory:
+            code, stdout, stderr = self.invoke([
+                "validate", "run", "/tmp/run/Pipeline.db", "--scan-id", "scan",
+                "--policy", "/tmp/current-policy.json",
+            ])
+        self.assertEqual(code, 0, stderr)
+        factory.assert_called_once_with(
+            db_path=Path("/tmp/run/Pipeline.db"),
+            policy_path=Path("/tmp/current-policy.json"),
+        )
+        coordinator.run.assert_called_once_with(
+            "scan", finding_id=None, chain_id=None,
+        )
+        self.assertEqual(json.loads(stdout)["status"], "completed")
+
     def test_report_run_accepts_only_three_platforms_and_injected_writer(self):
         writer, agent = Mock(), Mock()
         agent.run.return_value = {

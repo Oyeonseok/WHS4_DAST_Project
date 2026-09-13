@@ -15,8 +15,10 @@ from aidast.attack.db_cli import (
 )
 from aidast.attack.models import AttackStageResult
 from aidast.orchestration.attack import AttackCoordinator, AttackCoordinatorError
-from aidast.pipeline.lifecycle import create_task, start_stage_run
+from aidast.pipeline.lifecycle import create_task, finish_stage_run, start_stage_run
 from aidast.recon import db
+from aidast.validation import (CandidateIntegrityGate, HttpRuntimeContract,
+                               canonical_sha256)
 
 
 class FakeNativeMain:
@@ -292,6 +294,38 @@ class NativeAttackDatabaseCliTests(unittest.TestCase):
                     (stage_run_id, task_id, "d" * 64, "a" * 64))
 
             finding = root / "finding.json"
+            target_attempt = {
+                "request": {"query_parameters": {"object_id": "7"}},
+                "assertions": [{
+                    "assertion_id": "cors-origin",
+                    "kind": "header_equals",
+                    "header": "Access-Control-Allow-Origin",
+                    "expected": "https://redacted.invalid",
+                }],
+            }
+            positive_attempt = {
+                "request": {"query_parameters": {"object_id": "7"}},
+                "assertions": [{
+                    "assertion_id": "healthy-status",
+                    "kind": "status_equals",
+                    "expected": 200,
+                }],
+            }
+            negative_attempt = {
+                "request": {"query_parameters": {"object_id": "7"}},
+                "assertions": [{
+                    "assertion_id": "cors-origin",
+                    "kind": "header_equals",
+                    "header": "Access-Control-Allow-Origin",
+                    "expected": "https://redacted.invalid",
+                }],
+            }
+            runtime_contract = {
+                "schema_version": 1,
+                "target": target_attempt,
+                "positive_control": positive_attempt,
+                "negative_control": negative_attempt,
+            }
             finding.write_text(json.dumps({
                 "scan_id": "scan_native", "endpoint_id": endpoint_id,
                 "vuln_type": "CORS", "severity": "MEDIUM",
@@ -304,6 +338,7 @@ class NativeAttackDatabaseCliTests(unittest.TestCase):
                     "payload_template": {"object_id": "<slot:string>"},
                     "required_identity_roles": [],
                     "source_request_ids": ["http_fixture"],
+                    "runtime_contract": runtime_contract,
                 },
                 "evidence": [{
                     "role": "unauthenticated", "method": "GET",
@@ -324,10 +359,20 @@ class NativeAttackDatabaseCliTests(unittest.TestCase):
                        FROM attack_attempts WHERE attempt_id=?""",
                     (attempt_result["attempt_id"],),
                 ).fetchone()
+                stored_runtime = conn.execute(
+                    "SELECT runtime_contract_json,runtime_contract_sha256 "
+                    "FROM finding_reproduction_specs WHERE finding_id=?",
+                    (result["finding_id"],),
+                ).fetchone()
             self.assertEqual(stored, ("CORS", "unreviewed"))
             self.assertEqual(requests, 1)
             self.assertEqual(promoted, ("confirmed", result["finding_id"], 1))
             self.assertEqual(result["promoted_attempt_count"], 1)
+            normalized_runtime = HttpRuntimeContract.model_validate(
+                runtime_contract
+            ).model_dump(mode="json")
+            self.assertEqual(json.loads(stored_runtime[0]), normalized_runtime)
+            self.assertEqual(stored_runtime[1], canonical_sha256(normalized_runtime))
 
             second_attempt = root / "second-attempt.json"
             second_attempt.write_text(json.dumps({
@@ -354,6 +399,16 @@ class NativeAttackDatabaseCliTests(unittest.TestCase):
             self.assertEqual(closed, ("rejected", "matched the negative control", 1))
             transition_task(
                 database, "scan_native", stage_run_id, task_id, "completed"
+            )
+            with closing(sqlite3.connect(database)) as conn:
+                finish_stage_run(conn, stage_run_id, status="completed")
+                candidate = CandidateIntegrityGate(conn).validate_finding(
+                    case_id="case_runtime", scan_id="scan_native",
+                    finding_id=result["finding_id"],
+                )
+            self.assertEqual(
+                candidate.staged._blind_case.runtime_contract,
+                normalized_runtime,
             )
 
 

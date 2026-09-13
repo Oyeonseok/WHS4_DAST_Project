@@ -1,4 +1,4 @@
-"""Deterministic payload normalization and same-scan KNOWN matching."""
+"""Deterministic payload normalization and exact-metadata KNOWN matching."""
 
 from __future__ import annotations
 
@@ -10,9 +10,8 @@ from typing import Any, Iterable
 
 from .models import canonical_json, canonical_sha256
 
-MATCHER_VERSION = 1
+MATCHER_VERSION = 2
 NORMALIZER_VERSION = 1
-KNOWN_THRESHOLD = 0.85
 _SLOT = re.compile(r"(?:<slot:(?:[^:<>]+:)?([^<>:]+)>|\{\{[^{}:]+:([^{}:]+)\}\})")
 
 
@@ -43,64 +42,69 @@ def payload_structure_sha256(payload: Any) -> str:
     return canonical_sha256(_normalize(json.loads(payload) if isinstance(payload, str) else payload))
 
 
-def levenshtein_codepoint_distance(left: str, right: str) -> int:
-    if len(left) < len(right):
-        left, right = right, left
-    previous = list(range(len(right) + 1))
-    for row, left_char in enumerate(left, 1):
-        current = [row]
-        for column, right_char in enumerate(right, 1):
-            current.append(min(current[-1] + 1, previous[column] + 1,
-                               previous[column - 1] + (left_char != right_char)))
-        previous = current
-    return previous[-1]
-
-
-def normalized_similarity(left: str, right: str) -> float:
-    if not left and not right:
-        return 1.0
-    if not left or not right:
-        return 0.0
-    return 1.0 - levenshtein_codepoint_distance(left, right) / max(len(left), len(right))
-
-
 @dataclass(frozen=True)
 class KnownCandidate:
     case_id: str
     vuln_class: str
     endpoint_template: str
+    method: str
+    injection_location: str
     parameter_name: str
-    payload_template: Any
+    required_identity_roles: tuple[str, ...]
+    attack_skill_name: str
     current_status: str = "CONFIRMED"
 
 
 @dataclass(frozen=True)
 class KnownMatch:
     source_case_id: str
-    similarity: float
     matcher_version: int = MATCHER_VERSION
-    normalizer_version: int = NORMALIZER_VERSION
+    match_kind: str = "exact_metadata"
 
 
 class KnownMatcher:
-    def __init__(self, threshold: float = KNOWN_THRESHOLD):
-        if not 0 <= threshold <= 1:
-            raise ValueError("KNOWN threshold must be between zero and one")
-        self.threshold = threshold
+    """Match only candidates whose normalized execution metadata is identical."""
 
-    def match(self, *, vuln_class: str, endpoint_template: str, parameter_name: str,
-              payload_template: Any, candidates: Iterable[KnownCandidate]) -> KnownMatch | None:
-        target = canonical_payload(payload_template)
-        matches = []
+    @staticmethod
+    def _key(*, vuln_class: str, endpoint_template: str, method: str,
+             injection_location: str, parameter_name: str,
+             required_identity_roles: Iterable[str],
+             attack_skill_name: str) -> tuple[Any, ...]:
+        return (
+            vuln_class,
+            endpoint_template,
+            method.upper(),
+            injection_location,
+            parameter_name,
+            tuple(sorted(required_identity_roles)),
+            attack_skill_name,
+        )
+
+    def match(self, *, vuln_class: str, endpoint_template: str, method: str,
+              injection_location: str, parameter_name: str,
+              required_identity_roles: Iterable[str], attack_skill_name: str,
+              candidates: Iterable[KnownCandidate]) -> KnownMatch | None:
+        target = self._key(
+            vuln_class=vuln_class, endpoint_template=endpoint_template, method=method,
+            injection_location=injection_location, parameter_name=parameter_name,
+            required_identity_roles=required_identity_roles,
+            attack_skill_name=attack_skill_name,
+        )
+        matches: list[str] = []
         for candidate in candidates:
-            if candidate.current_status != "CONFIRMED" or (
-                candidate.vuln_class, candidate.endpoint_template, candidate.parameter_name
-            ) != (vuln_class, endpoint_template, parameter_name):
+            if candidate.current_status != "CONFIRMED":
                 continue
-            similarity = normalized_similarity(target, canonical_payload(candidate.payload_template))
-            if similarity >= self.threshold:
-                matches.append((similarity, candidate.case_id))
+            candidate_key = self._key(
+                vuln_class=candidate.vuln_class,
+                endpoint_template=candidate.endpoint_template,
+                method=candidate.method,
+                injection_location=candidate.injection_location,
+                parameter_name=candidate.parameter_name,
+                required_identity_roles=candidate.required_identity_roles,
+                attack_skill_name=candidate.attack_skill_name,
+            )
+            if candidate_key == target:
+                matches.append(candidate.case_id)
         if not matches:
             return None
-        similarity, case_id = sorted(matches, key=lambda item: (-item[0], item[1]))[0]
-        return KnownMatch(source_case_id=case_id, similarity=similarity)
+        return KnownMatch(source_case_id=sorted(matches)[0])

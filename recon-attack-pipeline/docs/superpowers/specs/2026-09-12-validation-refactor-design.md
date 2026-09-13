@@ -258,7 +258,7 @@ claim 공개 후의 `ClaimComparison`은 다음을 포함한다.
 
 기존 `stage_runs`에 `stage='validation'`을 사용한다. 별도 `validation_runs` 테이블은 만들지 않는다. 신규 테이블은 아래 일곱 개다.
 
-기존 `attack_http_requests`에는 nullable `policy_sha256` column을 추가한다. v9에서 새로 실행되는 Attack request는 반드시 이 값을 기록하고, 새 reproduction spec은 모든 source request의 digest가 `source_policy_sha256`과 같은 경우에만 생성할 수 있다. migration 이전 request는 값이 null일 수 있지만 reproduction spec이 없으므로 새 Validation 입력으로 자동 승격하지 않는다.
+기존 `attack_http_requests`에는 nullable `policy_sha256` column을 추가한다. v9에서 새로 실행되는 Attack request는 반드시 이 값을 기록하고, 새 reproduction spec은 모든 source request의 digest가 `source_policy_sha256`과 같은 경우에만 생성할 수 있다. migration 이전 request는 값이 null일 수 있지만 reproduction spec이 없으므로 새 Validation 입력으로 자동 승격하지 않는다. 최신 v9 계약은 Levenshtein 기반 KNOWN을 제거하며 이전 v9 DB의 `known_similarity` column도 case를 보존한 채 삭제한다.
 
 ### 7.1 `validation_cases`
 
@@ -276,7 +276,7 @@ Finding 또는 Chain 하나의 현재 Validation snapshot이다.
 - `attack_skill_name`, `skill_sha256`, `validation_profile_sha256`
 - `source_policy_sha256`, `current_policy_sha256`
 - `blind_case_sha256`, `blind_assessment_sha256`, `attack_claim_sha256`
-- `known_source_case_id`, `known_similarity`
+- `known_source_case_id`
 - `impact_boundary`, `impact_sensitivity`, `impact_actor_requirements`, `impact_score`, `severity`
 - `decision_json`, `decision_sha256`: canonical JSON과 그 SHA-256
 - `created_at`, `updated_at`
@@ -450,27 +450,24 @@ Blind 결과가 양성이고 Attack claim에도 양성 evidence가 있지만 아
 
 KNOWN 검색 범위는 같은 `Pipeline.db`와 같은 `scan_id`의 현재 `CONFIRMED` Finding case다.
 
-1. `(vuln_class, endpoint_template, parameter_name)`이 모두 정확히 일치해야 후보가 된다.
-2. 후보에 한해 canonical payload structure 유사도가 `>= 0.85`여야 한다.
-3. source는 반드시 `CONFIRMED`이며 `KNOWN`을 source로 연결하지 않는다.
-4. 여러 confirmed 후보가 통과하면 similarity가 가장 높은 case를 선택하고, 동률이면 가장 오래된 `case_id` lexical 순으로 결정하여 결과를 재현 가능하게 한다.
+1. `vuln_class`, normalized `endpoint_template`, HTTP method, `injection_location`, `parameter_name`, 정렬된 `required_identity_roles`, `attack_skill_name`이 모두 정확히 일치해야 한다.
+2. 별도 `parameter_role` field가 없으므로 `(injection_location, parameter_name)` 조합을 parameter의 실행 역할로 사용한다.
+3. source는 반드시 현재 `CONFIRMED`이며 `KNOWN`을 source로 연결하지 않는다.
+4. source case에 저장된 Skill과 reproduction spec의 Skill이 일치해야 한다.
+5. 여러 confirmed source가 통과하면 `case_id` lexical 순으로 하나를 선택하여 결과를 재현 가능하게 한다.
+
+`signal_types`와 Validation profile hash는 중복 key에 포함하지 않는다. 이는 동일한 취약점을 어떤 관찰 채널과 control로 검증했는지를 나타내는 검증 방법의 속성이며, endpoint·trigger 위치·identity 조건으로 표현되는 대상의 정체성이 아니기 때문이다.
 
 endpoint template은 Recon이 제공한 route parameter metadata만 placeholder로 치환한다. metadata가 없으면 normalized path를 그대로 사용하며 숫자·UUID처럼 보인다는 이유로 Validation이 path segment를 추측해 일반화하지 않는다.
 
-payload canonicalization은 versioned `PayloadNormalizer`가 다음 순서로 수행한다.
+payload canonicalization은 reproduction spec 무결성 검사를 위해 versioned `PayloadNormalizer`가 다음 순서로 수행한다.
 
 1. `payload_template_json`을 key 정렬·최소 구분자의 canonical JSON으로 직렬화한다.
 2. runtime placeholder를 타입을 보존하는 `<slot:type>` 토큰으로 치환한다.
 3. 문자열 literal 내부는 보존하고 그 밖의 비의미 공백만 제거한 뒤 Unicode NFC로 정규화한다.
 4. 결과 문자열과 UTF-8 bytes의 SHA-256을 저장한다.
 
-유사도는 아래 정규화 Levenshtein 점수를 사용한다. 임베딩이나 LLM 판정은 사용하지 않는다.
-
-```text
-similarity = 1 - levenshtein_codepoint_distance(a, b) / max(codepoint_len(a), codepoint_len(b))
-```
-
-두 canonical 문자열이 모두 비어 있으면 1, 한쪽만 비어 있으면 0이다. KNOWN이면 network replay를 생략하고 `known_source_case_id`, similarity, normalizer/matcher version을 저장한다.
+canonical payload 문자열과 구조 hash는 KNOWN 판정에 사용하지 않는다. KNOWN이면 network replay를 생략하고 `known_source_case_id`, exact metadata `match_kind`, matcher version을 저장한다. payload의 semantic 동등성을 판단하는 LLM 단계는 이 변경 범위에 포함하지 않는다.
 
 ### 8.7 영향도와 UNDERPOWERED
 
@@ -518,7 +515,7 @@ Finding이 `UNDERPOWERED` predicate를 만족하면 current snapshot을 종결�
 DecisionEngine은 아래 순서를 고정하여 하나의 case가 여러 상태 조건을 동시에 만족하지 않게 한다.
 
 1. Candidate 무결성 실패: `INCONCLUSIVE`
-2. KNOWN exact key와 similarity 통과: `KNOWN`
+2. KNOWN 실행 메타데이터 exact match 통과: `KNOWN`
 3. dispatch가 current policy에 거절됨: `OUT_OF_SCOPE`
 4. control 실패 또는 모순: `INCONCLUSIVE`
 5. 명시적 비악용 증거: `DISPROVEN`
@@ -652,13 +649,13 @@ Pipeline.db는 이후 재검증으로 변경될 수 있으므로 Report는 DB �
 
 | 영역 | 검증해야 하는 관찰 가능한 결과 |
 |---|---|
-| Schema migration | v8 fixture가 v9가 되고 기존 row·FK가 보존되며 재실행이 idempotent |
+| Schema migration | v8 fixture가 v9가 되고 이전 v9의 `known_similarity`가 제거되며 기존 row·FK 보존과 재실행 idempotency 검증 |
 | Reproduction spec | Finding과 atomic 생성되고 잘못된 scan·attempt·request·hash가 거절됨 |
 | Skill binding | distinct confirmed Skill이 0개 또는 2개 이상이면 요청 없이 INCONCLUSIVE |
 | Profile coverage | chain 제외 모든 packaged Hunt Skill에 유효 profile이 정확히 하나 존재 |
 | Blind boundary | staged input과 Agent prompt에 숨김 필드·Attack response·DB path가 없음; replay가 없으면 Agent ID가 비어 있음 |
 | Restricted helper | 허용하지 않은 command, target, method, 횟수, evidence ID가 거절됨 |
-| KNOWN | exact key와 0.85 임계 경계, source canonicalization, deterministic tie-break 검증 |
+| KNOWN | 취약점·요청·identity·Hunt Skill exact match, current source 검증, deterministic tie-break 검증 |
 | Controls | positive 실패와 negative false signal이 각각 INCONCLUSIVE |
 | Retry | 3/3, 0/3, mixed->5, development->fresh 3의 모든 전이 검증 |
 | Development | cycle 1회·action 2개 제한과 topology INCONCLUSIVE 검증 |

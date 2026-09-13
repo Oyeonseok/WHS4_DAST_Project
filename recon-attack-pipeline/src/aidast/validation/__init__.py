@@ -12,7 +12,7 @@ from .integrity import (CandidateIntegrityError, CandidateIntegrityGate,
                         ValidatedCandidate, canonical_reproduction_spec,
                         reproduction_spec_digest)
 from .matching import (KnownCandidate, KnownMatch, KnownMatcher, canonical_payload,
-                       normalized_similarity, payload_structure_sha256)
+                       payload_structure_sha256)
 from .models import (BlindAssessment, ClaimComparison, PoCAssessment, QuestionAnswer,
                      ValidationAssessment, ValidationCaseSnapshot, ValidationError,
                      ValidationStageResult, canonical_json, canonical_sha256)
@@ -26,8 +26,12 @@ from .request_broker import (ValidationPolicyRejection, ValidationRequestBroker,
                              ValidationRequestError)
 from .policy import TargetPolicyProvider
 from .http_adapter import HttpReproductionPort
+from .runtime_contract import (HttpAttemptContract, HttpRequestTemplate,
+                               HttpRuntimeContract, ResponseAssertion,
+                               evaluate_http_response, render_http_request)
 from .codex_runner import CodexBlindValidationRunner
-from .http_adapter import HttpReproductionPort
+from .native import build_native_validation_coordinator
+from .credentials import PipelineCredentialResolver
 from .status import shared_validation_status
 from .store import read_verified_validation, validation_status
 
@@ -38,7 +42,7 @@ __all__ = ["EvidenceOnlyReviewer", "ValidationAgent", "ValidationReviewer", "Val
 __all__ += ["BlindAssessment", "ClaimComparison", "ValidationCaseSnapshot",
             "ValidationStageResult", "canonical_json", "canonical_sha256", "ImpactResult",
             "evaluate_impact", "KnownCandidate", "KnownMatch", "KnownMatcher",
-            "canonical_payload", "normalized_similarity", "payload_structure_sha256"]
+            "canonical_payload", "payload_structure_sha256"]
 __all__ += ["ImpactGapAnalyzer"]
 __all__ += ["ValidationRepository", "ValidationRepositoryError", "ConcurrentValidationUpdate"]
 __all__ += ["shared_validation_status"]
@@ -55,5 +59,8 @@ __all__ += ["ValidationRequestBroker", "ValidationRequestError"]
 __all__ += ["ValidationPolicyRejection"]
 __all__ += ["TargetPolicyProvider"]
 __all__ += ["HttpReproductionPort"]
+__all__ += ["HttpAttemptContract", "HttpRequestTemplate", "HttpRuntimeContract",
+            "ResponseAssertion", "evaluate_http_response", "render_http_request"]
 __all__ += ["CodexBlindValidationRunner"]
-__all__ += ["HttpReproductionPort"]
+__all__ += ["build_native_validation_coordinator"]
+__all__ += ["PipelineCredentialResolver"]

@@ -22,6 +22,7 @@ class BlindCase(StrictContract):
     credential_references: tuple[Identifier, ...]
     signal_types: tuple[str, ...]
     controls: dict[str, Any]
+    runtime_contract: dict[str, Any] | None = None
     attack_skill_name: Identifier
     attack_skill_sha256: Digest
     validation_skill_sha256: Digest

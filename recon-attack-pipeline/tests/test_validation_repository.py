@@ -77,7 +77,7 @@ class ValidationRepositoryTests(unittest.TestCase):
         self.repo.create_case(scan_id="scan", stage_run_id=self.run, target_kind="finding",
                               target_id="two", case_id="duplicate")
         self.repo.finalize("duplicate", stage_run_id=self.run, expected_version=0, status="KNOWN",
-            decision={"result": "known"}, evidence_ids=[], known_source_case_id="source", known_similarity=.9)
+            decision={"result": "known"}, evidence_ids=[], known_source_case_id="source")
         finish_stage_run(self.conn, self.run)
         rerun = start_stage_run(self.conn, scan_id="scan", stage="validation", stage_run_id="rerun")
         self.repo.begin_revalidation("source", stage_run_id=rerun, expected_version=1)

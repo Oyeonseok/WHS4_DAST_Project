@@ -13,6 +13,7 @@ from .blind import AttackClaim, BlindCase, StagedBlindCase
 from .matching import canonical_payload, payload_structure_sha256
 from .models import canonical_sha256
 from .profiles import ResolvedValidationProfile, SkillProfileResolver, ValidationProfileError
+from .runtime_contract import HttpRuntimeContract
 
 
 class CandidateIntegrityError(ValueError):
@@ -74,6 +75,19 @@ class CandidateIntegrityGate:
                 spec[name] = json.loads(spec.pop(name + "_json"))
         except (json.JSONDecodeError, TypeError):
             raise CandidateIntegrityError("reproduction_spec_json") from None
+        runtime_json = spec.pop("runtime_contract_json", None)
+        runtime_sha256 = spec.pop("runtime_contract_sha256", None)
+        if (runtime_json is None) != (runtime_sha256 is None):
+            raise CandidateIntegrityError("runtime_contract_binding")
+        runtime_contract = None
+        if runtime_json is not None:
+            try:
+                runtime = HttpRuntimeContract.model_validate_json(runtime_json)
+            except (ValueError, TypeError):
+                raise CandidateIntegrityError("runtime_contract_schema") from None
+            runtime_contract = runtime.model_dump(mode="json")
+            if canonical_sha256(runtime_contract) != runtime_sha256:
+                raise CandidateIntegrityError("runtime_contract_sha256")
         if reproduction_spec_digest(spec) != spec["spec_sha256"]:
             raise CandidateIntegrityError("spec_sha256")
         if payload_structure_sha256(spec["payload_template"]) != spec["payload_structure_sha256"]:
@@ -125,6 +139,7 @@ class CandidateIntegrityGate:
                 "negative": profile.profile.control_negative.model_dump(mode="json"),
                 "baseline_samples": profile.profile.baseline_samples,
             },
+            runtime_contract=runtime_contract,
             attack_skill_name=spec["attack_skill_name"],
             attack_skill_sha256=profile.attack_skill_sha256,
             validation_skill_sha256=profile.validation_skill_sha256,

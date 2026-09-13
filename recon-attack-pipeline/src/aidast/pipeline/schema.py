@@ -320,7 +320,6 @@ CREATE TABLE IF NOT EXISTS validation_cases (
     blind_assessment_sha256 TEXT CHECK(blind_assessment_sha256 IS NULL OR length(blind_assessment_sha256)=64),
     attack_claim_sha256 TEXT CHECK(attack_claim_sha256 IS NULL OR length(attack_claim_sha256)=64),
     known_source_case_id TEXT REFERENCES validation_cases(case_id),
-    known_similarity REAL CHECK(known_similarity IS NULL OR known_similarity BETWEEN 0 AND 1),
     impact_boundary INTEGER CHECK(impact_boundary IS NULL OR impact_boundary BETWEEN 0 AND 3),
     impact_sensitivity INTEGER CHECK(impact_sensitivity IS NULL OR impact_sensitivity BETWEEN 0 AND 3),
     impact_actor_requirements INTEGER CHECK(impact_actor_requirements IS NULL OR impact_actor_requirements BETWEEN 0 AND 3),
@@ -334,7 +333,7 @@ CREATE TABLE IF NOT EXISTS validation_cases (
        OR (target_kind='chain' AND chain_id IS NOT NULL AND finding_id IS NULL)),
     CHECK((current_status IS NULL AND decision_json IS NULL AND decision_sha256 IS NULL)
        OR (current_status IS NOT NULL AND decision_json IS NOT NULL AND decision_sha256 IS NOT NULL)),
-    CHECK(current_status!='KNOWN' OR (known_source_case_id IS NOT NULL AND known_similarity IS NOT NULL)),
+    CHECK(current_status!='KNOWN' OR known_source_case_id IS NOT NULL),
     CHECK(impact_score IS NULL OR impact_score = impact_boundary + impact_sensitivity + impact_actor_requirements),
     UNIQUE(case_id, scan_id)
 );
@@ -460,8 +459,11 @@ CREATE TABLE IF NOT EXISTS finding_reproduction_specs (
     source_request_ids_json TEXT NOT NULL CHECK(json_valid(source_request_ids_json)),
     payload_structure_sha256 TEXT NOT NULL CHECK(length(payload_structure_sha256)=64),
     source_policy_sha256 TEXT NOT NULL CHECK(length(source_policy_sha256)=64),
+    runtime_contract_json TEXT CHECK(runtime_contract_json IS NULL OR json_valid(runtime_contract_json)),
+    runtime_contract_sha256 TEXT CHECK(runtime_contract_sha256 IS NULL OR length(runtime_contract_sha256)=64),
     spec_sha256 TEXT NOT NULL CHECK(length(spec_sha256)=64),
-    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CHECK((runtime_contract_json IS NULL) = (runtime_contract_sha256 IS NULL))
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_active_validation_stage
@@ -497,10 +499,92 @@ BEGIN SELECT RAISE(ABORT, 'finding relationship crosses scans'); END;
 """
 
 
+VALIDATION_CASES_WITHOUT_SIMILARITY_SCHEMA = """
+CREATE TABLE validation_cases_without_similarity (
+    case_id TEXT PRIMARY KEY NOT NULL,
+    scan_id TEXT NOT NULL REFERENCES scans(scan_id),
+    target_kind TEXT NOT NULL CHECK(target_kind IN ('finding','chain')),
+    finding_id TEXT REFERENCES findings(finding_id),
+    chain_id TEXT REFERENCES finding_chains(chain_id),
+    latest_stage_run_id TEXT NOT NULL REFERENCES stage_runs(stage_run_id),
+    decision_stage_run_id TEXT REFERENCES stage_runs(stage_run_id),
+    processing_phase TEXT NOT NULL CHECK(processing_phase IN
+        ('queued','blind_replay','developing','unblinding','completed','interrupted')),
+    current_status TEXT CHECK(current_status IN
+        ('CONFIRMED','DISPROVEN','OUT_OF_SCOPE','KNOWN','UNDERPOWERED','BLOCKED','INCONCLUSIVE','CONTESTED')),
+    state_version INTEGER NOT NULL DEFAULT 0 CHECK(state_version >= 0),
+    attack_skill_name TEXT,
+    skill_sha256 TEXT CHECK(skill_sha256 IS NULL OR length(skill_sha256)=64),
+    validation_profile_sha256 TEXT CHECK(validation_profile_sha256 IS NULL OR length(validation_profile_sha256)=64),
+    source_policy_sha256 TEXT CHECK(source_policy_sha256 IS NULL OR length(source_policy_sha256)=64),
+    current_policy_sha256 TEXT CHECK(current_policy_sha256 IS NULL OR length(current_policy_sha256)=64),
+    blind_case_sha256 TEXT CHECK(blind_case_sha256 IS NULL OR length(blind_case_sha256)=64),
+    blind_assessment_sha256 TEXT CHECK(blind_assessment_sha256 IS NULL OR length(blind_assessment_sha256)=64),
+    attack_claim_sha256 TEXT CHECK(attack_claim_sha256 IS NULL OR length(attack_claim_sha256)=64),
+    known_source_case_id TEXT REFERENCES validation_cases_without_similarity(case_id),
+    impact_boundary INTEGER CHECK(impact_boundary IS NULL OR impact_boundary BETWEEN 0 AND 3),
+    impact_sensitivity INTEGER CHECK(impact_sensitivity IS NULL OR impact_sensitivity BETWEEN 0 AND 3),
+    impact_actor_requirements INTEGER CHECK(impact_actor_requirements IS NULL OR impact_actor_requirements BETWEEN 0 AND 3),
+    impact_score INTEGER CHECK(impact_score IS NULL OR impact_score BETWEEN 0 AND 9),
+    severity TEXT CHECK(severity IS NULL OR severity IN ('CRITICAL','HIGH','MEDIUM','LOW','INFO')),
+    decision_json TEXT CHECK(decision_json IS NULL OR json_valid(decision_json)),
+    decision_sha256 TEXT CHECK(decision_sha256 IS NULL OR length(decision_sha256)=64),
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CHECK((target_kind='finding' AND finding_id IS NOT NULL AND chain_id IS NULL)
+       OR (target_kind='chain' AND chain_id IS NOT NULL AND finding_id IS NULL)),
+    CHECK((current_status IS NULL AND decision_json IS NULL AND decision_sha256 IS NULL)
+       OR (current_status IS NOT NULL AND decision_json IS NOT NULL AND decision_sha256 IS NOT NULL)),
+    CHECK(current_status!='KNOWN' OR known_source_case_id IS NOT NULL),
+    CHECK(impact_score IS NULL OR impact_score = impact_boundary + impact_sensitivity + impact_actor_requirements),
+    UNIQUE(case_id, scan_id)
+);
+"""
+
+
+def _remove_known_similarity_column(conn: sqlite3.Connection) -> None:
+    columns = [row[1] for row in conn.execute("PRAGMA table_info(validation_cases)")]
+    if "known_similarity" not in columns:
+        return
+    retained = [name for name in columns if name != "known_similarity"]
+    names = ",".join(retained)
+    foreign_keys = conn.execute("PRAGMA foreign_keys").fetchone()[0]
+    conn.commit()
+    if foreign_keys:
+        conn.execute("PRAGMA foreign_keys=OFF")
+    try:
+        conn.executescript(
+            "BEGIN IMMEDIATE;\n"
+            + VALIDATION_CASES_WITHOUT_SIMILARITY_SCHEMA
+            + f"INSERT INTO validation_cases_without_similarity ({names}) SELECT {names} FROM validation_cases;\n"
+            + "DROP TABLE validation_cases;\n"
+            + "ALTER TABLE validation_cases_without_similarity RENAME TO validation_cases;\n"
+            + "COMMIT;"
+        )
+        conn.executescript("""
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_validation_case_finding
+                ON validation_cases(scan_id, finding_id) WHERE finding_id IS NOT NULL;
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_validation_case_chain
+                ON validation_cases(scan_id, chain_id) WHERE chain_id IS NOT NULL;
+            CREATE INDEX IF NOT EXISTS idx_validation_cases_stage
+                ON validation_cases(latest_stage_run_id, processing_phase);
+        """)
+    except Exception:
+        if conn.in_transaction:
+            conn.rollback()
+        raise
+    finally:
+        if foreign_keys:
+            conn.execute("PRAGMA foreign_keys=ON")
+    if conn.execute("PRAGMA foreign_key_check").fetchone() is not None:
+        raise sqlite3.IntegrityError("validation_cases migration broke foreign keys")
+
+
 def migrate_pipeline_schema(conn: sqlite3.Connection) -> None:
     """Create shared pipeline tables without rebuilding existing data."""
     # executescript commits an existing transaction; caller owns initialization.
     conn.executescript(PIPELINE_SCHEMA)
+    _remove_known_similarity_column(conn)
     attempt_columns = {
         row[1] for row in conn.execute("PRAGMA table_info(attack_attempts)")
     }
@@ -525,6 +609,19 @@ def migrate_pipeline_schema(conn: sqlite3.Connection) -> None:
         )
     if "policy_sha256" not in request_columns:
         conn.execute("ALTER TABLE attack_http_requests ADD COLUMN policy_sha256 TEXT")
+    reproduction_columns = {
+        row[1] for row in conn.execute("PRAGMA table_info(finding_reproduction_specs)")
+    }
+    if "runtime_contract_json" not in reproduction_columns:
+        conn.execute(
+            "ALTER TABLE finding_reproduction_specs ADD COLUMN runtime_contract_json "
+            "TEXT CHECK(runtime_contract_json IS NULL OR json_valid(runtime_contract_json))"
+        )
+    if "runtime_contract_sha256" not in reproduction_columns:
+        conn.execute(
+            "ALTER TABLE finding_reproduction_specs ADD COLUMN runtime_contract_sha256 "
+            "TEXT CHECK(runtime_contract_sha256 IS NULL OR length(runtime_contract_sha256)=64)"
+        )
     for table, column, relation in (
         ("attack_tasks", "endpoint_id", "endpoints e JOIN origins o ON o.origin_id=e.origin_id"),
         ("attack_attempts", "endpoint_id", "endpoints e JOIN origins o ON o.origin_id=e.origin_id"),

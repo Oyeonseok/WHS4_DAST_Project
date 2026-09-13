@@ -10,7 +10,8 @@ from aidast.pipeline.lifecycle import create_task, finish_stage_run, start_stage
 from aidast.recon import db
 from aidast.recon.policy import PolicyLimits, TargetPolicy, ToolPolicy
 from aidast.scope.models import AssetType
-from aidast.validation import (ClaimComparison, ReproductionObservation,
+from aidast.validation import (ClaimComparison, HttpReproductionPort,
+                               ReproductionObservation,
                                ValidationCoordinator, ValidationCoordinatorError,
                                canonical_reproduction_spec)
 
@@ -215,6 +216,28 @@ class ValidationCoordinatorTests(unittest.TestCase):
             row = conn.execute("SELECT current_status,processing_phase FROM validation_cases").fetchone()
             self.assertEqual(row, ("CONFIRMED", "completed"))
             self.assertEqual(conn.execute("SELECT count(*) FROM validation_attempts").fetchone()[0], 5)
+
+    def test_native_http_preflight_isolates_missing_contract(self):
+        agent = CountingAgent()
+        result = ValidationCoordinator(
+            db_path=self.path, agent=agent, reproduction=HttpReproductionPort(),
+            policy_provider=lambda endpoint, method: self.policy,
+        ).run("scan")
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(result.validation_agent_ids, ())
+        with db.connect(self.path) as conn:
+            case = conn.execute(
+                "SELECT current_status,decision_json FROM validation_cases"
+            ).fetchone()
+            attempts = conn.execute(
+                "SELECT count(*) FROM validation_attempts"
+            ).fetchone()[0]
+        self.assertEqual(case[0], "INCONCLUSIVE")
+        self.assertEqual(
+            json.loads(case[1])["reason"], "http_runtime_contract_missing"
+        )
+        self.assertEqual(attempts, 0)
+        self.assertEqual(agent.assess_calls, 0)
 
     def test_replay_lazily_creates_exactly_one_native_agent(self):
         port = FakePort()

@@ -214,6 +214,10 @@ def _parser() -> argparse.ArgumentParser:
     )
     validation_run.add_argument("--run-id")
     validation_run.add_argument("--scan-id")
+    validation_run.add_argument(
+        "--policy", type=Path,
+        help="current TargetPolicy.json (default: next to Pipeline.db)",
+    )
     validation_target = validation_run.add_mutually_exclusive_group()
     validation_target.add_argument("--finding-id")
     validation_target.add_argument("--chain-id")
@@ -222,6 +226,10 @@ def _parser() -> argparse.ArgumentParser:
     )
     validation_resume.add_argument("database", type=Path, help="shared Pipeline.db")
     validation_resume.add_argument("--stage-run-id", required=True)
+    validation_resume.add_argument(
+        "--policy", type=Path,
+        help="current TargetPolicy.json (default: next to Pipeline.db)",
+    )
     validation_status_parser = validation_commands.add_parser(
         "status", help="inspect shared Pipeline.db with a selector or legacy Validation.db"
     )
@@ -638,11 +646,16 @@ def _run_recon(args: argparse.Namespace, *, prepare_attack: bool = False,
                     )
                 if validation_coordinator is not None:
                     validation_result = validation_coordinator.run(scan_id)
-                    print(
-                        "Shared Validation completed: "
-                        f"{validation_result.stage_run_id} "
-                        f"({len(validation_result.case_ids)} cases)"
-                    )
+                else:
+                    from aidast.validation import build_native_validation_coordinator
+                    validation_result = build_native_validation_coordinator(
+                        db_path=db_path, policy_path=run_dir / "TargetPolicy.json",
+                    ).run(scan_id)
+                print(
+                    "Shared Validation completed: "
+                    f"{validation_result.stage_run_id} "
+                    f"({len(validation_result.case_ids)} cases)"
+                )
         finally:
             executor.conn.close()
     return 0
@@ -779,8 +792,10 @@ def _run_validation(args: argparse.Namespace, *, reviewer: object | None = None,
             result = validation_status(args.database)
     elif args.validation_command == "resume":
         if coordinator is None:
-            raise ValidationCoordinatorError(
-                "validate resume requires a trusted injected ValidationCoordinator"
+            from aidast.validation import build_native_validation_coordinator
+            coordinator = build_native_validation_coordinator(
+                db_path=args.database,
+                policy_path=args.policy or args.database.parent / "TargetPolicy.json",
             )
         raw = coordinator.resume(args.stage_run_id)
         result = raw.model_dump(mode="json") if hasattr(raw, "model_dump") else raw
@@ -788,8 +803,10 @@ def _run_validation(args: argparse.Namespace, *, reviewer: object | None = None,
         if args.run_id is not None:
             raise ValidationError("--run-id belongs to the legacy offline Validation path")
         if coordinator is None:
-            raise ValidationCoordinatorError(
-                "shared validate run requires a trusted injected ValidationCoordinator"
+            from aidast.validation import build_native_validation_coordinator
+            coordinator = build_native_validation_coordinator(
+                db_path=args.database,
+                policy_path=args.policy or args.database.parent / "TargetPolicy.json",
             )
         raw = coordinator.run(args.scan_id, finding_id=args.finding_id, chain_id=args.chain_id)
         result = raw.model_dump(mode="json") if hasattr(raw, "model_dump") else raw

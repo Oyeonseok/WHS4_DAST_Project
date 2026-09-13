@@ -2,6 +2,151 @@
 
 이 문서는 Validation 재구조화 구현 변경을 누적 기록한다. 관련 구현을 완료할 때마다 최신 날짜의 항목을 문서 상단에 추가한다.
 
+## 2026-09-14: native env credential resolver
+
+- `PipelineCredentialResolver`가 Pipeline.db의 opaque credential ID를 read-only로 조회하고
+  `env://NAME`이 가리키는 환경 변수의 JSON HTTP header map을 dispatch 시점에만 해석한다.
+- header 이름, 개수, 값 크기와 CR/LF를 검증한다. 환경 변수 값이나 resolved header는
+  reproduction spec과 Validation evidence에 저장하지 않으며 기존 request ledger가
+  Authorization, Cookie 등 민감 header 값을 제거한다.
+- native Coordinator가 이 resolver를 기본 사용한다. 환경 변수가 없거나 malformed인
+  경우와 아직 backend가 없는 `keyring://`/`vault://` reference는 요청 전에
+  `credential_reference_unavailable`로 case만 격리한다.
+- preflight와 실제 dispatch 사이에 환경 값이 사라지는 경우도 raw 오류를 저장하지 않고
+  `identity_auth` blocker observation으로 바꾼다.
+
+  설계와 다른 점 및 이유: `env://` 값의 형식을 단일 token으로 추정하지 않고 명시적인
+  JSON header map으로 제한했다. Cookie, Authorization 또는 대상별 custom auth header를
+  안전하게 구분하면서 credential 원문을 DB schema에 추가하지 않기 위해서다.
+
+검증:
+
+- read-only credential reference 조회와 valid JSON header resolve
+- 누락된 env, CR/LF header injection, 미구성 backend의 preflight 거절
+- runtime contract/request broker/Coordinator 관련 집중 unittest 12개 통과
+- credential 추가 후 전체 unittest의 코드 테스트 359개와 별도 Reporting pytest 30개 통과
+
+## 2026-09-14: native HTTP Validation 기본 실행 연결
+
+- `build_native_validation_coordinator`가 current `TargetPolicy.json`, generic
+  `HttpReproductionPort`, lazy Codex runner를 기본 실행 구성으로 묶는다.
+- 전체 `aidast run`은 Chaining 직후 이 기본 Coordinator를 자동 실행한다. 별도
+  `validate run/resume`은 `--policy`를 받으며 생략하면 `Pipeline.db` 옆
+  `TargetPolicy.json`을 사용한다.
+- HTTP runtime contract가 없는 기존 Finding, 지원되지 않는 credential backend의 Finding,
+  Chain은 preflight에서 요청과 Agent 호출 없이 해당 case만 `INCONCLUSIVE`로 종료한다.
+  하나의 미지원 case 때문에 Validation stage 전체가 실패하지 않는다.
+- 테스트용 injected Coordinator 경계는 유지해 offline transport와 결정론적 fixture를
+  계속 사용할 수 있다.
+
+  설계와 다른 점 및 이유: 이 단계의 기본 연결은 unauthenticated HTTP Finding과
+  `env://` JSON header credential을 사용하는 Finding까지만 실제 replay를 수행한다.
+  미구성 backend를 추정하거나 HTTP assertion을 browser/OOB/Chain에 적용하면 잘못된
+  요청과 판정을 만들 수 있으므로 지원 범위를 preflight에서 명시적으로 제한한다.
+
+검증:
+
+- 전체 run 경로가 DB 옆 policy로 native Coordinator를 구성하고 호출
+- shared validate run의 명시적 policy 선택과 기존 injected 경로 호환
+- 미지원 HTTP case가 attempt와 Agent 호출 없이 `INCONCLUSIVE`로 격리
+- compileall 및 전체 unittest 360개 중 코드 테스트 359개 통과. pytest import가 필요한
+  기존 Reporting module은 `/opt/anaconda3/bin/pytest`에서 30개 통과
+
+## 2026-09-14: target별 HTTP runtime contract와 generic replay adapter
+
+- Attack `commit-finding`이 선택적으로 `runtime_contract`를 받아 target, positive control,
+  negative control 각각의 HTTP request와 response assertion을 strict schema로 검증한다.
+- path/query parameter, 비밀이 아닌 header, JSON/text body를 bounded request로 렌더링하고
+  status, header, body marker, JSON path, 최소/최대 duration assertion을 지원한다.
+- 정규화한 contract와 SHA-256을 immutable reproduction spec row에 함께 저장한다. Validation
+  무결성 게이트가 JSON schema와 hash를 다시 검사한 뒤에만 BlindCase로 전달한다.
+- `HttpReproductionPort`는 injected request builder/evaluator가 없어도 저장된 contract로
+  요청을 실행하고 assertion을 결정론적으로 평가한다. 실제 assertion 값은 evidence에
+  남기지 않고 expected/actual hash와 pass 여부만 저장한다.
+- credential header는 contract에서 거절하며 기존 opaque identity reference와 trusted
+  credential resolver 경계를 그대로 사용한다. 모든 initial/redirect hop은 기존
+  `ValidationRequestBroker`의 current TargetPolicy와 ledger 제한을 통과한다.
+
+  설계와 다른 점 및 이유: profile 파일에 모든 target의 marker, object ID, timing threshold를
+  미리 넣지 않았다. 같은 취약점 유형도 실제 endpoint와 응답 형식이 다르므로 Attack이
+  확인한 target별 실행값을 Finding과 함께 hash 고정하는 편이 오탐을 줄인다.
+
+  설계와 다른 점 및 이유: runtime contract는 현재 HTTP Finding에서 선택 사항이다. 기존
+  Finding 호환성을 유지하고 browser, OOB, 다단계 Chain을 HTTP 응답 assertion으로 잘못
+  축소하지 않기 위해서다. contract가 없는 case에서 generic HTTP adapter는 성공을
+  추정하지 않고 실행을 거절한다.
+
+검증:
+
+- runtime request 렌더링, credential header 거절, assertion 결과 원문 비저장
+- Attack transaction의 canonical contract/hash 저장과 완료 stage 무결성 gate 전달
+- 저장 contract를 사용한 실제 HTTP adapter 경로 및 redacted request ledger
+- runtime/adapter/Attack/Coordinator/schema 집중 unittest 28개 통과
+
+## 2026-09-13: KNOWN exact key에서 signal 종류 제거
+
+- `signal_types`를 KnownCandidate, KnownMatcher 입력과 exact metadata key에서 제거했다.
+- source의 Validation profile hash 일치 조건도 함께 제거했다. profile hash는 signal과
+  control 같은 검증 방법의 변경까지 포함하므로 중복 대상의 정체성을 비교하는 key로
+  사용하지 않는다.
+- KNOWN은 vuln class, normalized endpoint, method, injection 위치, parameter 이름/역할,
+  identity 역할, Hunt Skill이 정확히 같은지를 기준으로 판정한다.
+
+  설계와 다른 점 및 이유: 직전 구현은 expected signal 종류를 exact key에 포함했다.
+  signal은 같은 취약점을 OOB callback, response diff, authorization 등 어떤 방식으로
+  관찰했는지를 나타내며 취약점 자체의 endpoint·trigger·권한 조건이 아니다. 검증 방법이
+  다르다는 이유만으로 동일 대상을 별개 Finding으로 취급하지 않도록 중복 key에서 제외한다.
+
+검증:
+
+- signal field 없이 나머지 exact metadata가 모두 같을 때 deterministic source 선택
+- 각 exact metadata 또는 source current status가 다르면 match하지 않음
+- matching, Coordinator, Repository, schema 집중 unittest 22개 통과
+
+## 2026-09-13: KNOWN을 실행 메타데이터 exact match로 단순화
+
+- KNOWN 판정에서 payload Levenshtein 계산과 `0.85` threshold를 제거했다.
+- 같은 scan의 현재 `CONFIRMED` Finding 중 vuln class, normalized endpoint, method,
+  injection 위치, parameter 이름/실행 역할, identity 역할, Hunt Skill, expected signal
+  종류가 모두 정확히 일치하는 source만 KNOWN으로 선택한다.
+- identity 역할과 signal 종류는 집합 의미로 정렬해 비교하고, 여러 source가 맞으면
+  case ID lexical 순으로 결정한다. source의 저장 Skill과 현재 profile hash도 일치해야 한다.
+- shared Pipeline.db v9 계약에서 `known_similarity` column과 Repository 인자를 제거했다.
+  기존 v9 DB도 case와 foreign key를 보존하며 table을 재구성한다.
+- payload normalization과 구조 hash는 reproduction spec 변조 검출에만 유지한다.
+
+  설계와 다른 점 및 이유: 기존 §8.6은 세 개 exact key 뒤 payload 문자열의 Levenshtein
+  유사도 `0.85`를 사용했다. 표현이 다른 동등 payload를 놓치고, 반대로 문자가 비슷한
+  다른 mechanism을 KNOWN으로 처리해 fresh replay를 생략할 수 있으므로 문자열 거리를
+  중복의 의미 근거로 사용하지 않는다. 이번 범위는 구조화된 메타데이터 exact match까지만
+  구현하며 payload semantic 비교 LLM은 아직 연결하지 않는다.
+
+  설계와 다른 점 및 이유: 현재 reproduction spec에는 독립된 `parameter_role`과 권한
+  boundary field가 없다. 이번 구현은 `(injection_location, parameter_name)`을 parameter의
+  실행 역할로, `required_identity_roles`를 사용 가능한 identity/권한 조건으로 비교한다.
+  더 세밀한 semantic role이 필요하면 Attack producer와 schema 계약을 함께 확장해야 한다.
+
+검증:
+
+- 8개 실행 메타데이터 각각이 다를 때 match하지 않고 순서만 다른 role/signal은 동일하게 처리
+- v9의 `known_similarity` column 제거 후 case와 foreign key 보존
+- matching, schema, repository, Coordinator, shared Reporting, pipeline contract 관련
+  집중 unittest 37개 통과
+- 전체 unittest 350개 중 코드 테스트 349개 통과. `.venv`에 pytest가 없어 import되지
+  않은 Reporting module은 시스템 pytest에서 34개 통과
+
+## 2026-09-13: 구현 현황 이해 문서 추가
+
+- 커밋별 누적 기록과 구현 계획을 오가지 않고도 현재 구조를 파악할 수 있도록
+  `VALIDATION_IMPLEMENTATION_OVERVIEW.md`를 추가했다.
+- 후보 무결성 검사부터 KNOWN, replay, Blind/unblind, 결정론적 상태 판정, impact,
+  Chain, Reporting까지의 전체 흐름과 각 계층의 책임을 한 문서로 정리했다.
+- KNOWN에서 임베딩을 사용하지 않는 이유, LLM이 담당하는 의미 판정의 범위, impact와
+  설치 수·버그바운티 eligibility의 차이, production adapter가 아직 남아 있다는 현재
+  한계를 명시했다.
+- 기존 설계와 달라진 Agent 권한, persisted Codex session, runtime assertion 보류와
+  legacy Reporting 병행의 이유도 해당 항목 아래에 기록했다.
+
 ## 2026-09-13: Hunt Skill별 Validation 효과 기준 구체화
 
 - 58개 profile의 `profile_defined_*` placeholder를 제거하고 각 Hunt Skill에서 fresh

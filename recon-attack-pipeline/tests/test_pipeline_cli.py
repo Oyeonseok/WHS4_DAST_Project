@@ -50,6 +50,10 @@ class PipelineCliTests(unittest.TestCase):
                 patch("aidast.cli.OfflineReconReview") as review,
                 patch("aidast.cli.AttackCoordinator") as attack,
                 patch("aidast.cli.ChainingCoordinator") as chaining,
+                patch(
+                    "aidast.validation.build_native_validation_coordinator",
+                    return_value=validation,
+                ) as validation_factory,
                 patch("socket.create_connection", side_effect=AssertionError("network forbidden")),
                 patch("subprocess.run", side_effect=AssertionError("external process forbidden")),
                 redirect_stdout(stdout),
@@ -71,7 +75,7 @@ class PipelineCliTests(unittest.TestCase):
                     "run", "https://example.test/program", "--all-targets",
                     "--run-root", str(root / "Runs"),
                     "--attack-output-root", str(root / "AttackRuns"),
-                ], validation_coordinator=validation)
+                ])
             self.assertEqual(result, 0)
             self.assertIn("Native Attack Agent completed: agent-fixture", stdout.getvalue())
             database, = (root / "Runs").glob("*/Pipeline.db")
@@ -82,6 +86,10 @@ class PipelineCliTests(unittest.TestCase):
             attack.assert_called_once()
             chaining.assert_called_once()
             validation.run.assert_called_once()
+            validation_factory.assert_called_once_with(
+                db_path=database,
+                policy_path=database.parent / "TargetPolicy.json",
+            )
             self.assertIn("Shared Validation completed", stdout.getvalue())
 
     def test_recon_handoff_is_consumed_by_attack_command(self) -> None:

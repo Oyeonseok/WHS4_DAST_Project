@@ -284,7 +284,7 @@ class ValidationRepository:
     def finalize(self, case_id: str, *, stage_run_id: str, expected_version: int,
                  status: TerminalStatus, decision: dict[str, Any], evidence_ids: Iterable[str],
                  impact: tuple[int, int, int] | None = None,
-                 known_source_case_id: str | None = None, known_similarity: float | None = None) -> int:
+                 known_source_case_id: str | None = None) -> int:
         cited = tuple(evidence_ids)
         if len(cited) != len(set(cited)):
             raise ValidationRepositoryError("decision evidence IDs must be unique")
@@ -311,10 +311,9 @@ class ValidationRepository:
                     FROM validation_cases WHERE case_id=?""", (known_source_case_id,),
                 ).fetchone()
                 if (source is None or source[0] != case["scan_id"] or source[1] != "CONFIRMED"
-                        or source[2] != "completed" or source[3] != source[4]
-                        or known_similarity is None or not 0 <= known_similarity <= 1):
+                        or source[2] != "completed" or source[3] != source[4]):
                     raise ValidationRepositoryError("KNOWN requires a current same-scan CONFIRMED source")
-            elif known_source_case_id is not None or known_similarity is not None:
+            elif known_source_case_id is not None:
                 raise ValidationRepositoryError("KNOWN source fields are only valid for KNOWN")
             encoded = canonical_json(decision)
             decision_sha = canonical_sha256(decision)
@@ -324,11 +323,11 @@ class ValidationRepository:
             previous = case["current_status"]
             cursor = self.conn.execute(
                 """UPDATE validation_cases SET processing_phase='completed',current_status=?,
-                decision_stage_run_id=?,known_source_case_id=?,known_similarity=?,
+                decision_stage_run_id=?,known_source_case_id=?,
                 impact_boundary=?,impact_sensitivity=?,impact_actor_requirements=?,impact_score=?,severity=?,
                 decision_json=?,decision_sha256=?,state_version=state_version+1,updated_at=?
                 WHERE case_id=? AND latest_stage_run_id=? AND state_version=?""",
-                (status, stage_run_id, known_source_case_id, known_similarity, *values, encoded,
+                (status, stage_run_id, known_source_case_id, *values, encoded,
                  decision_sha, now(), case_id, stage_run_id, expected_version),
             )
             if cursor.rowcount != 1:
@@ -338,7 +337,7 @@ class ValidationRepository:
                 invalidation_json = canonical_json(invalidation)
                 self.conn.execute(
                     """UPDATE validation_cases SET current_status='INCONCLUSIVE',known_source_case_id=NULL,
-                    known_similarity=NULL,decision_json=?,decision_sha256=?,state_version=state_version+1,updated_at=?
+                    decision_json=?,decision_sha256=?,state_version=state_version+1,updated_at=?
                     WHERE known_source_case_id=? AND current_status='KNOWN'""",
                     (invalidation_json, canonical_sha256(invalidation), now(), case_id),
                 )

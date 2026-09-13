@@ -91,7 +91,7 @@ class SharedValidationReportingTests(unittest.TestCase):
         self.repo.create_case(scan_id="scan", stage_run_id=self.run, target_kind="finding",
                               target_id="known_finding", case_id="known")
         self.repo.finalize("known", stage_run_id=self.run, expected_version=0, status="KNOWN",
-            decision={"result": "known"}, evidence_ids=[], known_source_case_id="source", known_similarity=1)
+            decision={"result": "known"}, evidence_ids=[], known_source_case_id="source")
         known = ReportAgent().run(self.path, self.output, platform="hackerone", case_id="known")
         self.assertEqual((known["eligibility"], known["known_source_case_id"]), ("known", "source"))
         self.repo.create_case(scan_id="scan", stage_run_id=self.run, target_kind="finding",

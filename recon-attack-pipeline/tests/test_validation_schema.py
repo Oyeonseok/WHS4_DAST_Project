@@ -26,6 +26,8 @@ class ValidationSchemaTests(unittest.TestCase):
 
     def test_schema_version_and_tables(self):
         self.assertEqual(self.conn.execute("PRAGMA user_version").fetchone()[0], 9)
+        columns = {row[1] for row in self.conn.execute("PRAGMA table_info(validation_cases)")}
+        self.assertNotIn("known_similarity", columns)
         expected = {"validation_cases", "validation_attempts", "validation_evidence",
                     "validation_development_actions", "validation_impact_hypotheses",
                     "validation_http_requests", "finding_reproduction_specs"}
@@ -116,3 +118,27 @@ class ValidationSchemaTests(unittest.TestCase):
             migrate_pipeline_schema(connection)
             self.assertEqual(connection.execute("SELECT count(*) FROM sqlite_master").fetchone()[0], before)
             self.assertEqual(connection.execute("PRAGMA foreign_key_check").fetchall(), [])
+
+    def test_v9_known_similarity_column_is_removed_without_losing_cases(self):
+        self.conn.execute("ALTER TABLE validation_cases ADD COLUMN known_similarity REAL")
+        self.conn.execute("""INSERT INTO validation_cases
+            (case_id,scan_id,target_kind,finding_id,latest_stage_run_id,processing_phase,
+             known_similarity) VALUES ('case','scan','finding','finding','validation_run','queued',0.9)""")
+        self.conn.execute("""INSERT INTO validation_attempts
+            (attempt_id,case_id,stage_run_id,batch_no,attempt_kind,ordinal,signal_type,outcome)
+            VALUES ('attempt','case','validation_run',1,'target',1,'response_diff','not_observed')""")
+        self.conn.execute("PRAGMA user_version=9")
+        self.conn.commit()
+
+        migrate_pipeline_schema(self.conn)
+
+        columns = {row[1] for row in self.conn.execute("PRAGMA table_info(validation_cases)")}
+        self.assertNotIn("known_similarity", columns)
+        self.assertEqual(self.conn.execute(
+            "SELECT case_id,processing_phase FROM validation_cases"
+        ).fetchall(), [("case", "queued")])
+        self.assertEqual(self.conn.execute(
+            "SELECT attempt_id,case_id FROM validation_attempts"
+        ).fetchall(), [("attempt", "case")])
+        self.assertEqual(self.conn.execute("PRAGMA user_version").fetchone()[0], 9)
+        self.assertEqual(self.conn.execute("PRAGMA foreign_key_check").fetchall(), [])

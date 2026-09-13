@@ -8,8 +8,9 @@ from aidast.pipeline.lifecycle import start_stage_run
 from aidast.recon import db
 from aidast.recon.policy import PolicyLimits, TargetPolicy, ToolPolicy
 from aidast.scope.models import AssetType
-from aidast.validation import (BlindCase, ValidationRepository, ValidationRequestBroker,
-                               ValidationRequestError, HttpReproductionPort)
+from aidast.validation import (BlindCase, HttpReproductionPort, HttpRuntimeContract,
+                               ValidationRepository, ValidationRequestBroker,
+                               ValidationRequestError)
 
 
 class Response:
@@ -109,6 +110,33 @@ class ValidationRequestBrokerTests(unittest.TestCase):
         self.assertEqual(self.conn.execute(
             "SELECT status FROM validation_http_requests"
         ).fetchone()[0], "completed")
+
+    def test_http_reproduction_adapter_executes_staged_runtime_contract(self):
+        attempt = {
+            "request": {"path_parameters": {"id": 7}},
+            "assertions": [{
+                "assertion_id": "body-marker", "kind": "body_contains", "expected": "ok",
+            }],
+        }
+        contract = HttpRuntimeContract(
+            schema_version=1, target=attempt,
+            positive_control=attempt, negative_control=attempt,
+        )
+        blind = self.blind.model_copy(update={
+            "runtime_contract": contract.model_dump(mode="json"),
+        })
+        result = HttpReproductionPort(
+            transport=lambda request, timeout: Response(),
+            credential_resolver=lambda reference: {"Authorization": "Bearer private"},
+        ).execute(
+            blind, attempt_kind="target", batch_no=1, ordinal=1,
+            attempt_id="attempt", db_path=self.path, scan_id="scan",
+            stage_run_id="stage", case_id="case", policy=self.policy,
+        )
+        self.assertTrue(result.signal_observed)
+        self.assertEqual(self.conn.execute(
+            "SELECT url FROM validation_http_requests ORDER BY created_at DESC LIMIT 1"
+        ).fetchone()[0], "https://test/items/7")
 
 
 if __name__ == "__main__":

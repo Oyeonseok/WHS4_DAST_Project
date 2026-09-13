@@ -14,7 +14,7 @@ from aidast.recon.policy import TargetPolicy
 
 from .decision import DecisionEngine, DecisionInput
 from .integrity import CandidateIntegrityError, CandidateIntegrityGate, ValidatedCandidate
-from .matching import KnownCandidate, KnownMatcher, MATCHER_VERSION, NORMALIZER_VERSION
+from .matching import KnownCandidate, KnownMatcher, MATCHER_VERSION
 from .models import (BlindAssessment, ClaimComparison, ValidationStageResult,
                      canonical_sha256)
 from .repository import ValidationRepository
@@ -201,18 +201,21 @@ class ValidationCoordinator:
                           status="INCONCLUSIVE", decision={"reason": "candidate_integrity",
                           "failed_check": exc.check}, evidence_ids=())
             return False
+        blind = candidate.staged.blind_view()
         match = self.matcher.match(
             vuln_class=candidate.vuln_class, endpoint_template=candidate.endpoint_template,
-            parameter_name=candidate.parameter_name, payload_template=candidate.payload_template,
+            method=blind["method"], injection_location=blind["injection_location"],
+            parameter_name=candidate.parameter_name,
+            required_identity_roles=blind["required_identity_roles"],
+            attack_skill_name=blind["attack_skill_name"],
             candidates=self._known_candidates(conn, candidate),
         )
         if match:
             repo.finalize(
                 case["case_id"], stage_run_id=stage_run_id, expected_version=version,
                 status="KNOWN", decision={"reason": "known_match", "matcher_version": MATCHER_VERSION,
-                "normalizer_version": NORMALIZER_VERSION, "source_case_id": match.source_case_id,
-                "similarity": match.similarity}, evidence_ids=(),
-                known_source_case_id=match.source_case_id, known_similarity=match.similarity,
+                "match_kind": match.match_kind, "source_case_id": match.source_case_id},
+                evidence_ids=(), known_source_case_id=match.source_case_id,
             )
             return False
         return self._run_candidate(
@@ -288,10 +291,26 @@ class ValidationCoordinator:
                 (case["case_id"], stage_run_id),
             ).fetchone())
         else:
-            if self.reproduction is None:
-                raise ValidationCoordinatorError("blind replay requires an injected ReproductionPort")
             recovered = self._completed_batch(conn, case["case_id"], stage_run_id) if resuming else None
             if recovered is None:
+                if self.reproduction is None:
+                    raise ValidationCoordinatorError("blind replay requires an injected ReproductionPort")
+                preflight = getattr(self.reproduction, "unsupported_reason", None)
+                unsupported = (
+                    preflight(candidate.staged._blind_case)
+                    if callable(preflight) else None
+                )
+                if unsupported is not None:
+                    repo.finalize(
+                        case["case_id"], stage_run_id=stage_run_id,
+                        expected_version=version, status="INCONCLUSIVE",
+                        decision={
+                            "reason": unsupported,
+                            "phase": "reproduction_preflight",
+                        },
+                        evidence_ids=(),
+                    )
+                    return False
                 batch_no = 1 if not resuming else conn.execute(
                     "SELECT COALESCE(max(batch_no),0)+1 FROM validation_attempts WHERE case_id=? AND stage_run_id=?",
                     (case["case_id"], stage_run_id),
@@ -699,7 +718,9 @@ class ValidationCoordinator:
     @staticmethod
     def _known_candidates(conn: sqlite3.Connection, candidate: ValidatedCandidate) -> tuple[KnownCandidate, ...]:
         rows = conn.execute(
-            """SELECT c.case_id,f.vuln_type,s.endpoint_template,s.parameter_name,s.payload_template_json
+            """SELECT c.case_id,f.vuln_type,s.endpoint_template,s.method,s.injection_location,
+            s.parameter_name,s.required_identity_roles_json,s.attack_skill_name,
+            c.attack_skill_name
             FROM validation_cases c JOIN findings f ON f.finding_id=c.finding_id
             JOIN finding_reproduction_specs s ON s.finding_id=f.finding_id
             WHERE c.scan_id=? AND c.current_status='CONFIRMED' AND c.processing_phase='completed'
@@ -707,7 +728,18 @@ class ValidationCoordinator:
             (candidate.scan_id, candidate.case_id),
         ).fetchall()
         import json
-        return tuple(KnownCandidate(row[0], row[1], row[2], row[3], json.loads(row[4])) for row in rows)
+        result = []
+        for row in rows:
+            source_skill = row[7]
+            if row[8] != source_skill:
+                continue
+            result.append(KnownCandidate(
+                case_id=row[0], vuln_class=row[1], endpoint_template=row[2], method=row[3],
+                injection_location=row[4], parameter_name=row[5],
+                required_identity_roles=tuple(json.loads(row[6])),
+                attack_skill_name=source_skill,
+            ))
+        return tuple(result)
 
     def _run_chain(self, conn: sqlite3.Connection, repo: ValidationRepository,
                    case: dict[str, Any], stage_run_id: str) -> bool:

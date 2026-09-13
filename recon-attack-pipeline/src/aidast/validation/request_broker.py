@@ -31,6 +31,10 @@ class ValidationPolicyRejection(ValidationRequestError):
     pass
 
 
+class ValidationCredentialError(ValidationRequestError):
+    pass
+
+
 class _NoRedirect(HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         return None
@@ -66,11 +70,14 @@ class ValidationRequestBroker:
         merged = dict(headers or {})
         for reference in self.blind_case.credential_references:
             if self.credential_resolver is None:
-                raise ValidationRequestError("credential references require a trusted resolver")
-            resolved = self.credential_resolver(reference)
+                raise ValidationCredentialError("credential references require a trusted resolver")
+            try:
+                resolved = self.credential_resolver(reference)
+            except (OSError, ValueError) as exc:
+                raise ValidationCredentialError("credential reference resolution failed") from exc
             if not isinstance(resolved, Mapping) or any(not isinstance(k, str) or not isinstance(v, str)
                                                         for k, v in resolved.items()):
-                raise ValidationRequestError("credential resolver returned invalid headers")
+                raise ValidationCredentialError("credential resolver returned invalid headers")
             merged.update(resolved)
         broker = RequestBroker(
             self.policy, transport=self._ledger_transport,
