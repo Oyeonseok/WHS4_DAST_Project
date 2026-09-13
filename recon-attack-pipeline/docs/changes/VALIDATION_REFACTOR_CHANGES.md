@@ -2,6 +2,33 @@
 
 이 문서는 Validation 재구조화 구현 변경을 누적 기록한다. 관련 구현을 완료할 때마다 최신 날짜의 항목을 문서 상단에 추가한다.
 
+## 2026-09-14: target과 negative control의 proof 기준 고정
+
+- target에서 보안 효과를 판단하는 assertion과 fresh negative control에서 효과 부재를
+  판단하는 assertion을 동일한 의미로 고정했다. assertion ID와 순서는 판정 의미가 아니므로
+  비교에서 제외한다.
+- HTTP content profile은 같은 header/body/JSON marker를, timing profile은 같은 duration
+  threshold를 negative control에도 적용한다.
+- XSS는 같은 console execution marker를, 그 밖의 Browser profile은 같은 DOM assertion을
+  negative control에서 검사한다. OOB는 같은 token template, protocol과 최소 callback 수를
+  사용한다.
+- 요청 입력은 target과 inert control이 계속 달라야 한다. 따라서 동일 proof가 target에는
+  나타나고 negative control에는 나타나지 않을 때만 기존 DecisionEngine의
+  `negative_control_clear` 조건을 통과한다.
+- Attack database contract의 status-only IDOR 예시를 실제 `owner_id` JSON marker와 동일한
+  negative assertion을 사용하는 예시로 교체했다.
+- 서로 다른 HTTP marker, XSS execution marker와 OOB callback threshold를 거부하는 테스트를
+  추가했다. 전체 unittest 364개, shared Reporting pytest 22개, compileall과 whitespace
+  검사가 통과했다.
+
+설계와 다른 점 및 이유:
+
+원 설계는 target과 negative control을 모두 요구하지만 두 attempt가 동일한 proof 기준을
+평가해야 한다는 구조 제약은 명시하지 않았다. 서로 다른 assertion을 허용하면 negative
+control이 무관한 marker만 검사해 target marker의 정상 baseline 충돌을 놓칠 수 있다.
+정적 코드가 target별 marker의 정답을 추측하지 않으면서도 fresh control 비교가 유효하도록
+보안 효과 assertion의 의미만 양쪽에 동일하게 강제했다.
+
 ## 2026-09-14: Codex Validation thread의 case 단위 격리
 
 - 하나의 Validation runner는 stage 동안 유지하되 Codex persisted thread와 작업

@@ -189,7 +189,7 @@ Coordinator를 만들어 Validation을 자동 실행한다. 독립 `validate run
 현재 저장 구조, 상태 머신, 무결성 검사, Blind Agent, Chain replay와 보고서 연결은
 구현돼 있다. 실제 운영 경로를 완성하려면 다음 작업이 남아 있다.
 
-1. 실제 target에서 marker·selector·threshold가 정상 baseline과 충돌하지 않는지 운영 검토
+1. 실제 target에서 동일 proof를 적용한 fresh negative control이 clear인지 수용 검증
 
 HTTP response marker와 정량 threshold는 공통 profile에서 추정하지 않고 Attack의 실제
 관찰에서 만들어진 immutable runtime contract로 받는다. generic HTTP adapter는 이 값이
@@ -206,7 +206,9 @@ arm/cursor/poll observer로 연결한다.
 runtime contract 저장 전과 replay 전에는 profile-aware 최소 의미 검사를 수행한다. 동일한
 target/negative request, status-only HTTP proof, duration 없는 timing proof, 실행 marker 없는
 XSS와 동일한 OOB trigger는 거부한다. 실제 marker가 target의 자연 응답에도 존재하는지는
-정적 규칙으로 추측하지 않고 fresh control 관측에서 판단한다.
+정적 규칙으로 추측하지 않고 fresh control 관측에서 판단한다. 이때 negative control은
+target과 동일한 content marker·duration threshold·DOM/console assertion 또는 OOB callback
+기준을 사용해야 하므로 무관한 assertion으로 baseline 검사를 우회할 수 없다.
 
 native HTTP·Browser·OOB·Chain adapter의 성공 관찰은 Validation request ledger row를 반드시
 남긴다. Coordinator는 evidence 저장 전에 반환된 모든 request ID가 현재
