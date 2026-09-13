@@ -35,6 +35,8 @@ class FakeChainPort(FakePort):
     def execute(self, blind_case, *, attempt_kind, batch_no, ordinal, attempt_id, **context):
         if blind_case.target_kind == "chain":
             self.asserted_chain = True
+            assert blind_case.runtime_contract["runtime_kind"] == "chain"
+            assert len(blind_case.runtime_contract["steps"]) == 2
             assert len(blind_case.payload_template["ordered_steps"]) == 2
             assert blind_case.payload_template["bindings"] == [{
                 "from_position": 0, "to_position": 1, "binding_name": "object_id",
@@ -445,8 +447,33 @@ class ValidationCoordinatorTests(unittest.TestCase):
                 ]), "Reached terminal private record"),
             ])
             conn.execute("""INSERT INTO chain_execution_bindings
-                (execution_id,edge_position,from_step_position,to_step_position,binding_name,value_sha256)
-                VALUES ('execution',0,0,1,'object_id',?)""", ("b" * 64,))
+                (execution_id,edge_position,from_step_position,to_step_position,binding_name,
+                 value_sha256,source_kind,source_path_json,target_kind,target_path_json)
+                VALUES ('execution',0,0,1,'object_id',?,'json_path',?,
+                        'path_parameter',?)""", ("b" * 64, '["id"]', '["id"]'))
+            runtime_attempt = {
+                "request": {"path_parameters": {"id": 1}},
+                "assertions": [{
+                    "assertion_id": "status", "kind": "status_equals", "expected": 200,
+                }],
+            }
+            runtime_contract = {
+                "schema_version": 1, "target": runtime_attempt,
+                "positive_control": runtime_attempt, "negative_control": runtime_attempt,
+            }
+            from aidast.validation import validate_runtime_contract
+            normalized_runtime = validate_runtime_contract(runtime_contract).model_dump(mode="json")
+            runtime_json = json.dumps(normalized_runtime, sort_keys=True, separators=(",", ":"))
+            runtime_sha = canonical_sha256(normalized_runtime)
+            # This test fixture predates runtime contracts; replace only its setup
+            # row before Validation begins.
+            conn.execute("DROP TRIGGER finding_reproduction_specs_no_update")
+            conn.execute(
+                """UPDATE finding_reproduction_specs
+                   SET runtime_contract_json=?,runtime_contract_sha256=?
+                   WHERE finding_id IN ('finding','finding2')""",
+                (runtime_json, runtime_sha),
+            )
             conn.commit()
             chaining_tables = (
                 "finding_chains", "finding_chain_nodes", "chain_candidates",

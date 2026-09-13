@@ -6,10 +6,11 @@ from .blind import BlindCase
 
 
 class RuntimeReproductionRouter:
-    def __init__(self, *, http, browser=None, oob=None):
+    def __init__(self, *, http, browser=None, oob=None, chain=None):
         self.http = http
         self.browser = browser
         self.oob = oob
+        self.chain = chain
 
     @staticmethod
     def _kind(blind_case: BlindCase) -> str:
@@ -23,6 +24,8 @@ class RuntimeReproductionRouter:
             return self.browser
         if kind == "oob":
             return self.oob
+        if kind == "chain":
+            return self.chain
         return None
 
     def unsupported_reason(self, blind_case: BlindCase) -> str | None:

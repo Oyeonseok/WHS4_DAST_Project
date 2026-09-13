@@ -186,18 +186,40 @@ def _json_path(document: object, path: object) -> object:
     return _scalar(current, label="captured JSON value")
 
 
+def _binding_target_matches(*, kind: str, path: list, value: object, url: str,
+                            headers: dict[str, str], body: bytes | None) -> bool:
+    rendered = value if isinstance(value, str) else json.dumps(
+        value, ensure_ascii=False, separators=(",", ":")
+    )
+    if kind == "path_parameter":
+        return quote(rendered, safe="") in urlsplit(url).path.split("/")
+    if kind == "query_parameter":
+        return any(name == path[0] and candidate == rendered
+                   for name, candidate in parse_qsl(urlsplit(url).query, keep_blank_values=True))
+    if kind == "request_header":
+        return any(name.casefold() == path[0].casefold() and candidate == rendered
+                   for name, candidate in headers.items())
+    if body is None:
+        return False
+    try:
+        return _json_path(json.loads(body), path) == value
+    except (UnicodeDecodeError, json.JSONDecodeError, RequestGuardError):
+        return False
+
+
 def _binding_hashes(
     db_path: Path, *, scan_id: str, stage_run_id: str, task_id: str,
     bindings: object, url: str, headers: dict[str, str], body: bytes | None,
-) -> dict[str, str]:
+) -> tuple[dict[str, str], dict[str, dict]]:
     if bindings is None:
-        return {}
+        return {}, {}
     if not isinstance(bindings, list) or len(bindings) > 16:
         raise RequestGuardError("bindings must be a bounded list")
     haystacks = [url, *(f"{name}: {value}" for name, value in headers.items())]
     if body is not None:
         haystacks.append(body.decode("utf-8", errors="replace"))
     consumed: dict[str, str] = {}
+    contracts: dict[str, dict] = {}
     with closing(sqlite3.connect(db_path)) as conn:
         for raw in bindings:
             if not isinstance(raw, dict):
@@ -232,7 +254,31 @@ def _binding_hashes(
             if not any(rendered in haystack or encoded in haystack for haystack in haystacks):
                 raise RequestGuardError("binding value is not used by the outgoing request")
             consumed[name] = digest
-    return consumed
+            target_kind, target_path = raw.get("target_kind"), raw.get("target_path")
+            if target_kind is not None or target_path is not None:
+                if target_kind not in {
+                    "path_parameter", "query_parameter", "request_header", "json_body",
+                } or not isinstance(target_path, list) or not 1 <= len(target_path) <= 16:
+                    raise RequestGuardError("binding target contract is invalid")
+                if any(
+                    (isinstance(part, str) and (not part or len(part) > 256))
+                    or (type(part) is int and part < 0) or type(part) not in {str, int}
+                    for part in target_path
+                ):
+                    raise RequestGuardError("binding target path is invalid")
+                if target_kind != "json_body" and (
+                    len(target_path) != 1 or not isinstance(target_path[0], str)
+                ):
+                    raise RequestGuardError("non-JSON binding target requires one name")
+                if target_kind == "request_header" and target_path[0].casefold() in SENSITIVE_HEADERS:
+                    raise RequestGuardError("credential headers cannot be chain binding targets")
+                if not _binding_target_matches(
+                    kind=target_kind, path=target_path, value=value,
+                    url=url, headers=headers, body=body,
+                ):
+                    raise RequestGuardError("binding target contract does not match the outgoing request")
+                contracts[name] = {"target_kind": target_kind, "target_path": target_path}
+    return consumed, contracts
 
 
 def _response_metadata(
@@ -313,6 +359,13 @@ def _response_metadata(
     metadata = {
         "response_sha256": hashlib.sha256(response_body).hexdigest(),
         "capture_hashes": {name: _value_hash(value) for name, value in captures.items()},
+        "capture_contracts": {
+            raw["name"]: ({
+                "source_kind": "json_path", "source_path": raw["path"],
+            } if raw["source"] == "json_body" else {
+                "source_kind": "response_header", "source_path": [raw["header"]],
+            }) for raw in raw_captures
+        },
         "assertions": assertions,
     }
     return metadata, captures, assertions
@@ -432,7 +485,7 @@ def guarded_request(
         raise RequestGuardError("unsupported HTTP method")
     policy = _select_policy(policy_path, url, method)
     headers, body = _request_data(item)
-    consumed_bindings = _binding_hashes(
+    consumed_bindings, consumed_binding_contracts = _binding_hashes(
         db_path, scan_id=scan_id, stage_run_id=stage_run_id, task_id=task_id,
         bindings=item.get("bindings"), url=url, headers=headers, body=body,
     )
@@ -503,6 +556,7 @@ def guarded_request(
         )
         raise
     result_metadata["consumed_binding_hashes"] = consumed_bindings
+    result_metadata["consumed_binding_contracts"] = consumed_binding_contracts
     _set_status(
         db_path, request_id, status="completed", response_status=status_code,
         response_bytes=len(response_body),

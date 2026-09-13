@@ -261,6 +261,11 @@ CREATE TABLE IF NOT EXISTS chain_execution_bindings (
     to_step_position INTEGER NOT NULL CHECK(to_step_position > from_step_position),
     binding_name TEXT NOT NULL CHECK(length(trim(binding_name)) > 0),
     value_sha256 TEXT NOT NULL CHECK(length(value_sha256) = 64),
+    source_kind TEXT CHECK(source_kind IS NULL OR source_kind IN ('json_path','response_header')),
+    source_path_json TEXT CHECK(source_path_json IS NULL OR json_valid(source_path_json)),
+    target_kind TEXT CHECK(target_kind IS NULL OR target_kind IN
+        ('path_parameter','query_parameter','request_header','json_body')),
+    target_path_json TEXT CHECK(target_path_json IS NULL OR json_valid(target_path_json)),
     PRIMARY KEY(execution_id, edge_position, binding_name),
     FOREIGN KEY(execution_id, from_step_position)
         REFERENCES chain_execution_steps(execution_id, position),
@@ -622,6 +627,17 @@ def migrate_pipeline_schema(conn: sqlite3.Connection) -> None:
             "ALTER TABLE finding_reproduction_specs ADD COLUMN runtime_contract_sha256 "
             "TEXT CHECK(runtime_contract_sha256 IS NULL OR length(runtime_contract_sha256)=64)"
         )
+    binding_columns = {
+        row[1] for row in conn.execute("PRAGMA table_info(chain_execution_bindings)")
+    }
+    for name, declaration in (
+        ("source_kind", "TEXT CHECK(source_kind IS NULL OR source_kind IN ('json_path','response_header'))"),
+        ("source_path_json", "TEXT CHECK(source_path_json IS NULL OR json_valid(source_path_json))"),
+        ("target_kind", "TEXT CHECK(target_kind IS NULL OR target_kind IN ('path_parameter','query_parameter','request_header','json_body'))"),
+        ("target_path_json", "TEXT CHECK(target_path_json IS NULL OR json_valid(target_path_json))"),
+    ):
+        if name not in binding_columns:
+            conn.execute(f"ALTER TABLE chain_execution_bindings ADD COLUMN {name} {declaration}")
     for table, column, relation in (
         ("attack_tasks", "endpoint_id", "endpoints e JOIN origins o ON o.origin_id=e.origin_id"),
         ("attack_attempts", "endpoint_id", "endpoints e JOIN origins o ON o.origin_id=e.origin_id"),

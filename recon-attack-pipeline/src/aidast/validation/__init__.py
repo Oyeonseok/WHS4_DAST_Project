@@ -43,6 +43,10 @@ from .oob_contract import (OobAttemptContract, OobEvent, OobObservationSnapshot,
 from .oob_adapter import OobObserver, OobReproductionPort
 from .playwright_browser import (BrowserExecutionError, BrowserPolicyRejection,
                                  PlaywrightBrowserExecutor)
+from .chain_contract import (ChainBindingContract, ChainRuntimeContract,
+                             ChainStepContract, extract_chain_value,
+                             inject_chain_value)
+from .chain_adapter import ChainReproductionPort
 from .status import shared_validation_status
 from .store import read_verified_validation, validation_status
 
@@ -85,3 +89,5 @@ __all__ += ["OobAttemptContract", "OobEvent", "OobObservationSnapshot",
             "OobReproductionPort"]
 __all__ += ["BrowserExecutionError", "BrowserPolicyRejection",
             "PlaywrightBrowserExecutor"]
+__all__ += ["ChainBindingContract", "ChainRuntimeContract", "ChainStepContract",
+            "extract_chain_value", "inject_chain_value", "ChainReproductionPort"]

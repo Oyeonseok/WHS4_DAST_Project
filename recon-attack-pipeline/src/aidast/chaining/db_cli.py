@@ -209,6 +209,37 @@ def _hash_object(value: object, *, label: str) -> dict[str, str]:
     return result
 
 
+def _binding_contracts(value: object, *, source: bool) -> dict[str, dict]:
+    if value is None:
+        return {}
+    if not isinstance(value, dict) or len(value) > 16:
+        raise ValueError("binding contracts must be a bounded object")
+    allowed = {"json_path", "response_header"} if source else {
+        "path_parameter", "query_parameter", "request_header", "json_body",
+    }
+    result = {}
+    for name, raw in value.items():
+        if not isinstance(name, str) or not name.strip() or len(name) > 128 or not isinstance(raw, dict):
+            raise ValueError("binding contract contains an invalid entry")
+        kind_key = "source_kind" if source else "target_kind"
+        path_key = "source_path" if source else "target_path"
+        kind, path = raw.get(kind_key), raw.get(path_key)
+        if kind not in allowed or not isinstance(path, list) or not 1 <= len(path) <= 16:
+            raise ValueError("binding contract contains an invalid kind or path")
+        if any(
+            (isinstance(part, str) and (not part or len(part) > 256))
+            or (type(part) is int and part < 0)
+            or type(part) not in {str, int}
+            for part in path
+        ):
+            raise ValueError("binding contract path is invalid")
+        if kind in {"response_header", "path_parameter", "query_parameter", "request_header"} \
+                and (len(path) != 1 or not isinstance(path[0], str)):
+            raise ValueError("non-JSON binding paths require one name")
+        result[name] = {kind_key: kind, path_key: path}
+    return result
+
+
 def record_execution_step(
     db_path: Path, scan_id: str, stage_run_id: str, payload_path: Path,
 ) -> dict:
@@ -269,6 +300,12 @@ def record_execution_step(
                 label="output capture hashes",
             )
             assertions = request_result.get("assertions", [])
+            _binding_contracts(
+                request_result.get("capture_contracts"), source=True,
+            )
+            _binding_contracts(
+                request_result.get("consumed_binding_contracts"), source=False,
+            )
         except (AttributeError, TypeError, json.JSONDecodeError) as exc:
             raise ValueError("execution request metadata is invalid") from exc
         if not isinstance(assertions, list) or len(assertions) > 16:
@@ -285,6 +322,8 @@ def record_execution_step(
                 json.dumps(assertions, sort_keys=True), evidence_summary,
             ),
         )
+        # Contracts stay with the immutable request result until finish_execution
+        # proves that the captured and consumed value hashes are identical.
         return {
             "execution_id": execution_id, "position": position,
             "request_id": request_id, "attempt_id": attempt_id,
@@ -363,20 +402,42 @@ def finish_execution(
                 json.loads(steps[target_position][4]), label="stored input bindings"
             )
             matches = sorted(
-                (output_name, digest)
+                (output_name, input_name, digest)
                 for output_name, digest in outputs.items()
-                if digest in set(inputs.values())
+                for input_name, input_digest in inputs.items()
+                if digest == input_digest
             )
             if not matches:
                 raise ValueError("every chain edge requires a captured value used by its next request")
-            binding_name, digest = matches[0]
+            output_name, input_name, digest = matches[0]
+            source_kind = source_path = target_kind = target_path = None
+            source_result = json.loads(conn.execute(
+                "SELECT result_json FROM attack_http_requests WHERE request_id=?",
+                (steps[source_position][2],),
+            ).fetchone()[0])
+            target_result = json.loads(conn.execute(
+                "SELECT result_json FROM attack_http_requests WHERE request_id=?",
+                (steps[target_position][2],),
+            ).fetchone()[0])
+            source_contract = _binding_contracts(
+                source_result.get("capture_contracts"), source=True,
+            ).get(output_name)
+            target_contract = _binding_contracts(
+                target_result.get("consumed_binding_contracts"), source=False,
+            ).get(input_name)
+            if source_contract is not None and target_contract is not None:
+                source_kind = source_contract["source_kind"]
+                source_path = json.dumps(source_contract["source_path"], separators=(",", ":"))
+                target_kind = target_contract["target_kind"]
+                target_path = json.dumps(target_contract["target_path"], separators=(",", ":"))
             conn.execute(
                 """INSERT INTO chain_execution_bindings
                    (execution_id,edge_position,from_step_position,to_step_position,
-                    binding_name,value_sha256) VALUES (?,?,?,?,?,?)""",
+                    binding_name,value_sha256,source_kind,source_path_json,
+                    target_kind,target_path_json) VALUES (?,?,?,?,?,?,?,?,?,?)""",
                 (
                     execution_id, edge_position, source_position, target_position,
-                    binding_name, digest,
+                    output_name, digest, source_kind, source_path, target_kind, target_path,
                 ),
             )
         try:

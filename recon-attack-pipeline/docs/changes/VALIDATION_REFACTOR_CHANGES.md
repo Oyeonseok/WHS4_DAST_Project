@@ -2,6 +2,30 @@
 
 이 문서는 Validation 재구조화 구현 변경을 누적 기록한다. 관련 구현을 완료할 때마다 최신 날짜의 항목을 문서 상단에 추가한다.
 
+## 2026-09-14: demonstrated Chain native runtime replay
+
+- `chain_execution_bindings`가 값 hash뿐 아니라 응답 추출 위치
+  (`json_path`/`response_header`)와 다음 요청 주입 위치
+  (`path_parameter`/`query_parameter`/`request_header`/`json_body`)를 선택적으로
+  보존한다. 실제 scalar 값은 DB에 저장하지 않는다.
+- Attack HTTP helper가 기존 `captures`에서 추출 계약을 만들고, Chaining 요청의
+  `bindings.target_kind`와 `target_path`를 검증해 request ledger에 기록한다.
+- Validation integrity gate는 모든 node에 HTTP runtime contract가 있고 모든 edge에
+  명시적 위치 계약이 있을 때 `runtime_kind=chain` 계약을 만든다.
+- native `ChainReproductionPort`는 각 control/target 시도마다 첫 단계부터 새로 실행하고,
+  현재 응답에서 scalar를 추출해 바로 다음 요청에만 주입한다. 모든 요청은 기존
+  TargetPolicy와 `validation_http_requests` budget/ledger를 통과하며 evidence에는 값 대신
+  hash만 남긴다.
+- 계약·adapter·요청 helper·Chaining producer 회귀 테스트를 추가했다.
+
+설계와 다른 점 및 이유:
+
+기존 demonstrated Chain은 추출/주입 위치를 저장하지 않았으므로 새 native adapter가
+이를 추측하지 않는다. 위치 계약이 없는 기존 row는 그대로 읽을 수 있고 injected
+adapter 호환성도 유지하지만, native 실행에서는 `INCONCLUSIVE`가 된다. 과거 binding
+값을 재사용하거나 문자열 포함 관계만으로 주입 위치를 추정하면 Blind fresh replay와
+오탐 방지 조건을 위반하기 때문이다.
+
 ## 2026-09-14: browser DOM 및 OOB callback runtime 계약
 
 - 기존 HTTP runtime JSON/hash 호환성을 유지하면서 browser와 OOB 계약은
@@ -374,7 +398,7 @@
 
 - Pipeline.db를 schema v9로 올리고 Validation case, attempt, evidence, development action, impact hypothesis, HTTP ledger, reproduction spec 테이블을 추가했다.
 - Blind 입력과 Attack claim을 분리하고 Blind assessment가 고정된 뒤에만 claim을 공개하도록 제한했다.
-- KNOWN 판정은 임베딩 없이 exact key와 정규화된 Levenshtein 유사도 `0.85` 기준으로 구현했다.
+- 당시 KNOWN 판정은 임베딩 없이 exact key와 정규화된 Levenshtein 유사도 `0.85` 기준으로 구현했다. 이 단계는 2026-09-13 변경에서 완전히 제거됐다.
 
   이유: 이 방식은 원 설계 §8.6과 같다. 먼저 취약점 유형, endpoint template, parameter 이름이 모두 같은 후보만 비교하므로 의미 검색이 필요하지 않다. 이후 payload 구조의 작은 차이만 결정론적으로 계산하면 된다. 임베딩은 모델·버전·실행 환경에 따라 결과가 변할 수 있고 동일 입력의 재현성, 오프라인 실행, 임계값 설명 가능성을 약화하므로 KNOWN 자동 판정에 사용하지 않았다. 현재 `0.85`는 동일 취약점 확률이 아니라 정규화된 문자열 편집 유사도다.
 

@@ -68,8 +68,11 @@ The HTTP request payload optionally supports:
 - `captures`: bounded `json_body` entries with `name` and `path`, or `header`
   entries with `name` and `header`.
 - `bindings`: entries with `name`, `source_request_id`, `capture_name`, and the
-  exact captured scalar `value`. The helper checks the value hash against the
-  source response and verifies that the outgoing URL, header, or body uses it.
+  exact captured scalar `value`. For a replayable demonstrated chain, also set
+  `target_kind` to `path_parameter`, `query_parameter`, `request_header`, or
+  `json_body`, and set `target_path` to the field path. The helper checks the
+  value hash against the source response, verifies that the outgoing request
+  uses it, and stores the source/target locations without storing the value.
 - `assertions`: `status_equals`, `json_equals`, `header_equals`, or
   `body_contains` entries. Mark a final non-status assertion with
   `terminal: true` only when it directly proves the declared impact.
@@ -88,7 +91,9 @@ Then consume it in the next request and assert the final impact:
     "name":"object_id",
     "source_request_id":"HTTP_REQUEST_ID",
     "capture_name":"account_id",
-    "value":"EXACT_HELPER_RETURNED_VALUE"
+    "value":"EXACT_HELPER_RETURNED_VALUE",
+    "target_kind":"path_parameter",
+    "target_path":["account_id"]
   }],
   "assertions":[{
     "name":"private_record_disclosed",

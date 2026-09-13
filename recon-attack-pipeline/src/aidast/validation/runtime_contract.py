@@ -148,6 +148,9 @@ def validate_runtime_contract(value: Any) -> HttpRuntimeContract | Any:
     if isinstance(value, dict) and value.get("runtime_kind") == "oob":
         from .oob_contract import OobRuntimeContract
         return OobRuntimeContract.model_validate(value)
+    if isinstance(value, dict) and value.get("runtime_kind") == "chain":
+        from .chain_contract import ChainRuntimeContract
+        return ChainRuntimeContract.model_validate(value)
     return HttpRuntimeContract.model_validate(value)
 
 

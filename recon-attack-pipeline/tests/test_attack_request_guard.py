@@ -109,6 +109,7 @@ class AttackRequestGuardTests(unittest.TestCase):
                     "bindings": [{
                         "name": "object_id", "source_request_id": first["request_id"],
                         "capture_name": "account_id", "value": first["captures"]["account_id"],
+                        "target_kind": "path_parameter", "target_path": ["account_id"],
                     }],
                     "assertions": [{
                         "name": "private_record_disclosed", "kind": "json_equals",
@@ -127,6 +128,10 @@ class AttackRequestGuardTests(unittest.TestCase):
                 ).fetchone()[0]
             self.assertNotIn("victim-42", metadata)
             self.assertIn("consumed_binding_hashes", metadata)
+            parsed = json.loads(metadata)
+            self.assertEqual(parsed["consumed_binding_contracts"]["object_id"], {
+                "target_kind": "path_parameter", "target_path": ["account_id"],
+            })
 
             payload.write_text(json.dumps({
                 "method": "GET", "url": "https://example.test/api/account/forged",

@@ -236,6 +236,12 @@ class CandidateIntegrityGate:
 
         terminal = candidates[-1]
         node_blinds = [candidate.staged._blind_case for candidate in candidates]
+        binding_rows = self.conn.execute(
+            """SELECT from_step_position,to_step_position,binding_name,
+                      source_kind,source_path_json,target_kind,target_path_json
+            FROM chain_execution_bindings WHERE execution_id=?
+            ORDER BY edge_position,binding_name""", (execution["execution_id"],),
+        ).fetchall()
         composite_payload = {"ordered_steps": [{
             "position": position,
             "endpoint": item.endpoint,
@@ -249,11 +255,39 @@ class CandidateIntegrityGate:
         } for position, item in enumerate(node_blinds)], "bindings": [{
             "from_position": binding[0], "to_position": binding[1],
             "binding_name": binding[2],
-        } for binding in self.conn.execute(
-            """SELECT from_step_position,to_step_position,binding_name
-            FROM chain_execution_bindings WHERE execution_id=?
-            ORDER BY edge_position,binding_name""", (execution["execution_id"],),
-        )]}
+        } for binding in binding_rows]}
+        chain_runtime = None
+        if all(
+            binding["source_kind"] is not None and binding["source_path_json"] is not None
+            and binding["target_kind"] is not None and binding["target_path_json"] is not None
+            for binding in binding_rows
+        ) and all(
+            item.runtime_contract is not None
+            and (item.runtime_contract.get("runtime_kind") in {None, "http"})
+            for item in node_blinds
+        ):
+            from .chain_contract import ChainRuntimeContract
+            try:
+                chain_runtime = ChainRuntimeContract.model_validate({
+                    "runtime_kind": "chain", "schema_version": 1,
+                    "steps": [{
+                        "position": position, "endpoint": item.endpoint,
+                        "method": item.method,
+                        "credential_references": list(item.credential_references),
+                        "runtime_contract": item.runtime_contract,
+                    } for position, item in enumerate(node_blinds)],
+                    "bindings": [{
+                        "from_position": binding["from_step_position"],
+                        "to_position": binding["to_step_position"],
+                        "binding_name": binding["binding_name"],
+                        "source_kind": binding["source_kind"],
+                        "source_path": json.loads(binding["source_path_json"]),
+                        "target_kind": binding["target_kind"],
+                        "target_path": json.loads(binding["target_path_json"]),
+                    } for binding in binding_rows],
+                }).model_dump(mode="json")
+            except (TypeError, ValueError, json.JSONDecodeError):
+                chain_runtime = None
         combined_skill_sha = canonical_sha256(
             [item.profile.attack_skill_sha256 for item in candidates]
         )
@@ -283,7 +317,8 @@ class CandidateIntegrityGate:
                 "negative": terminal.profile.profile.control_negative.model_dump(mode="json"),
                 "baseline_samples": terminal.profile.profile.baseline_samples,
                 "terminal_only": True,
-            }, attack_skill_name="chain", attack_skill_sha256=combined_skill_sha,
+            }, runtime_contract=chain_runtime,
+            attack_skill_name="chain", attack_skill_sha256=combined_skill_sha,
             validation_skill_sha256=terminal.profile.validation_skill_sha256,
             validation_profile_sha256=combined_profile_sha,
         )

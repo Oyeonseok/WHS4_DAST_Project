@@ -292,8 +292,14 @@ class ChainingDatabaseCliTests(unittest.TestCase):
             binding_hash = "b" * 64
             request_results = [
                 {"capture_hashes": {"account_id": binding_hash},
+                 "capture_contracts": {"account_id": {
+                     "source_kind": "json_path", "source_path": ["account_id"],
+                 }},
                  "consumed_binding_hashes": {}, "assertions": []},
                 {"capture_hashes": {}, "consumed_binding_hashes": {"object_id": binding_hash},
+                 "consumed_binding_contracts": {"object_id": {
+                     "target_kind": "path_parameter", "target_path": ["id"],
+                 }},
                  "assertions": [{"name": "private_record_disclosed",
                                  "kind": "json_equals", "terminal": True,
                                  "passed": True, "actual_sha256": "c" * 64,
@@ -355,6 +361,10 @@ class ChainingDatabaseCliTests(unittest.TestCase):
                 self.assertEqual(conn.execute(
                     "SELECT COUNT(*) FROM chain_execution_bindings"
                 ).fetchone()[0], 1)
+                self.assertEqual(conn.execute(
+                    """SELECT source_kind,source_path_json,target_kind,target_path_json
+                       FROM chain_execution_bindings"""
+                ).fetchone(), ("json_path", '["account_id"]', "path_parameter", '["id"]'))
                 self.assertEqual(conn.execute(
                     "SELECT COUNT(*) FROM chain_evidence WHERE evidence_kind='executed_step'"
                 ).fetchone()[0], 2)

@@ -7,6 +7,7 @@ from typing import Callable, Mapping
 
 from .coordinator import ValidationCoordinator, ValidationCoordinatorError
 from .browser_adapter import BrowserExecutor, BrowserReproductionPort
+from .chain_adapter import ChainReproductionPort
 from .credentials import PipelineCredentialResolver
 from .http_adapter import HttpReproductionPort
 from .oob_adapter import OobObserver, OobReproductionPort
@@ -36,6 +37,7 @@ def build_native_validation_coordinator(
         oob=OobReproductionPort(
             observer=oob_observer, credential_resolver=resolver,
         ),
+        chain=ChainReproductionPort(credential_resolver=resolver),
     )
     return ValidationCoordinator(
         db_path=db_path,

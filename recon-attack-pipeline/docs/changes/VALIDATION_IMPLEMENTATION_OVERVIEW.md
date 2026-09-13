@@ -189,11 +189,10 @@ Coordinator를 만들어 Validation을 자동 실행한다. 독립 `validate run
 구현돼 있다. 실제 운영 경로를 완성하려면 다음 작업이 남아 있다.
 
 1. OOB observer backend의 인증·cursor 계약과 기본 구성
-2. 다단계 Chain의 step binding runtime contract 및 adapter
-3. `keyring://`, `vault://` credential reference의 configured backend resolver
-4. 58개 Skill profile과 Attack이 작성한 marker·threshold의 보안 전문가 의미 검토
-5. transport 완료와 local commit 사이의 `outcome_unknown` 운영 복구 보강
-6. 새 경로가 기본 동작이 된 뒤 legacy 7 Question `Validation.db` 제거
+2. `keyring://`, `vault://` credential reference의 configured backend resolver
+3. 58개 Skill profile과 Attack이 작성한 marker·threshold의 보안 전문가 의미 검토
+4. transport 완료와 local commit 사이의 `outcome_unknown` 운영 복구 보강
+5. 새 경로가 기본 동작이 된 뒤 legacy 7 Question `Validation.db` 제거
 
 HTTP response marker와 정량 threshold는 공통 profile에서 추정하지 않고 Attack의 실제
 관찰에서 만들어진 immutable runtime contract로 받는다. generic HTTP adapter는 이 값이
@@ -201,8 +200,8 @@ HTTP response marker와 정량 threshold는 공통 profile에서 추정하지 �
 `keyring://`/`vault://` reference가 필요한 Finding, Chain은 요청 없이 case 단위
 `INCONCLUSIVE`가 된다. `env://NAME`은 환경 변수의 JSON header map을 요청 직전에만
 해석해 authenticated HTTP replay를 지원한다. Playwright browser request는 current policy와
-Validation ledger를 매 요청 통과한다. OOB callback observer backend와 Chain 단계 간 값
-전달은 아직 별도 운영 연결이 필요하다.
+Validation ledger를 매 요청 통과한다. HTTP Chain은 명시적 응답 추출/요청 주입 계약으로
+fresh 값을 전달하며, OOB callback observer backend는 아직 별도 운영 연결이 필요하다.
 
 ## 11. 설계와 달라진 부분
 

@@ -28,6 +28,12 @@ class ValidationSchemaTests(unittest.TestCase):
         self.assertEqual(self.conn.execute("PRAGMA user_version").fetchone()[0], 9)
         columns = {row[1] for row in self.conn.execute("PRAGMA table_info(validation_cases)")}
         self.assertNotIn("known_similarity", columns)
+        binding_columns = {
+            row[1] for row in self.conn.execute("PRAGMA table_info(chain_execution_bindings)")
+        }
+        self.assertTrue({
+            "source_kind", "source_path_json", "target_kind", "target_path_json",
+        }.issubset(binding_columns))
         expected = {"validation_cases", "validation_attempts", "validation_evidence",
                     "validation_development_actions", "validation_impact_hypotheses",
                     "validation_http_requests", "finding_reproduction_specs"}
