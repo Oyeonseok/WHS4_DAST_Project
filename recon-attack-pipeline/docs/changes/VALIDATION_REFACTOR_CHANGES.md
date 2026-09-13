@@ -2,6 +2,19 @@
 
 이 문서는 Validation 재구조화 구현 변경을 누적 기록한다. 관련 구현을 완료할 때마다 최신 날짜의 항목을 문서 상단에 추가한다.
 
+## 2026-09-14: Validation 실행 ledger 소유권 검증
+
+- HTTP, Browser, OOB, Chain native reproduction adapter를 request ledger 필수 producer로
+  표시했다. 성공 또는 비관찰 결과에는 최소 한 개의 `validation_http_requests` row가
+  있어야 한다.
+- Coordinator가 observation을 evidence로 저장하기 전에 반환된 `request_ids`의 형식과
+  중복 여부를 검사하고, 모든 ID가 현재 scan·stage·case·attempt에 속한 `completed` row인지
+  확인한다.
+- native adapter가 ledger 없이 성공 결과를 반환하거나 다른 attempt 또는 존재하지 않는
+  request ID를 인용하면 stage를 실패시켜 출처가 불명확한 관찰이 판정에 들어가지 않게 했다.
+- Coordinator와 HTTP/Browser/OOB/Chain adapter 회귀를 포함한 전체 unittest 359개,
+  shared Reporting pytest 22개, compileall과 whitespace 검사가 통과했다.
+
 ## 2026-09-14: target runtime 최소 증명 의미 검사
 
 - `validate_runtime_semantics`를 추가해 schema가 유효한 runtime contract가 해당 Validation

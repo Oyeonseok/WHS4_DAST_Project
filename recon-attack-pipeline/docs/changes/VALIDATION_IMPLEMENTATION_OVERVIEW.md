@@ -207,6 +207,10 @@ target/negative request, status-only HTTP proof, duration 없는 timing proof, �
 XSS와 동일한 OOB trigger는 거부한다. 실제 marker가 target의 자연 응답에도 존재하는지는
 정적 규칙으로 추측하지 않고 fresh control 관측에서 판단한다.
 
+native HTTP·Browser·OOB·Chain adapter의 성공 관찰은 Validation request ledger row를 반드시
+남긴다. Coordinator는 evidence 저장 전에 반환된 모든 request ID가 현재
+scan·stage·case·attempt에 속한 완료 row인지 다시 확인한다.
+
 ## 11. 설계와 달라진 부분
 
 ### Agent 요청 권한

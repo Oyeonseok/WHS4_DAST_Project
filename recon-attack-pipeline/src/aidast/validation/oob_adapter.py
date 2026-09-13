@@ -34,6 +34,8 @@ def _replace_nonce(value: Any, nonce: str) -> Any:
 
 
 class OobReproductionPort:
+    requires_request_ledger = True
+
     def __init__(
         self, *, observer: OobObserver | None, transport: Callable | None = None,
         credential_resolver: Callable[[str], Mapping[str, str]] | None = None,

@@ -6,6 +6,8 @@ from .blind import BlindCase
 
 
 class RuntimeReproductionRouter:
+    requires_request_ledger = True
+
     def __init__(self, *, http, browser=None, oob=None, chain=None):
         self.http = http
         self.browser = browser

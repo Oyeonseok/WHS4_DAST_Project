@@ -25,6 +25,8 @@ class HttpReproductionPort:
     receives only the bounded response and returns structured signal metadata.
     """
 
+    requires_request_ledger = True
+
     def __init__(self, *,
                  request_builder: Callable[[BlindCase, str, int, int], tuple[str, Mapping[str, str], bytes | None]] | None = None,
                  evaluator: Callable[[str, object], Mapping] | None = None,

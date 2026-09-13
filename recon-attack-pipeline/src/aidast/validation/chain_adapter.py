@@ -24,6 +24,8 @@ from .runtime_contract import evaluate_http_response, render_http_request
 class ChainReproductionPort:
     """Transfer fresh HTTP values into HTTP, browser, or OOB terminal steps."""
 
+    requires_request_ledger = True
+
     def __init__(self, *, transport: Callable | None = None,
                  credential_resolver: Callable[[str], Mapping[str, str]] | None = None,
                  browser=None, oob=None,

@@ -25,6 +25,8 @@ class BrowserExecutor(Protocol):
 
 
 class BrowserReproductionPort:
+    requires_request_ledger = True
+
     def __init__(
         self, *, executor: BrowserExecutor | None,
         credential_resolver: Callable[[str], Mapping[str, str]] | None = None,

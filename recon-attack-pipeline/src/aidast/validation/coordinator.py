@@ -528,6 +528,10 @@ class ValidationCoordinator:
             observation = raw if isinstance(raw, ReproductionObservation) else ReproductionObservation.model_validate(raw)
             if observation.signal_type not in candidate.profile.profile.signal_types:
                 raise ValidationCoordinatorError("ReproductionPort returned a signal outside the profile")
+            self._validate_request_ledger(
+                repo.conn, candidate=candidate, stage_run_id=stage_run_id,
+                attempt_id=attempt, observation=observation,
+            )
             repo.complete_attempt(
                 attempt, outcome=observation.outcome,
                 signal_observed=observation.signal_observed,
@@ -547,6 +551,49 @@ class ValidationCoordinator:
                                  **observation.model_dump(mode="json")})
             evidence_ids.append(evidence)
         return observations, evidence_ids
+
+    def _validate_request_ledger(
+        self, conn: sqlite3.Connection, *, candidate: ValidatedCandidate,
+        stage_run_id: str, attempt_id: str,
+        observation: ReproductionObservation,
+    ) -> None:
+        """Bind adapter-reported request IDs to the current attempt before evidence storage."""
+        raw_ids = observation.details.get("request_ids", ())
+        if not isinstance(raw_ids, (list, tuple)) or any(
+            not isinstance(item, str) or not item for item in raw_ids
+        ) or len(raw_ids) != len(set(raw_ids)):
+            raise ValidationCoordinatorError(
+                "ReproductionPort returned invalid Validation request ledger IDs"
+            )
+        request_ids = tuple(raw_ids)
+        if (
+            getattr(self.reproduction, "requires_request_ledger", False)
+            and observation.outcome in {"observed", "not_observed"}
+            and not request_ids
+        ):
+            raise ValidationCoordinatorError(
+                "native reproduction completed without a Validation request ledger row"
+            )
+        if not request_ids:
+            return
+        placeholders = ",".join("?" for _ in request_ids)
+        rows = conn.execute(
+            f"""SELECT request_id,status FROM validation_http_requests
+                WHERE scan_id=? AND stage_run_id=? AND case_id=? AND attempt_id=?
+                AND request_id IN ({placeholders})""",
+            (
+                candidate.scan_id, stage_run_id, candidate.case_id, attempt_id,
+                *request_ids,
+            ),
+        ).fetchall()
+        if {row["request_id"] for row in rows} != set(request_ids):
+            raise ValidationCoordinatorError(
+                "Validation request ledger IDs do not belong to the current attempt"
+            )
+        if any(row["status"] != "completed" for row in rows):
+            raise ValidationCoordinatorError(
+                "Validation observation cites an unfinished request ledger row"
+            )
 
     @staticmethod
     def _completed_batch(conn: sqlite3.Connection, case_id: str,

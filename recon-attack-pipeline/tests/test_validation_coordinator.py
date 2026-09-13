@@ -48,6 +48,21 @@ class FakeChainPort(FakePort):
         )
 
 
+class MissingLedgerPort(FakePort):
+    requires_request_ledger = True
+
+
+class ForeignLedgerPort(FakePort):
+    def execute(self, blind_case, *, attempt_kind, batch_no, ordinal, attempt_id, **context):
+        result = super().execute(
+            blind_case, attempt_kind=attempt_kind, batch_no=batch_no,
+            ordinal=ordinal, attempt_id=attempt_id, **context,
+        )
+        return result.model_copy(update={
+            "details": {**result.details, "request_ids": ["foreign-request"]},
+        })
+
+
 class FakeAgent:
     agent_id = "validation_agent_fixture"
 
@@ -341,6 +356,24 @@ class ValidationCoordinatorTests(unittest.TestCase):
         ).run("scan", finding_id="legacy_finding")
         self.assertEqual(port.calls, [])
         self.assertEqual(result.summary["statuses"], {"INCONCLUSIVE": 1})
+
+    def test_native_port_observation_requires_request_ledger(self):
+        with self.assertRaisesRegex(
+            ValidationCoordinatorError, "without a Validation request ledger row"
+        ):
+            ValidationCoordinator(
+                db_path=self.path, agent=FakeAgent(), reproduction=MissingLedgerPort(),
+                policy_provider=lambda endpoint, method: self.policy,
+            ).run("scan")
+
+    def test_observation_rejects_foreign_request_ledger_id(self):
+        with self.assertRaisesRegex(
+            ValidationCoordinatorError, "do not belong to the current attempt"
+        ):
+            ValidationCoordinator(
+                db_path=self.path, agent=FakeAgent(), reproduction=ForeignLedgerPort(),
+                policy_provider=lambda endpoint, method: self.policy,
+            ).run("scan")
 
     def test_resolvable_blocker_uses_one_action_and_fresh_batch(self):
         port = BlockThenPassPort()
