@@ -295,7 +295,8 @@ class NativeAttackDatabaseCliTests(unittest.TestCase):
 
             finding = root / "finding.json"
             target_attempt = {
-                "request": {"query_parameters": {"object_id": "7"}},
+                "request": {"query_parameters": {"object_id": "7"},
+                            "headers": {"Origin": "https://redacted.invalid"}},
                 "assertions": [{
                     "assertion_id": "cors-origin",
                     "kind": "header_equals",
@@ -312,7 +313,8 @@ class NativeAttackDatabaseCliTests(unittest.TestCase):
                 }],
             }
             negative_attempt = {
-                "request": {"query_parameters": {"object_id": "7"}},
+                "request": {"query_parameters": {"object_id": "7"},
+                            "headers": {"Origin": "https://same-origin.test"}},
                 "assertions": [{
                     "assertion_id": "cors-origin",
                     "kind": "header_equals",

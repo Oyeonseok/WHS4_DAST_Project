@@ -68,7 +68,7 @@ TMPDIR=/private/tmp PYTHONPATH=src:tests .venv/bin/python -m unittest test_valid
 ```
 
 최신 전체 unittest는 macOS `/var` symlink 오인을 피하도록 `TMPDIR=/private/tmp`에서
-350개가 모두 통과했다. legacy 전용 unittest 30개를 제거했고, 기존 Reporting 보안
+357개가 모두 통과했다. legacy 전용 unittest 30개를 제거했고, 기존 Reporting 보안
 검사를 shared case fixture로 전환한 pytest 22개도 별도 통과했다. compileall과 diff
 whitespace 검사도 통과했다.
 
@@ -245,7 +245,7 @@ PYTHONPATH=src .venv/bin/python -m unittest discover -s tests -v
 | §5 reproduction 계약 | 저장 schema, provenance 제약, Attack producer와 HTTP/browser/OOB/Chain runtime hash binding | 없음 |
 | §6 Blind 경계 | DTO, 공개 필드, hash, tool-disabled 단일 native session | Codex local persisted-thread 운영 정책 정리 |
 | §7 shared DB | migration, repository, ownership | 실행 producer별 ledger 기록 통합 |
-| §8 판정 | evidence·점수·가설, HTTP/DOM/OOB assertion, Playwright 및 configured HTTP OOB observer 실행 | 없음 |
+| §8 판정 | evidence·점수·가설, profile-aware runtime 최소 proof 검사, HTTP/DOM/OOB assertion, Playwright 및 configured HTTP OOB observer 실행 | 실제 target baseline과 marker·selector·threshold 충돌 운영 검토 |
 | §9 Chain | node gate, injected/native end-to-end Blind replay, fresh scalar binding, HTTP→Browser/OOB terminal, terminal impact 재평가, Chaining table 불변 검증 | 비 HTTP node를 중간 source로 사용하는 chain은 원문 비저장 경계상 제외 |
 | §10 요청 안전 | redaction, 저장 경계, current policy per-hop HTTP transport와 env/keyring/configured Vault credential resolver | 없음 |
 | §11 CLI | status, 보고서 입력, native HTTP/Playwright/OOB/Chain Coordinator 기반 run·resume·targeted 실행과 pipeline 자동 호출 | 없음 |

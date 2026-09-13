@@ -111,6 +111,11 @@ class CandidateIntegrityGate:
             runtime_kind = runtime_contract.get("runtime_kind", "http")
             if runtime_kind not in profile.profile.runtime_kinds:
                 raise CandidateIntegrityError("runtime_profile_compatibility")
+            from .runtime_semantics import RuntimeSemanticError, validate_runtime_semantics
+            try:
+                validate_runtime_semantics(runtime, profile.profile)
+            except RuntimeSemanticError:
+                raise CandidateIntegrityError("runtime_profile_semantics") from None
         roles = spec["required_identity_roles"]
         if (not isinstance(roles, list) or len(roles) != len(set(roles))
                 or any(not isinstance(role, str) or not role for role in roles)):

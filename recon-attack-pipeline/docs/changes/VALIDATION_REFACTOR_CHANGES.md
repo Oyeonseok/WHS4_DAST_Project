@@ -2,6 +2,32 @@
 
 이 문서는 Validation 재구조화 구현 변경을 누적 기록한다. 관련 구현을 완료할 때마다 최신 날짜의 항목을 문서 상단에 추가한다.
 
+## 2026-09-14: target runtime 최소 증명 의미 검사
+
+- `validate_runtime_semantics`를 추가해 schema가 유효한 runtime contract가 해당 Validation
+  profile의 signal을 실제로 증명할 수 있는 최소 형태인지 검사한다.
+- HTTP target과 inert negative control은 서로 다른 요청이어야 한다. timing profile은
+  target에 정량 duration assertion이 있어야 하며, 그 외 HTTP profile은 status code만이
+  아니라 header/body/JSON assertion을 하나 이상 요구한다.
+- Browser target과 inert navigation을 구분하고 XSS는 selector 존재나 단순 URL 변화 대신
+  `console_contains` 실행 marker를 요구한다. OOB target과 inert trigger도 서로 달라야 하며
+  기존 `{nonce}` correlation 계약을 함께 적용한다.
+- 새 Finding은 Attack `commit-finding`에서 의미 검사를 통과해야 저장된다. 기존 DB row도
+  Candidate integrity gate에서 같은 검사를 다시 수행해 LLM 및 network replay 전에
+  `runtime_profile_semantics`로 차단한다.
+- status-only IDOR, duration 없는 timing, 실행 marker 없는 XSS, 동일 target/control을
+  거부하고 유효한 content assertion은 허용하는 테스트를 추가했다. 전체 unittest 357개,
+  shared Reporting pytest 22개, compileall과 whitespace 검사가 통과했다.
+
+설계와 다른 점 및 이유:
+
+원 설계는 marker·selector·threshold를 Attack의 target별 runtime contract에 두지만 그
+값이 profile signal을 증명하기에 충분한지 검사하는 규칙은 정의하지 않았다. runtime
+adapter가 구체화된 뒤 status-only 성공이나 동일한 negative control도 실행 가능한 공백이
+생겨, 취약점 의미를 추측하지 않는 최소 proof-shape 규칙을 producer와 consumer 양쪽에
+추가했다. marker가 실제 target의 정상 baseline에 이미 존재하는지 같은 대상별 판단은
+정적 코드로 결정하지 않고 fresh negative control evidence와 운영 검토에 남긴다.
+
 ## 2026-09-14: Browser/OOB terminal 혼합 Chain replay
 
 - Chain step runtime을 HTTP 전용에서 HTTP/Browser/OOB union으로 확장했다. 앞선 HTTP

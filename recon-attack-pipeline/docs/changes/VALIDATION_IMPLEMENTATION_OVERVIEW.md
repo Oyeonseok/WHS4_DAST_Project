@@ -188,7 +188,7 @@ Coordinator를 만들어 Validation을 자동 실행한다. 독립 `validate run
 현재 저장 구조, 상태 머신, 무결성 검사, Blind Agent, Chain replay와 보고서 연결은
 구현돼 있다. 실제 운영 경로를 완성하려면 다음 작업이 남아 있다.
 
-1. Attack이 target별로 작성한 marker·selector·threshold의 보안 전문가 의미 검토
+1. 실제 target에서 marker·selector·threshold가 정상 baseline과 충돌하지 않는지 운영 검토
 
 HTTP response marker와 정량 threshold는 공통 profile에서 추정하지 않고 Attack의 실제
 관찰에서 만들어진 immutable runtime contract로 받는다. generic HTTP adapter는 이 값이
@@ -201,6 +201,11 @@ Validation ledger를 매 요청 통과한다. HTTP Chain과 HTTP→Browser/OOB t
 arm/cursor/poll observer로 연결한다.
 중단 시 `outcome_unknown` 실행이 하나라도 남은 case는 자동 재전송하지 않고
 `INCONCLUSIVE`로 닫아 원격 side effect의 중복을 막는다.
+
+runtime contract 저장 전과 replay 전에는 profile-aware 최소 의미 검사를 수행한다. 동일한
+target/negative request, status-only HTTP proof, duration 없는 timing proof, 실행 marker 없는
+XSS와 동일한 OOB trigger는 거부한다. 실제 marker가 target의 자연 응답에도 존재하는지는
+정적 규칙으로 추측하지 않고 fresh control 관측에서 판단한다.
 
 ## 11. 설계와 달라진 부분
 

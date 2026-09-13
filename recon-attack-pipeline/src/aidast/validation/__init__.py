@@ -44,6 +44,7 @@ from .chain_contract import (ChainBindingContract, ChainRuntimeContract,
                              ChainStepContract, extract_chain_value,
                              inject_chain_value)
 from .chain_adapter import ChainReproductionPort
+from .runtime_semantics import RuntimeSemanticError, validate_runtime_semantics
 from .status import shared_validation_status
 __all__ = ["ValidationError"]
 
@@ -77,6 +78,7 @@ __all__ += ["CodexBlindValidationRunner"]
 __all__ += ["build_native_validation_coordinator"]
 __all__ += ["PipelineCredentialResolver", "KeyringCredentialBackend"]
 __all__ += ["RuntimeReproductionRouter"]
+__all__ += ["RuntimeSemanticError", "validate_runtime_semantics"]
 __all__ += ["OobAttemptContract", "OobEvent", "OobObservationSnapshot",
             "OobRuntimeContract", "evaluate_oob_observation", "OobObserver",
             "OobReproductionPort", "HttpJsonOobObserver", "HttpOobObserverConfig"]

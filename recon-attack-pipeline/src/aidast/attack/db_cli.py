@@ -355,7 +355,13 @@ def commit_finding(db_path: Path, scan_id: str, payload_path: Path) -> dict:
         if runtime_contract is not None:
             from aidast.validation.runtime_contract import validate_runtime_contract
             from aidast.validation.models import canonical_json, canonical_sha256
+            from aidast.validation.profiles import SkillProfileResolver
+            from aidast.validation.runtime_semantics import validate_runtime_semantics
             validated_runtime = validate_runtime_contract(runtime_contract)
+            validate_runtime_semantics(
+                validated_runtime,
+                SkillProfileResolver().resolve(attack_skill_name).profile,
+            )
             runtime_contract = validated_runtime.model_dump(mode="json")
             runtime_contract_json = canonical_json(runtime_contract)
             runtime_contract_sha256 = canonical_sha256(runtime_contract)

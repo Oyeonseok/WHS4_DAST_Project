@@ -242,6 +242,40 @@ class ValidationCoordinatorTests(unittest.TestCase):
                     case_id="case", scan_id="scan", finding_id="finding"
                 )
 
+    def test_candidate_gate_rejects_runtime_with_weak_profile_proof(self):
+        from aidast.validation import canonical_sha256, validate_runtime_contract
+
+        def attempt(variant):
+            return {
+                "request": {"path_parameters": {"id": 1},
+                            "query_parameters": {"variant": variant}},
+                "assertions": [{
+                    "assertion_id": "status", "kind": "status_equals", "expected": 200,
+                }],
+            }
+
+        runtime = validate_runtime_contract({
+            "schema_version": 1, "target": attempt("target"),
+            "positive_control": attempt("baseline"),
+            "negative_control": attempt("inert"),
+        }).model_dump(mode="json")
+        with db.connect(self.path) as conn:
+            conn.execute("DROP TRIGGER finding_reproduction_specs_no_update")
+            conn.execute(
+                """UPDATE finding_reproduction_specs
+                   SET runtime_contract_json=?,runtime_contract_sha256=?
+                   WHERE finding_id='finding'""",
+                (json.dumps(runtime, sort_keys=True, separators=(",", ":")),
+                 canonical_sha256(runtime)),
+            )
+            conn.commit()
+            with self.assertRaisesRegex(
+                CandidateIntegrityError, "runtime_profile_semantics"
+            ):
+                CandidateIntegrityGate(conn).validate_finding(
+                    case_id="case", scan_id="scan", finding_id="finding"
+                )
+
     def test_run_executes_fresh_three_with_controls_and_commits_confirmed(self):
         port = FakePort()
         result = ValidationCoordinator(
@@ -522,15 +556,18 @@ class ValidationCoordinatorTests(unittest.TestCase):
                  value_sha256,source_kind,source_path_json,target_kind,target_path_json)
                 VALUES ('execution',0,0,1,'object_id',?,'json_path',?,
                         'path_parameter',?)""", ("b" * 64, '["id"]', '["id"]'))
-            runtime_attempt = {
-                "request": {"path_parameters": {"id": 1}},
+            def runtime_attempt(variant):
+                return {
+                "request": {"path_parameters": {"id": 1},
+                            "headers": {"X-Validation-Variant": variant}},
                 "assertions": [{
-                    "assertion_id": "status", "kind": "status_equals", "expected": 200,
+                    "assertion_id": "private", "kind": "body_contains", "expected": "private",
                 }],
-            }
+                }
             runtime_contract = {
-                "schema_version": 1, "target": runtime_attempt,
-                "positive_control": runtime_attempt, "negative_control": runtime_attempt,
+                "schema_version": 1, "target": runtime_attempt("target"),
+                "positive_control": runtime_attempt("positive"),
+                "negative_control": runtime_attempt("negative"),
             }
             from aidast.validation import validate_runtime_contract
             normalized_runtime = validate_runtime_contract(runtime_contract).model_dump(mode="json")
