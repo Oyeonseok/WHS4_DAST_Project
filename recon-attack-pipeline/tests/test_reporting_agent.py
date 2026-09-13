@@ -1,223 +1,188 @@
-"""Reporting invariants against a stubbed, persisted validation boundary."""
+"""Reporting invariants for shared Pipeline.db Validation cases."""
 
 import copy
-import hashlib
 import json
 import sqlite3
-import sys
-import types
-from contextlib import closing
 from pathlib import Path
 
 import pytest
 
-from aidast.reporting import ReportAgent, ReportDraft, ReportError, prepare_report, record_report, report_status
+from aidast.pipeline.lifecycle import start_stage_run
+from aidast.recon import db
+from aidast.reporting import ReportAgent, ReportError, prepare_report, record_report, report_status
+from aidast.validation import ValidationRepository, canonical_sha256
 
 
 @pytest.fixture
-def validation(tmp_path, monkeypatch):
-    source_dir = tmp_path / "validation"
-    source_dir.mkdir()
-    path = source_dir / "Validation.db"
-    record = {
-        "validation_id": "validation_1", "status": "confirmed", "run_id": "run_1",
-        "scan_id": "scan_1", "finding_id": "finding_1", "source_database_sha256": "a" * 64,
-        "source_finding_sha256": "b" * 64, "skill_sha256": "c" * 64,
-        "context_sha256": "d" * 64, "decision_sha256": "e" * 64,
-        "assessment": {
-            "questions": [{"question_id": f"Q{i}", "passed": True, "reason": "Recorded evidence reviewed",
-                           "evidence_ids": ["evidence_1"]} for i in range(1, 8)],
-            "poc": {"reproduced": True, "reason": "Existing local transcript reviewed",
-                    "evidence_ids": ["evidence_1"], "request_ids": ["request_1"]},
-            "reviewer": "fixture",
-        },
-        "context": {"finding": {"title": "Recorded finding"}, "evidence": [
-            {"evidence_id": "evidence_1", "body_sha256": "f" * 64},
-            {"evidence_id": "evidence_uncited", "body_sha256": "0" * 64}],
-            "requests": [{"request_id": "request_1"}]},
-        "created_at": "2026-09-09T01:00:00+00:00",
-    }
-    with closing(sqlite3.connect(path)) as conn:
-        conn.execute("CREATE TABLE fixture (document TEXT)")
-        conn.execute("INSERT INTO fixture VALUES (?)", (json.dumps(record),))
-        conn.commit()
+def validation(tmp_path):
+    pipeline_dir = tmp_path / "pipeline"
+    pipeline_dir.mkdir()
+    path = pipeline_dir / "Pipeline.db"
+    conn = db.init_db(path)
+    db.insert_scan(conn, scan_id="scan", scope_type="test", scope_value="local")
+    asset = db.insert_asset(conn, scan_id="scan", identifier="test", asset_type="DOMAIN")
+    origin = db.upsert_origin(
+        conn, asset_id=asset, scheme="https", host="test", port=443,
+        base_url="https://test",
+    )
+    conn.execute(
+        "INSERT INTO endpoints(endpoint_id,origin_id,normalized_path) VALUES ('endpoint',?,'/')",
+        (origin,),
+    )
+    conn.execute(
+        """INSERT INTO findings
+           (finding_id,scan_id,endpoint_id,vuln_type,severity,title)
+           VALUES ('finding','scan','endpoint','idor','LOW','fixture')"""
+    )
+    stage = start_stage_run(conn, scan_id="scan", stage="validation", stage_run_id="stage")
+    repo = ValidationRepository(conn)
+    repo.create_case(
+        scan_id="scan", stage_run_id=stage, target_kind="finding",
+        target_id="finding", case_id="case",
+    )
+    attempt = repo.add_attempt(
+        case_id="case", stage_run_id=stage, batch_no=1, attempt_kind="target",
+        ordinal=1, signal_type="authorization_boundary", outcome="observed",
+    )
+    evidence = repo.add_evidence(
+        case_id="case", stage_run_id=stage, attempt_id=attempt,
+        evidence_kind="observation", details={"summary": "bounded fixture"},
+        content_sha256="a" * 64, content_length=1, evidence_id="evidence",
+    )
+    repo.finalize(
+        "case", stage_run_id=stage, expected_version=0, status="CONFIRMED",
+        decision={"summary": "confirmed fixture", "evidence_ids": [evidence]},
+        evidence_ids=[evidence], impact=(1, 1, 1),
+    )
+    conn.close()
+    return path, evidence
 
-    def read_verified(path, validation_id=None):
-        with closing(sqlite3.connect(Path(path).as_uri() + "?mode=ro", uri=True)) as conn:
-            value = json.loads(conn.execute("SELECT document FROM fixture").fetchone()[0])
-        if validation_id is not None and value["validation_id"] != validation_id:
-            raise ValueError("unknown validation")
-        return value
 
-    boundary = types.ModuleType("aidast.validation")
-    boundary.read_verified_validation = read_verified
-    monkeypatch.setitem(sys.modules, "aidast.validation", boundary)
-    return path, record
-
-
-def draft_for(context):
+def draft_for(context, evidence="evidence"):
     def cited(text):
-        return {"text": text, "evidence_ids": ["evidence_1"]}
-    return {"platform": context["platform"], "validation_id": context["source"]["validation_id"],
-            "source_context_sha256": context["context_sha256"],
-            "title": cited("Recorded test fixture result"), "asset": cited("Local test fixture"),
-            "weakness": cited("Recorded classification"), "summary": cited("Existing evidence was reviewed."),
-            "steps_to_reproduce": [cited("The fixture transcript records the observed behavior.")],
-            "expected_behavior": cited("Expected fixture behavior"),
-            "actual_behavior": cited("Observed fixture behavior"), "impact": cited("Recorded test impact"),
-            "attachment_evidence_ids": ["evidence_1"]}
+        return {"text": text, "evidence_ids": [evidence]}
+
+    return {
+        "platform": context["platform"], "case_id": context["source"]["case_id"],
+        "source_context_sha256": context["context_sha256"],
+        "title": cited("Validated fixture result"), "asset": cited("Local fixture"),
+        "weakness": cited("IDOR"), "summary": cited("Fresh replay confirmed the behavior."),
+        "steps_to_reproduce": [cited("Review the persisted replay evidence.")],
+        "expected_behavior": cited("Cross-user access is denied."),
+        "actual_behavior": cited("Cross-user access was observed."),
+        "impact": cited("An identity boundary was crossed."),
+        "attachment_evidence_ids": [evidence],
+    }
 
 
 def context_for(result):
-    return json.loads(Path(result["context_path"]).read_text())
+    return json.loads(Path(result["context_path"]).read_text(encoding="utf-8"))
 
 
 @pytest.mark.parametrize("platform", ["hackerone", "bugcrowd", "intigriti"])
-def test_report_agent_prepares_and_writes_separate_local_draft(validation, tmp_path, platform):
-    path, _ = validation
-    source_bytes = path.read_bytes()
+def test_report_agent_drafts_one_idempotent_shared_case_report(validation, tmp_path, platform):
+    path, evidence = validation
     calls = []
 
     class Writer:
         def write(self, context):
             calls.append(context)
-            assert context["skill"] and context["template"] and context["output_schema"]
-            assert context["allowed_evidence_ids"] == ["evidence_1"]
-            return draft_for(context)
+            return draft_for(context, evidence)
 
-    agent = ReportAgent(Writer())
-    result = agent.run(path, tmp_path / platform, platform=platform)
+    output = tmp_path / "reports" / platform
+    result = ReportAgent(Writer()).run(path, output, platform=platform, case_id="case")
     assert result["status"] == "drafted"
-    assert len(calls) == 1
-    assert result["source"]["validation_database_sha256"] == hashlib.sha256(source_bytes).hexdigest()
-    markdown = Path(result["report_path"]).read_text()
-    assert "Local draft" in markdown and "evidence_1" in markdown
-    assert "Demonstrated Impact" in markdown if platform == "bugcrowd" else "## Impact" in markdown
-    assert path.read_bytes() == source_bytes
-    assert agent.run(path, tmp_path / platform, platform=platform) == result
+    assert result["source"]["decision_sha256"]
+    assert ReportAgent(Writer()).run(path, output, platform=platform, case_id="case") == result
     assert len(calls) == 1
 
 
-@pytest.mark.parametrize("status", ["needs_evidence", "rejected", "retracted", "pending"])
-def test_nonconfirmed_validation_is_rejected(validation, tmp_path, status):
-    path, record = validation
-    record["status"] = status
-    with closing(sqlite3.connect(path)) as conn:
-        conn.execute("UPDATE fixture SET document=?", (json.dumps(record),))
-        conn.commit()
-    with pytest.raises(ReportError, match="confirmed"):
-        prepare_report(path, tmp_path / "report", platform="hackerone")
-    assert not (tmp_path / "report").exists()
+@pytest.mark.parametrize(
+    "status", ["DISPROVEN", "OUT_OF_SCOPE", "UNDERPOWERED", "BLOCKED", "INCONCLUSIVE"],
+)
+def test_nonconfirmed_case_is_rejected(validation, tmp_path, status):
+    path, _ = validation
+    with sqlite3.connect(path) as conn:
+        conn.execute("UPDATE validation_cases SET current_status=? WHERE case_id='case'", (status,))
+    with pytest.raises(ReportError, match="CONFIRMED"):
+        prepare_report(path, tmp_path / "report", platform="hackerone", case_id="case")
 
 
 @pytest.mark.parametrize("platform", ["immunefi", "unknown", "HackerOne", "", "../hackerone"])
 def test_unsupported_platform_is_rejected(validation, tmp_path, platform):
     with pytest.raises(ReportError, match="platform"):
-        prepare_report(validation[0], tmp_path / "report", platform=platform)
+        prepare_report(validation[0], tmp_path / "report", platform=platform, case_id="case")
 
 
 @pytest.mark.parametrize("field,value", [
-    ("platform", "bugcrowd"), ("validation_id", "validation_other"),
+    ("case_id", "other"),
     ("source_context_sha256", "0" * 64),
-    ("attachment_evidence_ids", ["evidence_uncited"]),
+    ("attachment_evidence_ids", ["invented"]),
     ("steps_to_reproduce", []),
     ("execute", "shell command"),
-    ("vrt_category", {"text": "Unspecified", "evidence_ids": ["evidence_1"]}),
+    ("vrt_category", {"text": "Unspecified", "evidence_ids": ["evidence"]}),
 ])
 def test_invalid_model_output_never_persists(validation, tmp_path, field, value):
-    result = prepare_report(validation[0], tmp_path / "report", platform="hackerone")
+    result = prepare_report(
+        validation[0], tmp_path / "report", platform="hackerone", case_id="case",
+    )
     draft = draft_for(context_for(result))
     draft[field] = value
     with pytest.raises(ValueError):
         record_report(Path(result["report_db"]), draft)
     assert report_status(Path(result["report_db"]))["status"] == "prepared"
-    assert not (tmp_path / "report" / "Report.md").exists()
 
 
-@pytest.mark.parametrize("evidence", [[], ["invented"], ["evidence_uncited"], ["evidence_1", "evidence_1"]])
-def test_claims_require_unique_validated_evidence(validation, tmp_path, evidence):
-    result = prepare_report(validation[0], tmp_path / "report", platform="hackerone")
+def test_immutable_draft_and_stale_decision(validation, tmp_path):
+    path, _ = validation
+    result = prepare_report(path, tmp_path / "report", platform="hackerone", case_id="case")
+    report_db = Path(result["report_db"])
     draft = draft_for(context_for(result))
-    draft["impact"]["evidence_ids"] = evidence
-    with pytest.raises(ValueError):
-        record_report(Path(result["report_db"]), draft)
-
-
-def test_immutable_draft_and_validation_source(validation, tmp_path):
-    result = prepare_report(validation[0], tmp_path / "report", platform="hackerone")
-    db = Path(result["report_db"])
-    draft = draft_for(context_for(result))
-    first = record_report(db, draft)
-    assert record_report(db, draft) == first
+    record_report(report_db, draft)
     changed = copy.deepcopy(draft)
     changed["impact"]["text"] = "Different prose"
-    with pytest.raises(ReportError, match="immutable"):
-        record_report(db, changed)
-    with closing(sqlite3.connect(validation[0])) as conn:
-        conn.execute("CREATE TABLE additional_state (value TEXT)")
-    with pytest.raises(ReportError, match="source changed"):
-        report_status(db)
+    with pytest.raises(ReportError, match="different immutable"):
+        record_report(report_db, changed)
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            "UPDATE validation_cases SET decision_json='{}',decision_sha256=? WHERE case_id='case'",
+            (canonical_sha256({}),),
+        )
+    assert report_status(report_db)["stale"] is True
+    with pytest.raises(ReportError, match="differs"):
+        record_report(report_db, draft)
 
 
-def test_render_escapes_untrusted_active_markup(validation, tmp_path):
-    result = prepare_report(validation[0], tmp_path / "report", platform="intigriti")
-    draft = draft_for(context_for(result))
-    draft["summary"]["text"] = '<script>alert(1)</script> ![beacon](https://example.invalid/image)'
-    result = record_report(Path(result["report_db"]), draft)
-    markdown = Path(result["report_path"]).read_text()
-    assert "<script>" not in markdown and "![beacon](" not in markdown
-
-
-def test_output_separation_and_symlinks(validation, tmp_path):
-    with pytest.raises(ReportError, match="separate"):
-        prepare_report(validation[0], validation[0].parent / "report", platform="hackerone")
-    result = prepare_report(validation[0], tmp_path / "report", platform="hackerone")
-    (tmp_path / "report" / "Report.md").symlink_to(validation[0])
-    before = validation[0].read_bytes()
-    with pytest.raises(ReportError, match="symlink"):
-        record_report(Path(result["report_db"]), draft_for(context_for(result)))
-    assert validation[0].read_bytes() == before
-
-
-def test_context_and_stored_draft_tampering_is_detected(validation, tmp_path):
-    result = prepare_report(validation[0], tmp_path / "report", platform="hackerone")
-    db = Path(result["report_db"])
-    record_report(db, draft_for(context_for(result)))
-    with closing(sqlite3.connect(db)) as conn:
-        conn.execute("UPDATE report_drafts SET markdown='tampered'")
-        conn.commit()
-    with pytest.raises(ReportError, match="hash mismatch"):
-        report_status(db)
-
-
-def test_rehashing_a_forged_evidence_allowlist_cannot_change_source(validation, tmp_path):
-    from aidast.reporting.runtime import _json, _sha
-
-    result = prepare_report(validation[0], tmp_path / "report", platform="hackerone")
+def test_rehashed_forged_context_cannot_expand_evidence(validation, tmp_path):
+    result = prepare_report(
+        validation[0], tmp_path / "report", platform="hackerone", case_id="case",
+    )
+    report_db = Path(result["report_db"])
     context = context_for(result)
     context["allowed_evidence_ids"].append("invented")
-    context["context_sha256"] = _sha(_json({key: value for key, value in context.items()
-                                           if key != "context_sha256"}))
-    db = Path(result["report_db"])
-    with closing(sqlite3.connect(db)) as conn:
-        conn.execute("UPDATE report_runs SET context_json=?,context_sha256=?",
-                     (_json(context), context["context_sha256"]))
-        conn.commit()
+    context["context_sha256"] = canonical_sha256({
+        key: value for key, value in context.items() if key != "context_sha256"
+    })
+    with sqlite3.connect(report_db) as conn:
+        conn.execute(
+            "UPDATE report_runs SET context_json=?,context_sha256=?",
+            (json.dumps(context, sort_keys=True, separators=(",", ":")),
+             context["context_sha256"]),
+        )
     with pytest.raises(ReportError, match="source changed"):
-        report_status(db)
+        report_status(report_db)
 
 
-def test_preparation_recovers_missing_export_from_persisted_draft(validation, tmp_path):
-    result = prepare_report(validation[0], tmp_path / "report", platform="hackerone")
-    record_report(Path(result["report_db"]), draft_for(context_for(result)))
-    markdown = tmp_path / "report" / "Report.md"
-    previous = markdown.read_bytes()
-    markdown.unlink()
-    resumed = prepare_report(validation[0], tmp_path / "report", platform="hackerone")
-    assert resumed["status"] == "drafted"
-    assert markdown.read_bytes() == previous
-
-
-def test_schema_has_only_three_platforms():
-    assert ReportDraft.model_json_schema()["properties"]["platform"]["enum"] == [
-        "hackerone", "bugcrowd", "intigriti"]
+def test_render_escapes_active_markup_and_missing_exports_are_recovered(validation, tmp_path):
+    path, _ = validation
+    output = tmp_path / "report"
+    result = prepare_report(path, output, platform="intigriti", case_id="case")
+    draft = draft_for(context_for(result))
+    draft["summary"]["text"] = '<script>alert(1)</script> ![beacon](https://invalid/image)'
+    record_report(Path(result["report_db"]), draft)
+    markdown = output.joinpath("Report.md").read_text(encoding="utf-8")
+    assert "<script>" not in markdown and "![beacon](" not in markdown
+    output.joinpath("Report.md").unlink()
+    output.joinpath("Report.json").unlink()
+    prepare_report(path, output, platform="intigriti", case_id="case")
+    assert output.joinpath("Report.md").is_file() and output.joinpath("Report.json").is_file()

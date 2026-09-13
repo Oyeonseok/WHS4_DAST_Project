@@ -1,7 +1,4 @@
-"""Offline seven-question and PoC evidence reviews in a separate Validation.db."""
-
-from .agent import (EvidenceOnlyReviewer, ValidationAgent, ValidationReviewer, load_skill,
-                    prepare_validation, record_validation, validate_assessment)
+"""Fresh, evidence-bound Validation in the shared Pipeline database."""
 from .impact import ImpactResult, evaluate_impact
 from .gaps import ImpactGapAnalyzer
 from .decision import DecisionEngine, DecisionInput
@@ -13,8 +10,7 @@ from .integrity import (CandidateIntegrityError, CandidateIntegrityGate,
                         reproduction_spec_digest)
 from .matching import (KnownCandidate, KnownMatch, KnownMatcher, canonical_payload,
                        payload_structure_sha256)
-from .models import (BlindAssessment, ClaimComparison, PoCAssessment, QuestionAnswer,
-                     ValidationAssessment, ValidationCaseSnapshot, ValidationError,
+from .models import (BlindAssessment, ClaimComparison, ValidationCaseSnapshot, ValidationError,
                      ValidationStageResult, canonical_json, canonical_sha256)
 from .repository import (ConcurrentValidationUpdate, ValidationRepository,
                          ValidationRepositoryError)
@@ -49,11 +45,7 @@ from .chain_contract import (ChainBindingContract, ChainRuntimeContract,
                              inject_chain_value)
 from .chain_adapter import ChainReproductionPort
 from .status import shared_validation_status
-from .store import read_verified_validation, validation_status
-
-__all__ = ["EvidenceOnlyReviewer", "ValidationAgent", "ValidationReviewer", "ValidationAssessment",
-           "ValidationError", "PoCAssessment", "QuestionAnswer", "load_skill", "prepare_validation",
-           "record_validation", "validate_assessment", "read_verified_validation", "validation_status"]
+__all__ = ["ValidationError"]
 
 __all__ += ["BlindAssessment", "ClaimComparison", "ValidationCaseSnapshot",
             "ValidationStageResult", "canonical_json", "canonical_sha256", "ImpactResult",

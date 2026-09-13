@@ -28,8 +28,7 @@ class CitedText(StrictModel):
 
 class ReportDraft(StrictModel):
     platform: Platform
-    validation_id: Identifier | None = None
-    case_id: Identifier | None = None
+    case_id: Identifier
     source_context_sha256: Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
     title: CitedText
     asset: CitedText
@@ -48,8 +47,6 @@ class ReportDraft(StrictModel):
 
     @model_validator(mode="after")
     def platform_fields(self) -> ReportDraft:
-        if (self.validation_id is None) == (self.case_id is None):
-            raise ValueError("exactly one validation_id or case_id is required")
         if len(self.title.text) > 256 or "\n" in self.title.text:
             raise ValueError("report title must be a single line of at most 256 characters")
         if self.platform != "bugcrowd" and self.vrt_category is not None:
@@ -64,11 +61,8 @@ def validate_draft(document: dict, context: dict) -> ReportDraft:
     draft = ReportDraft.model_validate(document)
     if draft.platform != context["platform"]:
         raise ValueError("draft platform does not match prepared report")
-    source_identifier = context["source"].get("validation_id")
-    if source_identifier is not None and draft.validation_id != source_identifier:
-        raise ValueError("draft validation ID does not match persisted validation")
-    source_case_id = context["source"].get("case_id")
-    if source_case_id is not None and draft.case_id != source_case_id:
+    source_case_id = context["source"]["case_id"]
+    if draft.case_id != source_case_id:
         raise ValueError("draft case ID does not match persisted Validation case")
     if draft.source_context_sha256 != context["context_sha256"]:
         raise ValueError("draft source context hash does not match prepared report")

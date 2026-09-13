@@ -189,7 +189,6 @@ Coordinator를 만들어 Validation을 자동 실행한다. 독립 `validate run
 구현돼 있다. 실제 운영 경로를 완성하려면 다음 작업이 남아 있다.
 
 1. Attack이 target별로 작성한 marker·selector·threshold의 보안 전문가 의미 검토
-2. 새 경로가 기본 동작이 된 뒤 legacy 7 Question `Validation.db` 제거
 
 HTTP response marker와 정량 threshold는 공통 profile에서 추정하지 않고 Attack의 실제
 관찰에서 만들어진 immutable runtime contract로 받는다. generic HTTP adapter는 이 값이
@@ -225,8 +224,8 @@ strict schema로 고정했지만 selector, marker와 threshold는 공통값으�
 markup을 exploit 성공으로 오인할 수 있어서다. 대신 Finding은 Attack이 작성한 target별
 runtime contract를 schema와 hash로 고정해 해당 실행 계열의 adapter에서 평가한다.
 
-### legacy Reporting 병행
+### legacy Reporting 제거
 
-새 case 기반 Report.db v2를 추가했지만 기존 v1 reader는 아직 유지한다. production adapter와
-새 Validation 기본 경로가 완성되기 전에 v1을 제거하면 기존 보고서와 consumer를 읽을 수
-없기 때문이다.
+새 case 기반 Report.db v2가 기본 경로가 된 뒤 기존 Validation.db, 7 Question API,
+`validation_id` 기반 Report.db v1 reader를 제거했다. 과거 DB는 자동 이관하지 않으며
+현재 CLI는 shared Pipeline.db의 `scan_id` 또는 `case_id`만 받는다.

@@ -14,7 +14,6 @@ from uuid import uuid4
 from aidast.agents.main import (
     CodexMainAgent,
     CodexReportWriter,
-    CodexValidationReviewer,
     MainAgentError,
 )
 from aidast.auth.codex import CodexAuth, CodexAuthError
@@ -33,8 +32,7 @@ from aidast.reporting import ReportAgent, ReportError, report_status
 from aidast.scope.paths import ScopePathError, resolve_scope_directory
 from aidast.scope.reader import PlaywrightProgramPageReader, ProgramPageError
 from aidast.scope.models import ScopeAsset, ScopeDocument
-from aidast.validation import (ValidationAgent, ValidationCoordinatorError,
-                               ValidationError, validation_status)
+from aidast.validation import ValidationCoordinatorError, ValidationError
 
 
 EXECUTION_PROFILES = {
@@ -200,20 +198,16 @@ def _parser() -> argparse.ArgumentParser:
 
     validation = commands.add_parser(
         "validate", aliases=["validation"],
-        help="run or inspect shared Validation; legacy offline review remains transitional",
+        help="run or inspect Validation in the shared Pipeline database",
     )
     validation_commands = validation.add_subparsers(
         dest="validation_command", required=True
     )
     validation_run = validation_commands.add_parser(
-        "run", help="run shared Validation, or explicitly use the legacy offline selector"
+        "run", help="run shared Validation"
     )
-    validation_run.add_argument("database", type=Path, help="Pipeline.db (shared) or legacy Attack.db")
-    validation_run.add_argument(
-        "--output-dir", type=Path, default=Path("ValidationRun")
-    )
-    validation_run.add_argument("--run-id")
-    validation_run.add_argument("--scan-id")
+    validation_run.add_argument("database", type=Path, help="shared Pipeline.db")
+    validation_run.add_argument("--scan-id", required=True)
     validation_run.add_argument(
         "--policy", type=Path,
         help="current TargetPolicy.json (default: next to Pipeline.db)",
@@ -231,7 +225,7 @@ def _parser() -> argparse.ArgumentParser:
         help="current TargetPolicy.json (default: next to Pipeline.db)",
     )
     validation_status_parser = validation_commands.add_parser(
-        "status", help="inspect shared Pipeline.db with a selector or legacy Validation.db"
+        "status", help="inspect shared Pipeline.db"
     )
     validation_status_parser.add_argument("database", type=Path)
     validation_status_selection = validation_status_parser.add_mutually_exclusive_group()
@@ -239,21 +233,19 @@ def _parser() -> argparse.ArgumentParser:
     validation_status_selection.add_argument("--case-id")
 
     report = commands.add_parser(
-        "report", help="draft a platform report from confirmed Validation.db"
+        "report", help="draft a platform report from a confirmed Validation case"
     )
     report_commands = report.add_subparsers(dest="report_command", required=True)
     report_run = report_commands.add_parser(
         "run", help="create a local report draft; never submit it"
     )
-    report_run.add_argument("database", type=Path, help="Validation.db")
+    report_run.add_argument("database", type=Path, help="shared Pipeline.db")
     report_run.add_argument(
         "--platform", required=True,
         choices=("hackerone", "intigriti", "bugcrowd"),
     )
     report_run.add_argument("--output-dir", type=Path, default=Path("ReportRun"))
-    report_source_selection = report_run.add_mutually_exclusive_group()
-    report_source_selection.add_argument("--validation-id")
-    report_source_selection.add_argument("--case-id")
+    report_run.add_argument("--case-id", required=True)
     report_status_parser = report_commands.add_parser(
         "status", help="verify and inspect a Report.db"
     )
@@ -350,7 +342,6 @@ def main(
     argv: Sequence[str] | None = None,
     *,
     attack_workflow: AttackWorkflow | None = None,
-    validation_reviewer: object | None = None,
     validation_coordinator: object | None = None,
     report_writer: object | None = None,
 ) -> int:
@@ -383,8 +374,7 @@ def main(
         if args.command == "attack":
             return _run_attack(args, workflow=attack_workflow)
         if args.command in {"validate", "validation"}:
-            return _run_validation(args, reviewer=validation_reviewer,
-                                   coordinator=validation_coordinator)
+            return _run_validation(args, coordinator=validation_coordinator)
         if args.command == "report":
             return _run_report(args, writer=report_writer)
         parser.error(f"unsupported command: {args.command}")
@@ -782,14 +772,10 @@ def _run_attack(
         raise ReviewPreparationError(str(exc)) from exc
 
 
-def _run_validation(args: argparse.Namespace, *, reviewer: object | None = None,
-                    coordinator: object | None = None) -> int:
+def _run_validation(args: argparse.Namespace, *, coordinator: object | None = None) -> int:
     if args.validation_command == "status":
-        if args.scan_id is not None or args.case_id is not None:
-            from aidast.validation import shared_validation_status
-            result = shared_validation_status(args.database, scan_id=args.scan_id, case_id=args.case_id)
-        else:
-            result = validation_status(args.database)
+        from aidast.validation import shared_validation_status
+        result = shared_validation_status(args.database, scan_id=args.scan_id, case_id=args.case_id)
     elif args.validation_command == "resume":
         if coordinator is None:
             from aidast.validation import build_native_validation_coordinator
@@ -799,9 +785,7 @@ def _run_validation(args: argparse.Namespace, *, reviewer: object | None = None,
             )
         raw = coordinator.resume(args.stage_run_id)
         result = raw.model_dump(mode="json") if hasattr(raw, "model_dump") else raw
-    elif args.scan_id is not None:
-        if args.run_id is not None:
-            raise ValidationError("--run-id belongs to the legacy offline Validation path")
+    else:
         if coordinator is None:
             from aidast.validation import build_native_validation_coordinator
             coordinator = build_native_validation_coordinator(
@@ -810,31 +794,6 @@ def _run_validation(args: argparse.Namespace, *, reviewer: object | None = None,
             )
         raw = coordinator.run(args.scan_id, finding_id=args.finding_id, chain_id=args.chain_id)
         result = raw.model_dump(mode="json") if hasattr(raw, "model_dump") else raw
-    else:
-        if args.chain_id is not None:
-            raise ValidationError("--chain-id requires --scan-id and shared Pipeline.db")
-        raw = ValidationAgent(reviewer or CodexValidationReviewer()).run(
-            args.database,
-            args.output_dir,
-            run_id=args.run_id,
-            finding_id=args.finding_id,
-        )
-        result = {
-            "database": raw["database"],
-            "validation_run_id": raw["validation_run_id"],
-            "run_id": raw["run_id"],
-            "scan_id": raw["scan_id"],
-            "status": raw["status"],
-            "decision_count": raw["decision_count"],
-            "decisions": [
-                {
-                    "validation_id": item["validation_id"],
-                    "finding_id": item["finding_id"],
-                    "status": item["status"],
-                }
-                for item in raw["decisions"]
-            ],
-        }
     print(json.dumps(result, ensure_ascii=False, sort_keys=True, default=str))
     return 0
 
@@ -843,11 +802,8 @@ def _run_report(args: argparse.Namespace, *, writer: object | None = None) -> in
     if args.report_command == "status":
         result = report_status(args.database)
     else:
-        options = {"platform": args.platform, "validation_id": args.validation_id}
-        if args.case_id is not None:
-            options = {"platform": args.platform, "case_id": args.case_id}
         result = ReportAgent(writer or CodexReportWriter()).run(
-            args.database, args.output_dir, **options,
+            args.database, args.output_dir, platform=args.platform, case_id=args.case_id,
         )
     print(json.dumps(result, ensure_ascii=False, sort_keys=True, default=str))
     return 0

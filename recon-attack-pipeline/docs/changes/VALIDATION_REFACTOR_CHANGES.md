@@ -2,6 +2,31 @@
 
 이 문서는 Validation 재구조화 구현 변경을 누적 기록한다. 관련 구현을 완료할 때마다 최신 날짜의 항목을 문서 상단에 추가한다.
 
+## 2026-09-14: legacy 7 Question Validation 제거
+
+- `validate run` 입력을 shared `Pipeline.db`와 필수 `--scan-id`로 단일화하고,
+  `validate status`도 shared case/scan reader만 사용하게 했다. `--run-id`, legacy
+  `Attack.db`, 별도 output directory 경로는 CLI에서 제거했다.
+- 별도 `Validation.db`를 생성·검증하던 agent/store, 7 Question assessment DTO와 offline
+  Codex reviewer를 제거했다. packaged `aidast-validation` Skill은 shared Blind Validation
+  경계만 설명하도록 교체했다.
+- `report run`은 필수 `--case-id`로 현재 shared Validation case만 받는다. ReportDraft와
+  Reporting Skill에서 `validation_id`를 제거하고 Report.db v1 reader/writer도 삭제했다.
+- Report.db 내부 context hash와 함께 evidence allowlist를 다시 쓴 변조도 탐지하도록,
+  현재 Pipeline case에서 source context 전체를 재구성해 저장 context와 대조한다.
+- 기존 report가 작성된 뒤 export 파일만 사라진 경우 immutable DB의 draft를 이용해
+  `Report.md`와 `Report.json`을 복구한다.
+- README의 Validation/Reporting 사용법을 현재 shared DB 계약으로 갱신했다.
+- legacy store 전용 unittest는 구현과 함께 제거하고, source/context 변조, 잘못된 citation,
+  immutable draft, stale decision, 세 플랫폼 routing과 export 복구 검사를 shared case
+  fixture로 이전했다. 전체 unittest 348개와 Reporting pytest 22개가 통과했다.
+
+설계와 다른 점 및 이유:
+
+없음. 이 변경은 설계 §12.3과 §13.1의 별도 Validation.db 미이관·입력 거부·7 Question
+API 제거 요구를 그대로 완료한다. 과거 Validation.db와 Report.db v1은 자동 변환하지
+않으며 새 CLI 입력으로도 받지 않는다.
+
 ## 2026-09-14: Validation profile 실행 의미 강제
 
 - 58개 Validation profile에 허용 runtime kind를 명시했다. 현재 구성은 HTTP 51개,

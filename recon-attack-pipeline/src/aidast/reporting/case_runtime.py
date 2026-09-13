@@ -130,7 +130,7 @@ PRAGMA user_version=2;
 
 
 def _load(path: Path, *, verify_source: bool = True) -> tuple[dict, dict, dict | None, bool]:
-    from .runtime import ReportError, _path, _sha
+    from .runtime import PLATFORMS, ReportError, _path, _sha
 
     report_db = _path(path, existing=True)
     with closing(sqlite3.connect(report_db.as_uri() + "?mode=ro", uri=True)) as conn:
@@ -142,10 +142,23 @@ def _load(path: Path, *, verify_source: bool = True) -> tuple[dict, dict, dict |
             raise ReportError("report database must contain exactly one source-bound run")
         run = dict(rows[0])
         draft_row = conn.execute("SELECT * FROM report_drafts WHERE report_id=?", (run["report_id"],)).fetchone()
-    context = json.loads(run["context_json"])
+    try:
+        context = json.loads(run["context_json"])
+    except (TypeError, json.JSONDecodeError):
+        raise ReportError("stored report context is invalid") from None
     unsigned = {key: value for key, value in context.items() if key != "context_sha256"}
     if canonical_sha256(unsigned) != context.get("context_sha256") or run["context_sha256"] != context.get("context_sha256"):
         raise ReportError("stored report context hash mismatch")
+    source_binding = context.get("source", {})
+    if (
+        context.get("platform") not in PLATFORMS
+        or run["scan_id"] != source_binding.get("scan_id")
+        or run["case_id"] != source_binding.get("case_id")
+        or run["decision_sha256"] != source_binding.get("decision_sha256")
+        or context.get("skill_sha256") != _sha(context.get("skill", ""))
+        or context.get("template_sha256") != _sha(context.get("template", ""))
+    ):
+        raise ReportError("stored report source, skill, or platform binding mismatch")
     stale = False
     if verify_source:
         source_path = _path(report_db.parent / run["source_path"], existing=True)
@@ -157,7 +170,9 @@ def _load(path: Path, *, verify_source: bool = True) -> tuple[dict, dict, dict |
             raise ReportError("prepared report source case no longer exists")
         stale = current[0] != run["decision_sha256"]
         if not stale:
-            read_verified_case(source_path, run["case_id"])
+            current_source = read_verified_case(source_path, run["case_id"])
+            if _context(current_source, context["platform"]) != context:
+                raise ReportError("Validation source changed since report preparation")
     stored = dict(draft_row) if draft_row else None
     if stored:
         if _sha(stored["draft_json"]) != stored["draft_sha256"] or _sha(stored["markdown"]) != stored["markdown_sha256"]:
@@ -205,6 +220,10 @@ def prepare_case_report(pipeline_db: Path, output_dir: Path, *, platform: str, c
     from .runtime import _publish
     _publish(output / "Report.context.json", canonical_json(context) + "\n")
     _publish(output / "Report.schema.json", canonical_json(ReportDraft.model_json_schema()) + "\n")
+    _, _, stored, _ = _load(target)
+    if stored is not None:
+        _publish(output / "Report.md", stored["markdown"])
+        _publish(output / "Report.json", stored["draft_json"] + "\n")
     return case_report_status(target)
 
 
@@ -233,8 +252,11 @@ def record_case_report(report_db: Path, document: dict) -> dict:
 
 def case_report_status(report_db: Path) -> dict:
     run, context, stored, stale = _load(report_db)
+    path = Path(report_db).resolve()
     return {"report_id": run["report_id"], "status": "prepared" if stored is None else "drafted",
             "stale": stale, "platform": context["platform"], "case_id": run["case_id"],
-            "report_db": str(Path(report_db).resolve()),
-            "report_path": None if stored is None else str(Path(report_db).resolve().parent / "Report.md"),
+            "report_db": str(path),
+            "context_path": str(path.parent / "Report.context.json"),
+            "schema_path": str(path.parent / "Report.schema.json"),
+            "report_path": None if stored is None else str(path.parent / "Report.md"),
             "source": context["source"], "context_sha256": context["context_sha256"]}

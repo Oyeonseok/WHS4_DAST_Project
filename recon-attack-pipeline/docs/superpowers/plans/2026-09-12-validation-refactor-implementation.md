@@ -68,10 +68,9 @@ TMPDIR=/private/tmp PYTHONPATH=src:tests .venv/bin/python -m unittest test_valid
 ```
 
 최신 전체 unittest는 macOS `/var` symlink 오인을 피하도록 `TMPDIR=/private/tmp`에서
-377개가 모두 통과했다. `.venv`와 기본
-Python에 pytest가 없어 `test_reporting_agent` import 한 건만 실패했고, 해당 모듈은
-`/opt/anaconda3/bin/pytest`로 별도 실행해 30개가 통과했다. compileall과 diff whitespace
-검사도 통과했다.
+348개가 모두 통과했다. legacy 전용 unittest 30개를 제거했고, 기존 Reporting 보안
+검사를 shared case fixture로 전환한 pytest 22개도 별도 통과했다. compileall과 diff
+whitespace 검사도 통과했다.
 
 ## 1. 범위와 완료의 의미
 
@@ -216,7 +215,7 @@ Task 1 DTO와 fixture
 - [x] 가설의 예상 영향과 검증된 영향을 명확히 구분한다.
 - [x] `report run Pipeline.db --case-id ...` 입력을 Task 6의 reader와 연결한다.
 - [x] legacy Validation.db는 shared selector 입력으로 거절하고 자동 이관하지 않는다.
-- [ ] 기존 7 Question API와 Skill의 제거는 모든 consumer가 전환된 뒤 진행한다. 실행 계층 미완성 상태에서 기존 경로부터 삭제하지 않는다.
+- [x] 기존 7 Question API와 별도 Validation.db store를 제거하고 packaged Validation Skill을 shared Blind 계약으로 교체한다.
 - [x] shared `run`, `resume`과 finding/chain targeted selector를 injected Coordinator에 연결한다.
 - [x] 정상 pipeline은 injected Coordinator가 있으면 Chaining 직후 같은 API를 자동 호출한다.
 - [x] native HTTP adapter를 기본 구성해 unauthenticated HTTP Finding의 자동 Validation을 활성화한다. 미지원 case는 요청 없이 `INCONCLUSIVE`로 격리한다.
@@ -236,7 +235,7 @@ PYTHONPATH=src .venv/bin/python -m unittest discover -s tests -v
 ```
 
 - [x] 외부 서비스 없이 실행한 범위와 pytest 환경 차이를 진행 기록에 남겼다.
-- [ ] migration, 경합, crash 정리, read-only Report snapshot 결과를 PR에 기록한다.
+- [x] migration, 경합, crash 정리, read-only Report snapshot 결과를 변경 기록에 남긴다.
 - [x] 실제 credential, 외부 대상 요청, 공격 실행 없이 포함 범위의 테스트가 완료되는지 확인한다.
 
 ## 4. 명세 대응과 남은 의존성
@@ -253,4 +252,5 @@ PYTHONPATH=src .venv/bin/python -m unittest discover -s tests -v
 | §12 복구·Report | lifecycle 저장 복구, 완료 batch·고정 assessment 재사용, outcome-unknown 재전송 차단, snapshot·eligibility·stale | 없음 |
 | §13 테스트 | 합성 fixture 및 HTTP adapter 통합 회귀 | 외부 test target과 전체 pipeline 수용 검증 |
 
-이 표의 남은 의존성이 해소되기 전에는 legacy 경로의 최종 제거와 새 Validation의 기본 활성화를 릴리스 완료 항목으로 처리하지 않는다.
+legacy Validation과 Report v1 경로는 제거됐다. 표에 남은 항목은 외부 test target 수용
+검증과 비 HTTP node를 포함하는 혼합 chain 확장 범위다.

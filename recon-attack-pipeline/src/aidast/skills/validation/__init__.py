@@ -1,1 +1,1 @@
-"""Bundled seven-question and PoC evidence-review rubric."""
+"""Bundled blind Validation skill and machine-readable Hunt profiles."""

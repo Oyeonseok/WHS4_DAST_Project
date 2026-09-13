@@ -259,30 +259,30 @@ aidast attack revoke AttackRuns/<scan_id>/Attack.db --reason "검토 중단"
 
 ### Validation Agent와 Report Agent
 
-Attack 실행기가 저장한 finding은 프로젝트 내 `aidast-validation` Skill로 7-Question과
-기존 PoC 증거를 검토합니다. Validation은 Recon/Attack DB를 수정하지 않고, 원본 DB
-해시와 finding·evidence·request ID에 묶인 판정 이력을 별도 `Validation.db`에 저장합니다.
+Attack 실행기가 shared `Pipeline.db`에 저장한 finding과 demonstrated chain은
+Validation Coordinator가 positive control, target 3회, negative control 순서로 fresh
+replay합니다. Blind assessment를 먼저 고정한 뒤 Attack claim을 공개하며, 판정과 evidence는
+같은 Pipeline DB의 case에 append-only로 연결됩니다.
 
 ```bash
-aidast validate run AttackRuns/<scan_id>/Attack.db \
-  --finding-id <finding_id> \
-  --output-dir ValidationRuns/<scan_id>
-aidast validate status ValidationRuns/<scan_id>/Validation.db
+aidast validate run Runs/<scan_id>/Pipeline.db \
+  --scan-id <scan_id> \
+  --finding-id <finding_id>
+aidast validate status Runs/<scan_id>/Pipeline.db --scan-id <scan_id>
 ```
 
-최종 상태는 `confirmed`, `rejected`, `needs_evidence` 중 하나이며 모델이 직접 상태를
-지정하지 않습니다. Python이 7개 답변, 존재하는 증거 ID, PoC request ID와 응답
-hash/길이의 연결을 검사해 계산합니다. 기본 검토기는 증거가 부족하면 fail-closed하고,
-CLI의 Codex 검토도 저장된 증거만 읽으며 PoC를 새로 실행하지 않습니다. 따라서
-`confirmed`는 저장된 PoC 증거에 대한 오프라인 판정이며 새로운 재실행을 의미하지 않습니다.
+최종 상태는 `CONFIRMED`, `DISPROVEN`, `OUT_OF_SCOPE`, `KNOWN`, `UNDERPOWERED`,
+`BLOCKED`, `INCONCLUSIVE`, `CONTESTED` 중 하나이며 모델이 직접 지정하지 않습니다.
+Python이 candidate 무결성, control/target 관측, impact 세 축, 중복 key와 claim 충돌을
+검사해 상태를 계산합니다.
 
-Report Agent는 `confirmed`로 저장된 Validation만 받아 `aidast-reporting` Skill로 로컬
-초안을 만듭니다. 지원 플랫폼은 HackerOne, Intigriti, Bugcrowd 세 가지이며 제출이나
-플랫폼 접속은 하지 않습니다.
+Report Agent는 현재 `CONFIRMED`인 case만 받아 `aidast-reporting` Skill로 로컬 초안을
+만듭니다. `KNOWN`은 source case를 안내하고 `CONTESTED`는 review-only bundle만 반환합니다.
+지원 플랫폼은 HackerOne, Intigriti, Bugcrowd 세 가지이며 제출이나 플랫폼 접속은 하지 않습니다.
 
 ```bash
-aidast report run ValidationRuns/<scan_id>/Validation.db \
-  --validation-id <validation_id> \
+aidast report run Runs/<scan_id>/Pipeline.db \
+  --case-id <case_id> \
   --platform hackerone \
   --output-dir ReportRuns/<scan_id>
 aidast report status ReportRuns/<scan_id>/Report.db
@@ -291,8 +291,8 @@ aidast report status ReportRuns/<scan_id>/Report.db
 결과 디렉터리에는 검증 가능한 `Report.db`, 구조화된 `Report.json`, 사람이 읽는
 `Report.md`가 생성됩니다. 모든 사실 필드는 확인된 evidence ID를 인용해야 하며,
 `--platform`은 `hackerone`, `intigriti`, `bugcrowd`만 허용합니다. 재현 가능한 팀 전달을
-위해 Validation을 시작하기 전에 Attack DB 쓰기를 끝내야 합니다. 이후 Attack DB가
-변경되면 기존 검증/보고서의 원본 확인은 실패하며 새 snapshot으로 다시 검증해야 합니다.
+위해 report는 case의 decision hash와 정렬된 evidence hash에 묶입니다. 무관한 Pipeline
+row 변경은 보고서를 무효화하지 않지만 case decision이 바뀌면 기존 보고서는 `stale`이 됩니다.
 
 통합 전후 차이와 수정 이유는 `docs/changes/MERGE_CHANGES.md`에 누적합니다.
 
