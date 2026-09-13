@@ -2,6 +2,23 @@
 
 이 문서는 Validation 재구조화 구현 변경을 누적 기록한다. 관련 구현을 완료할 때마다 최신 날짜의 항목을 문서 상단에 추가한다.
 
+## 2026-09-14: outcome-unknown resume 차단
+
+- 실패한 Validation stage를 재개할 때 해당 case의 `outcome_unknown` attempt, HTTP request,
+  development action 수를 먼저 확인한다.
+- 하나라도 있으면 같은 payload를 다시 보내지 않고 case를 `INCONCLUSIVE`로 종결하며
+  decision에 `outcome_unknown_requires_manual_review`와 종류별 개수를 기록한다.
+- transport 반환 전 중단을 재현한 테스트에서 resume이 새 요청이나 Agent 호출을 하지
+  않고 stage를 정상적으로 닫는지 검증했다.
+
+설계와 다른 점 및 이유:
+
+원 설계는 중단 row를 `outcome_unknown`으로 정리하고 resume한다고만 정의했다. 이번
+구현은 그 case의 자동 재전송을 금지한다. 원격 서버가 요청을 처리한 직후 local attempt
+commit 전에 프로세스가 중단될 수 있어, 같은 요청을 반복하면 상태 변경이나 OOB trigger를
+중복 실행할 수 있기 때문이다. 자동 판정 대신 수동 확인이 필요한 `INCONCLUSIVE`가 더
+안전한 종결 상태다.
+
 ## 2026-09-14: configured credential backend resolver
 
 - `PipelineCredentialResolver`가 `env://` 외 URI를 scheme별 trusted backend callable로

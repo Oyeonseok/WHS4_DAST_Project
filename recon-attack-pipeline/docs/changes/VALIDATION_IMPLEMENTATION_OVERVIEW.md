@@ -190,8 +190,7 @@ Coordinator를 만들어 Validation을 자동 실행한다. 독립 `validate run
 
 1. OOB observer backend의 인증·cursor 계약과 기본 구성
 2. 58개 Skill profile과 Attack이 작성한 marker·threshold의 보안 전문가 의미 검토
-3. transport 완료와 local commit 사이의 `outcome_unknown` 운영 복구 보강
-4. 새 경로가 기본 동작이 된 뒤 legacy 7 Question `Validation.db` 제거
+3. 새 경로가 기본 동작이 된 뒤 legacy 7 Question `Validation.db` 제거
 
 HTTP response marker와 정량 threshold는 공통 profile에서 추정하지 않고 Attack의 실제
 관찰에서 만들어진 immutable runtime contract로 받는다. generic HTTP adapter는 이 값이
@@ -201,6 +200,8 @@ HTTP response marker와 정량 threshold는 공통 profile에서 추정하지 �
 해석해 authenticated HTTP replay를 지원한다. Playwright browser request는 current policy와
 Validation ledger를 매 요청 통과한다. HTTP Chain은 명시적 응답 추출/요청 주입 계약으로
 fresh 값을 전달하며, OOB callback observer backend는 아직 별도 운영 연결이 필요하다.
+중단 시 `outcome_unknown` 실행이 하나라도 남은 case는 자동 재전송하지 않고
+`INCONCLUSIVE`로 닫아 원격 side effect의 중복을 막는다.
 
 ## 11. 설계와 달라진 부분
 

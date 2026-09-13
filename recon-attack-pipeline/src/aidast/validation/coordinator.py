@@ -227,6 +227,20 @@ class ValidationCoordinator:
                        candidate: ValidatedCandidate, *,
                        allow_impact_hypotheses: bool) -> bool:
         version = case["state_version"]
+        if case.get("blind_case_sha256") is not None:
+            unknown = self._unknown_execution_counts(
+                conn, case["case_id"], stage_run_id,
+            )
+            if any(unknown.values()):
+                repo.finalize(
+                    case["case_id"], stage_run_id=stage_run_id,
+                    expected_version=version, status="INCONCLUSIVE",
+                    decision={
+                        "reason": "outcome_unknown_requires_manual_review",
+                        "phase": "resume_preflight", "unknown": unknown,
+                    }, evidence_ids=(),
+                )
+                return False
         if self.policy_provider is None:
             raise ValidationCoordinatorError("replay requires an injected policy provider")
         blind_view = candidate.staged.blind_view()
@@ -465,6 +479,30 @@ class ValidationCoordinator:
             impact=impact_tuple if status in {"CONFIRMED", "UNDERPOWERED"} else None,
         )
         return True
+
+    @staticmethod
+    def _unknown_execution_counts(conn: sqlite3.Connection, case_id: str,
+                                  stage_run_id: str) -> dict[str, int]:
+        """Find dispatches whose side effects cannot be safely replayed."""
+        attempt_count = conn.execute(
+            """SELECT count(*) FROM validation_attempts
+               WHERE case_id=? AND stage_run_id=? AND outcome='outcome_unknown'""",
+            (case_id, stage_run_id),
+        ).fetchone()[0]
+        request_count = conn.execute(
+            """SELECT count(*) FROM validation_http_requests
+               WHERE case_id=? AND stage_run_id=? AND status='outcome_unknown'""",
+            (case_id, stage_run_id),
+        ).fetchone()[0]
+        action_count = conn.execute(
+            """SELECT count(*) FROM validation_development_actions
+               WHERE case_id=? AND stage_run_id=? AND status='outcome_unknown'""",
+            (case_id, stage_run_id),
+        ).fetchone()[0]
+        return {
+            "attempts": attempt_count, "requests": request_count,
+            "development_actions": action_count,
+        }
 
     def _execute_batch(self, repo: ValidationRepository, candidate: ValidatedCandidate,
                        stage_run_id: str, *, policy: TargetPolicy, extra_only: bool = False,

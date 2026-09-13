@@ -67,7 +67,7 @@ TMPDIR=/private/tmp PYTHONPATH=src:tests .venv/bin/python -m unittest test_valid
 ```
 
 최신 전체 unittest는 macOS `/var` symlink 오인을 피하도록 `TMPDIR=/private/tmp`에서
-371개가 모두 통과했다. `.venv`와 기본
+372개가 모두 통과했다. `.venv`와 기본
 Python에 pytest가 없어 `test_reporting_agent` import 한 건만 실패했고, 해당 모듈은
 `/opt/anaconda3/bin/pytest`로 별도 실행해 30개가 통과했다. compileall과 diff whitespace
 검사도 통과했다.
@@ -249,7 +249,7 @@ PYTHONPATH=src .venv/bin/python -m unittest discover -s tests -v
 | §9 Chain | node gate, injected/native end-to-end Blind replay, fresh scalar binding, terminal impact 재평가, Chaining table 불변 검증 | 비 HTTP node를 포함한 혼합 chain은 후속 범위 |
 | §10 요청 안전 | redaction, 저장 경계, current policy per-hop HTTP transport와 env/keyring/configured Vault credential resolver | 없음 |
 | §11 CLI | status, 보고서 입력, native HTTP/Playwright/Chain Coordinator 기반 run·resume·targeted 실행과 pipeline 자동 호출 | 실제 OOB observer 구성 선택 |
-| §12 복구·Report | lifecycle 저장 복구, 완료 batch·고정 assessment 재사용, snapshot·eligibility·stale | transport 완료와 local commit 사이의 outcome-unknown 운영 처리 |
+| §12 복구·Report | lifecycle 저장 복구, 완료 batch·고정 assessment 재사용, outcome-unknown 재전송 차단, snapshot·eligibility·stale | 없음 |
 | §13 테스트 | 합성 fixture 및 HTTP adapter 통합 회귀 | 외부 test target과 전체 pipeline 수용 검증 |
 
 이 표의 남은 의존성이 해소되기 전에는 legacy 경로의 최종 제거와 새 Validation의 기본 활성화를 릴리스 완료 항목으로 처리하지 않는다.

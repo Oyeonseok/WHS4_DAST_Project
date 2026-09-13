@@ -138,6 +138,11 @@ class CountingAgent(FakeAgent):
         return super().compare(claim, assessment, correction)
 
 
+class InterruptedReproductionPort(FakePort):
+    def execute(self, *args, **kwargs):
+        raise RuntimeError("transport completion is unknown")
+
+
 class ValidationCoordinatorTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -311,6 +316,39 @@ class ValidationCoordinatorTests(unittest.TestCase):
             self.assertEqual(conn.execute(
                 "SELECT count(*) FROM validation_attempts"
             ).fetchone()[0], 5)
+
+    def test_resume_does_not_redispatch_an_outcome_unknown_attempt(self):
+        with self.assertRaises(ValidationCoordinatorError):
+            ValidationCoordinator(
+                db_path=self.path, agent=FakeAgent(),
+                reproduction=InterruptedReproductionPort(),
+                policy_provider=lambda endpoint, method: self.policy,
+            ).run("scan")
+        with db.connect(self.path) as conn:
+            stage_id = conn.execute(
+                "SELECT stage_run_id FROM stage_runs WHERE stage='validation'"
+            ).fetchone()[0]
+            self.assertEqual(conn.execute(
+                "SELECT outcome FROM validation_attempts"
+            ).fetchone()[0], "outcome_unknown")
+
+        resumed_port = FakePort()
+        result = ValidationCoordinator(
+            db_path=self.path, agent=FakeAgent(), reproduction=resumed_port,
+            policy_provider=lambda endpoint, method: self.policy,
+        ).resume(stage_id)
+
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(resumed_port.calls, [])
+        with db.connect(self.path) as conn:
+            status, decision = conn.execute(
+                "SELECT current_status,decision_json FROM validation_cases"
+            ).fetchone()
+        self.assertEqual(status, "INCONCLUSIVE")
+        self.assertEqual(
+            json.loads(decision)["reason"],
+            "outcome_unknown_requires_manual_review",
+        )
 
     def test_resume_reuses_frozen_assessment_and_continues_at_unblinding(self):
         first_port = FakePort()
