@@ -196,8 +196,9 @@ HTTP response marker와 정량 threshold는 공통 profile에서 추정하지 �
 `keyring://`/`vault://` reference가 필요한 Finding, Chain은 요청 없이 case 단위
 `INCONCLUSIVE`가 된다. `env://NAME`은 환경 변수의 JSON header map을 요청 직전에만
 해석해 authenticated HTTP replay를 지원한다. Playwright browser request는 current policy와
-Validation ledger를 매 요청 통과한다. HTTP Chain은 명시적 응답 추출/요청 주입 계약으로
-fresh 값을 전달한다. OOB callback은 설정 기반 HTTP arm/cursor/poll observer로 연결한다.
+Validation ledger를 매 요청 통과한다. HTTP Chain과 HTTP→Browser/OOB terminal Chain은
+명시적 응답 추출/요청 주입 계약으로 fresh 값을 전달한다. OOB callback은 설정 기반 HTTP
+arm/cursor/poll observer로 연결한다.
 중단 시 `outcome_unknown` 실행이 하나라도 남은 case는 자동 재전송하지 않고
 `INCONCLUSIVE`로 닫아 원격 side effect의 중복을 막는다.
 

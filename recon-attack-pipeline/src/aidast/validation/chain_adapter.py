@@ -1,4 +1,4 @@
-"""Native end-to-end replay for demonstrated HTTP chains."""
+"""Native replay for demonstrated HTTP chains with browser or OOB terminals."""
 
 from __future__ import annotations
 
@@ -10,8 +10,10 @@ from typing import Callable, Mapping
 from aidast.recon.policy import TargetPolicy
 
 from .blind import BlindCase
-from .chain_contract import (ChainRuntimeContract, extract_chain_value,
-                             inject_chain_value)
+from .chain_contract import (ChainRuntimeContract, chain_attempt_request,
+                             chain_runtime_kind, extract_chain_value,
+                             inject_chain_value, replace_chain_attempt_request)
+from .runtime_contract import HttpRuntimeContract
 from .models import canonical_sha256
 from .reproduction import ReproductionObservation
 from .request_broker import (ValidationCredentialError, ValidationPolicyRejection,
@@ -20,13 +22,16 @@ from .runtime_contract import evaluate_http_response, render_http_request
 
 
 class ChainReproductionPort:
-    """Replay every HTTP step and transfer only freshly extracted scalar values."""
+    """Transfer fresh HTTP values into HTTP, browser, or OOB terminal steps."""
 
     def __init__(self, *, transport: Callable | None = None,
                  credential_resolver: Callable[[str], Mapping[str, str]] | None = None,
+                 browser=None, oob=None,
                  clock: Callable[[], float] = time.monotonic):
         self.transport = transport
         self.credential_resolver = credential_resolver
+        self.browser = browser
+        self.oob = oob
         self.clock = clock
 
     def unsupported_reason(self, blind_case: BlindCase) -> str | None:
@@ -36,6 +41,17 @@ class ChainReproductionPort:
             runtime = ChainRuntimeContract.model_validate(blind_case.runtime_contract)
         except (TypeError, ValueError):
             return "chain_runtime_contract_missing_or_invalid"
+        terminal = runtime.steps[-1]
+        terminal_kind = chain_runtime_kind(terminal.runtime_contract)
+        if terminal_kind != "http":
+            adapter = self.browser if terminal_kind == "browser" else self.oob
+            if adapter is None:
+                return f"chain_{terminal_kind}_adapter_unavailable"
+            child = self._step_blind(blind_case, terminal)
+            preflight = getattr(adapter, "unsupported_reason", None)
+            reason = preflight(child) if callable(preflight) else None
+            if reason is not None:
+                return f"chain_terminal_{reason}"
         if any(step.credential_references for step in runtime.steps) and self.credential_resolver is None:
             return "credential_resolver_missing"
         preflight = getattr(self.credential_resolver, "unsupported_reason", None)
@@ -58,17 +74,53 @@ class ChainReproductionPort:
         evaluations = []
         response_hashes = []
         request_ids = []
-        final_response = None
+        final_content_length = 0
         try:
             for step in runtime.steps:
-                attempt = runtime.for_attempt(step.position, attempt_kind)
-                request = attempt.request
+                step_runtime = step.runtime_contract
+                request = chain_attempt_request(step_runtime, attempt_kind)
                 for binding in runtime.bindings:
                     if binding.to_position == step.position:
                         request = inject_chain_value(
                             request, binding,
                             extracted[(binding.from_position, binding.binding_name)],
                         )
+                step_runtime = replace_chain_attempt_request(
+                    step_runtime, attempt_kind, request,
+                )
+                if not isinstance(step_runtime, HttpRuntimeContract):
+                    adapter = (
+                        self.browser if chain_runtime_kind(step_runtime) == "browser"
+                        else self.oob
+                    )
+                    child = self._step_blind(
+                        blind_case, step, runtime_contract=step_runtime,
+                    )
+                    observation = adapter.execute(
+                        child, attempt_kind=attempt_kind, batch_no=batch_no,
+                        ordinal=ordinal, attempt_id=attempt_id, db_path=db_path,
+                        scan_id=scan_id, stage_run_id=stage_run_id,
+                        case_id=case_id, policy=policy,
+                    )
+                    if observation.outcome == "blocked":
+                        return self._blocked(
+                            blind_case,
+                            str(observation.details.get("reason", "terminal_step_blocked")),
+                            request_ids,
+                            blocker_axis=observation.blocker_axis,
+                            policy_allowed=observation.policy_allowed,
+                        )
+                    evaluations.append({
+                        "position": step.position,
+                        "runtime_kind": chain_runtime_kind(step_runtime),
+                        "signal_observed": observation.signal_observed,
+                        "details": observation.details,
+                    })
+                    request_ids.extend(observation.details.get("request_ids", []))
+                    response_hashes.append(observation.content_sha256)
+                    final_content_length = observation.content_length
+                    continue
+                attempt = step_runtime.for_attempt(attempt_kind)
                 url, headers, data = render_http_request(step.endpoint, request)
                 step_blind = blind_case.model_copy(update={
                     "endpoint": step.endpoint,
@@ -90,7 +142,7 @@ class ChainReproductionPort:
                 evaluations.append({"position": step.position, **evaluation})
                 request_ids.extend(broker.request_ids)
                 response_hashes.append(hashlib.sha256(response.body).hexdigest())
-                final_response = response
+                final_content_length = len(response.body)
                 for binding in runtime.bindings:
                     if binding.from_position == step.position:
                         extracted[(binding.from_position, binding.binding_name)] = extract_chain_value(
@@ -104,7 +156,7 @@ class ChainReproductionPort:
                                  blocker_axis="identity_auth")
         except (KeyError, ValueError) as exc:
             return self._blocked(blind_case, str(exc), request_ids,
-                                 blocker_axis="environment")
+                                 blocker_axis="environment_topology")
 
         observed = all(item["signal_observed"] for item in evaluations)
         content_sha = canonical_sha256(response_hashes)
@@ -118,11 +170,27 @@ class ChainReproductionPort:
                     f"{position}:{name}": canonical_sha256(value)
                     for (position, name), value in sorted(extracted.items())
                 },
-                "terminal_status": final_response.status_code,
             },
             content_sha256=content_sha,
-            content_length=len(final_response.body),
+            content_length=final_content_length,
         )
+
+    @staticmethod
+    def _step_blind(blind_case: BlindCase, step, *, runtime_contract=None) -> BlindCase:
+        runtime = runtime_contract or step.runtime_contract
+        kind = chain_runtime_kind(runtime)
+        signal_types = (
+            ("dom_effect",) if kind == "browser"
+            else ("oob_callback",) if kind == "oob"
+            else blind_case.signal_types
+        )
+        return blind_case.model_copy(update={
+            "target_kind": "finding", "endpoint": step.endpoint,
+            "method": step.method,
+            "credential_references": step.credential_references,
+            "signal_types": signal_types,
+            "runtime_contract": runtime.model_dump(mode="json"),
+        })
 
     @staticmethod
     def _blocked(blind_case: BlindCase, reason: str, request_ids: list[str], *,

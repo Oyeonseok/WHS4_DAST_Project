@@ -2,6 +2,30 @@
 
 이 문서는 Validation 재구조화 구현 변경을 누적 기록한다. 관련 구현을 완료할 때마다 최신 날짜의 항목을 문서 상단에 추가한다.
 
+## 2026-09-14: Browser/OOB terminal 혼합 Chain replay
+
+- Chain step runtime을 HTTP 전용에서 HTTP/Browser/OOB union으로 확장했다. 앞선 HTTP
+  response의 명시적 JSON path 또는 response header에서 fresh scalar를 추출해 terminal
+  Browser navigation이나 OOB trigger의 선언된 path/query/header/JSON slot에 주입한다.
+- Browser/OOB terminal은 기존 개별 adapter를 그대로 사용하므로 Playwright subrequest
+  policy/ledger, OOB nonce·cursor, credential resolver와 control별 runtime 계약이 유지된다.
+- Chain contract가 모든 target/control attempt에서 binding slot의 존재와 주입 후 runtime
+  schema를 검사한다. OOB nonce field처럼 주입으로 원래 계약이 깨지는 위치는 거부한다.
+- Browser DOM snapshot과 OOB event를 다음 node의 원료로 내보내지 않는다. Browser/OOB
+  node는 terminal에서만 허용하며, 중간 source로 배치된 계약은 실행 전에 거부한다.
+- HTTP→Browser와 HTTP→OOB terminal 각각에서 fresh 값 주입, 성공 signal 집계, 원문 값
+  비저장을 회귀 테스트로 검증했다.
+- 전체 unittest 350개, shared Reporting pytest 22개, compileall과 whitespace 검사가
+  통과했다.
+
+설계와 다른 점 및 이유:
+
+설계는 demonstrated Chain의 node runtime 조합을 제한하지 않았지만 현재 구현은
+Browser/OOB를 terminal로 제한한다. 이 adapter들의 evidence는 의도적으로 DOM·callback
+원문을 저장하지 않으므로, 이를 다음 node binding으로 꺼내면 비밀값 비저장 경계를
+우회하게 된다. HTTP response에서 추출한 값만 메모리에서 전달하는 기존 불변식을 유지하며
+실제로 증명 가능한 혼합 Chain부터 지원한다.
+
 ## 2026-09-14: legacy 7 Question Validation 제거
 
 - `validate run` 입력을 shared `Pipeline.db`와 필수 `--scan-id`로 단일화하고,

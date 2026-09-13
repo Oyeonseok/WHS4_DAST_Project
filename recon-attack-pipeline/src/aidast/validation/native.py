@@ -36,16 +36,19 @@ def build_native_validation_coordinator(
         observer = oob_observer or HttpJsonOobObserver.from_environment()
     except (TypeError, ValueError) as exc:
         raise ValidationCoordinatorError(f"cannot load OOB observer config: {exc}") from exc
+    browser_port = BrowserReproductionPort(
+        executor=browser_executor or PlaywrightBrowserExecutor(),
+        credential_resolver=resolver,
+    )
+    oob_port = OobReproductionPort(
+        observer=observer, credential_resolver=resolver,
+    )
     reproduction = RuntimeReproductionRouter(
         http=HttpReproductionPort(credential_resolver=resolver),
-        browser=BrowserReproductionPort(
-            executor=browser_executor or PlaywrightBrowserExecutor(),
-            credential_resolver=resolver,
+        browser=browser_port, oob=oob_port,
+        chain=ChainReproductionPort(
+            credential_resolver=resolver, browser=browser_port, oob=oob_port,
         ),
-        oob=OobReproductionPort(
-            observer=observer, credential_resolver=resolver,
-        ),
-        chain=ChainReproductionPort(credential_resolver=resolver),
     )
     return ValidationCoordinator(
         db_path=db_path,

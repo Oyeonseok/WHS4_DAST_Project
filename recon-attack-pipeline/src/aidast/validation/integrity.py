@@ -265,11 +265,7 @@ class CandidateIntegrityGate:
             binding["source_kind"] is not None and binding["source_path_json"] is not None
             and binding["target_kind"] is not None and binding["target_path_json"] is not None
             for binding in binding_rows
-        ) and all(
-            item.runtime_contract is not None
-            and (item.runtime_contract.get("runtime_kind") in {None, "http"})
-            for item in node_blinds
-        ):
+        ) and all(item.runtime_contract is not None for item in node_blinds):
             from .chain_contract import ChainRuntimeContract
             try:
                 chain_runtime = ChainRuntimeContract.model_validate({

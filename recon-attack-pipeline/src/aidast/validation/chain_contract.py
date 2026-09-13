@@ -13,7 +13,12 @@ from aidast.core.http_safety import is_sensitive_header
 from aidast.core.request_broker import BrokerResponse
 
 from .models import StrictContract
+from .browser_contract import BrowserRuntimeContract
+from .oob_contract import OobRuntimeContract
 from .runtime_contract import HttpRequestTemplate, HttpRuntimeContract, JsonScalar
+
+
+StepRuntimeContract = HttpRuntimeContract | BrowserRuntimeContract | OobRuntimeContract
 
 
 class ChainStepContract(StrictContract):
@@ -23,7 +28,7 @@ class ChainStepContract(StrictContract):
     credential_references: tuple[Annotated[str, Field(min_length=1, max_length=512)], ...] = Field(
         default=(), max_length=16
     )
-    runtime_contract: HttpRuntimeContract
+    runtime_contract: StepRuntimeContract
 
     @field_validator("credential_references", mode="before")
     @classmethod
@@ -96,10 +101,19 @@ class ChainRuntimeContract(StrictContract):
         if any(not any(item.from_position == position and item.to_position == position + 1
                        for item in self.bindings) for position in range(len(self.steps) - 1)):
             raise ValueError("every adjacent chain step requires a binding")
+        if any(
+            not isinstance(step.runtime_contract, HttpRuntimeContract)
+            for step in self.steps[:-1]
+        ):
+            raise ValueError("browser and OOB chain steps are supported only as terminals")
         for binding in self.bindings:
+            if not isinstance(
+                self.steps[binding.from_position].runtime_contract, HttpRuntimeContract
+            ):
+                raise ValueError("chain values can be extracted only from HTTP responses")
             step = self.steps[binding.to_position]
             for attempt_kind in ("target", "positive_control", "negative_control"):
-                request = step.runtime_contract.for_attempt(attempt_kind).request
+                request = chain_attempt_request(step.runtime_contract, attempt_kind)
                 if binding.target_kind == "path_parameter":
                     declared = binding.target_path[0] in request.path_parameters
                 elif binding.target_kind == "query_parameter":
@@ -111,8 +125,16 @@ class ChainRuntimeContract(StrictContract):
                     )
                 else:
                     try:
-                        inject_chain_value(request, binding, "contract-probe")
+                        injected = inject_chain_value(request, binding, "contract-probe")
                         declared = True
+                    except ValueError:
+                        declared = False
+                if declared:
+                    try:
+                        injected = inject_chain_value(request, binding, "contract-probe")
+                        replace_chain_attempt_request(
+                            step.runtime_contract, attempt_kind, injected,
+                        )
                     except ValueError:
                         declared = False
                 if not declared:
@@ -121,6 +143,38 @@ class ChainRuntimeContract(StrictContract):
 
     def for_attempt(self, position: int, attempt_kind: str):
         return self.steps[position].runtime_contract.for_attempt(attempt_kind)
+
+
+def chain_runtime_kind(runtime: StepRuntimeContract) -> str:
+    if isinstance(runtime, BrowserRuntimeContract):
+        return "browser"
+    if isinstance(runtime, OobRuntimeContract):
+        return "oob"
+    return "http"
+
+
+def chain_attempt_request(
+    runtime: StepRuntimeContract, attempt_kind: str,
+) -> HttpRequestTemplate:
+    attempt = runtime.for_attempt(attempt_kind)
+    if isinstance(runtime, BrowserRuntimeContract):
+        return attempt.navigation
+    if isinstance(runtime, OobRuntimeContract):
+        return attempt.trigger
+    return attempt.request
+
+
+def replace_chain_attempt_request(
+    runtime: StepRuntimeContract, attempt_kind: str, request: HttpRequestTemplate,
+) -> StepRuntimeContract:
+    data = runtime.model_dump(mode="python")
+    field = (
+        "navigation" if isinstance(runtime, BrowserRuntimeContract)
+        else "trigger" if isinstance(runtime, OobRuntimeContract)
+        else "request"
+    )
+    data[attempt_kind][field] = request.model_dump(mode="python")
+    return type(runtime).model_validate(data)
 
 
 def extract_chain_value(response: BrokerResponse, binding: ChainBindingContract) -> JsonScalar:
@@ -154,11 +208,20 @@ def inject_chain_value(
     data = template.model_dump(mode="python")
     name = str(binding.target_path[0])
     if binding.target_kind == "path_parameter":
+        if name not in data["path_parameters"]:
+            raise ValueError("chain path parameter target was not declared")
         data["path_parameters"][name] = value
     elif binding.target_kind == "query_parameter":
+        if name not in data["query_parameters"]:
+            raise ValueError("chain query parameter target was not declared")
         data["query_parameters"][name] = value
     elif binding.target_kind == "request_header":
-        data["headers"][name] = "" if value is None else str(value)
+        header = next(
+            (item for item in data["headers"] if item.casefold() == name.casefold()), None,
+        )
+        if header is None:
+            raise ValueError("chain request header target was not declared")
+        data["headers"][header] = "" if value is None else str(value)
     else:
         body = deepcopy(data["json_body"])
         if body is None:
