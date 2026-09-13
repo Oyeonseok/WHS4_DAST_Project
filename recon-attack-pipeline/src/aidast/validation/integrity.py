@@ -13,7 +13,7 @@ from .blind import AttackClaim, BlindCase, StagedBlindCase
 from .matching import canonical_payload, payload_structure_sha256
 from .models import canonical_sha256
 from .profiles import ResolvedValidationProfile, SkillProfileResolver, ValidationProfileError
-from .runtime_contract import HttpRuntimeContract
+from .runtime_contract import validate_runtime_contract
 
 
 class CandidateIntegrityError(ValueError):
@@ -82,7 +82,7 @@ class CandidateIntegrityGate:
         runtime_contract = None
         if runtime_json is not None:
             try:
-                runtime = HttpRuntimeContract.model_validate_json(runtime_json)
+                runtime = validate_runtime_contract(json.loads(runtime_json))
             except (ValueError, TypeError):
                 raise CandidateIntegrityError("runtime_contract_schema") from None
             runtime_contract = runtime.model_dump(mode="json")

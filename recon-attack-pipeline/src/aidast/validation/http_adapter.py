@@ -39,6 +39,8 @@ class HttpReproductionPort:
         """Return a stable preflight reason when this HTTP adapter cannot replay a case."""
         if blind_case.target_kind != "finding":
             return "http_adapter_does_not_support_chain"
+        if (blind_case.runtime_contract or {}).get("runtime_kind") not in {None, "http"}:
+            return "http_runtime_contract_kind_unsupported"
         if self.request_builder is None and blind_case.runtime_contract is None:
             return "http_runtime_contract_missing"
         if blind_case.credential_references and self.credential_resolver is None:

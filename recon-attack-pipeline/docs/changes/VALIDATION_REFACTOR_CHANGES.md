@@ -2,6 +2,38 @@
 
 이 문서는 Validation 재구조화 구현 변경을 누적 기록한다. 관련 구현을 완료할 때마다 최신 날짜의 항목을 문서 상단에 추가한다.
 
+## 2026-09-14: browser DOM 및 OOB callback runtime 계약
+
+- 기존 HTTP runtime JSON/hash 호환성을 유지하면서 browser와 OOB 계약은
+  `runtime_kind` discriminator로 확장했다. Attack `commit-finding`과 Candidate integrity
+  gate가 세 kind를 같은 immutable 저장 경계에서 정규화하고 검증한다.
+- browser 계약은 body 없는 navigation, 최대 10초 wait와 selector 존재, text 포함,
+  attribute, final URL, console marker assertion을 정의한다. executor는 선언된 selector와
+  request ledger ID만 반환해야 하며 실제 DOM/console 값은 evidence에 저장하지 않는다.
+- OOB 계약은 trigger 안의 완전한 `{nonce}` token template, 허용 protocol, 최소 callback
+  수와 최대 30초 wait를 정의한다. 매 attempt ID에서 새 nonce를 만들고 observer를 arm한
+  후 기존 policy/credential broker로 trigger를 전송한다. stale token과 다른 protocol은
+  양성 signal에서 제외한다.
+- `RuntimeReproductionRouter`가 contract kind에 따라 HTTP/browser/OOB port를 선택한다.
+  native builder는 isolated headless Playwright executor를 기본 사용하며 configured OOB
+  observer를 받을 수 있다. OOB observer가 없으면 네트워크나 Agent 호출 전에 해당
+  case만 격리한다.
+- Playwright route는 navigation, script, XHR 등 모든 browser request를 current policy로
+  검사하고 `validation_http_requests`에 request lifecycle을 기록한다. policy 밖 dependency는
+  전송하지 않으며 incomplete request가 남은 DOM snapshot은 성공 evidence로 사용하지 않는다.
+
+  설계와 다른 점 및 이유: OOB observer 자체는 기본 생성하지 않는다. callback 서비스의
+  인증·cursor 계약이 없기 때문에 공개 callback 서비스를 임의로 호출하지 않기 위해서다.
+  browser는 로컬 Playwright route와 기존 ledger를 결합해 이 신뢰 경계를 코드로 강제한다.
+
+검증:
+
+- browser selector allowlist, DOM/console 원문 비저장, out-of-scope final URL 거절
+- browser subrequest의 current-policy 검사, redacted ledger와 incomplete request 처리
+- OOB attempt별 nonce, arm-before-trigger, stale token/protocol 제외와 redacted HTTP ledger
+- HTTP/browser/OOB runtime routing 및 기존 HTTP 계약 회귀 집중 unittest 15개 통과
+- 전체 unittest 368개 중 코드 테스트 367개와 별도 Reporting pytest 30개 통과
+
 ## 2026-09-14: native env credential resolver
 
 - `PipelineCredentialResolver`가 Pipeline.db의 opaque credential ID를 read-only로 조회하고

@@ -147,6 +147,8 @@ Attack은 Finding을 확정하는 같은 트랜잭션 안에서 정확히 하나
 | `source_request_ids_json` | 위 attempts를 뒷받침하는 Attack request ID 목록 |
 | `payload_structure_sha256` | 값 토큰을 제거한 payload 구조 해시 |
 | `source_policy_sha256` | Attack 당시 승인된 TargetPolicy canonical digest |
+| `runtime_contract_json` | 선택적인 target별 HTTP/browser/OOB 실행 계약. browser/OOB는 `runtime_kind`로 구분 |
+| `runtime_contract_sha256` | 정규화된 runtime contract의 SHA-256. JSON과 함께 null이거나 함께 존재 |
 | `spec_sha256` | canonical 필드 전체의 SHA-256 |
 | `created_at` | 생성 시각 |
 
@@ -158,9 +160,17 @@ CandidateIntegrityGate는 아래 조건을 모두 확인한다.
 - `source_request_ids_json`의 각 ID가 `attack_http_requests.request_id`를 가리키며 source attempt와 같은 task·fingerprint로 연결되고 endpoint·method가 spec과 모순되지 않는다.
 - 모든 source Attack request의 `policy_sha256`이 reproduction spec의 `source_policy_sha256`과 일치한다. 현재 policy와 달라졌다는 사실만으로 기각하지 않고 실제 Validation 요청은 §10에서 현재 policy로 다시 검사한다.
 - `spec_sha256`와 `payload_structure_sha256`이 현재 내용과 일치한다.
+- runtime contract가 있으면 kind별 strict schema와 별도 SHA-256이 현재 내용과 일치한다.
 - 필요한 역할을 현재 credential reference로 해석할 수 있다. 비밀값은 spec에 저장하지 않는다.
 
 하나라도 실패하면 네트워크 요청을 보내지 않고 case를 `INCONCLUSIVE`로 종결하며 실패한 check 이름을 `decision_json`에 기록한다. 무결성 실패는 scope 판정이 아니므로 `OUT_OF_SCOPE`로 바꾸지 않는다.
+
+HTTP contract는 기존 JSON 호환성을 위해 discriminator 없이 target/control의 request와
+response assertion 구조로 저장한다. browser와 OOB 확장 contract는 각각
+`runtime_kind='browser'`, `runtime_kind='oob'`를 필수로 둔다. browser observation은 선언한
+selector, final URL, console marker와 browser request ledger ID만 반환한다. OOB contract는
+attempt별 nonce를 trigger와 callback token에 함께 넣고 observer를 arm한 이후 발생한 동일
+token·허용 protocol event만 인정한다.
 
 ### 5.2 Skill 구성
 

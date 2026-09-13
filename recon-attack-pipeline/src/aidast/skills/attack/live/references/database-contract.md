@@ -72,6 +72,19 @@ values, non-secret headers, one JSON or text body, and one to sixteen assertions
 Supported assertion kinds are `status_equals`, `header_equals`, `body_contains`,
 `json_equals`, `duration_at_least_ms`, and `duration_at_most_ms`.
 
+For DOM effects, use a `runtime_kind: "browser"` contract. Each target/control
+attempt contains a body-free `navigation`, a bounded `wait_ms`, and assertions
+using `selector_exists`, `selector_text_contains`, `attribute_equals`,
+`url_equals`, or `console_contains`. Selectors and console markers must be
+specific to the observed effect; header absence alone is not a browser proof.
+
+For OOB effects, use `runtime_kind: "oob"`. Each attempt contains an HTTP
+`trigger`, a `token_template` with exactly one `{nonce}`, the allowed callback
+`protocols`, `minimum_callbacks`, and `wait_seconds`. The complete token template
+must appear exactly once in the trigger. Validation derives a new nonce from
+every attempt ID, arms the observer before sending the policy-checked trigger,
+and ignores callbacks with stale tokens or undeclared protocols.
+
 The target assertions describe the vulnerability effect and should pass when it
 is reproduced. The positive-control assertions describe a healthy transport,
 identity, and parser path and should pass. Negative-control assertions also

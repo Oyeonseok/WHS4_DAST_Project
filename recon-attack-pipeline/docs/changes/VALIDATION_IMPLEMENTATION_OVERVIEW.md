@@ -4,7 +4,7 @@
 - 관련 설계: [Validation 재구조화 설계](../superpowers/specs/2026-09-12-validation-refactor-design.md)
 - 상세 계획: [Validation 재구조화 구현 계획](../superpowers/plans/2026-09-12-validation-refactor-implementation.md)
 - 누적 변경 이력: [Validation 재구조화 변경 기록](VALIDATION_REFACTOR_CHANGES.md)
-- 구현 커밋: `aab3221`, `3065ece`, `c5f5b8c`, `af85da6`
+- 구현 커밋: `aab3221`, `3065ece`, `c5f5b8c`, `af85da6`, `0723fa8`
 
 ## 1. 무엇을 바꿨나
 
@@ -49,19 +49,21 @@ native Attack의 `commit-finding`은 다음 항목을 하나의 transaction으�
 - 근거가 된 Attack request와 attempt
 - endpoint, method, payload template, parameter와 identity role
 - TargetPolicy, Skill, request fingerprint에 묶인 immutable reproduction spec
-- HTTP target·positive control·negative control의 request와 response assertion 계약
+- HTTP/browser/OOB target·positive control·negative control의 runtime 계약
 
 이 중 하나라도 서로 맞지 않으면 Finding을 commit하지 않는다. Validation을 시작할 때
 `CandidateIntegrityGate`가 completed Attack stage, confirmed attempt, Skill hash,
 endpoint, request, policy digest, payload와 evidence 관계를 다시 검사한다. 이 검사가
 실패하면 실제 요청을 보내지 않고 해당 case만 `INCONCLUSIVE`로 끝낸다.
 
-HTTP runtime contract는 Attack이 실제 관찰에 사용한 target별 값에서 만든다. path/query,
+runtime contract는 Attack이 실제 관찰에 사용한 target별 값에서 만든다. HTTP는 path/query,
 비밀이 아닌 header, JSON 또는 text body와 bounded assertion을 정규화한 뒤 별도 SHA-256에
 묶는다. Validation은 이 계약으로 요청을 만들고 status, header, body marker, JSON path,
-duration assertion을 평가한다. 실제 응답값은 evidence에 원문으로 남기지 않고 hash로
-저장한다. 기존 Finding과 browser/OOB·다단계 재현은 계약을 생략할 수 있으며, 이 경우
-generic HTTP adapter가 임의로 성공을 추정하지 않는다.
+duration assertion을 평가한다. browser 계약은 body 없는 navigation과 선언된 DOM selector,
+URL·console assertion을 평가한다. OOB 계약은 attempt별 nonce로 callback token을 새로 만들고
+observer를 arm한 뒤 policy-checked HTTP trigger를 전송하며 동일 token과 protocol의 event만
+인정한다. 실제 응답·DOM·callback 값은 evidence에 원문으로 남기지 않고 hash와 요약으로
+저장한다. contract나 configured executor/observer가 없으면 성공을 추정하지 않는다.
 
 ## 4. KNOWN 중복 판정
 
@@ -186,19 +188,21 @@ Coordinator를 만들어 Validation을 자동 실행한다. 독립 `validate run
 현재 저장 구조, 상태 머신, 무결성 검사, Blind Agent, Chain replay와 보고서 연결은
 구현돼 있다. 실제 운영 경로를 완성하려면 다음 작업이 남아 있다.
 
-1. browser, OOB와 다단계 Chain용 runtime contract 및 adapter 구현
-2. `keyring://`, `vault://` credential reference의 configured backend resolver
-3. 58개 Skill profile과 Attack이 작성한 marker·threshold의 보안 전문가 의미 검토
-4. transport 완료와 local commit 사이의 `outcome_unknown` 운영 복구 보강
-5. 새 경로가 기본 동작이 된 뒤 legacy 7 Question `Validation.db` 제거
+1. OOB observer backend의 인증·cursor 계약과 기본 구성
+2. 다단계 Chain의 step binding runtime contract 및 adapter
+3. `keyring://`, `vault://` credential reference의 configured backend resolver
+4. 58개 Skill profile과 Attack이 작성한 marker·threshold의 보안 전문가 의미 검토
+5. transport 완료와 local commit 사이의 `outcome_unknown` 운영 복구 보강
+6. 새 경로가 기본 동작이 된 뒤 legacy 7 Question `Validation.db` 제거
 
 HTTP response marker와 정량 threshold는 공통 profile에서 추정하지 않고 Attack의 실제
 관찰에서 만들어진 immutable runtime contract로 받는다. generic HTTP adapter는 이 값이
 있는 unauthenticated Finding을 기본 경로에서 결정론적으로 실행한다. contract가 없거나
 `keyring://`/`vault://` reference가 필요한 Finding, Chain은 요청 없이 case 단위
 `INCONCLUSIVE`가 된다. `env://NAME`은 환경 변수의 JSON header map을 요청 직전에만
-해석해 authenticated HTTP replay를 지원한다. DOM selector, OOB callback과 Chain 단계 간
-값 전달은 별도 계약과 adapter가 아직 필요하다.
+해석해 authenticated HTTP replay를 지원한다. Playwright browser request는 current policy와
+Validation ledger를 매 요청 통과한다. OOB callback observer backend와 Chain 단계 간 값
+전달은 아직 별도 운영 연결이 필요하다.
 
 ## 11. 설계와 달라진 부분
 

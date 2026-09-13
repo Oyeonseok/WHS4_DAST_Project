@@ -140,6 +140,17 @@ class HttpRuntimeContract(StrictContract):
         return getattr(self, attempt_kind)
 
 
+def validate_runtime_contract(value: Any) -> HttpRuntimeContract | Any:
+    """Validate an extensible runtime contract without changing legacy HTTP hashes."""
+    if isinstance(value, dict) and value.get("runtime_kind") == "browser":
+        from .browser_contract import BrowserRuntimeContract
+        return BrowserRuntimeContract.model_validate(value)
+    if isinstance(value, dict) and value.get("runtime_kind") == "oob":
+        from .oob_contract import OobRuntimeContract
+        return OobRuntimeContract.model_validate(value)
+    return HttpRuntimeContract.model_validate(value)
+
+
 def render_http_request(endpoint: str, template: HttpRequestTemplate) -> tuple[str, dict[str, str], bytes | None]:
     parsed = urlsplit(endpoint)
     slots = _PATH_SLOT.findall(parsed.path)

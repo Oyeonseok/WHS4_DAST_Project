@@ -90,6 +90,41 @@ class ValidationRequestBroker:
                 raise ValidationPolicyRejection(str(exc)) from exc
             raise ValidationRequestError(str(exc)) from exc
 
+    def begin_observed_request(
+        self, url: str, *, method: str, headers: Mapping[str, str] | None = None,
+        data: bytes | None = None,
+    ) -> str:
+        """Reserve a request sent by a trusted browser transport."""
+        method = method.upper()
+        try:
+            allowed = self.policy.allows_url(url, method=method)
+        except ValueError:
+            allowed = False
+        if not allowed:
+            raise ValidationPolicyRejection("browser request is outside current TargetPolicy")
+        request_id, scheduled = self._reserve(url, method, dict(headers or {}), data)
+        delay = scheduled - self.clock()
+        if delay > 0:
+            self.sleeper(delay)
+        self._set_status(request_id, "running", dispatched_at=self.clock())
+        return request_id
+
+    def complete_observed_request(
+        self, request_id: str, *, response_status: int,
+        response_headers: Mapping[str, str] | None = None,
+    ) -> None:
+        self._set_status(
+            request_id, "completed", response_status=response_status,
+            finished_at=self.clock(),
+            result_json={"headers": sanitize_headers(response_headers or {})},
+        )
+
+    def fail_observed_request(self, request_id: str, *, error_type: str) -> None:
+        self._set_status(
+            request_id, "outcome_unknown", error_message=error_type[:256],
+            finished_at=self.clock(),
+        )
+
     def _restrict(self, url: str, method: str) -> None:
         if method != self.blind_case.method:
             raise ValidationPolicyRejection("method is outside the staged reproduction spec")

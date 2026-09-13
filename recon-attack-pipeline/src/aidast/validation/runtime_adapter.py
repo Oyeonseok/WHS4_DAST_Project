@@ -1,0 +1,39 @@
+"""Select a concrete replay adapter from the immutable runtime contract kind."""
+
+from __future__ import annotations
+
+from .blind import BlindCase
+
+
+class RuntimeReproductionRouter:
+    def __init__(self, *, http, browser=None, oob=None):
+        self.http = http
+        self.browser = browser
+        self.oob = oob
+
+    @staticmethod
+    def _kind(blind_case: BlindCase) -> str:
+        return (blind_case.runtime_contract or {}).get("runtime_kind", "http")
+
+    def _adapter(self, blind_case: BlindCase):
+        kind = self._kind(blind_case)
+        if kind == "http":
+            return self.http
+        if kind == "browser":
+            return self.browser
+        if kind == "oob":
+            return self.oob
+        return None
+
+    def unsupported_reason(self, blind_case: BlindCase) -> str | None:
+        adapter = self._adapter(blind_case)
+        if adapter is None:
+            return f"{self._kind(blind_case)}_adapter_unavailable"
+        preflight = getattr(adapter, "unsupported_reason", None)
+        return preflight(blind_case) if callable(preflight) else None
+
+    def execute(self, blind_case: BlindCase, **kwargs):
+        adapter = self._adapter(blind_case)
+        if adapter is None:
+            raise ValueError(f"{self._kind(blind_case)}_adapter_unavailable")
+        return adapter.execute(blind_case, **kwargs)

@@ -1,7 +1,7 @@
 # Validation 재구조화 구현 계획 — 데이터 무결성과 보고서 연동
 
 - 작성일: 2026-09-12
-- 상태: HTTP native 실행과 env credential 완료, 확장 adapter 진행 중
+- 상태: HTTP/Playwright 실행 완료, OOB observer·Chain backend 진행 중
 - 기준 명세: [Validation 재구조화 설계](../specs/2026-09-12-validation-refactor-design.md)
 - 대상: `recon-attack-pipeline`
 - 구현 여부: shared DB v9, DTO, 결정론적 판정, Repository, 복구, Report v2,
@@ -14,7 +14,10 @@
   구체화했다. Attack이 target별로 저장하는 HTTP request/assertion runtime contract와
   generic HTTP adapter도 구현됐다. 이 adapter와 current policy를 사용하는 native
   Coordinator가 pipeline과 shared CLI의 기본 경로에 연결됐다. `env://` JSON header
-  credential resolver도 연결했으며 browser·OOB·keyring/vault·Chain adapter는 미구현이다.
+  credential resolver도 연결했다. browser DOM과 OOB callback의 target별 계약,
+  deterministic evaluator와 executor/observer 포트까지 구현했다. Playwright는 모든
+  subrequest를 current policy와 ledger에 연결했으며 OOB observer backend,
+  keyring/vault와 Chain adapter는 미구현이다.
 
 ## 구현 진행 기록
 
@@ -38,6 +41,8 @@
   매 hop 재검사하는 Validation ledger 및 실제 transport adapter 계약.
 - `src/aidast/validation/runtime_contract.py`: Attack이 고정한 target/control HTTP 요청과
   status/header/body/JSON/duration assertion의 schema·렌더링·결정론적 평가.
+- `src/aidast/validation/{browser_contract,browser_adapter,oob_contract,oob_adapter,runtime_adapter}.py`:
+  runtime kind routing, bounded DOM assertion, per-attempt OOB correlation과 injected 실행 포트.
 - `src/aidast/validation/gaps.py`: profile과 현재 evidence에 제한된 비실행
   impact expansion proposal.
 - `src/aidast/attack/db_cli.py`: native Finding과 reproduction spec의 원자적 producer.
@@ -50,8 +55,9 @@ ReproductionPort, request broker/ledger, profile 파일 전체와 injected Coord
 pass와 case 사이에 유지한다. 다만 profile 대부분은 보수적인 공통 초안이며
 취약점별 target effect criterion은 고유하게 작성됐지만 runtime marker·selector와
 정량 threshold를 적용하는 target별 HTTP adapter와 pipeline 자동 실행까지 구현됐다.
-`env://` credential은 dispatch 시점에만 resolve한다. browser·OOB·keyring/vault·Chain
-runtime은 아직 구현되지 않았다.
+`env://` credential은 dispatch 시점에만 resolve한다. browser/OOB contract와 port,
+concrete Playwright request ledger는 구현됐고 OOB observer backend 및
+keyring/vault·Chain runtime은 아직 구현되지 않았다.
 Blind claim 공개 시점은 Coordinator가 assessment digest를 먼저 고정하도록 연결됐다.
 
 검증 명령은 macOS의 심볼릭 링크 임시 경로 문제를 피하도록 실제 경로를 지정한다.
@@ -60,7 +66,7 @@ Blind claim 공개 시점은 Coordinator가 assessment digest를 먼저 고정�
 TMPDIR=/private/tmp PYTHONPATH=src:tests .venv/bin/python -m unittest test_validation_evidence_policy test_validation_agent test_validation_store test_validation_report_cli -q
 ```
 
-최신 전체 unittest는 360개를 실행했으며 코드 테스트 359개가 통과했다. `.venv`와 기본
+최신 전체 unittest는 368개를 실행했으며 코드 테스트 367개가 통과했다. `.venv`와 기본
 Python에 pytest가 없어 `test_reporting_agent` import 한 건만 실패했고, 해당 모듈은
 `/opt/anaconda3/bin/pytest`로 별도 실행해 30개가 통과했다. compileall과 diff whitespace
 검사도 통과했다.
@@ -235,13 +241,13 @@ PYTHONPATH=src .venv/bin/python -m unittest discover -s tests -v
 
 | 명세 영역 | 이 계획의 처리 | 전체 구현 완료를 위해 남는 부분 |
 |---|---|---|
-| §5 reproduction 계약 | 저장 schema, provenance 제약, Attack producer와 HTTP runtime request/assertion hash binding | browser·OOB·Chain runtime 계약 |
+| §5 reproduction 계약 | 저장 schema, provenance 제약, Attack producer와 HTTP/browser/OOB runtime hash binding | Chain runtime 계약 |
 | §6 Blind 경계 | DTO, 공개 필드, hash, tool-disabled 단일 native session | Codex local persisted-thread 운영 정책 정리 |
 | §7 shared DB | migration, repository, ownership | 실행 producer별 ledger 기록 통합 |
-| §8 판정 | evidence·점수·가설 검증과 HTTP response assertion 실행 | browser·OOB 관측 adapter |
+| §8 판정 | evidence·점수·가설, HTTP/DOM/OOB assertion과 Playwright 실행 | concrete OOB backend |
 | §9 Chain | node gate, injected end-to-end Blind replay, terminal impact 재평가, Chaining table 불변 검증 | 실제 transport adapter를 통한 다단계 binding 재실행 |
 | §10 요청 안전 | redaction, 저장 경계, current policy per-hop HTTP transport와 env credential resolver | keyring/vault backend 연결 |
-| §11 CLI | status, 보고서 입력, native HTTP Coordinator 기반 run·resume·targeted 실행과 pipeline 자동 호출 | browser·OOB·인증·Chain adapter 선택 |
+| §11 CLI | status, 보고서 입력, native HTTP/Playwright Coordinator 기반 run·resume·targeted 실행과 pipeline 자동 호출 | OOB observer·Chain adapter 선택 |
 | §12 복구·Report | lifecycle 저장 복구, 완료 batch·고정 assessment 재사용, snapshot·eligibility·stale | transport 완료와 local commit 사이의 outcome-unknown 운영 처리 |
 | §13 테스트 | 합성 fixture 및 HTTP adapter 통합 회귀 | 외부 test target과 전체 pipeline 수용 검증 |
 

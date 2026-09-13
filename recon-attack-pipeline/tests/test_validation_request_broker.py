@@ -9,6 +9,7 @@ from aidast.recon import db
 from aidast.recon.policy import PolicyLimits, TargetPolicy, ToolPolicy
 from aidast.scope.models import AssetType
 from aidast.validation import (BlindCase, HttpReproductionPort, HttpRuntimeContract,
+                               OobReproductionPort, OobRuntimeContract,
                                ValidationRepository, ValidationRequestBroker,
                                ValidationRequestError)
 
@@ -22,6 +23,20 @@ class Response:
 
     def close(self):
         pass
+
+
+class OobObserverFixture:
+    def __init__(self):
+        self.armed = []
+
+    def arm(self, token):
+        self.armed.append(token)
+
+    def poll(self, token, *, wait_seconds):
+        return {"events": [
+            {"token": "stale.cb.invalid", "protocol": "dns"},
+            {"token": token, "protocol": "dns"},
+        ]}
 
 
 class ValidationRequestBrokerTests(unittest.TestCase):
@@ -89,6 +104,24 @@ class ValidationRequestBrokerTests(unittest.TestCase):
             broker.request("https://test/items/7", method="POST")
         self.assertEqual(self.conn.execute("SELECT count(*) FROM validation_http_requests").fetchone()[0], 0)
 
+    def test_browser_transport_can_ledger_policy_allowed_subresources(self):
+        broker = self.broker()
+        request_id = broker.begin_observed_request(
+            "https://test/items/app.js", method="GET",
+            headers={"Authorization": "Bearer private"},
+        )
+        broker.complete_observed_request(
+            request_id, response_status=200,
+            response_headers={"Set-Cookie": "private"},
+        )
+        row = self.conn.execute(
+            "SELECT status,url,result_json FROM validation_http_requests"
+        ).fetchone()
+        self.assertEqual(row[:2], ("completed", "https://test/items/app.js"))
+        self.assertNotIn("private", row[2])
+        with self.assertRaises(ValidationRequestError):
+            broker.begin_observed_request("https://other.test/app.js", method="GET")
+
     def test_http_reproduction_adapter_receives_runtime_context_and_writes_ledger(self):
         port = HttpReproductionPort(
             request_builder=lambda blind, kind, batch, ordinal: (
@@ -137,6 +170,45 @@ class ValidationRequestBrokerTests(unittest.TestCase):
         self.assertEqual(self.conn.execute(
             "SELECT url FROM validation_http_requests ORDER BY created_at DESC LIMIT 1"
         ).fetchone()[0], "https://test/items/7")
+
+    def test_oob_adapter_arms_unique_token_before_policy_checked_trigger(self):
+        attempt = {
+            "trigger": {
+                "path_parameters": {"id": 7},
+                "query_parameters": {
+                    "callback": "https://{nonce}.cb.invalid",
+                },
+            },
+            "token_template": "https://{nonce}.cb.invalid",
+            "protocols": ["dns"],
+            "minimum_callbacks": 1,
+            "wait_seconds": 0,
+        }
+        contract = OobRuntimeContract(
+            runtime_kind="oob", schema_version=1, target=attempt,
+            positive_control=attempt, negative_control=attempt,
+        )
+        blind = self.blind.model_copy(update={
+            "signal_types": ("oob_callback",),
+            "runtime_contract": contract.model_dump(mode="json"),
+        })
+        observer = OobObserverFixture()
+        result = OobReproductionPort(
+            observer=observer, transport=lambda request, timeout: Response(),
+            credential_resolver=lambda reference: {"Authorization": "Bearer private"},
+        ).execute(
+            blind, attempt_kind="target", batch_no=1, ordinal=1,
+            attempt_id="attempt", db_path=self.path, scan_id="scan",
+            stage_run_id="stage", case_id="case", policy=self.policy,
+        )
+        self.assertTrue(result.signal_observed)
+        self.assertEqual(len(observer.armed), 1)
+        self.assertNotIn(observer.armed[0], str(result.details))
+        row = self.conn.execute(
+            "SELECT status,url FROM validation_http_requests"
+        ).fetchone()
+        self.assertEqual(row[0], "completed")
+        self.assertIn("callback=%5BREDACTED%5D", row[1])
 
 
 if __name__ == "__main__":
