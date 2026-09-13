@@ -154,6 +154,15 @@ class CountingAgent(FakeAgent):
         return super().compare(claim, assessment, correction)
 
 
+class PreparingCountingAgent(CountingAgent):
+    def __init__(self):
+        super().__init__()
+        self.prepared_cases = []
+
+    def prepare_comparison(self, blind_case):
+        self.prepared_cases.append(blind_case["case_id"])
+
+
 class InterruptedReproductionPort(FakePort):
     def execute(self, *args, **kwargs):
         raise RuntimeError("transport completion is unknown")
@@ -471,7 +480,7 @@ class ValidationCoordinatorTests(unittest.TestCase):
             ).fetchone()[0], 1)
 
         resumed_port = FakePort()
-        resumed_agent = CountingAgent()
+        resumed_agent = PreparingCountingAgent()
         result = ValidationCoordinator(
             db_path=self.path, agent=resumed_agent, reproduction=resumed_port,
             policy_provider=lambda endpoint, method: self.policy,
@@ -481,6 +490,7 @@ class ValidationCoordinatorTests(unittest.TestCase):
         self.assertEqual(resumed_port.calls, [])
         self.assertEqual(resumed_agent.assess_calls, 0)
         self.assertEqual(resumed_agent.compare_calls, 1)
+        self.assertEqual(len(resumed_agent.prepared_cases), 1)
         with db.connect(self.path) as conn:
             self.assertEqual(conn.execute(
                 "SELECT count(*) FROM validation_attempts"

@@ -404,7 +404,9 @@ class ValidationCoordinator:
         )
         if stored_comparison is None:
             try:
-                comparison = self._comparison(claim, assessment.model_dump(mode="json"))
+                comparison = self._comparison(
+                    claim, assessment.model_dump(mode="json"), blind_view=blind_view,
+                )
             except ValidationCoordinatorError:
                 repo.finalize(
                     case["case_id"], stage_run_id=stage_run_id, expected_version=version,
@@ -755,7 +757,17 @@ class ValidationCoordinator:
     def _assessment(self, blind: dict[str, Any], observations: tuple[dict[str, Any], ...]) -> BlindAssessment:
         return self._agent_call("assess", blind, observations, model=BlindAssessment)
 
-    def _comparison(self, claim: dict[str, Any], assessment: dict[str, Any]) -> ClaimComparison:
+    def _comparison(
+        self, claim: dict[str, Any], assessment: dict[str, Any], *,
+        blind_view: dict[str, Any],
+    ) -> ClaimComparison:
+        if self.agent is None:
+            from .codex_runner import CodexBlindValidationRunner
+            self.agent = CodexBlindValidationRunner()
+            self._owns_agent = True
+        prepare = getattr(self.agent, "prepare_comparison", None)
+        if callable(prepare):
+            prepare(blind_view)
         return self._agent_call("compare", claim, assessment, model=ClaimComparison)
 
     def _agent_call(self, method: str, first: Any, second: Any, *, model):

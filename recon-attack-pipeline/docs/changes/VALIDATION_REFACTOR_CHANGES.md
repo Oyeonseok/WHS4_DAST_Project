@@ -2,6 +2,30 @@
 
 이 문서는 Validation 재구조화 구현 변경을 누적 기록한다. 관련 구현을 완료할 때마다 최신 날짜의 항목을 문서 상단에 추가한다.
 
+## 2026-09-14: Codex Validation thread의 case 단위 격리
+
+- 하나의 Validation runner는 stage 동안 유지하되 Codex persisted thread와 작업
+  directory는 case마다 새로 만든다. 같은 case 안에서만 Blind assessment, schema 수정
+  재시도와 unblind comparison이 정확한 thread ID로 이어진다.
+- 이전 case에서 공개된 Attack claim이 다음 case의 Blind prompt 문맥에 남지 않도록 case가
+  바뀌면 in-memory thread ID와 base Skill 상태를 폐기한다.
+- 프로세스 중단 전에 BlindAssessment가 DB에 고정됐다면 resume은 replay나 Blind pass를
+  반복하지 않고, 새 격리 thread에 검증된 Skill을 준비한 뒤 unblind comparison부터
+  계속한다.
+- 외부 `ValidationStageResult`에는 Codex 로컬 thread ID 대신 stage 단위의 안정적인 runner
+  ID 하나만 기록한다. thread ID는 Pipeline DB에 저장하거나 프로세스 간 재사용하지 않는다.
+- case별 thread/work directory 분리와 frozen assessment comparison 재개 테스트를 추가했다.
+  전체 unittest 361개, shared Reporting pytest 22개, compileall과 whitespace 검사가
+  통과했다.
+
+설계와 다른 점 및 이유:
+
+설계 §11.1의 “native custom Validation Agent를 정확히 하나 생성해 cases를 순차 처리”는
+하나의 runner 인스턴스로 유지한다. 다만 persisted conversation까지 모든 case가 공유하면
+앞선 unblind 단계에서 공개된 claim이 다음 case의 Blind 판단에 노출된다. Agent 수 계약은
+유지하면서 정보 비공개 경계를 보존하기 위해 conversation thread와 staging directory만
+case 단위로 분리했다.
+
 ## 2026-09-14: Validation 실행 ledger 소유권 검증
 
 - HTTP, Browser, OOB, Chain native reproduction adapter를 request ledger 필수 producer로
@@ -403,8 +427,8 @@ adapter 호환성도 유지하지만, native 실행에서는 `INCONCLUSIVE`가 �
 ## 2026-09-13: 단일 native Validation Agent 세션
 
 - `CodexMainAgent`에 Validation 전용 structured session 실행 경계를 추가했다.
-  첫 Blind pass에서 받은 Codex thread ID를 고정하고, claim comparison과 다음 case는
-  `codex exec resume <thread-id>`로 같은 세션에서 이어간다.
+  첫 Blind pass에서 받은 Codex thread ID를 고정하고 같은 case의 claim comparison은
+  `codex exec resume <thread-id>`로 이어간다. 다음 case는 별도 격리 thread에서 시작한다.
 - Validation 모델은 요청대로 낮춘 `gpt-5.6-sol`을 별도 기본값으로 고정했다.
   각 pass마다 `BlindAssessment` 또는 `ClaimComparison` strict output schema를 새로
   적용하며, resume 결과가 다른 thread ID를 반환하면 실패한다.

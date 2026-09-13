@@ -184,7 +184,115 @@ class ValidationProfileTests(unittest.TestCase):
         self.assertEqual(agent.calls[0]["work_dir"], agent.calls[1]["work_dir"])
         self.assertNotIn("claimed_impact", agent.calls[0]["prompt"])
         self.assertIn("claimed_impact", agent.calls[1]["prompt"])
-        self.assertEqual(runner.agent_id, "thread-validation")
+        self.assertTrue(runner.agent_id.startswith("validation_agent_"))
+
+    def test_codex_runner_starts_fresh_thread_and_work_dir_for_next_case(self):
+        resolved = SkillProfileResolver().resolve("hunt-idor")
+        axis = {"score": 1, "evidence_ids": ("evidence",), "reason": "Evidence-bound score."}
+
+        def assessment(case_id):
+            return BlindAssessment(
+                case_id=case_id, blind_case_sha256="a" * 64, reproduced=True,
+                signal_types=("authorization_boundary",), target_attempt_ids=("target",),
+                control_attempt_ids=("control",), evidence_ids=("evidence",),
+                impact_boundary=axis, impact_sensitivity=axis,
+                impact_actor_requirements=axis, conclusion="Observed consistently.",
+            )
+
+        def comparison(case_id):
+            return ClaimComparison(
+                case_id=case_id, blind_assessment_sha256="b" * 64,
+                attack_claim_sha256="c" * 64, alignment="aligned", conflict_axes=(),
+                validation_evidence_ids=("evidence",), attack_evidence_ids=("attack",),
+                reason="Claims align.",
+            )
+
+        class SessionAgent:
+            def __init__(self):
+                self.results = [
+                    assessment("case-1"), comparison("case-1"),
+                    assessment("case-2"), comparison("case-2"),
+                ]
+                self.calls = []
+                self.thread_count = 0
+
+            def _run_structured_session(self, **kwargs):
+                self.calls.append(kwargs)
+                if kwargs["session_id"] is None:
+                    self.thread_count += 1
+                    session_id = f"thread-{self.thread_count}"
+                else:
+                    session_id = kwargs["session_id"]
+                return self.results.pop(0), session_id
+
+        def blind(case_id):
+            return {
+                "case_id": case_id, "attack_skill_name": "hunt-idor",
+                "attack_skill_sha256": resolved.attack_skill_sha256,
+                "validation_skill_sha256": resolved.validation_skill_sha256,
+                "validation_profile_sha256": resolved.profile_sha256,
+            }
+
+        agent = SessionAgent()
+        runner = CodexBlindValidationRunner(agent)
+        self.addCleanup(runner.close)
+        stable_agent_id = runner.agent_id
+        for case_id in ("case-1", "case-2"):
+            current = runner.assess(blind(case_id), ())
+            runner.compare({"claimed_impact": "read"}, current.model_dump(mode="json"))
+
+        self.assertEqual(
+            [item["session_id"] for item in agent.calls],
+            [None, "thread-1", None, "thread-2"],
+        )
+        self.assertEqual(agent.calls[0]["work_dir"], agent.calls[1]["work_dir"])
+        self.assertEqual(agent.calls[2]["work_dir"], agent.calls[3]["work_dir"])
+        self.assertNotEqual(agent.calls[0]["work_dir"], agent.calls[2]["work_dir"])
+        self.assertEqual(runner.agent_id, stable_agent_id)
+
+    def test_codex_runner_can_compare_frozen_assessment_in_fresh_thread(self):
+        resolved = SkillProfileResolver().resolve("hunt-idor")
+        axis = {"score": 1, "evidence_ids": ("evidence",), "reason": "Evidence-bound score."}
+        assessment = BlindAssessment(
+            case_id="case", blind_case_sha256="a" * 64, reproduced=True,
+            signal_types=("authorization_boundary",), target_attempt_ids=("target",),
+            control_attempt_ids=("control",), evidence_ids=("evidence",),
+            impact_boundary=axis, impact_sensitivity=axis,
+            impact_actor_requirements=axis, conclusion="Observed consistently.",
+        )
+        comparison = ClaimComparison(
+            case_id="case", blind_assessment_sha256="b" * 64,
+            attack_claim_sha256="c" * 64, alignment="aligned", conflict_axes=(),
+            validation_evidence_ids=("evidence",), attack_evidence_ids=("attack",),
+            reason="Claims align.",
+        )
+
+        class SessionAgent:
+            def __init__(self):
+                self.calls = []
+
+            def _run_structured_session(self, **kwargs):
+                self.calls.append(kwargs)
+                return comparison, kwargs["session_id"] or "thread-resumed-comparison"
+
+        blind = {
+            "case_id": "case", "attack_skill_name": "hunt-idor",
+            "attack_skill_sha256": resolved.attack_skill_sha256,
+            "validation_skill_sha256": resolved.validation_skill_sha256,
+            "validation_profile_sha256": resolved.profile_sha256,
+        }
+        agent = SessionAgent()
+        runner = CodexBlindValidationRunner(agent)
+        self.addCleanup(runner.close)
+        runner.prepare_comparison(blind)
+        result = runner.compare(
+            {"claimed_impact": "read"}, assessment.model_dump(mode="json"),
+        )
+
+        self.assertIs(result, comparison)
+        self.assertEqual(agent.calls[0]["session_id"], None)
+        self.assertIn("claimed_impact", agent.calls[0]["prompt"])
+        self.assertIn(resolved.validation_skill_text, agent.calls[0]["prompt"])
 
     def test_native_structured_session_uses_sol_and_exact_thread_resume(self):
         axis = {"score": 1, "evidence_ids": ("evidence",), "reason": "Evidence-bound score."}

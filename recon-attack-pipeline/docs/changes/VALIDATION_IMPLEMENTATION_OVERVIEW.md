@@ -114,8 +114,9 @@ Blind pass에서는 Attack의 결론과 영향 주장을 숨기고 다음 정보
 
 기본 Validation 모델은 `gpt-5.6-sol`이다. native Codex 세션은 read-only sandbox에서
 shell, web, browser, apps 등 모든 도구를 끈 상태로 실행한다. 첫 Blind pass에서 얻은
-thread ID를 이후 unblind pass와 다음 case에도 그대로 사용한다. KNOWN이나 무결성 실패로
-replay가 필요하지 않으면 Codex 세션도 만들지 않는다.
+thread ID는 같은 case의 unblind pass와 schema 수정 재시도에만 사용한다. 다음 case는 새
+thread와 작업 directory에서 시작하므로 이전에 공개된 claim이 Blind 문맥에 섞이지 않는다.
+KNOWN이나 무결성 실패로 replay가 필요하지 않으면 Codex 세션도 만들지 않는다.
 
 ## 6. 최종 상태와 impact
 
@@ -223,8 +224,11 @@ Agent 도구를 모두 제거하고 Coordinator가 고정한 batch를 trusted `R
 ### Codex session 보존
 
 같은 Agent가 Blind와 unblind를 이어서 처리하려면 persisted Codex thread가 필요하므로
-native 실행에 `--ephemeral`을 사용하지 않는다. 작업용 임시 staging directory는 stage
-종료 시 정리하지만 Codex의 로컬 session 보존 정책은 따른다.
+native 실행에 `--ephemeral`을 사용하지 않는다. thread는 case 내부에서만 resume하며
+다음 case와 프로세스 재시작에는 재사용하지 않는다. 고정된 BlindAssessment를 resume할
+때는 새 thread에서 unblind comparison만 수행한다. thread ID는 Pipeline DB에 저장하지
+않고 작업용 case별 staging directory는 stage 종료 시 정리한다. Codex CLI가 자체적으로
+보존하는 로컬 session의 삭제 주기는 Codex 운영 정책을 따른다.
 
 ### profile의 runtime assertion
 
