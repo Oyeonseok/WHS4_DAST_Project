@@ -2,6 +2,26 @@
 
 이 문서는 Validation 재구조화 구현 변경을 누적 기록한다. 관련 구현을 완료할 때마다 최신 날짜의 항목을 문서 상단에 추가한다.
 
+## 2026-09-14: configured credential backend resolver
+
+- `PipelineCredentialResolver`가 `env://` 외 URI를 scheme별 trusted backend callable로
+  해석할 수 있다. backend 반환값도 최종적으로 1~32개의 CR/LF 없는 HTTP header map인지
+  같은 경계에서 검증한다.
+- `keyring://SERVICE/ACCOUNT`는 Python keyring을 dispatch 직전에 지연 로딩하며, 저장된
+  secret은 기존 `env://`와 같은 JSON header map 형식을 사용한다.
+- `vault://`는 application이 `credential_backends={"vault": callable}`로 명시한 경우에만
+  활성화된다. backend 오류나 미구성 상태는 요청 전에
+  `credential_reference_unavailable`로 격리된다.
+- native Coordinator builder가 configured backend map을 resolver에 전달하며 keyring/Vault
+  성공·미구성·header 검증 회귀 테스트를 추가했다.
+
+설계와 다른 점 및 이유:
+
+Vault HTTP client와 인증 방식을 기본값으로 만들지 않았다. 현재 명세와 DB의
+`vault://` URI에는 Vault 제품, 주소, namespace, KV 버전, 인증 수단이 없어서 이를
+추측하면 엉뚱한 secret을 읽거나 별도 credential service로 임의 요청할 수 있다. 대신
+운영 application이 검토한 backend를 명시적으로 주입하는 경계를 완성했다.
+
 ## 2026-09-14: demonstrated Chain native runtime replay
 
 - `chain_execution_bindings`가 값 hash뿐 아니라 응답 추출 위치

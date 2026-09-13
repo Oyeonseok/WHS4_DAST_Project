@@ -97,12 +97,14 @@ and let the trusted Validation runtime resolve their opaque references. Browser,
 OOB, and multi-step findings may omit this HTTP-only contract until their
 dedicated runtime contract is available.
 
-The native Validation runtime currently resolves `env://NAME` references. The
-environment variable must contain a JSON object whose keys and values are the
-HTTP credential headers, for example `{"Authorization":"Bearer ..."}`. The
-resolved object exists only in memory at dispatch; the request ledger sanitizes
-sensitive header values. `keyring://` and `vault://` references require a future
-configured backend and are treated as unavailable by the default runtime.
+The native Validation runtime resolves `env://NAME` references and lazily uses
+Python keyring for `keyring://SERVICE/ACCOUNT`. Both secrets contain a JSON
+object whose keys and values are the HTTP credential headers, for example
+`{"Authorization":"Bearer ..."}`. An application may configure a trusted
+`vault` scheme backend when its Vault address, namespace, KV version, and auth
+method are known. An unconfigured backend is unavailable before any target
+request. Resolved values exist only in memory at dispatch; the request ledger
+sanitizes sensitive header values.
 
 Every source request must be completed, share the supporting attempt's task and
 fingerprint, and have one non-null TargetPolicy digest. Each evidence item contains role, method, URL, redacted

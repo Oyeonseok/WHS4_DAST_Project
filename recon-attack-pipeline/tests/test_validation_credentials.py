@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 from aidast.pipeline.lifecycle import register_credential_reference
 from aidast.recon import db
-from aidast.validation import PipelineCredentialResolver
+from aidast.validation import KeyringCredentialBackend, PipelineCredentialResolver
 
 
 class ValidationCredentialResolverTests(unittest.TestCase):
@@ -27,6 +27,10 @@ class ValidationCredentialResolverTests(unittest.TestCase):
         self.unsupported = register_credential_reference(
             conn, scan_id="scan", label="vault-member",
             reference_uri="vault://team/member", identity_role="vault-member",
+        )
+        self.keyring = register_credential_reference(
+            conn, scan_id="scan", label="keyring-member",
+            reference_uri="keyring://aidast/member", identity_role="keyring-member",
         )
         conn.close()
         self.resolver = PipelineCredentialResolver(self.path)
@@ -56,6 +60,34 @@ class ValidationCredentialResolverTests(unittest.TestCase):
             self.resolver.unsupported_reason(self.unsupported),
             "credential_reference_unavailable",
         )
+
+    def test_configured_vault_backend_returns_a_validated_header_map(self):
+        seen = []
+        resolver = PipelineCredentialResolver(self.path, backends={
+            "vault": lambda uri: seen.append(uri) or {
+                "Authorization": "Bearer vault-value",
+            },
+        })
+        self.assertIsNone(resolver.unsupported_reason(self.unsupported))
+        self.assertEqual(resolver(self.unsupported), {
+            "Authorization": "Bearer vault-value",
+        })
+        self.assertEqual(seen, ["vault://team/member", "vault://team/member"])
+
+    def test_keyring_backend_uses_service_and_account_without_persisting_secret(self):
+        class Provider:
+            calls = []
+
+            @classmethod
+            def get_password(cls, service, account):
+                cls.calls.append((service, account))
+                return json.dumps({"Cookie": "session=keyring-value"})
+
+        resolver = PipelineCredentialResolver(self.path, backends={
+            "keyring": KeyringCredentialBackend(Provider),
+        })
+        self.assertEqual(resolver(self.keyring), {"Cookie": "session=keyring-value"})
+        self.assertEqual(Provider.calls, [("aidast", "member")])
 
 
 if __name__ == "__main__":

@@ -19,6 +19,7 @@ from .runtime_adapter import RuntimeReproductionRouter
 def build_native_validation_coordinator(
     *, db_path: Path, policy_path: Path,
     credential_resolver: Callable[[str], Mapping[str, str]] | None = None,
+    credential_backends: Mapping[str, Callable[[str], object]] | None = None,
     browser_executor: BrowserExecutor | None = None,
     oob_observer: OobObserver | None = None,
 ) -> ValidationCoordinator:
@@ -27,7 +28,9 @@ def build_native_validation_coordinator(
         policy_provider = TargetPolicyProvider(policy_path)
     except (OSError, ValueError) as exc:
         raise ValidationCoordinatorError(f"cannot load current TargetPolicy: {exc}") from exc
-    resolver = credential_resolver or PipelineCredentialResolver(db_path)
+    resolver = credential_resolver or PipelineCredentialResolver(
+        db_path, backends=credential_backends,
+    )
     reproduction = RuntimeReproductionRouter(
         http=HttpReproductionPort(credential_resolver=resolver),
         browser=BrowserReproductionPort(

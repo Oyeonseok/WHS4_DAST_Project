@@ -17,7 +17,7 @@
   credential resolver도 연결했다. browser DOM과 OOB callback의 target별 계약,
   deterministic evaluator와 executor/observer 포트까지 구현했다. Playwright는 모든
   subrequest를 current policy와 ledger에 연결했으며 OOB observer backend,
-  keyring/vault resolver backend와 실제 OOB observer 연결은 미구현이다.
+  keyring 및 configured Vault resolver 경계까지 구현됐고 실제 OOB observer 연결은 미구현이다.
 
 ## 구현 진행 기록
 
@@ -57,7 +57,7 @@ pass와 case 사이에 유지한다. 다만 profile 대부분은 보수적인 �
 정량 threshold를 적용하는 target별 HTTP adapter와 pipeline 자동 실행까지 구현됐다.
 `env://` credential은 dispatch 시점에만 resolve한다. browser/OOB contract와 port,
 concrete Playwright request ledger와 HTTP Chain runtime은 구현됐고 OOB observer
-backend 및 keyring/vault resolver는 아직 구현되지 않았다.
+backend는 아직 구현되지 않았고 keyring 및 configured Vault resolver 경계는 구현됐다.
 Blind claim 공개 시점은 Coordinator가 assessment digest를 먼저 고정하도록 연결됐다.
 
 검증 명령은 macOS의 심볼릭 링크 임시 경로 문제를 피하도록 실제 경로를 지정한다.
@@ -67,7 +67,7 @@ TMPDIR=/private/tmp PYTHONPATH=src:tests .venv/bin/python -m unittest test_valid
 ```
 
 최신 전체 unittest는 macOS `/var` symlink 오인을 피하도록 `TMPDIR=/private/tmp`에서
-369개가 모두 통과했다. `.venv`와 기본
+371개가 모두 통과했다. `.venv`와 기본
 Python에 pytest가 없어 `test_reporting_agent` import 한 건만 실패했고, 해당 모듈은
 `/opt/anaconda3/bin/pytest`로 별도 실행해 30개가 통과했다. compileall과 diff whitespace
 검사도 통과했다.
@@ -247,7 +247,7 @@ PYTHONPATH=src .venv/bin/python -m unittest discover -s tests -v
 | §7 shared DB | migration, repository, ownership | 실행 producer별 ledger 기록 통합 |
 | §8 판정 | evidence·점수·가설, HTTP/DOM/OOB assertion과 Playwright 실행 | concrete OOB backend |
 | §9 Chain | node gate, injected/native end-to-end Blind replay, fresh scalar binding, terminal impact 재평가, Chaining table 불변 검증 | 비 HTTP node를 포함한 혼합 chain은 후속 범위 |
-| §10 요청 안전 | redaction, 저장 경계, current policy per-hop HTTP transport와 env credential resolver | keyring/vault backend 연결 |
+| §10 요청 안전 | redaction, 저장 경계, current policy per-hop HTTP transport와 env/keyring/configured Vault credential resolver | 없음 |
 | §11 CLI | status, 보고서 입력, native HTTP/Playwright/Chain Coordinator 기반 run·resume·targeted 실행과 pipeline 자동 호출 | 실제 OOB observer 구성 선택 |
 | §12 복구·Report | lifecycle 저장 복구, 완료 batch·고정 assessment 재사용, snapshot·eligibility·stale | transport 완료와 local commit 사이의 outcome-unknown 운영 처리 |
 | §13 테스트 | 합성 fixture 및 HTTP adapter 통합 회귀 | 외부 test target과 전체 pipeline 수용 검증 |

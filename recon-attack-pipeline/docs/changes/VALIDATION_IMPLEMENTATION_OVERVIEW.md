@@ -189,10 +189,9 @@ Coordinator를 만들어 Validation을 자동 실행한다. 독립 `validate run
 구현돼 있다. 실제 운영 경로를 완성하려면 다음 작업이 남아 있다.
 
 1. OOB observer backend의 인증·cursor 계약과 기본 구성
-2. `keyring://`, `vault://` credential reference의 configured backend resolver
-3. 58개 Skill profile과 Attack이 작성한 marker·threshold의 보안 전문가 의미 검토
-4. transport 완료와 local commit 사이의 `outcome_unknown` 운영 복구 보강
-5. 새 경로가 기본 동작이 된 뒤 legacy 7 Question `Validation.db` 제거
+2. 58개 Skill profile과 Attack이 작성한 marker·threshold의 보안 전문가 의미 검토
+3. transport 완료와 local commit 사이의 `outcome_unknown` 운영 복구 보강
+4. 새 경로가 기본 동작이 된 뒤 legacy 7 Question `Validation.db` 제거
 
 HTTP response marker와 정량 threshold는 공통 profile에서 추정하지 않고 Attack의 실제
 관찰에서 만들어진 immutable runtime contract로 받는다. generic HTTP adapter는 이 값이

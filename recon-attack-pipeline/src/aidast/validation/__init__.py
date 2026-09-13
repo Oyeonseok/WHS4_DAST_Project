@@ -36,7 +36,7 @@ from .browser_contract import (BrowserAssertion, BrowserAttemptContract,
 from .browser_adapter import BrowserExecutor, BrowserReproductionPort
 from .codex_runner import CodexBlindValidationRunner
 from .native import build_native_validation_coordinator
-from .credentials import PipelineCredentialResolver
+from .credentials import KeyringCredentialBackend, PipelineCredentialResolver
 from .runtime_adapter import RuntimeReproductionRouter
 from .oob_contract import (OobAttemptContract, OobEvent, OobObservationSnapshot,
                            OobRuntimeContract, evaluate_oob_observation)
@@ -82,7 +82,7 @@ __all__ += ["validate_runtime_contract", "BrowserAssertion", "BrowserAttemptCont
             "BrowserExecutor", "BrowserReproductionPort"]
 __all__ += ["CodexBlindValidationRunner"]
 __all__ += ["build_native_validation_coordinator"]
-__all__ += ["PipelineCredentialResolver"]
+__all__ += ["PipelineCredentialResolver", "KeyringCredentialBackend"]
 __all__ += ["RuntimeReproductionRouter"]
 __all__ += ["OobAttemptContract", "OobEvent", "OobObservationSnapshot",
             "OobRuntimeContract", "evaluate_oob_observation", "OobObserver",
