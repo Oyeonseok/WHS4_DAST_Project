@@ -106,6 +106,19 @@ method are known. An unconfigured backend is unavailable before any target
 request. Resolved values exist only in memory at dispatch; the request ledger
 sanitizes sensitive header values.
 
+For OOB runtime contracts, the native process may configure a service-neutral
+observer with `AIDAST_OOB_OBSERVER_CONFIG`:
+
+```json
+{"arm_url":"https://observer.example/v1/arm","poll_url":"https://observer.example/v1/events","auth_env":"AIDAST_OOB_AUTH_HEADERS"}
+```
+
+The auth environment variable contains the same JSON header-map format. The
+arm endpoint accepts `{"token":"..."}` and returns `{"cursor":123}`. The poll
+endpoint receives `token`, `after`, and `wait_seconds` query parameters and
+returns `{"events":[{"cursor":124,"token":"...","protocol":"dns"}]}`.
+Only events after the armed cursor can reach Validation evidence.
+
 Every source request must be completed, share the supporting attempt's task and
 fingerprint, and have one non-null TargetPolicy digest. Each evidence item contains role, method, URL, redacted
 request headers/body, response status, redacted response headers/body, and

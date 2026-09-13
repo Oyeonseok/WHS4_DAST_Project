@@ -41,6 +41,7 @@ from .runtime_adapter import RuntimeReproductionRouter
 from .oob_contract import (OobAttemptContract, OobEvent, OobObservationSnapshot,
                            OobRuntimeContract, evaluate_oob_observation)
 from .oob_adapter import OobObserver, OobReproductionPort
+from .http_oob_observer import HttpJsonOobObserver, HttpOobObserverConfig
 from .playwright_browser import (BrowserExecutionError, BrowserPolicyRejection,
                                  PlaywrightBrowserExecutor)
 from .chain_contract import (ChainBindingContract, ChainRuntimeContract,
@@ -86,7 +87,7 @@ __all__ += ["PipelineCredentialResolver", "KeyringCredentialBackend"]
 __all__ += ["RuntimeReproductionRouter"]
 __all__ += ["OobAttemptContract", "OobEvent", "OobObservationSnapshot",
             "OobRuntimeContract", "evaluate_oob_observation", "OobObserver",
-            "OobReproductionPort"]
+            "OobReproductionPort", "HttpJsonOobObserver", "HttpOobObserverConfig"]
 __all__ += ["BrowserExecutionError", "BrowserPolicyRejection",
             "PlaywrightBrowserExecutor"]
 __all__ += ["ChainBindingContract", "ChainRuntimeContract", "ChainStepContract",

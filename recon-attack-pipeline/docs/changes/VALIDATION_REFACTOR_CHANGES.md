@@ -2,6 +2,27 @@
 
 이 문서는 Validation 재구조화 구현 변경을 누적 기록한다. 관련 구현을 완료할 때마다 최신 날짜의 항목을 문서 상단에 추가한다.
 
+## 2026-09-14: configured HTTP OOB observer
+
+- `HttpJsonOobObserver`가 `POST arm`에서 발급받은 정수 cursor를 attempt token과 메모리에
+  묶고, trigger 이후 `GET poll`에 token·cursor·wait를 전달한다.
+- poll 결과 중 arm cursor 이하의 stale event를 제거한 뒤 기존 OOB evaluator에
+  token/protocol만 전달한다. 한 번 poll한 token은 다시 사용할 수 없다.
+- observer endpoint는 기본 HTTPS, 동일 origin, redirect 금지이며 응답은 2xx JSON object와
+  200KB·64 event 한도를 적용한다. 인증 header는 설정에 적힌 환경 변수를 dispatch
+  시점에만 읽고 DB나 Validation evidence에 저장하지 않는다.
+- `AIDAST_OOB_OBSERVER_CONFIG`가 있으면 native Coordinator가 기본 observer로 구성한다.
+  설정이 없으면 기존처럼 OOB case만 preflight `INCONCLUSIVE`가 된다.
+- cursor 이전 event 제외, 잘못된 token 보존, runtime auth, one-shot poll, insecure/mixed-origin
+  설정 거절을 deterministic transport 테스트로 검증했다.
+
+설계와 다른 점 및 이유:
+
+특정 Interactsh/Burp API를 기본값으로 고정하지 않고 작은 HTTP JSON protocol을
+사용했다. 현재 명세에 OOB 공급자가 정해져 있지 않으므로 벤더 API를 추측하면 배포별
+인증·cursor 의미가 달라질 수 있다. 운영 adapter나 gateway가 명시된 arm/poll 계약을
+제공하게 하면 fresh-callback 불변식을 유지하면서 공급자를 교체할 수 있다.
+
 ## 2026-09-14: outcome-unknown resume 차단
 
 - 실패한 Validation stage를 재개할 때 해당 case의 `outcome_unknown` attempt, HTTP request,

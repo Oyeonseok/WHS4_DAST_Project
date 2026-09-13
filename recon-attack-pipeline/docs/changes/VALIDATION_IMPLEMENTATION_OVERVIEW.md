@@ -188,9 +188,8 @@ Coordinator를 만들어 Validation을 자동 실행한다. 독립 `validate run
 현재 저장 구조, 상태 머신, 무결성 검사, Blind Agent, Chain replay와 보고서 연결은
 구현돼 있다. 실제 운영 경로를 완성하려면 다음 작업이 남아 있다.
 
-1. OOB observer backend의 인증·cursor 계약과 기본 구성
-2. 58개 Skill profile과 Attack이 작성한 marker·threshold의 보안 전문가 의미 검토
-3. 새 경로가 기본 동작이 된 뒤 legacy 7 Question `Validation.db` 제거
+1. 58개 Skill profile과 Attack이 작성한 marker·threshold의 보안 전문가 의미 검토
+2. 새 경로가 기본 동작이 된 뒤 legacy 7 Question `Validation.db` 제거
 
 HTTP response marker와 정량 threshold는 공통 profile에서 추정하지 않고 Attack의 실제
 관찰에서 만들어진 immutable runtime contract로 받는다. generic HTTP adapter는 이 값이
@@ -199,7 +198,7 @@ HTTP response marker와 정량 threshold는 공통 profile에서 추정하지 �
 `INCONCLUSIVE`가 된다. `env://NAME`은 환경 변수의 JSON header map을 요청 직전에만
 해석해 authenticated HTTP replay를 지원한다. Playwright browser request는 current policy와
 Validation ledger를 매 요청 통과한다. HTTP Chain은 명시적 응답 추출/요청 주입 계약으로
-fresh 값을 전달하며, OOB callback observer backend는 아직 별도 운영 연결이 필요하다.
+fresh 값을 전달한다. OOB callback은 설정 기반 HTTP arm/cursor/poll observer로 연결한다.
 중단 시 `outcome_unknown` 실행이 하나라도 남은 case는 자동 재전송하지 않고
 `INCONCLUSIVE`로 닫아 원격 side effect의 중복을 막는다.
 

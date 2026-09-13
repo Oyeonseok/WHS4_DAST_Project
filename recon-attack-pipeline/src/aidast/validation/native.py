@@ -10,6 +10,7 @@ from .browser_adapter import BrowserExecutor, BrowserReproductionPort
 from .chain_adapter import ChainReproductionPort
 from .credentials import PipelineCredentialResolver
 from .http_adapter import HttpReproductionPort
+from .http_oob_observer import HttpJsonOobObserver
 from .oob_adapter import OobObserver, OobReproductionPort
 from .policy import TargetPolicyProvider
 from .playwright_browser import PlaywrightBrowserExecutor
@@ -31,6 +32,10 @@ def build_native_validation_coordinator(
     resolver = credential_resolver or PipelineCredentialResolver(
         db_path, backends=credential_backends,
     )
+    try:
+        observer = oob_observer or HttpJsonOobObserver.from_environment()
+    except (TypeError, ValueError) as exc:
+        raise ValidationCoordinatorError(f"cannot load OOB observer config: {exc}") from exc
     reproduction = RuntimeReproductionRouter(
         http=HttpReproductionPort(credential_resolver=resolver),
         browser=BrowserReproductionPort(
@@ -38,7 +43,7 @@ def build_native_validation_coordinator(
             credential_resolver=resolver,
         ),
         oob=OobReproductionPort(
-            observer=oob_observer, credential_resolver=resolver,
+            observer=observer, credential_resolver=resolver,
         ),
         chain=ChainReproductionPort(credential_resolver=resolver),
     )
