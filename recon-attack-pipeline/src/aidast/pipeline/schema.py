@@ -477,6 +477,12 @@ BEGIN SELECT RAISE(ABORT, 'completed validation attempts are immutable'); END;
 CREATE TRIGGER IF NOT EXISTS validation_attempts_completed_no_delete BEFORE DELETE ON validation_attempts
 WHEN OLD.finished_at IS NOT NULL
 BEGIN SELECT RAISE(ABORT, 'completed validation attempts are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS finding_reproduction_specs_no_update
+BEFORE UPDATE ON finding_reproduction_specs
+BEGIN SELECT RAISE(ABORT, 'finding reproduction specs are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS finding_reproduction_specs_no_delete
+BEFORE DELETE ON finding_reproduction_specs
+BEGIN SELECT RAISE(ABORT, 'finding reproduction specs are immutable'); END;
 
 CREATE TRIGGER IF NOT EXISTS finding_chain_nodes_scan_insert
 BEFORE INSERT ON finding_chain_nodes

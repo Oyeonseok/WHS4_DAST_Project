@@ -278,6 +278,8 @@ def commit_finding(db_path: Path, scan_id: str, payload_path: Path) -> dict:
     if item.get("scan_id") != scan_id:
         raise ValueError("finding scan_id mismatch")
     endpoint_id = _text(item.get("endpoint_id")) or None
+    if endpoint_id is None:
+        raise ValueError("a finding reproduction requires endpoint_id")
     severity = _text(item.get("severity"), required=True).upper()
     if severity not in {"CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"}:
         raise ValueError("invalid finding severity")
@@ -292,6 +294,9 @@ def commit_finding(db_path: Path, scan_id: str, payload_path: Path) -> dict:
         raise ValueError("lead_attempt_ids must be a list of attempt IDs")
     if len(lead_attempt_ids) != len(set(lead_attempt_ids)):
         raise ValueError("lead_attempt_ids contains duplicates")
+    reproduction = item.get("reproduction")
+    if not isinstance(reproduction, dict):
+        raise ValueError("a finding requires one reproduction object")
     finding_id = _text(item.get("finding_id"), maximum=256) or "finding_" + uuid4().hex
     cvss = item.get("cvss_score")
     if cvss is not None and (isinstance(cvss, bool) or not isinstance(cvss, (int, float)) or not 0 <= cvss <= 10):
@@ -300,6 +305,59 @@ def commit_finding(db_path: Path, scan_id: str, payload_path: Path) -> dict:
         conn.execute("PRAGMA foreign_keys=ON")
         _completed_scan(conn, scan_id)
         _endpoint(conn, scan_id, endpoint_id)
+        placeholders = ",".join("?" for _ in lead_attempt_ids) or "NULL"
+        source_attempts = conn.execute(
+            f"""SELECT attempt_id,task_id,skill_name,endpoint_id,request_fingerprint
+            FROM attack_attempts WHERE scan_id=? AND outcome='lead' AND finding_id IS NULL
+            AND attempt_id IN ({placeholders})""", (scan_id, *lead_attempt_ids),
+        ).fetchall()
+        if len(source_attempts) != len(lead_attempt_ids) or not source_attempts:
+            raise ValueError("reproduction requires supporting open lead attempts")
+        if any(row[3] != endpoint_id for row in source_attempts):
+            raise ValueError("reproduction attempts must use the finding endpoint")
+        skills = {row[2] for row in source_attempts}
+        if len(skills) != 1:
+            raise ValueError("reproduction attempts must have exactly one Hunt Skill")
+        attack_skill_name = next(iter(skills))
+        source_request_ids = reproduction.get("source_request_ids")
+        if (not isinstance(source_request_ids, list) or not source_request_ids
+                or any(not isinstance(value, str) or not value for value in source_request_ids)
+                or len(source_request_ids) != len(set(source_request_ids))):
+            raise ValueError("reproduction source_request_ids are invalid")
+        request_placeholders = ",".join("?" for _ in source_request_ids)
+        source_requests = conn.execute(
+            f"""SELECT request_id,task_id,request_fingerprint,method,policy_sha256,status
+            FROM attack_http_requests WHERE scan_id=? AND request_id IN ({request_placeholders})""",
+            (scan_id, *source_request_ids),
+        ).fetchall()
+        pairs = {(row[1], row[4]) for row in source_attempts}
+        method = _text(reproduction.get("method"), required=True, maximum=16).upper()
+        policy_digests = {row[4] for row in source_requests}
+        if (len(source_requests) != len(source_request_ids) or len(policy_digests) != 1
+                or None in policy_digests or any(
+                    (row[1], row[2]) not in pairs or row[3].upper() != method
+                    or row[5] != "completed" for row in source_requests
+                )):
+            raise ValueError("reproduction requests do not match the supporting attempts")
+        endpoint_template = _text(reproduction.get("endpoint_template"), required=True, maximum=8192)
+        injection_location = _text(reproduction.get("injection_location"), required=True, maximum=16)
+        if injection_location not in {"path", "query", "header", "cookie", "body"}:
+            raise ValueError("invalid reproduction injection_location")
+        parameter_name = _text(reproduction.get("parameter_name"), required=True, maximum=256)
+        payload_template = reproduction.get("payload_template")
+        roles = reproduction.get("required_identity_roles", [])
+        if (not isinstance(roles, list) or any(not isinstance(role, str) or not role for role in roles)
+                or len(roles) != len(set(roles))):
+            raise ValueError("invalid reproduction identity roles")
+        from aidast.validation.integrity import canonical_reproduction_spec
+        spec = canonical_reproduction_spec(
+            finding_id=finding_id, attack_skill_name=attack_skill_name,
+            endpoint_id=endpoint_id, method=method, endpoint_template=endpoint_template,
+            injection_location=injection_location, parameter_name=parameter_name,
+            payload_template=payload_template, required_identity_roles=roles,
+            source_attempt_ids=lead_attempt_ids, source_request_ids=source_request_ids,
+            source_policy_sha256=next(iter(policy_digests)),
+        )
         conn.execute(
             """INSERT INTO findings
                (finding_id,scan_id,endpoint_id,vuln_type,severity,title,description,
@@ -347,10 +405,25 @@ def commit_finding(db_path: Path, scan_id: str, payload_path: Path) -> dict:
             )
             if cursor.rowcount != 1:
                 raise ValueError("finding references an attempt that is not an open lead")
+        conn.execute(
+            """INSERT INTO finding_reproduction_specs
+            (finding_id,attack_skill_name,endpoint_id,method,endpoint_template,injection_location,
+             parameter_name,payload_template_json,required_identity_roles_json,
+             source_attempt_ids_json,source_request_ids_json,payload_structure_sha256,
+             source_policy_sha256,spec_sha256) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (spec["finding_id"], spec["attack_skill_name"], spec["endpoint_id"], spec["method"],
+             spec["endpoint_template"], spec["injection_location"], spec["parameter_name"],
+             json.dumps(spec["payload_template"], ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+             json.dumps(spec["required_identity_roles"], ensure_ascii=False, separators=(",", ":")),
+             json.dumps(spec["source_attempt_ids"], ensure_ascii=False, separators=(",", ":")),
+             json.dumps(spec["source_request_ids"], ensure_ascii=False, separators=(",", ":")),
+             spec["payload_structure_sha256"], spec["source_policy_sha256"], spec["spec_sha256"]),
+        )
         return {
             "finding_id": finding_id,
             "evidence_count": len(evidence),
             "promoted_attempt_count": len(lead_attempt_ids),
+            "reproduction_spec_sha256": spec["spec_sha256"],
         }
 
 

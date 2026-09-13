@@ -9,6 +9,7 @@ from typing import Any, Iterable
 from aidast.recon.db import new_id, now
 
 from .impact import evaluate_impact
+from .evidence_policy import sanitize_metadata
 from .models import TerminalStatus, canonical_json, canonical_sha256
 
 
@@ -73,6 +74,7 @@ class ValidationRepository:
     def add_attempt(self, *, case_id: str, stage_run_id: str, batch_no: int,
                     attempt_kind: str, ordinal: int, signal_type: str, outcome: str,
                     observation: dict[str, Any] | None = None, finished: bool = True,
+                    signal_observed: bool | None = None, blocker_axis: str | None = None,
                     attempt_id: str | None = None) -> str:
         identifier = attempt_id or new_id("vattempt")
         with self.conn:
@@ -80,9 +82,11 @@ class ValidationRepository:
             self.conn.execute(
                 """INSERT INTO validation_attempts
                 (attempt_id,case_id,stage_run_id,batch_no,attempt_kind,ordinal,signal_type,outcome,
-                 observation_json,finished_at) VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                 signal_observed,blocker_axis,observation_json,finished_at)
+                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (identifier, case_id, stage_run_id, batch_no, attempt_kind, ordinal, signal_type,
-                 outcome, canonical_json(observation or {}), now() if finished else None),
+                 outcome, signal_observed, blocker_axis,
+                 canonical_json(sanitize_metadata(observation or {})), now() if finished else None),
             )
         return identifier
 
@@ -95,7 +99,7 @@ class ValidationRepository:
             "blind_assessment", "claim_comparison",
         }:
             raise ValidationRepositoryError("execution evidence requires exactly one source")
-        encoded = canonical_json(details)
+        encoded = canonical_json(sanitize_metadata(details))
         if len(encoded.encode("utf-8")) > 8192:
             raise ValidationRepositoryError("evidence details exceed 8 KiB")
         with self.conn:
@@ -115,6 +119,165 @@ class ValidationRepository:
                  details_json,content_sha256,content_length) VALUES (?,?,?,?,?,?,?,?,?)""",
                 (identifier, case_id, stage_run_id, attempt_id, development_action_id,
                  evidence_kind, encoded, content_sha256, content_length),
+            )
+        return identifier
+
+    def complete_attempt(self, attempt_id: str, *, outcome: str,
+                         signal_observed: bool | None, blocker_axis: str | None,
+                         observation: dict[str, Any]) -> None:
+        with self.conn:
+            cursor = self.conn.execute(
+                """UPDATE validation_attempts SET outcome=?,signal_observed=?,blocker_axis=?,
+                observation_json=?,finished_at=? WHERE attempt_id=? AND finished_at IS NULL""",
+                (outcome, signal_observed, blocker_axis,
+                 canonical_json(sanitize_metadata(observation)), now(), attempt_id),
+            )
+            if cursor.rowcount != 1:
+                raise ValidationRepositoryError("Validation attempt is missing or already completed")
+
+    def stage_blind_case(self, case_id: str, *, stage_run_id: str, expected_version: int,
+                         attack_skill_name: str, skill_sha256: str,
+                         validation_profile_sha256: str, source_policy_sha256: str,
+                         current_policy_sha256: str, blind_case_sha256: str,
+                         attack_claim_sha256: str) -> int:
+        with self.conn:
+            self._assert_current_case(case_id, stage_run_id)
+            cursor = self.conn.execute(
+                """UPDATE validation_cases SET processing_phase='blind_replay',
+                attack_skill_name=?,skill_sha256=?,validation_profile_sha256=?,
+                source_policy_sha256=?,current_policy_sha256=?,blind_case_sha256=?,
+                attack_claim_sha256=?,state_version=state_version+1,updated_at=?
+                WHERE case_id=? AND latest_stage_run_id=? AND state_version=?
+                AND processing_phase IN ('queued','interrupted')""",
+                (attack_skill_name, skill_sha256, validation_profile_sha256,
+                 source_policy_sha256, current_policy_sha256, blind_case_sha256,
+                 attack_claim_sha256, now(), case_id, stage_run_id, expected_version),
+            )
+            if cursor.rowcount != 1:
+                raise ConcurrentValidationUpdate("case changed while staging blind input")
+        return expected_version + 1
+
+    def resume_blind_case(self, case_id: str, *, stage_run_id: str,
+                          expected_version: int, current_policy_sha256: str) -> None:
+        with self.conn:
+            cursor = self.conn.execute(
+                """UPDATE validation_cases SET processing_phase='blind_replay',
+                current_policy_sha256=?,updated_at=? WHERE case_id=?
+                AND latest_stage_run_id=? AND state_version=? AND processing_phase='queued'
+                AND blind_case_sha256 IS NOT NULL AND blind_assessment_sha256 IS NULL""",
+                (current_policy_sha256, now(), case_id, stage_run_id, expected_version),
+            )
+            if cursor.rowcount != 1:
+                raise ConcurrentValidationUpdate("case cannot resume at blind replay")
+
+    def resume_unblinding(self, case_id: str, *, stage_run_id: str,
+                          expected_version: int, current_policy_sha256: str) -> None:
+        """Resume after the immutable blind assessment has already been committed."""
+        with self.conn:
+            cursor = self.conn.execute(
+                """UPDATE validation_cases SET processing_phase='unblinding',
+                current_policy_sha256=?,updated_at=? WHERE case_id=?
+                AND latest_stage_run_id=? AND state_version=? AND processing_phase='queued'
+                AND blind_case_sha256 IS NOT NULL AND blind_assessment_sha256 IS NOT NULL""",
+                (current_policy_sha256, now(), case_id, stage_run_id, expected_version),
+            )
+            if cursor.rowcount != 1:
+                raise ConcurrentValidationUpdate("case cannot resume at unblinding")
+
+    def freeze_blind_assessment(self, case_id: str, *, stage_run_id: str,
+                                expected_version: int, assessment_sha256: str) -> int:
+        with self.conn:
+            self._assert_current_case(case_id, stage_run_id)
+            cursor = self.conn.execute(
+                """UPDATE validation_cases SET processing_phase='unblinding',
+                blind_assessment_sha256=?,state_version=state_version+1,updated_at=?
+                WHERE case_id=? AND latest_stage_run_id=? AND state_version=?
+                AND processing_phase='blind_replay' AND blind_assessment_sha256 IS NULL""",
+                (assessment_sha256, now(), case_id, stage_run_id, expected_version),
+            )
+            if cursor.rowcount != 1:
+                raise ConcurrentValidationUpdate("case changed while freezing blind assessment")
+        return expected_version + 1
+
+    def set_processing_phase(self, case_id: str, *, stage_run_id: str,
+                             phase: str) -> None:
+        if phase not in {"blind_replay", "developing"}:
+            raise ValidationRepositoryError("unsupported intermediate processing phase")
+        with self.conn:
+            self._assert_current_case(case_id, stage_run_id)
+            self.conn.execute(
+                "UPDATE validation_cases SET processing_phase=?,updated_at=? WHERE case_id=?",
+                (phase, now(), case_id),
+            )
+
+    def add_development_action(self, *, case_id: str, stage_run_id: str, ordinal: int,
+                               blocker_axis: str, action_type: str,
+                               details: dict[str, Any] | None = None) -> str:
+        identifier = new_id("vaction")
+        with self.conn:
+            self._assert_current_case(case_id, stage_run_id)
+            self.conn.execute(
+                """INSERT INTO validation_development_actions
+                (action_id,case_id,stage_run_id,ordinal,blocker_axis,action_type,status,details_json)
+                VALUES (?,?,?,?,?,?,'planned',?)""",
+                (identifier, case_id, stage_run_id, ordinal, blocker_axis, action_type,
+                 canonical_json(sanitize_metadata(details or {}))),
+            )
+        return identifier
+
+    def finish_development_action(self, action_id: str, *, succeeded: bool,
+                                  details: dict[str, Any] | None = None) -> None:
+        with self.conn:
+            cursor = self.conn.execute(
+                """UPDATE validation_development_actions SET status=?,details_json=?,
+                started_at=COALESCE(started_at,?),finished_at=?
+                WHERE action_id=? AND status IN ('planned','running')""",
+                ("succeeded" if succeeded else "failed",
+                 canonical_json(sanitize_metadata(details or {})), now(), now(), action_id),
+            )
+            if cursor.rowcount != 1:
+                raise ValidationRepositoryError("development action is missing or already finished")
+
+    def add_impact_hypothesis(self, *, case_id: str, stage_run_id: str, ordinal: int,
+                              proposal: dict[str, Any], skill_sha256: str,
+                              validation_profile_sha256: str) -> str:
+        identifier = new_id("vhypothesis")
+        required = {
+            "gap_axis", "path_id", "hypothesis_kind", "current_score", "reason",
+            "required_preconditions", "recommended_actions", "expected_signal",
+            "supporting_evidence_ids", "execution_owner", "feasibility", "potential_impact",
+        }
+        if set(proposal) != required:
+            raise ValidationRepositoryError("impact hypothesis fields do not match the contract")
+        evidence_ids = proposal["supporting_evidence_ids"]
+        if not isinstance(evidence_ids, (list, tuple)) or not evidence_ids:
+            raise ValidationRepositoryError("impact hypothesis requires current-stage evidence")
+        with self.conn:
+            self._assert_current_case(case_id, stage_run_id)
+            placeholders = ",".join("?" for _ in evidence_ids)
+            count = self.conn.execute(
+                f"SELECT count(*) FROM validation_evidence WHERE case_id=? AND stage_run_id=? "
+                f"AND evidence_id IN ({placeholders})", (case_id, stage_run_id, *evidence_ids),
+            ).fetchone()[0]
+            if count != len(set(evidence_ids)):
+                raise ValidationRepositoryError("impact hypothesis cites foreign evidence")
+            digest_input = {key: proposal[key] for key in sorted(proposal)}
+            self.conn.execute(
+                """INSERT INTO validation_impact_hypotheses
+                (hypothesis_id,case_id,stage_run_id,ordinal,gap_axis,path_id,hypothesis_kind,
+                current_score,reason_json,required_preconditions_json,recommended_actions_json,
+                expected_signal_json,supporting_evidence_ids_json,execution_owner,feasibility,
+                potential_impact_json,skill_sha256,validation_profile_sha256,proposal_sha256)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (identifier, case_id, stage_run_id, ordinal, proposal["gap_axis"],
+                 proposal["path_id"], proposal["hypothesis_kind"], proposal["current_score"],
+                 canonical_json(sanitize_metadata(proposal["reason"])),
+                 canonical_json(sanitize_metadata(proposal["required_preconditions"])),
+                 canonical_json(sanitize_metadata(proposal["recommended_actions"])),
+                 canonical_json(sanitize_metadata(proposal["expected_signal"])),
+                 canonical_json(list(evidence_ids)), proposal["execution_owner"],
+                 proposal["feasibility"], canonical_json(sanitize_metadata(proposal["potential_impact"])),
+                 skill_sha256, validation_profile_sha256, canonical_sha256(digest_input)),
             )
         return identifier
 

@@ -184,10 +184,21 @@ class AttackCoordinator:
                    WHERE stage_run_id=? AND status IN ('reserved','running','outcome_unknown')""",
                 (stage_run_id,),
             ).fetchall()
+            reproduction_findings = {
+                row[0] for row in conn.execute(
+                    """SELECT s.finding_id FROM finding_reproduction_specs s
+                    JOIN findings f ON f.finding_id=s.finding_id WHERE f.scan_id=?""",
+                    (scan_id,),
+                )
+            }
         committed = {row[0] for row in rows}
         if set(result.finding_ids) != committed - existing_findings:
             raise AttackCoordinatorError(
                 "Attack Agent completion does not match newly committed findings"
+            )
+        if not set(result.finding_ids) <= reproduction_findings:
+            raise AttackCoordinatorError(
+                "new Attack findings require atomic reproduction specs"
             )
         new_attempts = [row for row in attempt_rows if row[0] not in existing_attempts]
         unresolved = [row[0] for row in attempt_rows if row[1] == "lead"]

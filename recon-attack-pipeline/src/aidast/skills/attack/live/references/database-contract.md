@@ -60,7 +60,14 @@ candidate and submit it as another guarded request only if needed.
 `severity`, `title`, `description`, optional CVSS/CWE fields, and a non-empty
 `evidence` array. Include the IDs of every supporting open lead in
 `lead_attempt_ids`; the helper atomically changes them to `confirmed` and links
-them to the finding. Each evidence item contains role, method, URL, redacted
+them to the finding. It also requires exactly one `reproduction` object:
+
+```json
+{"method":"GET","endpoint_template":"/api/items","injection_location":"query","parameter_name":"object_id","payload_template":{"object_id":"<slot:string>"},"required_identity_roles":[],"source_request_ids":["HTTP ledger request ID"]}
+```
+
+Every source request must be completed, share the supporting attempt's task and
+fingerprint, and have one non-null TargetPolicy digest. Each evidence item contains role, method, URL, redacted
 request headers/body, response status, redacted response headers/body, and
 elapsed ms.
 

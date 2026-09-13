@@ -33,7 +33,8 @@ from aidast.reporting import ReportAgent, ReportError, report_status
 from aidast.scope.paths import ScopePathError, resolve_scope_directory
 from aidast.scope.reader import PlaywrightProgramPageReader, ProgramPageError
 from aidast.scope.models import ScopeAsset, ScopeDocument
-from aidast.validation import ValidationAgent, ValidationError, validation_status
+from aidast.validation import (ValidationAgent, ValidationCoordinatorError,
+                               ValidationError, validation_status)
 
 
 EXECUTION_PROFILES = {
@@ -199,22 +200,30 @@ def _parser() -> argparse.ArgumentParser:
 
     validation = commands.add_parser(
         "validate", aliases=["validation"],
-        help="review Attack findings with the 7-Question and PoC Skill",
+        help="run or inspect shared Validation; legacy offline review remains transitional",
     )
     validation_commands = validation.add_subparsers(
         dest="validation_command", required=True
     )
     validation_run = validation_commands.add_parser(
-        "run", help="review existing Attack evidence and persist Validation.db"
+        "run", help="run shared Validation, or explicitly use the legacy offline selector"
     )
-    validation_run.add_argument("database", type=Path, help="thin Attack.db")
+    validation_run.add_argument("database", type=Path, help="Pipeline.db (shared) or legacy Attack.db")
     validation_run.add_argument(
         "--output-dir", type=Path, default=Path("ValidationRun")
     )
     validation_run.add_argument("--run-id")
-    validation_run.add_argument("--finding-id")
+    validation_run.add_argument("--scan-id")
+    validation_target = validation_run.add_mutually_exclusive_group()
+    validation_target.add_argument("--finding-id")
+    validation_target.add_argument("--chain-id")
+    validation_resume = validation_commands.add_parser(
+        "resume", help="resume one failed shared Validation stage"
+    )
+    validation_resume.add_argument("database", type=Path, help="shared Pipeline.db")
+    validation_resume.add_argument("--stage-run-id", required=True)
     validation_status_parser = validation_commands.add_parser(
-        "status", help="verify and inspect a Validation.db"
+        "status", help="inspect shared Pipeline.db with a selector or legacy Validation.db"
     )
     validation_status_parser.add_argument("database", type=Path)
     validation_status_selection = validation_status_parser.add_mutually_exclusive_group()
@@ -334,6 +343,7 @@ def main(
     *,
     attack_workflow: AttackWorkflow | None = None,
     validation_reviewer: object | None = None,
+    validation_coordinator: object | None = None,
     report_writer: object | None = None,
 ) -> int:
     parser = _parser()
@@ -358,11 +368,15 @@ def main(
             args.policy_only = False
             args.db_path = Path("Recon.db")
             args.surface_path = Path("Surface.json")
-            return _run_recon(args, prepare_attack=True)
+            return _run_recon(
+                args, prepare_attack=True,
+                validation_coordinator=validation_coordinator,
+            )
         if args.command == "attack":
             return _run_attack(args, workflow=attack_workflow)
         if args.command in {"validate", "validation"}:
-            return _run_validation(args, reviewer=validation_reviewer)
+            return _run_validation(args, reviewer=validation_reviewer,
+                                   coordinator=validation_coordinator)
         if args.command == "report":
             return _run_report(args, writer=report_writer)
         parser.error(f"unsupported command: {args.command}")
@@ -379,6 +393,7 @@ def main(
         ReportError,
         ScopePathError,
         ValidationError,
+        ValidationCoordinatorError,
     ) as exc:
         print(f"aidast: {exc}", file=sys.stderr)
         return 1
@@ -429,7 +444,8 @@ def _run_scope(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int
     return 0
 
 
-def _run_recon(args: argparse.Namespace, *, prepare_attack: bool = False) -> int:
+def _run_recon(args: argparse.Namespace, *, prepare_attack: bool = False,
+               validation_coordinator: object | None = None) -> int:
     if args.execute and not (args.target or args.all_targets):
         raise ReconCoordinatorError(
             "--execute requires an explicit --target (repeatable) or --all-targets"
@@ -620,6 +636,13 @@ def _run_recon(args: argparse.Namespace, *, prepare_attack: bool = False) -> int
                         f"{len(chaining_result.execution_ids)} executions, "
                         f"{len(chaining_result.chain_ids)} proposed chains)"
                     )
+                if validation_coordinator is not None:
+                    validation_result = validation_coordinator.run(scan_id)
+                    print(
+                        "Shared Validation completed: "
+                        f"{validation_result.stage_run_id} "
+                        f"({len(validation_result.case_ids)} cases)"
+                    )
         finally:
             executor.conn.close()
     return 0
@@ -746,14 +769,33 @@ def _run_attack(
         raise ReviewPreparationError(str(exc)) from exc
 
 
-def _run_validation(args: argparse.Namespace, *, reviewer: object | None = None) -> int:
+def _run_validation(args: argparse.Namespace, *, reviewer: object | None = None,
+                    coordinator: object | None = None) -> int:
     if args.validation_command == "status":
         if args.scan_id is not None or args.case_id is not None:
             from aidast.validation import shared_validation_status
             result = shared_validation_status(args.database, scan_id=args.scan_id, case_id=args.case_id)
         else:
             result = validation_status(args.database)
+    elif args.validation_command == "resume":
+        if coordinator is None:
+            raise ValidationCoordinatorError(
+                "validate resume requires a trusted injected ValidationCoordinator"
+            )
+        raw = coordinator.resume(args.stage_run_id)
+        result = raw.model_dump(mode="json") if hasattr(raw, "model_dump") else raw
+    elif args.scan_id is not None:
+        if args.run_id is not None:
+            raise ValidationError("--run-id belongs to the legacy offline Validation path")
+        if coordinator is None:
+            raise ValidationCoordinatorError(
+                "shared validate run requires a trusted injected ValidationCoordinator"
+            )
+        raw = coordinator.run(args.scan_id, finding_id=args.finding_id, chain_id=args.chain_id)
+        result = raw.model_dump(mode="json") if hasattr(raw, "model_dump") else raw
     else:
+        if args.chain_id is not None:
+            raise ValidationError("--chain-id requires --scan-id and shared Pipeline.db")
         raw = ValidationAgent(reviewer or CodexValidationReviewer()).run(
             args.database,
             args.output_dir,

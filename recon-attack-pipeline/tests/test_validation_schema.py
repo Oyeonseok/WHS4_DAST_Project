@@ -58,6 +58,20 @@ class ValidationSchemaTests(unittest.TestCase):
         with self.assertRaises(sqlite3.IntegrityError):
             self.conn.execute("UPDATE validation_attempts SET outcome='error'")
 
+    def test_reproduction_spec_is_immutable(self):
+        self.conn.execute("""INSERT INTO finding_reproduction_specs
+            (finding_id,attack_skill_name,endpoint_id,method,endpoint_template,
+             injection_location,parameter_name,payload_template_json,
+             required_identity_roles_json,source_attempt_ids_json,source_request_ids_json,
+             payload_structure_sha256,source_policy_sha256,spec_sha256)
+             VALUES ('finding','hunt-idor','endpoint','GET','/','query','id','{}','[]',
+                     '["attempt"]','["request"]',?,?,?)""",
+            ("a" * 64, "b" * 64, "c" * 64))
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.conn.execute("UPDATE finding_reproduction_specs SET method='POST'")
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.conn.execute("DELETE FROM finding_reproduction_specs")
+
     def test_real_v8_request_shape_migrates_without_backfilling_policy_digest(self):
         path = Path(self.temp.name) / "v8.db"
         with sqlite3.connect(path) as connection:

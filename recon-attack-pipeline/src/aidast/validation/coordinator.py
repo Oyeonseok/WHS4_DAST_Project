@@ -1,0 +1,736 @@
+"""Shared Validation stage coordinator with a narrow, injectable execution boundary."""
+
+from __future__ import annotations
+
+import sqlite3
+from contextlib import closing
+from pathlib import Path
+from typing import Any, Protocol
+
+from pydantic import ValidationError as PydanticValidationError
+
+from aidast.pipeline.lifecycle import finish_stage_run, resume_validation_stage_run, start_stage_run
+from aidast.recon.policy import TargetPolicy
+
+from .decision import DecisionEngine, DecisionInput
+from .integrity import CandidateIntegrityError, CandidateIntegrityGate, ValidatedCandidate
+from .matching import KnownCandidate, KnownMatcher, MATCHER_VERSION, NORMALIZER_VERSION
+from .models import (BlindAssessment, ClaimComparison, ValidationStageResult,
+                     canonical_sha256)
+from .repository import ValidationRepository
+from .reproduction import PrerequisiteResolverPort, ReproductionObservation, ReproductionPort
+
+
+class ValidationCoordinatorError(RuntimeError):
+    pass
+
+
+class ValidationAgentRunner(Protocol):
+    agent_id: str
+
+    def assess(self, blind_case: dict[str, Any], observations: tuple[dict[str, Any], ...],
+               correction: str | None = None) -> BlindAssessment | dict[str, Any]: ...
+
+    def compare(self, claim: dict[str, Any], assessment: dict[str, Any],
+                correction: str | None = None) -> ClaimComparison | dict[str, Any]: ...
+
+
+class PolicyProvider(Protocol):
+    def __call__(self, endpoint: str, method: str) -> TargetPolicy: ...
+
+
+class ValidationCoordinator:
+    """Run deterministic case selection while keeping all network work behind a port."""
+
+    def __init__(self, *, db_path: Path, agent: ValidationAgentRunner | None,
+                 reproduction: ReproductionPort | None, policy_provider: PolicyProvider | None,
+                 prerequisite_resolver: PrerequisiteResolverPort | None = None):
+        self.db_path = Path(db_path).expanduser().resolve()
+        self.agent = agent
+        self.reproduction = reproduction
+        self.policy_provider = policy_provider
+        self.prerequisite_resolver = prerequisite_resolver
+        self.engine = DecisionEngine()
+        self.matcher = KnownMatcher()
+
+    def run(self, scan_id: str, *, finding_id: str | None = None,
+            chain_id: str | None = None) -> ValidationStageResult:
+        if finding_id and chain_id:
+            raise ValidationCoordinatorError("select at most one finding_id or chain_id")
+        if not self.db_path.is_file():
+            raise ValidationCoordinatorError(f"pipeline DB not found: {self.db_path}")
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            conn.execute("PRAGMA foreign_keys=ON")
+            conn.row_factory = sqlite3.Row
+            self._require_scan_ready(conn, scan_id)
+            stage_run_id = start_stage_run(conn, scan_id=scan_id, stage="validation")
+            repo = ValidationRepository(conn)
+            case_ids = self._select_cases(
+                conn, repo, scan_id=scan_id, stage_run_id=stage_run_id,
+                finding_id=finding_id, chain_id=chain_id,
+            )
+            agent_used = False
+            try:
+                for case_id in case_ids:
+                    case = repo.read_case(case_id)
+                    if case["target_kind"] == "chain":
+                        agent_used |= self._run_chain(conn, repo, case, stage_run_id)
+                    else:
+                        agent_used |= self._run_finding(conn, repo, case, stage_run_id)
+                finish_stage_run(conn, stage_run_id, status="completed")
+                statuses = [repo.read_case(case_id)["current_status"] for case_id in case_ids]
+                return ValidationStageResult(
+                    status="completed", scan_id=scan_id, db_path=str(self.db_path),
+                    stage_run_id=stage_run_id, case_ids=tuple(case_ids),
+                    validation_agent_ids=((self.agent.agent_id,) if agent_used and self.agent else ()),
+                    summary={"case_count": len(case_ids), "statuses": {
+                        status: statuses.count(status) for status in sorted(set(statuses))
+                    }},
+                )
+            except Exception as exc:
+                row = conn.execute("SELECT status FROM stage_runs WHERE stage_run_id=?", (stage_run_id,)).fetchone()
+                if row is not None and row[0] == "running":
+                    finish_stage_run(conn, stage_run_id, status="failed", error_message=type(exc).__name__)
+                if isinstance(exc, ValidationCoordinatorError):
+                    raise
+                raise ValidationCoordinatorError(str(exc)) from exc
+
+    def resume(self, stage_run_id: str) -> ValidationStageResult:
+        if not self.db_path.is_file():
+            raise ValidationCoordinatorError(f"pipeline DB not found: {self.db_path}")
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            conn.execute("PRAGMA foreign_keys=ON")
+            conn.row_factory = sqlite3.Row
+            resume_validation_stage_run(conn, stage_run_id)
+            row = conn.execute("SELECT scan_id FROM stage_runs WHERE stage_run_id=?", (stage_run_id,)).fetchone()
+            scan_id = row[0]
+            repo = ValidationRepository(conn)
+            cases = conn.execute(
+                """SELECT case_id FROM validation_cases WHERE latest_stage_run_id=?
+                AND processing_phase IN ('queued','interrupted') ORDER BY created_at,case_id""",
+                (stage_run_id,),
+            ).fetchall()
+            agent_used = False
+            try:
+                for row in cases:
+                    case = repo.read_case(row[0])
+                    if case["processing_phase"] == "interrupted":
+                        conn.execute("UPDATE validation_cases SET processing_phase='queued' WHERE case_id=?", (row[0],))
+                        conn.commit()
+                        case["processing_phase"] = "queued"
+                    if case["target_kind"] == "chain":
+                        agent_used |= self._run_chain(conn, repo, case, stage_run_id)
+                    else:
+                        agent_used |= self._run_finding(conn, repo, case, stage_run_id)
+                finish_stage_run(conn, stage_run_id, status="completed")
+            except Exception as exc:
+                finish_stage_run(conn, stage_run_id, status="failed", error_message=type(exc).__name__)
+                raise ValidationCoordinatorError(str(exc)) from exc
+            case_ids = tuple(row[0] for row in conn.execute(
+                "SELECT case_id FROM validation_cases WHERE latest_stage_run_id=? ORDER BY created_at,case_id",
+                (stage_run_id,),
+            ))
+            return ValidationStageResult(
+                status="completed", scan_id=scan_id, db_path=str(self.db_path),
+                stage_run_id=stage_run_id, case_ids=case_ids,
+                validation_agent_ids=((self.agent.agent_id,) if agent_used and self.agent else ()),
+                summary={"resumed": True, "case_count": len(case_ids)},
+            )
+
+    @staticmethod
+    def _require_scan_ready(conn: sqlite3.Connection, scan_id: str) -> None:
+        scan = conn.execute("SELECT status FROM scans WHERE scan_id=?", (scan_id,)).fetchone()
+        if scan is None:
+            raise ValidationCoordinatorError("unknown scan")
+        chain = conn.execute(
+            """SELECT status FROM stage_runs WHERE scan_id=? AND stage='chaining'
+            ORDER BY created_at DESC LIMIT 1""", (scan_id,),
+        ).fetchone()
+        if chain is None or chain[0] not in {"completed", "skipped"}:
+            raise ValidationCoordinatorError("Validation requires a completed or skipped Chaining stage")
+
+    @staticmethod
+    def _select_cases(conn: sqlite3.Connection, repo: ValidationRepository, *, scan_id: str,
+                      stage_run_id: str, finding_id: str | None, chain_id: str | None) -> list[str]:
+        if finding_id:
+            targets = [("finding", finding_id)]
+        elif chain_id:
+            targets = [("chain", chain_id)]
+        else:
+            targets = [("finding", row[0]) for row in conn.execute(
+                """SELECT finding_id FROM findings WHERE scan_id=?
+                AND status IN ('unreviewed','confirmed') ORDER BY created_at,finding_id""", (scan_id,)
+            )]
+            targets += [("chain", row[0]) for row in conn.execute(
+                """SELECT chain_id FROM finding_chains WHERE scan_id=? AND status='demonstrated'
+                ORDER BY created_at,chain_id""", (scan_id,)
+            )]
+        result = []
+        for kind, target in targets:
+            column = "finding_id" if kind == "finding" else "chain_id"
+            prior = conn.execute(
+                f"SELECT case_id,state_version,processing_phase FROM validation_cases WHERE scan_id=? AND {column}=?",
+                (scan_id, target),
+            ).fetchone()
+            if prior is None:
+                result.append(repo.create_case(scan_id=scan_id, stage_run_id=stage_run_id,
+                                               target_kind=kind, target_id=target))
+            else:
+                if prior["processing_phase"] != "completed":
+                    raise ValidationCoordinatorError("selected Validation case is already in progress")
+                repo.begin_revalidation(prior["case_id"], stage_run_id=stage_run_id,
+                                        expected_version=prior["state_version"])
+                result.append(prior["case_id"])
+        return result
+
+    def _run_finding(self, conn: sqlite3.Connection, repo: ValidationRepository,
+                     case: dict[str, Any], stage_run_id: str) -> bool:
+        version = case["state_version"]
+        try:
+            candidate = CandidateIntegrityGate(conn).validate_finding(
+                case_id=case["case_id"], scan_id=case["scan_id"], finding_id=case["finding_id"]
+            )
+        except CandidateIntegrityError as exc:
+            repo.finalize(case["case_id"], stage_run_id=stage_run_id, expected_version=version,
+                          status="INCONCLUSIVE", decision={"reason": "candidate_integrity",
+                          "failed_check": exc.check}, evidence_ids=())
+            return False
+        match = self.matcher.match(
+            vuln_class=candidate.vuln_class, endpoint_template=candidate.endpoint_template,
+            parameter_name=candidate.parameter_name, payload_template=candidate.payload_template,
+            candidates=self._known_candidates(conn, candidate),
+        )
+        if match:
+            repo.finalize(
+                case["case_id"], stage_run_id=stage_run_id, expected_version=version,
+                status="KNOWN", decision={"reason": "known_match", "matcher_version": MATCHER_VERSION,
+                "normalizer_version": NORMALIZER_VERSION, "source_case_id": match.source_case_id,
+                "similarity": match.similarity}, evidence_ids=(),
+                known_source_case_id=match.source_case_id, known_similarity=match.similarity,
+            )
+            return False
+        return self._run_candidate(
+            conn, repo, case, stage_run_id, candidate, allow_impact_hypotheses=True
+        )
+
+    def _run_candidate(self, conn: sqlite3.Connection, repo: ValidationRepository,
+                       case: dict[str, Any], stage_run_id: str,
+                       candidate: ValidatedCandidate, *,
+                       allow_impact_hypotheses: bool) -> bool:
+        version = case["state_version"]
+        if self.policy_provider is None:
+            raise ValidationCoordinatorError("replay requires an injected policy provider")
+        blind_view = candidate.staged.blind_view()
+        try:
+            policy = self.policy_provider(blind_view["endpoint"], blind_view["method"])
+        except (LookupError, ValueError):
+            repo.finalize(case["case_id"], stage_run_id=stage_run_id, expected_version=version,
+                          status="OUT_OF_SCOPE", decision={"reason": "current_policy_rejected"},
+                          evidence_ids=())
+            return False
+        policy_digest = canonical_sha256(policy.model_dump(mode="json"))
+        if not policy.allows_url(blind_view["endpoint"], method=blind_view["method"]):
+            repo.finalize(case["case_id"], stage_run_id=stage_run_id, expected_version=version,
+                          status="OUT_OF_SCOPE", decision={"reason": "current_policy_rejected"},
+                          evidence_ids=())
+            return False
+        resuming = case.get("blind_case_sha256") is not None
+        if resuming:
+            expected = {
+                "blind_case_sha256": candidate.staged.blind_case_sha256,
+                "attack_claim_sha256": candidate.staged.attack_claim_sha256,
+                "skill_sha256": candidate.profile.attack_skill_sha256,
+                "validation_profile_sha256": candidate.profile.profile_sha256,
+                "source_policy_sha256": candidate.source_policy_sha256,
+            }
+            if any(case.get(key) != value for key, value in expected.items()):
+                raise ValidationCoordinatorError("staged Validation inputs changed before resume")
+            if case.get("blind_assessment_sha256") is None:
+                repo.resume_blind_case(
+                    case["case_id"], stage_run_id=stage_run_id, expected_version=version,
+                    current_policy_sha256=policy_digest,
+                )
+            else:
+                repo.resume_unblinding(
+                    case["case_id"], stage_run_id=stage_run_id, expected_version=version,
+                    current_policy_sha256=policy_digest,
+                )
+        else:
+            version = repo.stage_blind_case(
+                case["case_id"], stage_run_id=stage_run_id, expected_version=version,
+                attack_skill_name=blind_view["attack_skill_name"],
+                skill_sha256=blind_view["attack_skill_sha256"],
+                validation_profile_sha256=blind_view["validation_profile_sha256"],
+                source_policy_sha256=candidate.source_policy_sha256,
+                current_policy_sha256=policy_digest, blind_case_sha256=candidate.staged.blind_case_sha256,
+                attack_claim_sha256=candidate.staged.attack_claim_sha256,
+            )
+        frozen_sha = case.get("blind_assessment_sha256") if resuming else None
+        if frozen_sha is not None:
+            assessment, assessment_evidence = self._load_frozen_assessment(
+                conn, case["case_id"], stage_run_id, frozen_sha
+            )
+            assessment_sha = candidate.staged.freeze_assessment(assessment)
+            if assessment_sha != frozen_sha:
+                raise ValidationCoordinatorError("stored BlindAssessment digest mismatch")
+            observations, evidence_ids = self._observations_for_assessment(
+                conn, case["case_id"], stage_run_id, assessment
+            )
+            evidence_ids.append(assessment_evidence)
+            development_used = bool(conn.execute(
+                "SELECT 1 FROM validation_development_actions WHERE case_id=? AND stage_run_id=? LIMIT 1",
+                (case["case_id"], stage_run_id),
+            ).fetchone())
+        else:
+            if self.agent is None or self.reproduction is None:
+                raise ValidationCoordinatorError("blind replay requires injected Agent and ReproductionPort")
+            recovered = self._completed_batch(conn, case["case_id"], stage_run_id) if resuming else None
+            if recovered is None:
+                batch_no = 1 if not resuming else conn.execute(
+                    "SELECT COALESCE(max(batch_no),0)+1 FROM validation_attempts WHERE case_id=? AND stage_run_id=?",
+                    (case["case_id"], stage_run_id),
+                ).fetchone()[0]
+                observations, evidence_ids = self._execute_batch(
+                    repo, candidate, stage_run_id, policy=policy, batch_no=batch_no
+                )
+            else:
+                observations, evidence_ids = recovered
+            target_values = [item["signal_observed"] for item in observations if item["attempt_kind"] == "target"]
+            if len(target_values) == 3 and any(target_values) and not all(target_values):
+                extra, extra_evidence = self._execute_batch(
+                    repo, candidate, stage_run_id, policy=policy, extra_only=True,
+                    batch_no=observations[0]["batch_no"],
+                )
+                observations += extra
+                evidence_ids += extra_evidence
+            try:
+                assessment = self._assessment(blind_view, tuple(observations))
+            except ValidationCoordinatorError:
+                repo.finalize(
+                    case["case_id"], stage_run_id=stage_run_id, expected_version=version,
+                    status="INCONCLUSIVE", decision={"reason": "agent_schema_invalid",
+                    "phase": "blind_assessment"}, evidence_ids=evidence_ids,
+                )
+                return True
+            self._validate_assessment_refs(assessment, case["case_id"], evidence_ids, observations)
+            development_used = False
+            if assessment.blocker_axis in {
+                "identity_auth", "state_setup", "encoding_transport", "timing_concurrency"
+            }:
+                development_used = True
+                succeeded = self._develop(repo, candidate, stage_run_id, assessment.blocker_axis)
+                if succeeded:
+                    repo.set_processing_phase(case["case_id"], stage_run_id=stage_run_id,
+                                              phase="blind_replay")
+                    observations, evidence_ids = self._execute_batch(
+                        repo, candidate, stage_run_id, policy=policy, batch_no=2
+                    )
+                    try:
+                        assessment = self._assessment(blind_view, tuple(observations))
+                    except ValidationCoordinatorError:
+                        repo.finalize(
+                            case["case_id"], stage_run_id=stage_run_id, expected_version=version,
+                            status="INCONCLUSIVE", decision={"reason": "agent_schema_invalid",
+                            "phase": "post_development_blind_assessment"},
+                            evidence_ids=evidence_ids,
+                        )
+                        return True
+                    self._validate_assessment_refs(
+                        assessment, case["case_id"], evidence_ids, observations
+                    )
+            assessment_sha = candidate.staged.freeze_assessment(assessment)
+            assessment_evidence = repo.add_evidence(
+                case_id=case["case_id"], stage_run_id=stage_run_id,
+                evidence_kind="blind_assessment", details=assessment.model_dump(mode="json"),
+                content_sha256=assessment_sha, content_length=len(assessment.model_dump_json().encode()),
+            )
+            evidence_ids.append(assessment_evidence)
+            version = repo.freeze_blind_assessment(
+                case["case_id"], stage_run_id=stage_run_id, expected_version=version,
+                assessment_sha256=assessment_sha,
+            )
+        gate = CandidateIntegrityGate(conn)
+        if case["target_kind"] == "chain":
+            current_candidate = gate.validate_chain(
+                case_id=case["case_id"], scan_id=case["scan_id"], chain_id=case["chain_id"]
+            )
+        else:
+            current_candidate = gate.validate_finding(
+                case_id=case["case_id"], scan_id=case["scan_id"], finding_id=case["finding_id"]
+            )
+        claim = candidate.staged.reveal_claim(current_candidate.staged._attack_claim)
+        stored_comparison = self._load_stored_comparison(
+            conn, case["case_id"], stage_run_id, assessment_sha,
+            candidate.staged.attack_claim_sha256,
+        )
+        if stored_comparison is None:
+            if self.agent is None:
+                raise ValidationCoordinatorError("claim comparison requires an injected Agent")
+            try:
+                comparison = self._comparison(claim, assessment.model_dump(mode="json"))
+            except ValidationCoordinatorError:
+                repo.finalize(
+                    case["case_id"], stage_run_id=stage_run_id, expected_version=version,
+                    status="INCONCLUSIVE", decision={"reason": "agent_schema_invalid",
+                    "phase": "claim_comparison"}, evidence_ids=evidence_ids,
+                )
+                return True
+        else:
+            comparison, comparison_evidence = stored_comparison
+        if comparison.case_id != case["case_id"] or comparison.blind_assessment_sha256 != assessment_sha \
+                or comparison.attack_claim_sha256 != candidate.staged.attack_claim_sha256:
+            raise ValidationCoordinatorError("claim comparison digest or case mismatch")
+        if not set(comparison.validation_evidence_ids) <= set(evidence_ids):
+            raise ValidationCoordinatorError("claim comparison cites foreign Validation evidence")
+        if not set(comparison.attack_evidence_ids) <= set(claim["attack_evidence_ids"]):
+            raise ValidationCoordinatorError("claim comparison cites foreign Attack evidence")
+        if stored_comparison is None:
+            comparison_sha = canonical_sha256(comparison.model_dump(mode="json"))
+            comparison_evidence = repo.add_evidence(
+                case_id=case["case_id"], stage_run_id=stage_run_id,
+                evidence_kind="claim_comparison", details=comparison.model_dump(mode="json"),
+                content_sha256=comparison_sha, content_length=len(comparison.model_dump_json().encode()),
+            )
+        evidence_ids.append(comparison_evidence)
+        targets = tuple(bool(item["signal_observed"]) for item in observations if item["attempt_kind"] == "target")
+        positive = all(bool(item["signal_observed"]) for item in observations
+                       if item["attempt_kind"] == "positive_control")
+        negative = not any(bool(item["signal_observed"]) for item in observations
+                           if item["attempt_kind"] == "negative_control")
+        impact_tuple = (
+            assessment.impact_boundary.score, assessment.impact_sensitivity.score,
+            assessment.impact_actor_requirements.score,
+        )
+        from .impact import evaluate_impact
+        impact_result = evaluate_impact(*impact_tuple)
+        status = self.engine.decide(DecisionInput(
+            policy_allowed=all(item["policy_allowed"] for item in observations),
+            positive_control_passed=positive, negative_control_clear=negative,
+            explicit_non_exploit_evidence=any(
+                item["attempt_kind"] == "target" and item["explicit_non_exploit"]
+                for item in observations
+            ),
+            topology_or_unknown_cause=(assessment.reproduced is None
+                                       or assessment.blocker_axis == "environment_topology"),
+            resolvable_blocker=assessment.blocker_axis in {
+                "identity_auth", "state_setup", "encoding_transport", "timing_concurrency"
+            }, development_used=development_used, target_observations=targets,
+            semantic_conflict=comparison.alignment == "conflicting",
+            attack_has_positive_evidence=bool(comparison.attack_evidence_ids), impact=impact_result,
+        ))
+        if status == "DEVELOPING":
+            status = "BLOCKED"
+        decision = {
+            "blind_assessment": assessment.model_dump(mode="json"),
+            "claim_comparison": comparison.model_dump(mode="json"),
+            "evidence_ids": evidence_ids,
+        }
+        if status == "UNDERPOWERED" and allow_impact_hypotheses:
+            from .gaps import ImpactGapAnalyzer
+            for ordinal, proposal in enumerate(ImpactGapAnalyzer().analyze(
+                profile=candidate.profile.profile, impact=impact_result,
+                evidence_ids=assessment.evidence_ids,
+            ), 1):
+                repo.add_impact_hypothesis(
+                    case_id=case["case_id"], stage_run_id=stage_run_id, ordinal=ordinal,
+                    proposal=proposal, skill_sha256=candidate.profile.attack_skill_sha256,
+                    validation_profile_sha256=candidate.profile.profile_sha256,
+                )
+        repo.finalize(
+            case["case_id"], stage_run_id=stage_run_id, expected_version=version,
+            status=status, decision=decision, evidence_ids=evidence_ids,
+            impact=impact_tuple if status in {"CONFIRMED", "UNDERPOWERED"} else None,
+        )
+        return True
+
+    def _execute_batch(self, repo: ValidationRepository, candidate: ValidatedCandidate,
+                       stage_run_id: str, *, policy: TargetPolicy, extra_only: bool = False,
+                       batch_no: int = 1) -> tuple[list[dict], list[str]]:
+        plan = [("target", 4), ("target", 5)] if extra_only else [
+            ("positive_control", 1), ("negative_control", 1),
+            ("target", 1), ("target", 2), ("target", 3),
+        ]
+        observations, evidence_ids = [], []
+        for kind, ordinal in plan:
+            attempt = repo.add_attempt(
+                case_id=candidate.case_id, stage_run_id=stage_run_id, batch_no=batch_no,
+                attempt_kind=kind, ordinal=ordinal,
+                signal_type=candidate.profile.profile.signal_types[0],
+                outcome="error", finished=False,
+            )
+            raw = self.reproduction.execute(
+                candidate.staged._blind_case, attempt_kind=kind,
+                batch_no=batch_no, ordinal=ordinal, attempt_id=attempt,
+                db_path=self.db_path, scan_id=candidate.scan_id,
+                stage_run_id=stage_run_id, case_id=candidate.case_id, policy=policy,
+            )
+            observation = raw if isinstance(raw, ReproductionObservation) else ReproductionObservation.model_validate(raw)
+            if observation.signal_type not in candidate.profile.profile.signal_types:
+                raise ValidationCoordinatorError("ReproductionPort returned a signal outside the profile")
+            repo.complete_attempt(
+                attempt, outcome=observation.outcome,
+                signal_observed=observation.signal_observed,
+                blocker_axis=observation.blocker_axis,
+                observation={**observation.details, "validation_runtime": {
+                    "explicit_non_exploit": observation.explicit_non_exploit,
+                    "policy_allowed": observation.policy_allowed,
+                }},
+            )
+            evidence = repo.add_evidence(
+                case_id=candidate.case_id, stage_run_id=stage_run_id, attempt_id=attempt,
+                evidence_kind="observation", details=observation.details,
+                content_sha256=observation.content_sha256, content_length=observation.content_length,
+            )
+            observations.append({"attempt_id": attempt, "evidence_id": evidence,
+                                 "attempt_kind": kind, "batch_no": batch_no,
+                                 **observation.model_dump(mode="json")})
+            evidence_ids.append(evidence)
+        return observations, evidence_ids
+
+    @staticmethod
+    def _completed_batch(conn: sqlite3.Connection, case_id: str,
+                         stage_run_id: str) -> tuple[list[dict], list[str]] | None:
+        batches = [row[0] for row in conn.execute(
+            """SELECT batch_no FROM validation_attempts WHERE case_id=? AND stage_run_id=?
+            GROUP BY batch_no ORDER BY batch_no DESC""", (case_id, stage_run_id),
+        )]
+        required = {("positive_control", 1), ("negative_control", 1),
+                    ("target", 1), ("target", 2), ("target", 3)}
+        for batch in batches:
+            rows = conn.execute(
+                """SELECT a.attempt_id,a.attempt_kind,a.ordinal,a.signal_type,a.outcome,
+                a.signal_observed,a.blocker_axis,a.observation_json,e.evidence_id,
+                e.content_sha256,e.content_length FROM validation_attempts a
+                JOIN validation_evidence e ON e.attempt_id=a.attempt_id
+                WHERE a.case_id=? AND a.stage_run_id=? AND a.batch_no=?
+                AND a.finished_at IS NOT NULL AND a.outcome!='outcome_unknown'
+                ORDER BY a.attempt_kind,a.ordinal""", (case_id, stage_run_id, batch),
+            ).fetchall()
+            if not required <= {(row["attempt_kind"], row["ordinal"]) for row in rows}:
+                continue
+            observations, evidence_ids = [], []
+            for row in rows:
+                import json
+                details = json.loads(row["observation_json"])
+                runtime = details.pop("validation_runtime", {})
+                observations.append({
+                    "attempt_id": row["attempt_id"], "evidence_id": row["evidence_id"],
+                    "attempt_kind": row["attempt_kind"], "batch_no": batch,
+                    "outcome": row["outcome"],
+                    "signal_type": row["signal_type"],
+                    "signal_observed": bool(row["signal_observed"]) if row["signal_observed"] is not None else None,
+                    "blocker_axis": row["blocker_axis"], "details": details,
+                    "content_sha256": row["content_sha256"], "content_length": row["content_length"],
+                    "explicit_non_exploit": bool(runtime.get("explicit_non_exploit", False)),
+                    "policy_allowed": bool(runtime.get("policy_allowed", True)),
+                })
+                evidence_ids.append(row["evidence_id"])
+            return observations, evidence_ids
+        return None
+
+    @staticmethod
+    def _load_frozen_assessment(conn: sqlite3.Connection, case_id: str,
+                                stage_run_id: str,
+                                expected_sha256: str) -> tuple[BlindAssessment, str]:
+        rows = conn.execute(
+            """SELECT evidence_id,details_json,content_sha256 FROM validation_evidence
+            WHERE case_id=? AND stage_run_id=? AND evidence_kind='blind_assessment'
+            AND content_sha256=? ORDER BY created_at,evidence_id""",
+            (case_id, stage_run_id, expected_sha256),
+        ).fetchall()
+        if len(rows) != 1:
+            raise ValidationCoordinatorError("frozen BlindAssessment evidence is missing or ambiguous")
+        try:
+            assessment = BlindAssessment.model_validate_json(rows[0]["details_json"])
+        except (PydanticValidationError, ValueError) as exc:
+            raise ValidationCoordinatorError("stored BlindAssessment failed schema validation") from exc
+        if canonical_sha256(assessment.model_dump(mode="json")) != expected_sha256:
+            raise ValidationCoordinatorError("stored BlindAssessment content digest mismatch")
+        return assessment, rows[0]["evidence_id"]
+
+    @classmethod
+    def _observations_for_assessment(cls, conn: sqlite3.Connection, case_id: str,
+                                     stage_run_id: str,
+                                     assessment: BlindAssessment) -> tuple[list[dict], list[str]]:
+        attempt_ids = assessment.control_attempt_ids + assessment.target_attempt_ids
+        if not attempt_ids or len(attempt_ids) != len(set(attempt_ids)):
+            raise ValidationCoordinatorError("frozen BlindAssessment has invalid attempt references")
+        placeholders = ",".join("?" for _ in attempt_ids)
+        rows = conn.execute(
+            f"""SELECT a.attempt_id,a.attempt_kind,a.batch_no,a.signal_type,a.outcome,
+            a.signal_observed,a.blocker_axis,a.observation_json,e.evidence_id,
+            e.content_sha256,e.content_length FROM validation_attempts a
+            JOIN validation_evidence e ON e.attempt_id=a.attempt_id
+            AND e.evidence_kind='observation'
+            WHERE a.case_id=? AND a.stage_run_id=? AND a.attempt_id IN ({placeholders})
+            AND a.finished_at IS NOT NULL AND a.outcome!='outcome_unknown'
+            ORDER BY a.batch_no,a.attempt_kind,a.ordinal""",
+            (case_id, stage_run_id, *attempt_ids),
+        ).fetchall()
+        if len(rows) != len(attempt_ids) or len({row["attempt_id"] for row in rows}) != len(attempt_ids):
+            raise ValidationCoordinatorError("frozen BlindAssessment attempt evidence is incomplete or ambiguous")
+        observations, evidence_ids = [], []
+        for row in rows:
+            import json
+            details = json.loads(row["observation_json"])
+            runtime = details.pop("validation_runtime", {})
+            observations.append({
+                "attempt_id": row["attempt_id"], "evidence_id": row["evidence_id"],
+                "attempt_kind": row["attempt_kind"], "batch_no": row["batch_no"],
+                "outcome": row["outcome"], "signal_type": row["signal_type"],
+                "signal_observed": bool(row["signal_observed"])
+                if row["signal_observed"] is not None else None,
+                "blocker_axis": row["blocker_axis"], "details": details,
+                "content_sha256": row["content_sha256"],
+                "content_length": row["content_length"],
+                "explicit_non_exploit": bool(runtime.get("explicit_non_exploit", False)),
+                "policy_allowed": bool(runtime.get("policy_allowed", True)),
+            })
+            evidence_ids.append(row["evidence_id"])
+        cls._validate_assessment_refs(assessment, case_id, evidence_ids, observations)
+        return observations, evidence_ids
+
+    @staticmethod
+    def _load_stored_comparison(conn: sqlite3.Connection, case_id: str,
+                                stage_run_id: str, assessment_sha256: str,
+                                attack_claim_sha256: str) -> tuple[ClaimComparison, str] | None:
+        rows = conn.execute(
+            """SELECT evidence_id,details_json,content_sha256 FROM validation_evidence
+            WHERE case_id=? AND stage_run_id=? AND evidence_kind='claim_comparison'
+            ORDER BY created_at,evidence_id""", (case_id, stage_run_id),
+        ).fetchall()
+        if not rows:
+            return None
+        if len(rows) != 1:
+            raise ValidationCoordinatorError("stored claim comparison evidence is ambiguous")
+        try:
+            comparison = ClaimComparison.model_validate_json(rows[0]["details_json"])
+        except (PydanticValidationError, ValueError) as exc:
+            raise ValidationCoordinatorError("stored claim comparison failed schema validation") from exc
+        if canonical_sha256(comparison.model_dump(mode="json")) != rows[0]["content_sha256"]:
+            raise ValidationCoordinatorError("stored claim comparison content digest mismatch")
+        if (comparison.case_id != case_id
+                or comparison.blind_assessment_sha256 != assessment_sha256
+                or comparison.attack_claim_sha256 != attack_claim_sha256):
+            raise ValidationCoordinatorError("stored claim comparison binding mismatch")
+        return comparison, rows[0]["evidence_id"]
+
+    def _develop(self, repo: ValidationRepository, candidate: ValidatedCandidate,
+                 stage_run_id: str, blocker_axis: str) -> bool:
+        repo.set_processing_phase(candidate.case_id, stage_run_id=stage_run_id, phase="developing")
+        actions = [item for item in candidate.profile.profile.allowed_development_actions
+                   if item.blocker_axis == blocker_axis][:2]
+        if not actions or self.prerequisite_resolver is None:
+            return False
+        for ordinal, action in enumerate(actions, 1):
+            action_id = repo.add_development_action(
+                case_id=candidate.case_id, stage_run_id=stage_run_id, ordinal=ordinal,
+                blocker_axis=blocker_axis, action_type=action.action_type,
+            )
+            try:
+                result = self.prerequisite_resolver.perform(
+                    candidate.staged._blind_case, action_type=action.action_type,
+                    blocker_axis=blocker_axis,
+                )
+                succeeded = bool(result.get("succeeded")) if isinstance(result, dict) else False
+                repo.finish_development_action(action_id, succeeded=succeeded,
+                                               details=result if isinstance(result, dict) else {})
+            except Exception as exc:
+                repo.finish_development_action(
+                    action_id, succeeded=False, details={"error_type": type(exc).__name__}
+                )
+                succeeded = False
+            if succeeded:
+                return True
+        return False
+
+    def _assessment(self, blind: dict[str, Any], observations: tuple[dict[str, Any], ...]) -> BlindAssessment:
+        return self._agent_call("assess", blind, observations, model=BlindAssessment)
+
+    def _comparison(self, claim: dict[str, Any], assessment: dict[str, Any]) -> ClaimComparison:
+        return self._agent_call("compare", claim, assessment, model=ClaimComparison)
+
+    def _agent_call(self, method: str, first: Any, second: Any, *, model):
+        correction = None
+        for attempt in range(2):
+            try:
+                raw = getattr(self.agent, method)(first, second, correction=correction)
+                return raw if isinstance(raw, model) else model.model_validate(raw)
+            except (PydanticValidationError, TypeError, ValueError):
+                if attempt:
+                    raise ValidationCoordinatorError(f"Agent {method} output failed schema correction") from None
+                correction = "The previous object failed schema validation; correct only invalid fields."
+        raise AssertionError("unreachable")
+
+    @staticmethod
+    def _validate_assessment_refs(assessment: BlindAssessment, case_id: str,
+                                  evidence_ids: list[str], observations: list[dict]) -> None:
+        if assessment.case_id != case_id or not set(assessment.evidence_ids) <= set(evidence_ids):
+            raise ValidationCoordinatorError("blind assessment cites foreign case or evidence")
+        target_ids = {item["attempt_id"] for item in observations
+                      if item["attempt_kind"] == "target"}
+        control_ids = {item["attempt_id"] for item in observations
+                       if item["attempt_kind"] != "target"}
+        if set(assessment.target_attempt_ids) != target_ids \
+                or set(assessment.control_attempt_ids) != control_ids:
+            raise ValidationCoordinatorError("blind assessment must cite the complete replay batch")
+        for axis in (assessment.impact_boundary, assessment.impact_sensitivity,
+                     assessment.impact_actor_requirements):
+            if not set(axis.evidence_ids) <= set(evidence_ids):
+                raise ValidationCoordinatorError("impact proposal cites foreign evidence")
+
+    @staticmethod
+    def _known_candidates(conn: sqlite3.Connection, candidate: ValidatedCandidate) -> tuple[KnownCandidate, ...]:
+        rows = conn.execute(
+            """SELECT c.case_id,f.vuln_type,s.endpoint_template,s.parameter_name,s.payload_template_json
+            FROM validation_cases c JOIN findings f ON f.finding_id=c.finding_id
+            JOIN finding_reproduction_specs s ON s.finding_id=f.finding_id
+            WHERE c.scan_id=? AND c.current_status='CONFIRMED' AND c.processing_phase='completed'
+            AND c.decision_stage_run_id=c.latest_stage_run_id AND c.case_id!=?""",
+            (candidate.scan_id, candidate.case_id),
+        ).fetchall()
+        import json
+        return tuple(KnownCandidate(row[0], row[1], row[2], row[3], json.loads(row[4])) for row in rows)
+
+    def _run_chain(self, conn: sqlite3.Connection, repo: ValidationRepository,
+                   case: dict[str, Any], stage_run_id: str) -> bool:
+        statuses = [row[0] for row in conn.execute(
+            """SELECT c.current_status FROM finding_chain_nodes n
+            LEFT JOIN validation_cases c ON c.finding_id=n.finding_id AND c.scan_id=?
+            WHERE n.chain_id=? ORDER BY n.position""", (case["scan_id"], case["chain_id"]),
+        )]
+        if not statuses:
+            status = "INCONCLUSIVE"
+        elif "DISPROVEN" in statuses:
+            status = "DISPROVEN"
+        elif "OUT_OF_SCOPE" in statuses:
+            status = "OUT_OF_SCOPE"
+        elif "BLOCKED" in statuses:
+            status = "BLOCKED"
+        elif any(status is None or status in {"CONTESTED", "UNDERPOWERED", "INCONCLUSIVE"}
+                 for status in statuses):
+            status = "INCONCLUSIVE"
+        else:
+            try:
+                candidate = CandidateIntegrityGate(conn).validate_chain(
+                    case_id=case["case_id"], scan_id=case["scan_id"],
+                    chain_id=case["chain_id"],
+                )
+            except CandidateIntegrityError as exc:
+                repo.finalize(
+                    case["case_id"], stage_run_id=stage_run_id,
+                    expected_version=case["state_version"], status="INCONCLUSIVE",
+                    decision={"reason": "chain_candidate_integrity",
+                              "failed_check": exc.check, "node_statuses": statuses},
+                    evidence_ids=(),
+                )
+                return False
+            return self._run_candidate(
+                conn, repo, case, stage_run_id, candidate,
+                allow_impact_hypotheses=False,
+            )
+        repo.finalize(case["case_id"], stage_run_id=stage_run_id,
+                      expected_version=case["state_version"], status=status,
+                      decision={"reason": "chain_node_gate", "node_statuses": statuses},
+                      evidence_ids=())
+        return False

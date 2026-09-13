@@ -283,6 +283,14 @@ class NativeAttackDatabaseCliTests(unittest.TestCase):
             self.assertFalse(duplicate["committed"])
             self.assertEqual(duplicate["attempt_id"], attempt_result["attempt_id"])
 
+            with closing(sqlite3.connect(database)) as conn, conn:
+                conn.execute("""INSERT INTO attack_http_requests
+                    (request_id,scan_id,stage_run_id,task_id,policy_id,policy_sha256,
+                     method,url,request_fingerprint,status,response_status,response_bytes,scheduled_at)
+                    VALUES ('http_fixture','scan_native',?,?,'policy',?,'GET',
+                    'https://example.test/api/items',?,'completed',200,5,0)""",
+                    (stage_run_id, task_id, "d" * 64, "a" * 64))
+
             finding = root / "finding.json"
             finding.write_text(json.dumps({
                 "scan_id": "scan_native", "endpoint_id": endpoint_id,
@@ -290,6 +298,13 @@ class NativeAttackDatabaseCliTests(unittest.TestCase):
                 "title": "Untrusted origin accepted",
                 "description": "The observed response reflected an untrusted origin.",
                 "lead_attempt_ids": [attempt_result["attempt_id"]],
+                "reproduction": {
+                    "method": "GET", "endpoint_template": "/api/items",
+                    "injection_location": "query", "parameter_name": "object_id",
+                    "payload_template": {"object_id": "<slot:string>"},
+                    "required_identity_roles": [],
+                    "source_request_ids": ["http_fixture"],
+                },
                 "evidence": [{
                     "role": "unauthenticated", "method": "GET",
                     "url": "https://example.test/api/items", "response_status": 200,

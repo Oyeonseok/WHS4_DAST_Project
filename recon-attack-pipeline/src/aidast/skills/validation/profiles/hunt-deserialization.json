@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "attack_skill_name": "hunt-deserialization",
+  "signal_types": [
+    "error_signature"
+  ],
+  "target_expected_signal": {
+    "kind": "profile_defined_error_signature"
+  },
+  "control_positive": {
+    "payload_template": {
+      "mode": "known_safe_positive_control"
+    },
+    "expected_signal": {
+      "kind": "error_signature_channel_operational"
+    },
+    "signal_type": "error_signature"
+  },
+  "control_negative": {
+    "payload_template": {
+      "mode": "inert_negative_control"
+    },
+    "expected_signal": {
+      "kind": "no_target_signal"
+    }
+  },
+  "impact_rules": {
+    "boundary": "cite current-stage evidence for the crossed trust boundary",
+    "sensitivity": "cite current-stage evidence for exposed data or state change",
+    "actor_requirements": "cite current-stage evidence for the required attacker role"
+  },
+  "allowed_development_actions": [
+    {
+      "action_type": "refresh_credential",
+      "blocker_axis": "identity_auth"
+    },
+    {
+      "action_type": "adjust_transport_encoding",
+      "blocker_axis": "encoding_transport"
+    }
+  ],
+  "impact_expansion_paths": []
+}

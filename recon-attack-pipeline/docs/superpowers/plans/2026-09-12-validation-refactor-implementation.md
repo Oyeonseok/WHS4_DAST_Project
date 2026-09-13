@@ -1,10 +1,15 @@
 # Validation 재구조화 구현 계획 — 데이터 무결성과 보고서 연동
 
 - 작성일: 2026-09-12
-- 상태: 부분 범위 구현 진행 중
+- 상태: 실행 계층 1차 연결 진행 중
 - 기준 명세: [Validation 재구조화 설계](../specs/2026-09-12-validation-refactor-design.md)
 - 대상: `recon-attack-pipeline`
-- 구현 여부: shared DB v9, DTO, 결정론적 판정, Repository, 복구, Report v2와 status CLI 구현됨. 실제 재현 실행 계층은 미구현이다.
+- 구현 여부: shared DB v9, DTO, 결정론적 판정, Repository, 복구, Report v2,
+  status CLI에 이어 Candidate gate, profile resolver, injected Coordinator,
+  ReproductionPort와 Validation request ledger의 1차 실행 경로, 완료 batch 및
+  고정 BlindAssessment 이후의 실행 재개가 구현됐다.
+  demonstrated Chain의 injected end-to-end Blind replay도 구현됐다.
+  native Agent·real 취약점별 adapter·pipeline 자동 실행은 미구현이다.
 
 ## 구현 진행 기록
 
@@ -19,10 +24,24 @@
 - `src/aidast/validation/source.py`: 기존 오프라인 reader에 연결. 안전한 형식이나 예산을 벗어나는 메타데이터는 원문 대신 생략 안내를 반환한다.
 - `src/aidast/reporting/case_runtime.py`: 현재 CONFIRMED case의 read-only source snapshot, Report.db v2, KNOWN redirect, CONTESTED review-only, stale 판정.
 - `src/aidast/validation/status.py`, `src/aidast/cli.py`: scan/case status와 `report run Pipeline.db --case-id`.
+- `src/aidast/validation/{integrity,profiles}.py`: Attack reproduction spec의
+  provenance gate와 packaged Hunt Skill 58개 profile coverage 검증.
+- `src/aidast/validation/{coordinator,reproduction}.py`: injected 실행 포트 기반
+  case 선택, control/target batch, 제한된 retry/development, Blind/unblind와 durable
+  case 격리.
+- `src/aidast/validation/{request_broker,http_adapter,policy}.py`: current policy를
+  매 hop 재검사하는 Validation ledger 및 실제 transport adapter 계약.
+- `src/aidast/validation/gaps.py`: profile과 현재 evidence에 제한된 비실행
+  impact expansion proposal.
+- `src/aidast/attack/db_cli.py`: native Finding과 reproduction spec의 원자적 producer.
 
 패턴 기반 제거는 이름이나 문맥이 없는 임의의 비밀값을 식별한다고 보장하지 않는다. 기존 source에서 공개 context가 달라지면 기존 digest 검증이 이를 감지할 수 있으며, 저장된 과거 결과를 자동으로 재작성하지 않는다.
 
-실제 ReproductionPort, Validation request broker/ledger writer, profile 전체, restricted helper, native Agent/Coordinator, chain replay와 pipeline 자동 실행은 아직 구현되지 않았다. Blind DTO는 구현됐지만 claim 공개 시점의 실행 권한 제어는 Coordinator가 없으므로 아직 연결되지 않았다.
+ReproductionPort, request broker/ledger, profile 파일 전체와 injected Coordinator는
+구현됐다. completed node만 허용하는 demonstrated Chain replay도 같은 Coordinator에
+연결됐다. 다만 profile 대부분은 보수적인 공통 초안이며 native 단일 Agent,
+취약점별 real adapter와 pipeline 자동 실행은 아직 구현되지 않았다.
+Blind claim 공개 시점은 Coordinator가 assessment digest를 먼저 고정하도록 연결됐다.
 
 검증 명령은 macOS의 심볼릭 링크 임시 경로 문제를 피하도록 실제 경로를 지정한다.
 
@@ -36,7 +55,7 @@ TMPDIR=/private/tmp PYTHONPATH=src:tests .venv/bin/python -m unittest test_valid
 
 이 계획은 명세의 shared DB, 증거 무결성, 정보 접근 제한, 상태 보존, Report eligibility를 구현 가능한 작업으로 나눈다. 각 작업에는 수정 대상, 검증 방법, 완료 조건을 함께 둔다.
 
-자율 취약점 재현을 가능하게 하는 payload/control profile 작성, 실제 재현 adapter, 재시도·전제조건 보정 실행, native 공격 Agent 연결, end-to-end chain 실행 및 영향 확장 기법 생성은 이 계획에 포함하지 않는다. 실행 결과가 필요한 검증은 합성 DTO와 저장된 테스트 fixture로 수행한다. 따라서 이 계획을 모두 완료해도 원 명세 §13.3 전체가 구현됐다고 표시할 수 없다.
+자율 취약점 재현을 가능하게 하는 취약점별 payload/control profile 작성, 실제 재현 adapter, native Agent 연결 및 영향 확장 기법 생성은 이 계획에 포함하지 않는다. 재시도·전제조건 보정과 end-to-end chain 상태 머신은 injected port 및 저장된 fixture까지 범위를 확장해 구현했다. 실제 transport 결과가 필요한 검증은 합성 DTO와 저장된 테스트 fixture로 수행한다. 따라서 이 계획을 모두 완료해도 원 명세 §13.3 전체가 구현됐다고 표시할 수 없다.
 
 기준 명세의 상태와 계약은 그대로 참조한다. 범위에서 제외된 기능을 임의의 성공 반환이나 `CONFIRMED` 기본값으로 대체하지 않는다. 실제 실행이 연결되기 전에는 신규 실행 CLI와 자동 pipeline 연결을 완료 기능으로 공개하지 않는다.
 
@@ -176,7 +195,9 @@ Task 1 DTO와 fixture
 - [x] `report run Pipeline.db --case-id ...` 입력을 Task 6의 reader와 연결한다.
 - [x] legacy Validation.db는 shared selector 입력으로 거절하고 자동 이관하지 않는다.
 - [ ] 기존 7 Question API와 Skill의 제거는 모든 consumer가 전환된 뒤 진행한다. 실행 계층 미완성 상태에서 기존 경로부터 삭제하지 않는다.
-- [x] `run`, `resume`, targeted 실행 및 pipeline 자동 호출은 실행 계층 의존성이 남은 항목으로 문서화한다.
+- [x] shared `run`, `resume`과 finding/chain targeted selector를 injected Coordinator에 연결한다.
+- [x] 정상 pipeline은 injected Coordinator가 있으면 Chaining 직후 같은 API를 자동 호출한다.
+- [ ] native adapter를 기본 구성한 뒤 injection 없이도 자동 Validation을 활성화한다.
 
 **검증·완료:** status가 DB를 변경하지 않으며 잘못된 ID·schema와 허용되지 않은 Report 상태는 명확한 오류 및 non-zero exit를 반환한다.
 
@@ -204,10 +225,10 @@ PYTHONPATH=src .venv/bin/python -m unittest discover -s tests -v
 | §6 Blind 경계 | DTO, 공개 필드, hash와 접근 제약 | native Agent 격리·실행 통합 |
 | §7 shared DB | migration, repository, ownership | 실행 producer별 ledger 기록 통합 |
 | §8 판정 | evidence·점수·가설의 데이터 검증 | 실제 관측을 만드는 재현 및 실행 상태 머신 |
-| §9 Chain | Chaining 읽기 전용 보장, case source 계약 | node gate와 end-to-end 재현 |
+| §9 Chain | node gate, injected end-to-end Blind replay, terminal impact 재평가, Chaining table 불변 검증 | 실제 transport adapter를 통한 다단계 binding 재실행 |
 | §10 요청 안전 | redaction과 저장 경계 검증 | 공통 safety core와 실제 transport 통합 |
-| §11 CLI | status와 보고서 입력 | Coordinator 기반 run·targeted 실행·자동 호출 |
-| §12 복구·Report | lifecycle 저장 복구, snapshot·eligibility·stale | 실제 실행 재개와 중복 dispatch 방지 통합 |
+| §11 CLI | status, 보고서 입력, injected Coordinator 기반 run·resume·targeted 실행 | native adapter 기본 연결과 pipeline 자동 호출 |
+| §12 복구·Report | lifecycle 저장 복구, 완료 batch·고정 assessment 재사용, snapshot·eligibility·stale | transport 완료와 local commit 사이의 outcome-unknown 운영 처리 |
 | §13 테스트 | 합성 fixture 기반 포함 범위 회귀 | 실제 adapter 및 전체 pipeline 수용 검증 |
 
 이 표의 남은 의존성이 해소되기 전에는 legacy 경로의 최종 제거와 새 Validation의 기본 활성화를 릴리스 완료 항목으로 처리하지 않는다.

@@ -72,6 +72,24 @@ class ValidationReportCliTests(unittest.TestCase):
         self.assertEqual(json.loads(stdout), expected)
         status.assert_called_once_with(Path("Pipeline.db"), scan_id=None, case_id="case")
 
+    def test_shared_validation_run_and_resume_use_injected_coordinator(self):
+        coordinator = Mock()
+        coordinator.run.return_value = {"status": "completed", "stage_run_id": "stage"}
+        code, stdout, stderr = self.invoke(
+            ["validate", "run", "Pipeline.db", "--scan-id", "scan", "--finding-id", "finding"],
+            validation_coordinator=coordinator,
+        )
+        self.assertEqual(code, 0, stderr)
+        coordinator.run.assert_called_once_with("scan", finding_id="finding", chain_id=None)
+        self.assertEqual(json.loads(stdout)["status"], "completed")
+        coordinator.resume.return_value = {"status": "completed", "stage_run_id": "stage"}
+        code, _, stderr = self.invoke(
+            ["validate", "resume", "Pipeline.db", "--stage-run-id", "stage"],
+            validation_coordinator=coordinator,
+        )
+        self.assertEqual(code, 0, stderr)
+        coordinator.resume.assert_called_once_with("stage")
+
     def test_report_run_accepts_only_three_platforms_and_injected_writer(self):
         writer, agent = Mock(), Mock()
         agent.run.return_value = {

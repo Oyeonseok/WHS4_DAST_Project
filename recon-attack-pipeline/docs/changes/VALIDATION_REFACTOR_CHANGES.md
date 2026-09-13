@@ -2,6 +2,131 @@
 
 이 문서는 Validation 재구조화 구현 변경을 누적 기록한다. 관련 구현을 완료할 때마다 최신 날짜의 항목을 문서 상단에 추가한다.
 
+## 2026-09-12: demonstrated Chain 종단간 Blind replay
+
+- 모든 node의 최신 Validation 결과가 `CONFIRMED|KNOWN`인 demonstrated Chain을
+  node gate 이후 실제 end-to-end Blind replay로 연결했다.
+- chain integrity gate가 성공한 Chaining stage와 execution, 연속된 2~4개 node,
+  execution step의 finding 순서, 마지막 step의 성공 terminal assertion, 각 node의
+  immutable reproduction spec과 최신 Validation snapshot을 재검증한다.
+- 각 node의 endpoint, method, payload template, identity reference와 단계 사이의
+  binding 이름·방향을 순서가 있는 합성 Blind case로 만든다. 이전 실행의 binding
+  값·response와 terminal impact claim은 assessment가 고정될 때까지 공개하지 않는다.
+- chain은 finding과 별개의 control/target batch를 실행하며 terminal effect를 세 영향
+  축으로 다시 평가한다. node impact 점수를 더하지 않으며 `UNDERPOWERED` chain에는
+  Finding용 impact expansion hypothesis를 생성하지 않는다.
+- Validation은 chain 결과를 `validation_cases`, attempt, evidence에만 기록한다.
+  통합 테스트는 replay 전후 9개 Chaining write table의 전체 row가 같은지 검증한다.
+
+  설계와 다른 점 및 이유: 별도의 chain Validation profile 형식은 명세에 정의되어
+  있지 않다. 따라서 chain Blind contract는 node별 Skill/profile hash를 canonical
+  aggregate hash로 묶고, 관측 signal과 control 기준은 terminal node의 검증된 profile을
+  사용한다. 체인의 판정 대상이 마지막 단계에서 실제 도달한 terminal effect라는 §9
+  규칙을 따르면서, 아직 정의되지 않은 임의 chain profile을 생성하지 않기 위해서다.
+
+검증:
+
+- 두 node가 각각 `CONFIRMED`, `KNOWN`인 demonstrated Chain에서 별도 5회 replay 후
+  terminal impact를 재평가해 chain case `CONFIRMED`
+- replay 전후 Chaining 관련 9개 table의 row 불변
+- `TMPDIR=/private/tmp` 기준 전체 unittest 348개 중 코드 테스트 347개 통과.
+  `.venv`의 pytest 미설치로 pytest 기반 module import 1건만 제외했으며 해당
+  Reporting suite는 시스템 pytest에서 34개 통과
+- 소스 compileall과 `git diff --check` 통과
+
+## 2026-09-12: Blind freeze 이후 실행 재개
+
+- Validation stage가 Blind assessment를 DB에 고정한 뒤 claim 비교 중 중단돼도
+  같은 `stage_run_id`로 `unblinding` 단계부터 재개하도록 연결했다.
+- 재개 시 저장된 assessment의 strict schema, case·Blind case hash와 canonical
+  content hash를 다시 검증하고, assessment가 인용한 완료 attempt와 observation
+  evidence를 같은 case·stage에서 재구성한다.
+- claim comparison evidence까지 이미 저장된 crash 상태에서는 해당 객체의 schema,
+  content hash, assessment·Attack claim binding을 검증한 뒤 재사용한다.
+- 고정 assessment 재개 경로는 HTTP replay와 Blind assessment Agent 호출을 다시
+  수행하지 않으며, 동일 assessment/comparison evidence도 중복 저장하지 않는다.
+
+  설계와 다른 점 및 이유: 명세는 crash 지점 전체에 대한 복구를 요구하지만 현재
+  구현은 DB transaction 경계로 식별 가능한 완료 batch, 고정 assessment, 저장된
+  comparison을 재사용한다. transport가 응답을 받았지만 ledger·attempt 완료 transaction
+  전에 프로세스가 종료된 경우에는 원격 부작용 발생 여부를 증명할 수 없으므로 기존
+  lifecycle대로 `outcome_unknown`으로 보존하며 성공으로 추정하지 않는다.
+
+검증:
+
+- claim 비교 직전에 강제 중단한 뒤 resume 시 request 0회, assessment 재호출 0회,
+  comparison 1회로 `CONFIRMED` 완료
+- 기존 attempt 5개와 Blind assessment evidence 1개가 중복 없이 유지됨
+
+## 2026-09-12: shared Validation 실행 계층 1차 연결
+
+- native Attack `commit-finding`이 Finding, supporting Attack request, 공식
+  `finding_reproduction_specs`를 한 transaction에서 기록하도록 변경했다.
+  supporting attempt의 Skill·endpoint·fingerprint와 request의 method·policy
+  digest가 일치하지 않으면 Finding 자체를 commit하지 않는다.
+- `CandidateIntegrityGate`를 추가해 completed Attack stage, confirmed attempt,
+  단일 Hunt Skill, packaged Skill hash, endpoint, request, policy, payload 및 spec
+  digest, credential role과 Attack evidence를 재현 전에 검증한다. 실패 case는
+  요청 없이 `INCONCLUSIVE`로 종결한다.
+- chain 항목을 제외한 packaged Hunt Skill 58개에 machine-readable Validation
+  profile을 추가하고, profile schema·이름·Skill hash·전체 coverage를 검사하는
+  `SkillProfileResolver`를 구현했다.
+
+  설계와 다른 점 및 이유: 이번 profile들은 실행 계약을 먼저 고정하기 위한
+  보수적인 signal-class mapping과 공통 control 초안이다. IDOR에는 실제 impact
+  expansion path 두 개를 작성했지만 나머지 Skill의 control/impact 기준은 아직
+  취약점별로 세분화되지 않았다. 이름만 채운 profile을 실제 취약점별 검증이
+  끝난 것으로 오인하지 않도록 전체 profile 의미 검토를 남은 작업으로 유지한다.
+
+- `ValidationCoordinator`를 추가해 scan 및 targeted case 선택, 기존 case
+  revalidation, KNOWN 선판정, control과 fresh target 3회, 혼재 시 추가 2회,
+  blocker development 1 cycle, Blind assessment 고정, claim 공개·비교, impact와
+  최종 상태 commit을 shared DB 흐름으로 연결했다. Agent schema 오류는 한 번
+  수정 기회를 준 뒤 해당 case만 `INCONCLUSIVE`로 격리한다.
+- `ReproductionPort`, `PrerequisiteResolverPort`, `HttpReproductionPort` 계약을
+  추가했다. Coordinator가 Agent에게 범용 DB나 command helper를 주지 않고,
+  검증된 관찰 DTO만 전달하도록 실행 권한을 좁혔다.
+- `CodexBlindValidationRunner`를 추가해 검증된 base Skill, 연결 Hunt Skill과
+  machine profile로 BlindAssessment와 ClaimComparison을 분리된 strict structured
+  output으로 생성할 수 있게 했다. 두 pass는 하나의 논리 runner ID와 case에 묶인다.
+- `ValidationRequestBroker`를 추가했다. initial request와 redirect hop마다
+  current TargetPolicy, stage/case/attempt ownership, rate, concurrency와 총 요청
+  예산을 dispatch 직전에 검사하고 `validation_http_requests`에 예약·결과를
+  기록한다. query와 credential header 값은 ledger에 저장하지 않는다.
+- `ImpactGapAnalyzer`를 추가했다. `UNDERPOWERED` Finding에서 현재 stage
+  evidence와 검증된 profile path만 사용해 최대 3개의 비실행 가설을 저장한다.
+- shared CLI 계약에 `validate run Pipeline.db --scan-id`의 finding/chain selector와
+  `validate resume Pipeline.db --stage-run-id`를 추가했다. 실행 권한을 가진
+  application이 주입한 동일 Coordinator만 호출하며, 기본 CLI가 임의로 네트워크
+  실행 객체를 만들지는 않는다.
+- 정상 `aidast run`도 application이 ValidationCoordinator를 주입한 경우 Chaining
+  직후 같은 `run(scan_id)` API를 자동 호출한다.
+- reproduction spec을 update/delete할 수 없도록 DB trigger를 추가했고 Validation
+  evidence 저장과 attempt 완료 경계에 metadata sanitization을 적용했다.
+
+  설계와 다른 점 및 이유: native Codex Validation Agent의 단일 프로세스 staging,
+  취약점별 real request builder/evaluator는 아직 연결되지 않았다. 현재 shared CLI가
+  injected Coordinator를 요구하는 이유는 이 adapter들이 없는 상태에서 기본 CLI가
+  네트워크 요청을 실행하거나 성공을 가장하지 않게 하기 위해서다. 이 기록 당시
+  chain은 node gate까지만 구현됐으며, end-to-end replay는 위의 후속 변경에서 연결됐다.
+
+검증:
+
+- 전체 unittest 346개 중 코드 테스트 345개 통과
+- `.venv`에 pytest가 없어 전체 unittest의 pytest 기반 module import 1건은 환경상
+  제외됐고, 해당 Reporting suite는 `TMPDIR=/private/tmp`를 지정한 시스템 pytest로
+  별도 실행해 34개 통과
+- 신규 Coordinator, profile, request broker 및 native Attack 계약 테스트 통과
+- Validation/Attack/Pipeline 관련 unittest suite와 Reporting pytest 34개 통과
+
+남은 작업:
+
+- 58개 profile의 취약점별 signal, control, timing, impact 및 development 규칙 검토
+- native 단일 Validation Agent와 restricted helper staging
+- 실제 HTTP/browser/OOB request builder와 signal evaluator 연결
+- 기본 native adapter 구성으로 `Recon -> Attack -> Chaining` 자동 호출 활성화
+- 새 실행 경로가 기본 동작이 된 뒤 legacy 7 Question Validation.db 제거
+
 ## 2026-09-12: shared Validation 기반 구현
 
 - Pipeline.db를 schema v9로 올리고 Validation case, attempt, evidence, development action, impact hypothesis, HTTP ledger, reproduction spec 테이블을 추가했다.

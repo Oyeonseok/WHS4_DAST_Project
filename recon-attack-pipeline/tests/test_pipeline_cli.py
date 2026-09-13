@@ -8,7 +8,7 @@ import unittest
 from contextlib import closing, redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from aidast.cli import _write_recon_handoff, main
 from aidast.attack.models import AttackStageResult
@@ -37,6 +37,10 @@ class PipelineCliTests(unittest.TestCase):
                 return SimpleNamespace(conn=conn, scan_id=kwargs["scan_id"], run=lambda tasks: None)
 
             stdout = io.StringIO()
+            validation = Mock()
+            validation.run.return_value = SimpleNamespace(
+                stage_run_id="fixture-validation-stage", case_ids=(),
+            )
             with (
                 patch("aidast.cli.resolve_scope_directory", return_value=program_dir),
                 patch("aidast.cli.ScopeCoordinator") as coordinator,
@@ -67,7 +71,7 @@ class PipelineCliTests(unittest.TestCase):
                     "run", "https://example.test/program", "--all-targets",
                     "--run-root", str(root / "Runs"),
                     "--attack-output-root", str(root / "AttackRuns"),
-                ])
+                ], validation_coordinator=validation)
             self.assertEqual(result, 0)
             self.assertIn("Native Attack Agent completed: agent-fixture", stdout.getvalue())
             database, = (root / "Runs").glob("*/Pipeline.db")
@@ -77,6 +81,8 @@ class PipelineCliTests(unittest.TestCase):
                 self.assertIsNotNone(conn.execute("SELECT name FROM sqlite_master WHERE name='endpoints'").fetchone())
             attack.assert_called_once()
             chaining.assert_called_once()
+            validation.run.assert_called_once()
+            self.assertIn("Shared Validation completed", stdout.getvalue())
 
     def test_recon_handoff_is_consumed_by_attack_command(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_dir:

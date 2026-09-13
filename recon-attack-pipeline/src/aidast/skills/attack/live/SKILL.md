@@ -57,8 +57,10 @@ Recon and Attack records.
    non-secret facts.
 7. When observed behavior satisfies the active Skill's confirmation criteria,
    write a minimal redacted evidence JSON and use `commit-finding`. Include all
-   supporting open attempt IDs in `lead_attempt_ids`; this atomically promotes
-   those attempts to `confirmed` and links them to the finding. A high-confidence
+   supporting open attempt IDs in `lead_attempt_ids` and the official
+   `reproduction` object described by the database contract. This atomically
+   creates the Finding and reproduction spec, then promotes those attempts to
+   `confirmed`. A high-confidence
    fact is useful context but is never a substitute for this promotion.
 8. Close all leads for the task, then transition it to `completed`. Continue
    until every configured task is `completed` or `skipped`. Chaining is not part
@@ -70,7 +72,8 @@ Before returning, query every new attempt for this scan whose `outcome='lead'`.
 Close each one exactly once:
 
 - If the active Hunt Skill's confirmation gate is satisfied, call
-  `commit-finding` with HTTP evidence and the supporting `lead_attempt_ids`.
+  `commit-finding` with HTTP evidence, supporting `lead_attempt_ids`, and the
+  request-bound `reproduction` object.
 - If a control disproves it, call `resolve-attempt` with `resolution='rejected'`.
 - If required evidence cannot be obtained within Scope or budget, call
   `resolve-attempt` with `resolution='inconclusive'` and state what is missing.
