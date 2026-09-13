@@ -10,7 +10,8 @@
   고정 BlindAssessment 이후의 실행 재개가 구현됐다.
   demonstrated Chain의 injected end-to-end Blind replay도 구현됐다.
   native 단일 Codex session도 tool-disabled lazy runner로 연결됐다.
-  real 취약점별 adapter·pipeline 자동 실행은 미구현이다.
+  58개 profile의 Skill별 target effect와 signal-class control/impact/development 의미도
+  구체화했다. real 취약점별 assertion adapter·pipeline 자동 실행은 미구현이다.
 
 ## 구현 진행 기록
 
@@ -42,7 +43,8 @@ ReproductionPort, request broker/ledger, profile 파일 전체와 injected Coord
 구현됐다. completed node만 허용하는 demonstrated Chain replay도 같은 Coordinator에
 연결됐다. native Validation runner는 `gpt-5.6-sol`의 동일 thread를 Blind/unblind
 pass와 case 사이에 유지한다. 다만 profile 대부분은 보수적인 공통 초안이며
-취약점별 real adapter와 pipeline 자동 실행은 아직 구현되지 않았다.
+취약점별 target effect criterion은 고유하게 작성됐지만 runtime marker·selector와
+정량 threshold를 적용하는 real adapter, pipeline 자동 실행은 아직 구현되지 않았다.
 Blind claim 공개 시점은 Coordinator가 assessment digest를 먼저 고정하도록 연결됐다.
 
 검증 명령은 macOS의 심볼릭 링크 임시 경로 문제를 피하도록 실제 경로를 지정한다.

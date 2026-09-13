@@ -5,38 +5,42 @@
     "response_diff"
   ],
   "target_expected_signal": {
-    "kind": "profile_defined_response_diff"
+    "kind": "hunt-aspnet_verified",
+    "criterion": "ASP.NET diagnostic, configuration, or framework-specific protected data is exposed",
+    "requires_fresh_target_and_control_evidence": true
   },
   "control_positive": {
     "payload_template": {
-      "mode": "known_safe_positive_control"
+      "mode": "channel_health_baseline"
     },
     "expected_signal": {
-      "kind": "response_diff_channel_operational"
+      "kind": "response_diff_channel_operational",
+      "criterion": "the same transport, identity, parser, browser, callback, or timing channel produces its declared harmless baseline"
     },
     "signal_type": "response_diff"
   },
   "control_negative": {
     "payload_template": {
-      "mode": "inert_negative_control"
+      "mode": "inert_same_shape_control"
     },
     "expected_signal": {
-      "kind": "no_target_signal"
+      "kind": "no_response_diff_target_effect",
+      "criterion": "an inert same-shape input does not produce the target security effect"
     }
   },
   "impact_rules": {
-    "boundary": "cite current-stage evidence for the crossed trust boundary",
-    "sensitivity": "cite current-stage evidence for exposed data or state change",
-    "actor_requirements": "cite current-stage evidence for the required attacker role"
+    "boundary": "identify the exact route, origin, tenant, service, or configuration boundary crossed",
+    "sensitivity": "cite the security-relevant data or capability behind the stable response difference",
+    "actor_requirements": "score the minimum authentication and environmental prerequisites"
   },
   "allowed_development_actions": [
     {
-      "action_type": "refresh_credential",
+      "action_type": "refresh_current_role_credential",
       "blocker_axis": "identity_auth"
     },
     {
-      "action_type": "adjust_transport_encoding",
-      "blocker_axis": "encoding_transport"
+      "action_type": "prepare_declared_resource_state",
+      "blocker_axis": "state_setup"
     }
   ],
   "impact_expansion_paths": []

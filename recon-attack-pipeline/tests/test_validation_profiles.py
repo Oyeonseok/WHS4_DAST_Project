@@ -27,6 +27,28 @@ class ValidationProfileTests(unittest.TestCase):
                               if item.name.endswith(".json")))
         self.assertEqual(actual, tuple(sorted(expected)))
 
+    def test_profiles_define_skill_specific_effects_and_bounded_controls(self):
+        criteria = set()
+        for entry in load_catalog():
+            if entry.skill_id == "chain":
+                continue
+            profile = SkillProfileResolver().resolve(entry.skill_id).profile
+            self.assertEqual(profile.target_expected_signal["kind"],
+                             f"{entry.skill_id}_verified")
+            criterion = profile.target_expected_signal.get("criterion")
+            self.assertIsInstance(criterion, str)
+            self.assertGreater(len(criterion.strip()), 20)
+            self.assertNotIn("profile_defined", json.dumps(
+                profile.model_dump(mode="json"), ensure_ascii=False
+            ))
+            criteria.add(criterion)
+            self.assertEqual(profile.control_positive.payload_template,
+                             {"mode": "channel_health_baseline"})
+            self.assertEqual(profile.control_negative.payload_template,
+                             {"mode": "inert_same_shape_control"})
+            self.assertLessEqual(len(profile.allowed_development_actions), 2)
+        self.assertEqual(len(criteria), 58)
+
     def test_profile_rejects_unknown_fields_and_timing_without_baseline(self):
         document = {
             "schema_version": 1, "attack_skill_name": "hunt-test",

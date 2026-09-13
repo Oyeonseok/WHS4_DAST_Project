@@ -2,6 +2,35 @@
 
 이 문서는 Validation 재구조화 구현 변경을 누적 기록한다. 관련 구현을 완료할 때마다 최신 날짜의 항목을 문서 상단에 추가한다.
 
+## 2026-09-13: Hunt Skill별 Validation 효과 기준 구체화
+
+- 58개 profile의 `profile_defined_*` placeholder를 제거하고 각 Hunt Skill에서 fresh
+  replay가 입증해야 하는 보안 효과를 서로 다른 criterion으로 명시했다. 예를 들어
+  IDOR는 다른 test identity의 object/state, CORS는 credentialed cross-origin read,
+  SSRF는 target server에서 비롯된 controlled callback을 요구한다.
+- positive control은 동일 transport·identity·parser·browser·callback·timing channel의
+  harmless health baseline으로, negative control은 inert same-shape input에서 target
+  effect가 없어야 하는 조건으로 통일해 두 control의 역할을 분명히 했다.
+- signal class별 impact rule을 작성해 단순 오류·지연·markup을 곧바로 높은 영향으로
+  평가하지 못하게 하고, boundary·sensitivity·actor requirements가 인용해야 할 실제
+  관찰을 구분했다.
+- development action은 signal class에 맞춰 credential refresh, second identity/resource
+  setup, encoding adjustment, callback registration, timing baseline/concurrency 보정 중
+  최대 두 개만 허용하도록 정리했다.
+
+  설계와 다른 점 및 이유: profile의 effect criterion은 구체화했지만 status/body/DOM/OOB
+  관찰을 판정하는 정량 threshold나 selector·marker는 임의로 만들지 않았다. 이 값은
+  실제 target과 Attack이 남긴 runtime slot에 종속되므로 공통 문구로 자동 생성하면
+  false positive를 만들 수 있다. concrete adapter 연결 전까지 profile은 허용된 의미와
+  control 목적을 제한하고, 실행 가능한 assertion 세부값은 별도 검증 계약으로 남긴다.
+
+검증:
+
+- packaged Hunt Skill 58개가 각각 고유한 target criterion과 stable kind를 가지며
+  `profile_defined` placeholder가 남지 않는지 검사
+- 모든 profile이 공통 harmless positive control, inert negative control과 최대 2개
+  development action 제한을 통과
+
 ## 2026-09-13: 단일 native Validation Agent 세션
 
 - `CodexMainAgent`에 Validation 전용 structured session 실행 경계를 추가했다.
@@ -159,7 +188,7 @@
 
 남은 작업:
 
-- 58개 profile의 취약점별 signal, control, timing, impact 및 development 규칙 검토
+- 58개 profile의 실제 adapter threshold, selector·marker와 전문가 의미 검토
 - 실제 HTTP/browser/OOB request builder와 signal evaluator 연결
 - 기본 native adapter 구성으로 `Recon -> Attack -> Chaining` 자동 호출 활성화
 - 새 실행 경로가 기본 동작이 된 뒤 legacy 7 Question Validation.db 제거

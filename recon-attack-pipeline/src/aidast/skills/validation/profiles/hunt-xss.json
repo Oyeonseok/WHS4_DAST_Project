@@ -5,37 +5,41 @@
     "dom_effect"
   ],
   "target_expected_signal": {
-    "kind": "profile_defined_dom_effect"
+    "kind": "hunt-xss_verified",
+    "criterion": "the unique marker executes in the target origin and declared browser context",
+    "requires_fresh_target_and_control_evidence": true
   },
   "control_positive": {
     "payload_template": {
-      "mode": "known_safe_positive_control"
+      "mode": "channel_health_baseline"
     },
     "expected_signal": {
-      "kind": "dom_effect_channel_operational"
+      "kind": "dom_effect_channel_operational",
+      "criterion": "the same transport, identity, parser, browser, callback, or timing channel produces its declared harmless baseline"
     },
     "signal_type": "dom_effect"
   },
   "control_negative": {
     "payload_template": {
-      "mode": "inert_negative_control"
+      "mode": "inert_same_shape_control"
     },
     "expected_signal": {
-      "kind": "no_target_signal"
+      "kind": "no_dom_effect_target_effect",
+      "criterion": "an inert same-shape input does not produce the target security effect"
     }
   },
   "impact_rules": {
-    "boundary": "cite current-stage evidence for the crossed trust boundary",
-    "sensitivity": "cite current-stage evidence for exposed data or state change",
-    "actor_requirements": "cite current-stage evidence for the required attacker role"
+    "boundary": "identify the origin, user-interaction, or victim-context boundary required by the browser effect",
+    "sensitivity": "distinguish inert markup from script execution or a sensitive UI action",
+    "actor_requirements": "score required delivery, victim interaction, and authentication state"
   },
   "allowed_development_actions": [
     {
-      "action_type": "refresh_credential",
-      "blocker_axis": "identity_auth"
+      "action_type": "prepare_declared_browser_state",
+      "blocker_axis": "state_setup"
     },
     {
-      "action_type": "adjust_transport_encoding",
+      "action_type": "apply_profile_allowed_encoding",
       "blocker_axis": "encoding_transport"
     }
   ],

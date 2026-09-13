@@ -5,38 +5,42 @@
     "timing"
   ],
   "target_expected_signal": {
-    "kind": "profile_defined_timing"
+    "kind": "hunt-brute-force_verified",
+    "criterion": "repeated guesses bypass the declared throttling or lockout boundary",
+    "requires_fresh_target_and_control_evidence": true
   },
   "control_positive": {
     "payload_template": {
-      "mode": "known_safe_positive_control"
+      "mode": "channel_health_baseline"
     },
     "expected_signal": {
-      "kind": "timing_channel_operational"
+      "kind": "timing_channel_operational",
+      "criterion": "the same transport, identity, parser, browser, callback, or timing channel produces its declared harmless baseline"
     },
     "signal_type": "timing"
   },
   "control_negative": {
     "payload_template": {
-      "mode": "inert_negative_control"
+      "mode": "inert_same_shape_control"
     },
     "expected_signal": {
-      "kind": "no_target_signal"
+      "kind": "no_timing_target_effect",
+      "criterion": "an inert same-shape input does not produce the target security effect"
     }
   },
   "impact_rules": {
-    "boundary": "cite current-stage evidence for the crossed trust boundary",
-    "sensitivity": "cite current-stage evidence for exposed data or state change",
-    "actor_requirements": "cite current-stage evidence for the required attacker role"
+    "boundary": "credit a boundary only when controlled timing or concurrency changes a protected outcome",
+    "sensitivity": "cite the resulting data, state, cache, or protocol effect rather than latency alone",
+    "actor_requirements": "score request count, concurrency, authentication, and timing precision required"
   },
   "allowed_development_actions": [
     {
-      "action_type": "refresh_credential",
-      "blocker_axis": "identity_auth"
+      "action_type": "recalibrate_timing_baseline",
+      "blocker_axis": "timing_concurrency"
     },
     {
-      "action_type": "adjust_transport_encoding",
-      "blocker_axis": "encoding_transport"
+      "action_type": "reduce_validation_concurrency",
+      "blocker_axis": "timing_concurrency"
     }
   ],
   "impact_expansion_paths": [],

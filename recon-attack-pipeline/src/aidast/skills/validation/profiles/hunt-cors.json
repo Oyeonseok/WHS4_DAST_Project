@@ -5,38 +5,42 @@
     "authorization_boundary"
   ],
   "target_expected_signal": {
-    "kind": "profile_defined_authorization_boundary"
+    "kind": "hunt-cors_verified",
+    "criterion": "a credentialed cross-origin reader can access the declared protected response",
+    "requires_fresh_target_and_control_evidence": true
   },
   "control_positive": {
     "payload_template": {
-      "mode": "known_safe_positive_control"
+      "mode": "channel_health_baseline"
     },
     "expected_signal": {
-      "kind": "authorization_boundary_channel_operational"
+      "kind": "authorization_boundary_channel_operational",
+      "criterion": "the same transport, identity, parser, browser, callback, or timing channel produces its declared harmless baseline"
     },
     "signal_type": "authorization_boundary"
   },
   "control_negative": {
     "payload_template": {
-      "mode": "inert_negative_control"
+      "mode": "inert_same_shape_control"
     },
     "expected_signal": {
-      "kind": "no_target_signal"
+      "kind": "no_authorization_boundary_target_effect",
+      "criterion": "an inert same-shape input does not produce the target security effect"
     }
   },
   "impact_rules": {
-    "boundary": "cite current-stage evidence for the crossed trust boundary",
-    "sensitivity": "cite current-stage evidence for exposed data or state change",
-    "actor_requirements": "cite current-stage evidence for the required attacker role"
+    "boundary": "identify the exact unauthenticated, identity, role, tenant, or administrator boundary crossed",
+    "sensitivity": "identify only protected fields or committed actions observed in the fresh response",
+    "actor_requirements": "score the lowest role and setup that reproduced the unauthorized access"
   },
   "allowed_development_actions": [
     {
-      "action_type": "refresh_credential",
+      "action_type": "refresh_current_role_credential",
       "blocker_axis": "identity_auth"
     },
     {
-      "action_type": "adjust_transport_encoding",
-      "blocker_axis": "encoding_transport"
+      "action_type": "prepare_second_test_identity_state",
+      "blocker_axis": "state_setup"
     }
   ],
   "impact_expansion_paths": []
