@@ -4,6 +4,9 @@
   "signal_types": [
     "error_signature"
   ],
+  "runtime_kinds": [
+    "http"
+  ],
   "target_expected_signal": {
     "kind": "hunt-graphql_verified",
     "criterion": "a GraphQL query or mutation crosses the declared field, role, or operation boundary",

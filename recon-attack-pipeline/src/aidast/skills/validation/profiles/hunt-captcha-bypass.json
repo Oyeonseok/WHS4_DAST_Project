@@ -4,6 +4,9 @@
   "signal_types": [
     "authorization_boundary"
   ],
+  "runtime_kinds": [
+    "http"
+  ],
   "target_expected_signal": {
     "kind": "hunt-captcha-bypass_verified",
     "criterion": "a challenge-protected action succeeds without a valid fresh challenge",

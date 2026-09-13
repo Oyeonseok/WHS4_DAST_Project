@@ -4,6 +4,9 @@
   "signal_types": [
     "response_diff"
   ],
+  "runtime_kinds": [
+    "http"
+  ],
   "target_expected_signal": {
     "kind": "hunt-subdomain_verified",
     "criterion": "the declared hostname is controllable through a dangling or misbound service relationship",

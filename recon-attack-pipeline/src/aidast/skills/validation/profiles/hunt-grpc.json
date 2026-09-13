@@ -4,6 +4,9 @@
   "signal_types": [
     "error_signature"
   ],
+  "runtime_kinds": [
+    "http"
+  ],
   "target_expected_signal": {
     "kind": "hunt-grpc_verified",
     "criterion": "a gRPC method exposes a protected result or framework-specific failure across the declared boundary",

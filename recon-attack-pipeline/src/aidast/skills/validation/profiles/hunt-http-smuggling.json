@@ -4,6 +4,9 @@
   "signal_types": [
     "timing"
   ],
+  "runtime_kinds": [
+    "http"
+  ],
   "target_expected_signal": {
     "kind": "hunt-http-smuggling_verified",
     "criterion": "paired requests produce a stable downstream parsing or response-queue desynchronization signal",

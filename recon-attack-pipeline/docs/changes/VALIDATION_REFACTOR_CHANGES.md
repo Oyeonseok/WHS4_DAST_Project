@@ -2,6 +2,28 @@
 
 이 문서는 Validation 재구조화 구현 변경을 누적 기록한다. 관련 구현을 완료할 때마다 최신 날짜의 항목을 문서 상단에 추가한다.
 
+## 2026-09-14: Validation profile 실행 의미 강제
+
+- 58개 Validation profile에 허용 runtime kind를 명시했다. 현재 구성은 HTTP 51개,
+  Browser 4개, OOB 3개이며 signal type에서 도출되는 실행 계열과 정확히 일치해야 한다.
+- 자유형 JSON이던 target signal, control signal과 impact rule을 strict typed contract로
+  바꿨다. target은 fresh target/control evidence를 반드시 요구하고, positive control은
+  primary signal channel, negative control은 같은 target effect의 부재를 표현해야 한다.
+- Candidate integrity gate가 Attack의 immutable runtime contract와 profile의 허용 실행
+  계열을 대조한다. 따라서 DOM effect profile에 HTTP 계약을 붙이거나 HTTP signal
+  profile에 Browser 계약을 붙인 후보는 LLM 실행 전에 거부된다.
+- 58개 전체 coverage, 중복·누락 runtime kind, 잘못된 control kind와 IDOR/Browser 계약
+  불일치 거부를 회귀 테스트로 검증했다.
+
+설계와 다른 점 및 이유:
+
+원 설계는 profile에 취약점별 payload와 검증 방식을 둘 것을 요구하지만 runtime kind와
+signal type의 관계를 별도 필드로 정의하지 않았다. 실제 adapter가 HTTP, Browser, OOB로
+분리된 현재 구조에서는 이 관계를 문장에만 두면 잘못된 adapter가 실행될 수 있어
+machine-readable allowlist로 고정했다. target별 marker, selector, object ID와 threshold는
+Attack이 실제 관찰에서 작성한 hash-bound runtime contract에 계속 둔다. 공통 profile에서
+그 값을 추정하면 정상 응답이나 자연 지연을 성공으로 오인할 수 있기 때문이다.
+
 ## 2026-09-14: configured HTTP OOB observer
 
 - `HttpJsonOobObserver`가 `POST arm`에서 발급받은 정수 cursor를 attempt token과 메모리에

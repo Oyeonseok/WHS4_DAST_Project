@@ -4,6 +4,9 @@
   "signal_types": [
     "response_diff"
   ],
+  "runtime_kinds": [
+    "http"
+  ],
   "target_expected_signal": {
     "kind": "hunt-api-misconfig_verified",
     "criterion": "unauthorized API capability or sensitive metadata becomes reachable",

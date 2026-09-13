@@ -4,6 +4,9 @@
   "signal_types": [
     "dom_effect"
   ],
+  "runtime_kinds": [
+    "browser"
+  ],
   "target_expected_signal": {
     "kind": "hunt-dom_verified",
     "criterion": "a controlled source reaches the declared security-sensitive DOM sink",

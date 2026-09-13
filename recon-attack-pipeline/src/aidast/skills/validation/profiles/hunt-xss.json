@@ -4,6 +4,9 @@
   "signal_types": [
     "dom_effect"
   ],
+  "runtime_kinds": [
+    "browser"
+  ],
   "target_expected_signal": {
     "kind": "hunt-xss_verified",
     "criterion": "the unique marker executes in the target origin and declared browser context",

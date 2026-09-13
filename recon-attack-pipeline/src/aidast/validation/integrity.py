@@ -107,6 +107,10 @@ class CandidateIntegrityGate:
             profile = self.resolver.resolve(spec["attack_skill_name"])
         except ValidationProfileError:
             raise CandidateIntegrityError("skill_profile_binding") from None
+        if runtime_contract is not None:
+            runtime_kind = runtime_contract.get("runtime_kind", "http")
+            if runtime_kind not in profile.profile.runtime_kinds:
+                raise CandidateIntegrityError("runtime_profile_compatibility")
         roles = spec["required_identity_roles"]
         if (not isinstance(roles, list) or len(roles) != len(set(roles))
                 or any(not isinstance(role, str) or not role for role in roles)):

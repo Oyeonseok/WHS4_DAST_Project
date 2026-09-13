@@ -4,6 +4,9 @@
   "signal_types": [
     "error_signature"
   ],
+  "runtime_kinds": [
+    "http"
+  ],
   "target_expected_signal": {
     "kind": "hunt-deserialization_verified",
     "criterion": "crafted serialized input reaches a framework-specific deserialization failure or controlled effect",

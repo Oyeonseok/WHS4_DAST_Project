@@ -4,6 +4,9 @@
   "signal_types": [
     "response_diff"
   ],
+  "runtime_kinds": [
+    "http"
+  ],
   "target_expected_signal": {
     "kind": "hunt-cicd_verified",
     "criterion": "CI/CD metadata, secret material, or an unauthorized pipeline action becomes reachable",

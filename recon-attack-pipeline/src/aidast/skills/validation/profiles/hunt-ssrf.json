@@ -4,6 +4,9 @@
   "signal_types": [
     "oob_callback"
   ],
+  "runtime_kinds": [
+    "oob"
+  ],
   "target_expected_signal": {
     "kind": "hunt-ssrf_verified",
     "criterion": "the controlled callback endpoint receives a request attributable to the target server",

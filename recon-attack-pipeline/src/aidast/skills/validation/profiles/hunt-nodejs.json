@@ -4,6 +4,9 @@
   "signal_types": [
     "response_diff"
   ],
+  "runtime_kinds": [
+    "http"
+  ],
   "target_expected_signal": {
     "kind": "hunt-nodejs_verified",
     "criterion": "Node.js framework parsing or runtime behavior exposes the declared protected effect",

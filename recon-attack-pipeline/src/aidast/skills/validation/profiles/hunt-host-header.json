@@ -4,6 +4,9 @@
   "signal_types": [
     "response_diff"
   ],
+  "runtime_kinds": [
+    "http"
+  ],
   "target_expected_signal": {
     "kind": "hunt-host-header_verified",
     "criterion": "a controlled Host value changes a security-sensitive absolute URL, routing, or trust decision",

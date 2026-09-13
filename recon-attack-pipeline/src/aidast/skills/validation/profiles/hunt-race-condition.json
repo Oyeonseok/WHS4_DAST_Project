@@ -4,6 +4,9 @@
   "signal_types": [
     "timing"
   ],
+  "runtime_kinds": [
+    "http"
+  ],
   "target_expected_signal": {
     "kind": "hunt-race-condition_verified",
     "criterion": "concurrent requests produce the prohibited duplicate or out-of-order state transition",

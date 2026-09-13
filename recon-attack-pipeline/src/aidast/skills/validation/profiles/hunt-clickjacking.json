@@ -4,6 +4,9 @@
   "signal_types": [
     "dom_effect"
   ],
+  "runtime_kinds": [
+    "browser"
+  ],
   "target_expected_signal": {
     "kind": "hunt-clickjacking_verified",
     "criterion": "a framed page permits activation of the declared sensitive UI action",

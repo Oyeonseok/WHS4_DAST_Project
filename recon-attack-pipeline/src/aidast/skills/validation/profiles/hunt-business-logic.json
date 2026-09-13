@@ -4,6 +4,9 @@
   "signal_types": [
     "state_change"
   ],
+  "runtime_kinds": [
+    "http"
+  ],
   "target_expected_signal": {
     "kind": "hunt-business-logic_verified",
     "criterion": "the prohibited business transition is durably committed",

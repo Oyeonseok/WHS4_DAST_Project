@@ -4,6 +4,9 @@
   "signal_types": [
     "response_diff"
   ],
+  "runtime_kinds": [
+    "http"
+  ],
   "target_expected_signal": {
     "kind": "hunt-spa-api_verified",
     "criterion": "a backing SPA API exposes a protected object or operation independent of client-side controls",

@@ -4,6 +4,9 @@
   "signal_types": [
     "response_diff"
   ],
+  "runtime_kinds": [
+    "http"
+  ],
   "target_expected_signal": {
     "kind": "hunt-misc_verified",
     "criterion": "the Hunt Skill declared security effect differs stably from an inert same-shape control",

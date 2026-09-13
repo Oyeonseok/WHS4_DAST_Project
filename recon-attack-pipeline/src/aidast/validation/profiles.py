@@ -18,10 +18,28 @@ class ValidationProfileError(ValueError):
     pass
 
 
+RuntimeKind = Literal["http", "browser", "oob"]
+
+
+class ProfileSignalCriterion(StrictContract):
+    kind: Identifier
+    criterion: str = Field(min_length=21, max_length=2_000)
+
+
+class ProfileTargetSignal(ProfileSignalCriterion):
+    requires_fresh_target_and_control_evidence: Literal[True]
+
+
 class ProfileControl(StrictContract):
     payload_template: dict[str, Any] | list[Any] | str | int | float | bool | None
-    expected_signal: dict[str, Any]
+    expected_signal: ProfileSignalCriterion
     signal_type: SignalType | None = None
+
+
+class ProfileImpactRules(StrictContract):
+    boundary: str = Field(min_length=21, max_length=2_000)
+    sensitivity: str = Field(min_length=21, max_length=2_000)
+    actor_requirements: str = Field(min_length=21, max_length=2_000)
 
 
 class DevelopmentAction(StrictContract):
@@ -47,11 +65,12 @@ class ValidationProfile(StrictContract):
     schema_version: Literal[1]
     attack_skill_name: Identifier
     signal_types: tuple[SignalType, ...] = Field(min_length=1, max_length=7)
-    target_expected_signal: dict[str, Any]
+    runtime_kinds: tuple[RuntimeKind, ...] = Field(min_length=1, max_length=3)
+    target_expected_signal: ProfileTargetSignal
     control_positive: ProfileControl
     control_negative: ProfileControl
     baseline_samples: int | None = Field(default=None, ge=3, le=20)
-    impact_rules: dict[str, Any]
+    impact_rules: ProfileImpactRules
     allowed_development_actions: tuple[DevelopmentAction, ...] = Field(max_length=2)
     impact_expansion_paths: tuple[ImpactExpansionPath, ...] = Field(max_length=32)
 
@@ -59,10 +78,29 @@ class ValidationProfile(StrictContract):
     def validate_profile(self) -> "ValidationProfile":
         if len(self.signal_types) != len(set(self.signal_types)):
             raise ValueError("profile signal types must be unique")
+        if len(self.runtime_kinds) != len(set(self.runtime_kinds)):
+            raise ValueError("profile runtime kinds must be unique")
+        expected_runtime_kinds = set()
+        for signal_type in self.signal_types:
+            if signal_type == "dom_effect":
+                expected_runtime_kinds.add("browser")
+            elif signal_type == "oob_callback":
+                expected_runtime_kinds.add("oob")
+            else:
+                expected_runtime_kinds.add("http")
+        if set(self.runtime_kinds) != expected_runtime_kinds:
+            raise ValueError("profile runtime kinds must match its signal types")
         if "timing" in self.signal_types and self.baseline_samples is None:
             raise ValueError("timing profiles require baseline_samples")
         if self.control_positive.signal_type not in {None, *self.signal_types}:
             raise ValueError("positive control signal must be allowed by the profile")
+        primary_signal = self.signal_types[0]
+        if self.control_positive.signal_type != primary_signal:
+            raise ValueError("positive control must exercise the primary signal channel")
+        if self.control_positive.expected_signal.kind != f"{primary_signal}_channel_operational":
+            raise ValueError("positive control kind must identify the primary signal channel")
+        if self.control_negative.expected_signal.kind != f"no_{primary_signal}_target_effect":
+            raise ValueError("negative control kind must exclude the primary target effect")
         action_keys = [(item.action_type, item.blocker_axis) for item in self.allowed_development_actions]
         if len(action_keys) != len(set(action_keys)):
             raise ValueError("development actions must be unique")

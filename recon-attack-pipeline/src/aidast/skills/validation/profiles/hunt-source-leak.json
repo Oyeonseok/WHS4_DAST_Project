@@ -4,6 +4,9 @@
   "signal_types": [
     "error_signature"
   ],
+  "runtime_kinds": [
+    "http"
+  ],
   "target_expected_signal": {
     "kind": "hunt-source-leak_verified",
     "criterion": "the response contains the declared source, map, credential-pattern, or internal-code marker",

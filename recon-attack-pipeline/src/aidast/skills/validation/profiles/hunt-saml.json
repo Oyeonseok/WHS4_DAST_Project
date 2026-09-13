@@ -4,6 +4,9 @@
   "signal_types": [
     "authorization_boundary"
   ],
+  "runtime_kinds": [
+    "http"
+  ],
   "target_expected_signal": {
     "kind": "hunt-saml_verified",
     "criterion": "a modified or policy-invalid assertion establishes the protected identity or role",

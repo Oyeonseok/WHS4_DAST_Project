@@ -10,7 +10,8 @@ from aidast.pipeline.lifecycle import create_task, finish_stage_run, start_stage
 from aidast.recon import db
 from aidast.recon.policy import PolicyLimits, TargetPolicy, ToolPolicy
 from aidast.scope.models import AssetType
-from aidast.validation import (ClaimComparison, HttpReproductionPort,
+from aidast.validation import (CandidateIntegrityError, CandidateIntegrityGate,
+                               ClaimComparison, HttpReproductionPort,
                                ReproductionObservation,
                                ValidationCoordinator, ValidationCoordinatorError,
                                canonical_reproduction_spec)
@@ -208,6 +209,38 @@ class ValidationCoordinatorTests(unittest.TestCase):
         chaining = start_stage_run(conn, scan_id="scan", stage="chaining", stage_run_id="chain_stage")
         finish_stage_run(conn, chaining, status="skipped")
         conn.close()
+
+    def test_candidate_gate_rejects_runtime_incompatible_with_profile_signal(self):
+        from aidast.validation import canonical_sha256, validate_runtime_contract
+
+        browser_attempt = {
+            "navigation": {}, "wait_ms": 0,
+            "assertions": [{
+                "assertion_id": "marker", "kind": "console_contains",
+                "expected": "unique-marker",
+            }],
+        }
+        runtime = validate_runtime_contract({
+            "runtime_kind": "browser", "schema_version": 1,
+            "target": browser_attempt, "positive_control": browser_attempt,
+            "negative_control": browser_attempt,
+        }).model_dump(mode="json")
+        with db.connect(self.path) as conn:
+            conn.execute("DROP TRIGGER finding_reproduction_specs_no_update")
+            conn.execute(
+                """UPDATE finding_reproduction_specs
+                   SET runtime_contract_json=?,runtime_contract_sha256=?
+                   WHERE finding_id='finding'""",
+                (json.dumps(runtime, sort_keys=True, separators=(",", ":")),
+                 canonical_sha256(runtime)),
+            )
+            conn.commit()
+            with self.assertRaisesRegex(
+                CandidateIntegrityError, "runtime_profile_compatibility"
+            ):
+                CandidateIntegrityGate(conn).validate_finding(
+                    case_id="case", scan_id="scan", finding_id="finding"
+                )
 
     def test_run_executes_fresh_three_with_controls_and_commits_confirmed(self):
         port = FakePort()

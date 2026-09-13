@@ -4,6 +4,9 @@
   "signal_types": [
     "timing"
   ],
+  "runtime_kinds": [
+    "http"
+  ],
   "target_expected_signal": {
     "kind": "hunt-cache-poison_verified",
     "criterion": "an attacker-controlled response variant is served to an independent request",

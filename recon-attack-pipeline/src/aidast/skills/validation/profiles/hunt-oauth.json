@@ -4,6 +4,9 @@
   "signal_types": [
     "authorization_boundary"
   ],
+  "runtime_kinds": [
+    "http"
+  ],
   "target_expected_signal": {
     "kind": "hunt-oauth_verified",
     "criterion": "the authorization response, code, token, redirect, or account binding is accepted outside its declared binding",

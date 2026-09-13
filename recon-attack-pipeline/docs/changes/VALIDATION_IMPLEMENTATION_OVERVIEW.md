@@ -188,7 +188,7 @@ Coordinator를 만들어 Validation을 자동 실행한다. 독립 `validate run
 현재 저장 구조, 상태 머신, 무결성 검사, Blind Agent, Chain replay와 보고서 연결은
 구현돼 있다. 실제 운영 경로를 완성하려면 다음 작업이 남아 있다.
 
-1. 58개 Skill profile과 Attack이 작성한 marker·threshold의 보안 전문가 의미 검토
+1. Attack이 target별로 작성한 marker·selector·threshold의 보안 전문가 의미 검토
 2. 새 경로가 기본 동작이 된 뒤 legacy 7 Question `Validation.db` 제거
 
 HTTP response marker와 정량 threshold는 공통 profile에서 추정하지 않고 Attack의 실제
@@ -219,10 +219,11 @@ native 실행에 `--ephemeral`을 사용하지 않는다. 작업용 임시 stagi
 
 ### profile의 runtime assertion
 
-58개 profile의 보안 효과 기준은 구체화했지만 selector, marker와 threshold는 공통값으로
-만들지 않았다. 실제 target과 Attack runtime slot을 모르는 상태에서 이를 추정하면 정상
-오류나 지연, markup을 exploit 성공으로 오인할 수 있어서다. 대신 HTTP Finding은 Attack이
-작성한 target별 runtime contract를 schema와 hash로 고정해 generic adapter에서 평가한다.
+58개 profile의 보안 효과, control, impact 기준과 허용 HTTP/Browser/OOB 실행 계열은
+strict schema로 고정했지만 selector, marker와 threshold는 공통값으로 만들지 않았다.
+실제 target과 Attack runtime slot을 모르는 상태에서 이를 추정하면 정상 오류나 지연,
+markup을 exploit 성공으로 오인할 수 있어서다. 대신 Finding은 Attack이 작성한 target별
+runtime contract를 schema와 hash로 고정해 해당 실행 계열의 adapter에서 평가한다.
 
 ### legacy Reporting 병행
 

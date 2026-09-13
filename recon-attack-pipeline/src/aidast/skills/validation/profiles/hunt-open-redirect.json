@@ -4,6 +4,9 @@
   "signal_types": [
     "response_diff"
   ],
+  "runtime_kinds": [
+    "http"
+  ],
   "target_expected_signal": {
     "kind": "hunt-open-redirect_verified",
     "criterion": "the application emits or follows an external redirect to the controlled destination",

@@ -4,6 +4,9 @@
   "signal_types": [
     "oob_callback"
   ],
+  "runtime_kinds": [
+    "oob"
+  ],
   "target_expected_signal": {
     "kind": "hunt-ntlm-info_verified",
     "criterion": "the controlled callback endpoint receives the declared NTLM authentication attempt",

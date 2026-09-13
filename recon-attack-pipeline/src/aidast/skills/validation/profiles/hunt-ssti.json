@@ -4,6 +4,9 @@
   "signal_types": [
     "error_signature"
   ],
+  "runtime_kinds": [
+    "http"
+  ],
   "target_expected_signal": {
     "kind": "hunt-ssti_verified",
     "criterion": "template input produces a template-engine-specific evaluation result or isolated expression marker",

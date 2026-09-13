@@ -17,7 +17,8 @@
   credential resolver도 연결했다. browser DOM과 OOB callback의 target별 계약,
   deterministic evaluator와 executor/observer 포트까지 구현했다. Playwright는 모든
   subrequest를 current policy와 ledger에 연결했다. keyring/configured Vault resolver와
-  configured HTTP OOB observer까지 구현됐다.
+  configured HTTP OOB observer까지 구현됐다. 58개 profile의 signal/control/impact 구조와
+  허용 HTTP/Browser/OOB 실행 계열도 strict schema 및 Candidate gate에 연결됐다.
 
 ## 구현 진행 기록
 
@@ -52,9 +53,9 @@
 ReproductionPort, request broker/ledger, profile 파일 전체와 injected Coordinator는
 구현됐다. completed node만 허용하는 demonstrated Chain replay도 같은 Coordinator에
 연결됐다. native Validation runner는 `gpt-5.6-sol`의 동일 thread를 Blind/unblind
-pass와 case 사이에 유지한다. 다만 profile 대부분은 보수적인 공통 초안이며
-취약점별 target effect criterion은 고유하게 작성됐지만 runtime marker·selector와
-정량 threshold를 적용하는 target별 HTTP adapter와 pipeline 자동 실행까지 구현됐다.
+pass와 case 사이에 유지한다. 취약점별 target effect criterion과 signal별 control,
+impact 규칙, 허용 runtime kind가 검증된다. runtime marker·selector와 정량 threshold를
+적용하는 target별 adapter와 pipeline 자동 실행까지 구현됐다.
 `env://` credential은 dispatch 시점에만 resolve한다. browser/OOB contract와 port,
 concrete Playwright request ledger, HTTP Chain runtime, cursor 기반 HTTP OOB observer,
 keyring 및 configured Vault resolver 경계가 구현됐다.
@@ -67,7 +68,7 @@ TMPDIR=/private/tmp PYTHONPATH=src:tests .venv/bin/python -m unittest test_valid
 ```
 
 최신 전체 unittest는 macOS `/var` symlink 오인을 피하도록 `TMPDIR=/private/tmp`에서
-375개가 모두 통과했다. `.venv`와 기본
+377개가 모두 통과했다. `.venv`와 기본
 Python에 pytest가 없어 `test_reporting_agent` import 한 건만 실패했고, 해당 모듈은
 `/opt/anaconda3/bin/pytest`로 별도 실행해 30개가 통과했다. compileall과 diff whitespace
 검사도 통과했다.

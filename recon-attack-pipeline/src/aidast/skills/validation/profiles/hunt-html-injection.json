@@ -4,6 +4,9 @@
   "signal_types": [
     "dom_effect"
   ],
+  "runtime_kinds": [
+    "browser"
+  ],
   "target_expected_signal": {
     "kind": "hunt-html-injection_verified",
     "criterion": "the unique marker is parsed into the declared HTML node or attribute context",

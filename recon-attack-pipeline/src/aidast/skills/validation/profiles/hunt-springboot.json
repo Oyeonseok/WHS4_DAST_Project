@@ -4,6 +4,9 @@
   "signal_types": [
     "response_diff"
   ],
+  "runtime_kinds": [
+    "http"
+  ],
   "target_expected_signal": {
     "kind": "hunt-springboot_verified",
     "criterion": "a Spring Boot actuator, diagnostic, or framework endpoint exposes the declared protected effect",

@@ -4,6 +4,9 @@
   "signal_types": [
     "response_diff"
   ],
+  "runtime_kinds": [
+    "http"
+  ],
   "target_expected_signal": {
     "kind": "hunt-dispatch_verified",
     "criterion": "the dispatcher routes attacker-controlled input to an unintended handler or capability",

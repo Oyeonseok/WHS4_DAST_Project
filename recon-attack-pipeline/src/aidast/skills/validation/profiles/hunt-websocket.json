@@ -4,6 +4,9 @@
   "signal_types": [
     "state_change"
   ],
+  "runtime_kinds": [
+    "http"
+  ],
   "target_expected_signal": {
     "kind": "hunt-websocket_verified",
     "criterion": "a WebSocket message causes the prohibited cross-role read or state transition",

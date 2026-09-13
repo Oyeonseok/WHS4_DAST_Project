@@ -4,6 +4,9 @@
   "signal_types": [
     "response_diff"
   ],
+  "runtime_kinds": [
+    "http"
+  ],
   "target_expected_signal": {
     "kind": "hunt-k8s_verified",
     "criterion": "a Kubernetes API, workload secret, or cluster action crosses the declared principal boundary",

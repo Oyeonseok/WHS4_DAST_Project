@@ -4,6 +4,9 @@
   "signal_types": [
     "response_diff"
   ],
+  "runtime_kinds": [
+    "http"
+  ],
   "target_expected_signal": {
     "kind": "hunt-tls-network_verified",
     "criterion": "the tested endpoint exhibits the declared protocol, certificate, or transport-policy weakness",

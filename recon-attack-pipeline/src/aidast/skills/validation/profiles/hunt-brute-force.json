@@ -4,6 +4,9 @@
   "signal_types": [
     "timing"
   ],
+  "runtime_kinds": [
+    "http"
+  ],
   "target_expected_signal": {
     "kind": "hunt-brute-force_verified",
     "criterion": "repeated guesses bypass the declared throttling or lockout boundary",

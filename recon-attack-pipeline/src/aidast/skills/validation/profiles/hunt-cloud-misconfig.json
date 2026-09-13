@@ -4,6 +4,9 @@
   "signal_types": [
     "response_diff"
   ],
+  "runtime_kinds": [
+    "http"
+  ],
   "target_expected_signal": {
     "kind": "hunt-cloud-misconfig_verified",
     "criterion": "a cloud resource or control-plane capability is reachable beyond its intended principal",

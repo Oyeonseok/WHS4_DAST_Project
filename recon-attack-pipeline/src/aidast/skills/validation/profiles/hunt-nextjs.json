@@ -4,6 +4,9 @@
   "signal_types": [
     "response_diff"
   ],
+  "runtime_kinds": [
+    "http"
+  ],
   "target_expected_signal": {
     "kind": "hunt-nextjs_verified",
     "criterion": "Next.js framework metadata, server data, or protected route behavior crosses its intended boundary",

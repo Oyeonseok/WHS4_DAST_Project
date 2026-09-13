@@ -4,6 +4,9 @@
   "signal_types": [
     "error_signature"
   ],
+  "runtime_kinds": [
+    "http"
+  ],
   "target_expected_signal": {
     "kind": "hunt-rce_verified",
     "criterion": "crafted input produces the declared isolated command-execution marker or runtime-specific execution signal",

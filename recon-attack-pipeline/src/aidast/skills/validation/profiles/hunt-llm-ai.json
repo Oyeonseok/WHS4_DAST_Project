@@ -4,6 +4,9 @@
   "signal_types": [
     "response_diff"
   ],
+  "runtime_kinds": [
+    "http"
+  ],
   "target_expected_signal": {
     "kind": "hunt-llm-ai_verified",
     "criterion": "adversarial model input crosses the declared instruction, data, or tool-use boundary",

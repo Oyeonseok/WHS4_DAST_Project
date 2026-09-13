@@ -4,6 +4,9 @@
   "signal_types": [
     "state_change"
   ],
+  "runtime_kinds": [
+    "http"
+  ],
   "target_expected_signal": {
     "kind": "hunt-file-upload_verified",
     "criterion": "the uploaded test artifact reaches the prohibited storage, parsing, or execution state",

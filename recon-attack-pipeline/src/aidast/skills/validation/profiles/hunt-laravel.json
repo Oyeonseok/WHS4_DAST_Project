@@ -4,6 +4,9 @@
   "signal_types": [
     "response_diff"
   ],
+  "runtime_kinds": [
+    "http"
+  ],
   "target_expected_signal": {
     "kind": "hunt-laravel_verified",
     "criterion": "Laravel debug, configuration, or framework behavior exposes the declared protected effect",

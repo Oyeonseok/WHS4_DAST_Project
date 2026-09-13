@@ -4,6 +4,9 @@
   "signal_types": [
     "response_diff"
   ],
+  "runtime_kinds": [
+    "http"
+  ],
   "target_expected_signal": {
     "kind": "hunt-exceptional-conditions_verified",
     "criterion": "the exceptional input produces a stable security-relevant behavior difference",

@@ -4,6 +4,9 @@
   "signal_types": [
     "error_signature"
   ],
+  "runtime_kinds": [
+    "http"
+  ],
   "target_expected_signal": {
     "kind": "hunt-ldap_verified",
     "criterion": "crafted LDAP input produces a directory-specific parsing signal or unauthorized result-set change",

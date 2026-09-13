@@ -33,9 +33,9 @@ class ValidationProfileTests(unittest.TestCase):
             if entry.skill_id == "chain":
                 continue
             profile = SkillProfileResolver().resolve(entry.skill_id).profile
-            self.assertEqual(profile.target_expected_signal["kind"],
+            self.assertEqual(profile.target_expected_signal.kind,
                              f"{entry.skill_id}_verified")
-            criterion = profile.target_expected_signal.get("criterion")
+            criterion = profile.target_expected_signal.criterion
             self.assertIsInstance(criterion, str)
             self.assertGreater(len(criterion.strip()), 20)
             self.assertNotIn("profile_defined", json.dumps(
@@ -53,6 +53,7 @@ class ValidationProfileTests(unittest.TestCase):
         document = {
             "schema_version": 1, "attack_skill_name": "hunt-test",
             "signal_types": ["timing"], "target_expected_signal": {},
+            "runtime_kinds": ["http"],
             "control_positive": {"payload_template": {}, "expected_signal": {},
                                  "signal_type": "timing"},
             "control_negative": {"payload_template": {}, "expected_signal": {}},
@@ -61,6 +62,40 @@ class ValidationProfileTests(unittest.TestCase):
         }
         with self.assertRaises(PydanticValidationError):
             ValidationProfile.model_validate_json(json.dumps(document))
+
+    def test_profile_rejects_runtime_kind_that_cannot_emit_its_signal(self):
+        document = {
+            "schema_version": 1, "attack_skill_name": "hunt-test",
+            "signal_types": ("dom_effect",), "runtime_kinds": ("http",),
+            "target_expected_signal": {
+                "kind": "hunt-test_verified",
+                "criterion": "a unique marker executes in the declared browser context",
+                "requires_fresh_target_and_control_evidence": True,
+            },
+            "control_positive": {
+                "payload_template": {"mode": "channel_health_baseline"},
+                "expected_signal": {
+                    "kind": "dom_effect_channel_operational",
+                    "criterion": "the harmless browser baseline executes in the same context",
+                },
+                "signal_type": "dom_effect",
+            },
+            "control_negative": {
+                "payload_template": {"mode": "inert_same_shape_control"},
+                "expected_signal": {
+                    "kind": "no_dom_effect_target_effect",
+                    "criterion": "the inert input does not execute in the browser context",
+                },
+            },
+            "impact_rules": {
+                "boundary": "identify the browser boundary crossed by the effect",
+                "sensitivity": "identify the protected action exposed by the effect",
+                "actor_requirements": "identify the interaction and identity requirements",
+            },
+            "allowed_development_actions": (), "impact_expansion_paths": (),
+        }
+        with self.assertRaisesRegex(PydanticValidationError, "runtime kinds must match"):
+            ValidationProfile.model_validate(document)
 
     def test_impact_gap_uses_only_profile_paths_and_current_evidence(self):
         profile = SkillProfileResolver().resolve("hunt-idor").profile

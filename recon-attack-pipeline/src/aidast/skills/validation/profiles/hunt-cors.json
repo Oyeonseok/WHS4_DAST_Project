@@ -4,6 +4,9 @@
   "signal_types": [
     "authorization_boundary"
   ],
+  "runtime_kinds": [
+    "http"
+  ],
   "target_expected_signal": {
     "kind": "hunt-cors_verified",
     "criterion": "a credentialed cross-origin reader can access the declared protected response",

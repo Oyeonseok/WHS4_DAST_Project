@@ -4,6 +4,9 @@
   "signal_types": [
     "authorization_boundary"
   ],
+  "runtime_kinds": [
+    "http"
+  ],
   "target_expected_signal": {
     "kind": "hunt-jwt-crypto_verified",
     "criterion": "a cryptographically invalid or policy-forbidden token is accepted for the protected operation",
