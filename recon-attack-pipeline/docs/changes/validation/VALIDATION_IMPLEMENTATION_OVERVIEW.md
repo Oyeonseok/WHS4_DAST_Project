@@ -145,6 +145,7 @@ KNOWN이나 무결성 실패로 replay가 필요하지 않으면 Codex 세션도
 | `OUT_OF_SCOPE` | 현재 TargetPolicy가 endpoint 또는 method를 허용하지 않음 |
 | `UNDERPOWERED` | 취약점 효과는 확인됐지만 현재 입증된 기술 영향이 최소 기준보다 낮음 |
 | `CONTESTED` | Blind 관찰과 Attack claim이 충돌하지만 Attack 쪽 positive evidence도 존재 |
+| `BLOCKED` | 해결 가능한 blocker에 제한된 development를 수행했으나 fresh replay 조건을 충족하지 못함 |
 | `INCONCLUSIVE` | 무결성, control, 관찰 횟수, schema 또는 원인 식별이 충분하지 않음 |
 
 impact는 Boundary, Sensitivity, Actor requirements 세 축을 각각 0~3점으로 계산한다.
@@ -200,17 +201,50 @@ CONTESTED는 review 용도로만 취급한다.
 shared CLI에는 다음 계약이 연결돼 있다.
 
 - `validate run Pipeline.db --scan-id ...`
-- finding 또는 chain targeted run
-- `validate resume Pipeline.db --stage-run-id ...`
-- `validate status --scan-id/--case-id ...`
+- `validate run Pipeline.db --scan-id ... --finding-id ...`
+- `validate run Pipeline.db --scan-id ... --chain-id ...`
+- `validate resume Pipeline.db --stage-run-id ... [--policy TargetPolicy.json]`
+- `validate status Pipeline.db --scan-id ...`
+- `validate status Pipeline.db --case-id ...`
 - `report run Pipeline.db --case-id ...`
 
-`aidast run`은 Chaining 직후 DB 옆 `TargetPolicy.json`과 generic HTTP adapter로 native
-Coordinator를 만들어 Validation을 자동 실행한다. 독립 `validate run/resume`도 `--policy`
-또는 DB 옆 정책 파일로 같은 구성을 사용한다. application이 넣는 Coordinator 경계도
-테스트 transport와 별도 운영 adapter를 위해 유지한다.
+`--finding-id`와 `--chain-id`는 서로 배타적이다. 두 옵션을 모두 생략하면 해당 scan의
+`unreviewed`/`confirmed` finding과 `demonstrated` chain을 순차 처리한다. `status`는
+scan과 case 중 하나를 반드시 선택해야 한다. `run`과 `resume`의 `--policy`가
+생략되면 `Pipeline.db` 옆의 `TargetPolicy.json`을 기본값으로 사용한다.
 
-## 10. 완료 상태와 운영 수용 범위
+`aidast run`은 Chaining 직후 DB 옆 `TargetPolicy.json`과 HTTP/Browser/OOB/Chain runtime
+router로 native Coordinator를 만들어 Validation을 자동 실행한다. 독립
+`validate run/resume`도 `--policy` 또는 DB 옆 정책 파일로 같은 구성을 사용한다.
+application이 넣는 Coordinator 경계도 테스트 transport와 별도 운영 adapter를 위해
+유지한다.
+
+## 10. 구현 위치와 운영 구성
+
+아래 경로는 `src/aidast/`를 기준으로 한다.
+
+| 영역 | 주요 구현 |
+|---|---|
+| 조정 | `validation/coordinator.py`, `decision.py`, `matching.py`, `impact.py`, `gaps.py` |
+| 입력 무결성 | `validation/integrity.py`, `runtime_semantics.py`, `evidence_policy.py` |
+| replay 계약 | `runtime_contract.py`, `browser_contract.py`, `oob_contract.py`, `chain_contract.py` |
+| native 실행 | `native.py`, `http_adapter.py`, `browser_adapter.py`, `oob_adapter.py`, `chain_adapter.py` |
+| 요청 통제·비밀 | `request_broker.py`, `credentials.py`, `http_oob_observer.py`, `playwright_browser.py` |
+| Blind Agent | `codex_runner.py`, `blind.py`, `models.py` |
+| 저장·복구·조회 | `repository.py`, `source.py`, `status.py`, `reporting/case_runtime.py` |
+
+native builder는 runtime contract의 `http`, `browser`, `oob`, `chain`을 router로
+분기한다. HTTP는 기본 설정만으로 실행되고, Browser는 Python Playwright와 Chromium이
+필요하다. OOB는 `AIDAST_OOB_OBSERVER_CONFIG`에 HTTPS·동일 origin의 arm/poll JSON
+endpoint가 구성될 때 활성화된다. 미구성 adapter나 credential은 성공으로 대체하지 않고
+해당 case를 `INCONCLUSIVE`로 격리한다.
+
+credential은 DB에 비밀번호 본문이 아닌 opaque reference만 저장한다. native resolver는
+dispatch 시점에 `env://`와 `keyring://SERVICE/ACCOUNT`를 해석하며, Vault 등 추가
+scheme은 trusted application이 backend callable을 명시적으로 주입해야 한다. 해석된 값은
+1~32개의 CR/LF 없는 HTTP header map으로 다시 검증된다.
+
+## 11. 완료 상태와 운영 수용 범위
 
 현재 계획에 포함된 로컬 코드 구현은 완료됐다. shared DB 저장 구조, 무결성 검사,
 HTTP/Browser/OOB 및 mixed terminal Chain replay, Blind Agent, 복구, Reporting과 CLI가
@@ -228,7 +262,7 @@ negative control과 target 3회, ledger·evidence·최종 `CONFIRMED` snapshot�
 현재 검증 결과는 live acceptance를 포함한 unittest 365개와 shared Reporting pytest 22개
 통과이며 compileall과 whitespace 검사도 통과했다.
 
-## 11. 설계와 달라진 부분
+## 12. 설계와 달라진 부분
 
 ### Agent 요청 권한
 

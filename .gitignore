@@ -35,3 +35,6 @@ dist/
 *.db-wal
 *.db-shm
 *-surface*.json
+
+# AI 산출물
+*.omc*
