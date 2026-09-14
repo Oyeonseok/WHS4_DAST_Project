@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ai-dast"
+version = "0.1.0"
+description = "Multi-agent AI DAST orchestration core"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+  "playwright>=1.55,<2",
+  "pydantic>=2.12,<3",
+]
+
+[dependency-groups]
+dev = [
+  "pytest>=8,<10",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+cache_dir = "result/.pytest_cache"
+
+[project.scripts]
+aidast = "aidast.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"aidast.auth" = ["*.ps1"]
+"aidast.skills.scope" = ["SKILL.md"]
+"aidast.skills.ffuf_root_selection" = ["SKILL.md"]
+"aidast.skills.target_policy" = ["SKILL.md"]
+"aidast.skills.attack" = ["manifest.json", "controller.md", "catalog/*.json"]
+"aidast.skills.validation" = ["SKILL.md"]
+"aidast.skills.reporting" = ["SKILL.md", "references/*.md"]
