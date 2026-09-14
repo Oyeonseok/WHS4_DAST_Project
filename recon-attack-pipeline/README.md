@@ -157,9 +157,25 @@ uv run python -m unittest discover -s tests -v
 ## Recon observation annotations
 
 실제 CLI Recon 실행은 기존 탐색 결과와 별도로 관측 맥락을 저장하고, 탐색 단계가
-끝날 때 최대 50개 관측씩 Codex로 기능 태깅합니다. 계획 및 `--policy-only`는
-태깅을 실행하지 않습니다. 라이브러리에서 `ReconExecutor`를 직접 사용할 때는
-`annotation_agent`를 전달해야 LLM 태깅이 활성화됩니다.
+끝날 때 100개 관측씩 최대 3개의 독립 Codex 호출로 병렬 기능 태깅합니다. 완전히 같은
+정제 입력은 한 번만 판정하고 결과를 각 관측에 연결합니다. 실패한 배치는 50개, 25개로
+분할한 뒤 작은 배치를 한 번 더 재시도하며 진행률을 출력합니다. 계획 및
+`--policy-only`는 태깅을 실행하지 않습니다. 라이브러리에서 `ReconExecutor`를 직접
+사용할 때는 `annotation_agent`를 전달해야 LLM 태깅이 활성화됩니다.
+
+중단되거나 반복 실패한 태깅은 Recon을 다시 실행하지 않고 shared DB에서 이어갈 수
+있습니다.
+
+```bash
+aidast annotations status Runs/<scan_id>/Pipeline.db --scan-id <scan_id>
+aidast annotations resume Runs/<scan_id>/Pipeline.db --scan-id <scan_id>
+```
+
+`resume`은 완료된 annotation이 없는 관측만 선택합니다. 기본값은
+`--batch-size 100 --workers 3 --min-batch-size 25 --codex-timeout 300`이며 필요하면
+더 낮춰 실행할 수 있습니다. 최종 실패가 남으면 종료 코드 1과 미완료 건수를 반환하고,
+원본 관측은 계속 보존됩니다. 중단된 프로세스가 `running` row를 남겼다면 다른 태깅
+프로세스가 없음을 확인한 뒤 `--recover-running`을 추가합니다.
 
 - `discovery_contexts`: 페이지, 자동 클릭, 당시 인증 상태 및 세션 연결.
 - `endpoint_observations`: 병합 전 발견 기록과 출처, 실제 HTTP 트랜잭션 근거.

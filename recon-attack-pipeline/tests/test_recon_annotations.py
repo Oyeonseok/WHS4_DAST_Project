@@ -1,11 +1,18 @@
 import json
 import sqlite3
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
 from aidast.recon import db
-from aidast.recon.annotations import ObservationRecorder, AnnotationBatch, safe_url
+from aidast.recon.annotations import (
+    AnnotationBatch,
+    ObservationRecorder,
+    annotation_status,
+    resume_annotations,
+    safe_url,
+)
 from aidast.recon.surface import export_surface
 from aidast.recon.tools.mitm_proxy import ingest_mitm_capture
 
@@ -22,6 +29,28 @@ class FakeAgent:
             'category': 'function', 'tag': 'unknown',
             'rationale': '기능을 판단할 근거가 부족함', 'confidence': None,
         } for o in payload['observations']])
+
+
+class SizedAgent:
+    def __init__(self, reject_above=None):
+        self.reject_above = reject_above
+        self.batch_sizes = []
+        self.lock = threading.Lock()
+
+    def _run_structured(self, **kwargs):
+        payload = json.loads(kwargs['prompt'].split('\n', 1)[1])
+        observations = payload['observations']
+        with self.lock:
+            self.batch_sizes.append(len(observations))
+        if self.reject_above is not None and len(observations) > self.reject_above:
+            raise ValueError('batch too large')
+        return AnnotationBatch(annotations=[{
+            'observation_id': item['observation_id'],
+            'category': 'function',
+            'tag': 'unknown',
+            'rationale': '기능을 판단할 근거가 부족함',
+            'confidence': None,
+        } for item in observations])
 
 
 class ObservationTests(unittest.TestCase):
@@ -65,6 +94,107 @@ class ObservationTests(unittest.TestCase):
         self.assertEqual(self.conn.execute('SELECT count(*) FROM endpoint_observations').fetchone()[0], 2)
         self.assertEqual(self.conn.execute('SELECT count(*) FROM endpoint_annotations').fetchone()[0], 0)
         self.assertEqual(self.conn.execute('SELECT status FROM annotation_runs').fetchone()[0], 'failed')
+
+    def test_large_annotation_batches_run_in_parallel_sized_chunks(self):
+        agent = SizedAgent()
+        items = [
+            {
+                'method': 'GET', 'path': f'/items/{index}', 'source': 'katana_standard',
+                'context': {
+                    'context_key': f'item-{index}', 'page_url': f'/items/{index}',
+                    'action_type': 'tool_run', 'action_target': f'item-{index}',
+                },
+            }
+            for index in range(205)
+        ]
+        recorder = ObservationRecorder(
+            self.conn, origin_id=self.origin, scan_id='scan', agent=agent,
+        )
+        recorder.record('katana_standard', items)
+        self.assertEqual(sorted(agent.batch_sizes), [5, 100, 100])
+        self.assertEqual(
+            self.conn.execute('SELECT count(*) FROM endpoint_annotations').fetchone()[0],
+            205,
+        )
+        self.assertEqual(
+            self.conn.execute(
+                "SELECT count(*) FROM annotation_runs WHERE status='completed'"
+            ).fetchone()[0],
+            3,
+        )
+
+    def test_failed_batches_split_to_minimum_size_and_retry(self):
+        agent = SizedAgent(reject_above=25)
+        items = [
+            {
+                'method': 'GET', 'path': f'/retry/{index}', 'source': 'katana_standard',
+                'context': {
+                    'context_key': f'retry-{index}', 'page_url': f'/retry/{index}',
+                    'action_type': 'tool_run', 'action_target': f'retry-{index}',
+                },
+            }
+            for index in range(60)
+        ]
+        ObservationRecorder(
+            self.conn, origin_id=self.origin, scan_id='scan', agent=agent,
+        ).record('katana_standard', items)
+        self.assertEqual(sorted(agent.batch_sizes), [15, 15, 15, 15, 30, 30, 60])
+        self.assertEqual(
+            self.conn.execute('SELECT count(*) FROM endpoint_annotations').fetchone()[0],
+            60,
+        )
+        self.assertEqual(
+            self.conn.execute(
+                "SELECT count(*) FROM annotation_runs WHERE status='failed'"
+            ).fetchone()[0],
+            3,
+        )
+
+    def test_exact_duplicate_inputs_reuse_one_model_result(self):
+        agent = SizedAgent()
+        duplicate = {
+            'method': 'GET', 'path': '/same', 'source': 'katana_standard',
+            'context': {
+                'context_key': 'same', 'page_url': '/same',
+                'action_type': 'tool_run', 'action_target': 'same',
+            },
+        }
+        ObservationRecorder(
+            self.conn, origin_id=self.origin, scan_id='scan', agent=agent,
+        ).record('katana_standard', [dict(duplicate) for _ in range(40)])
+        self.assertEqual(agent.batch_sizes, [1])
+        self.assertEqual(
+            self.conn.execute('SELECT count(*) FROM endpoint_annotations').fetchone()[0],
+            40,
+        )
+
+    def test_resume_only_classifies_observations_without_completed_annotations(self):
+        ObservationRecorder(
+            self.conn, origin_id=self.origin, scan_id='scan',
+        ).record('login', self.items())
+        self.assertEqual(annotation_status(self.conn, scan_id='scan')['pending'], 2)
+        agent = SizedAgent()
+        self.conn.execute(
+            "INSERT INTO annotation_runs(annotation_run_id,scan_id,model,prompt_version,"
+            "taxonomy_version,status) VALUES ('stale','scan','fixture','1','1','running')"
+        )
+        self.conn.commit()
+        with self.assertRaisesRegex(ValueError, 'recover-running'):
+            resume_annotations(self.conn, scan_id='scan', agent=agent)
+        summary = resume_annotations(
+            self.conn, scan_id='scan', agent=agent, recover_running=True,
+        )
+        self.assertEqual((summary.tagged, summary.failed), (2, 0))
+        self.assertEqual(
+            self.conn.execute(
+                "SELECT status FROM annotation_runs WHERE annotation_run_id='stale'"
+            ).fetchone()[0],
+            'failed',
+        )
+        self.assertEqual(annotation_status(self.conn, scan_id='scan')['pending'], 0)
+        second = resume_annotations(self.conn, scan_id='scan', agent=agent)
+        self.assertEqual((second.requested, second.model_calls), (0, 0))
+        self.assertEqual(agent.batch_sizes, [2])
 
     def test_proxy_links_endpoint_and_scan_without_guessing_page(self):
         ObservationRecorder(self.conn, origin_id=self.origin, scan_id='scan').record('login', self.items())

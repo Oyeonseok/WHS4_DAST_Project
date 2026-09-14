@@ -6,6 +6,7 @@ import json
 import shutil
 import sqlite3
 import sys
+from contextlib import closing
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Protocol, Sequence
@@ -232,6 +233,32 @@ def _parser() -> argparse.ArgumentParser:
     validation_status_selection.add_argument("--scan-id")
     validation_status_selection.add_argument("--case-id")
 
+    annotations = commands.add_parser(
+        "annotations",
+        help="resume or inspect Recon observation annotations",
+    )
+    annotation_commands = annotations.add_subparsers(
+        dest="annotation_command", required=True
+    )
+    annotation_resume = annotation_commands.add_parser(
+        "resume", help="classify only observations without completed annotations"
+    )
+    annotation_resume.add_argument("database", type=Path, help="shared Pipeline.db")
+    annotation_resume.add_argument("--scan-id", required=True)
+    annotation_resume.add_argument("--batch-size", type=_positive_int, default=100)
+    annotation_resume.add_argument("--workers", type=_positive_int, default=3)
+    annotation_resume.add_argument("--min-batch-size", type=_positive_int, default=25)
+    annotation_resume.add_argument("--codex-timeout", type=_positive_int, default=300)
+    annotation_resume.add_argument(
+        "--recover-running", action="store_true",
+        help="mark stale running annotation calls failed before resuming",
+    )
+    annotation_status_parser = annotation_commands.add_parser(
+        "status", help="show tagged and pending observation counts"
+    )
+    annotation_status_parser.add_argument("database", type=Path)
+    annotation_status_parser.add_argument("--scan-id", required=True)
+
     report = commands.add_parser(
         "report", help="draft a platform report from a confirmed Validation case"
     )
@@ -375,6 +402,8 @@ def main(
             return _run_attack(args, workflow=attack_workflow)
         if args.command in {"validate", "validation"}:
             return _run_validation(args, coordinator=validation_coordinator)
+        if args.command == "annotations":
+            return _run_annotations(args)
         if args.command == "report":
             return _run_report(args, writer=report_writer)
         parser.error(f"unsupported command: {args.command}")
@@ -796,6 +825,35 @@ def _run_validation(args: argparse.Namespace, *, coordinator: object | None = No
         result = raw.model_dump(mode="json") if hasattr(raw, "model_dump") else raw
     print(json.dumps(result, ensure_ascii=False, sort_keys=True, default=str))
     return 0
+
+
+def _run_annotations(args: argparse.Namespace) -> int:
+    from aidast.recon.annotations import annotation_status, resume_annotations
+
+    database = args.database.expanduser().resolve()
+    if not database.is_file():
+        raise ReconExecutionError(f"pipeline DB not found: {database}")
+    try:
+        with closing(sqlite3.connect(database)) as conn:
+            conn.execute("PRAGMA foreign_keys=ON")
+            if args.annotation_command == "status":
+                result = annotation_status(conn, scan_id=args.scan_id)
+                exit_code = 0
+            else:
+                summary = resume_annotations(
+                    conn, scan_id=args.scan_id,
+                    agent=CodexMainAgent(timeout_seconds=args.codex_timeout),
+                    batch_size=args.batch_size, workers=args.workers,
+                    min_batch_size=args.min_batch_size,
+                    recover_running=args.recover_running,
+                )
+                result = asdict(summary)
+                result["scan_id"] = args.scan_id
+                exit_code = 1 if summary.failed else 0
+    except (OSError, sqlite3.Error, ValueError) as exc:
+        raise ReconExecutionError(str(exc)) from exc
+    print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+    return exit_code
 
 
 def _run_report(args: argparse.Namespace, *, writer: object | None = None) -> int:

@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import unicodedata
 from datetime import datetime, timezone
 from importlib.resources import files
@@ -151,6 +152,8 @@ class CodexMainAgent:
         self._attack_model = attack_model or self.DEFAULT_ATTACK_MODEL
         self._chaining_model = chaining_model or self.DEFAULT_CHAINING_MODEL
         self._validation_model = validation_model or self.DEFAULT_VALIDATION_MODEL
+        self._auth_lock = threading.Lock()
+        self._login_verified = False
         base_executable = getattr(sys, "_base_executable", None)
         stable_executable = (
             base_executable
@@ -1029,10 +1032,16 @@ another codex exec process. Return only the required structured result.
                 ) from exc
 
     def _require_login(self, executable: str) -> None:
-        try:
-            CodexAuth(executable=executable).require_login()
-        except CodexAuthError as exc:
-            raise MainAgentError(str(exc)) from exc
+        if self._login_verified:
+            return
+        with self._auth_lock:
+            if self._login_verified:
+                return
+            try:
+                CodexAuth(executable=executable).require_login()
+            except CodexAuthError as exc:
+                raise MainAgentError(str(exc)) from exc
+            self._login_verified = True
 
     @staticmethod
     def _build_scope_collection_prompt(program_url: str) -> str:

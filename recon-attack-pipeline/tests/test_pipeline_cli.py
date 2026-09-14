@@ -14,9 +14,66 @@ from aidast.cli import _write_recon_handoff, main
 from aidast.attack.models import AttackStageResult
 from aidast.chaining.models import ChainingStageResult
 from aidast.recon import db
+from aidast.recon.annotations import AnnotationBatch, ObservationRecorder
 
 
 class PipelineCliTests(unittest.TestCase):
+    def test_annotation_status_and_resume_only_process_pending_rows(self) -> None:
+        class AnnotationAgent:
+            def _run_structured(self, **kwargs):
+                payload = json.loads(kwargs["prompt"].split("\n", 1)[1])
+                return AnnotationBatch(annotations=[{
+                    "observation_id": item["observation_id"],
+                    "category": "function",
+                    "tag": "unknown",
+                    "rationale": "근거 부족",
+                    "confidence": None,
+                } for item in payload["observations"]])
+
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            database = Path(temporary_dir) / "Pipeline.db"
+            conn = db.init_db(database)
+            db.insert_scan(
+                conn, scan_id="scan_annotations", scope_type="test",
+                scope_value="example.com",
+            )
+            asset = db.insert_asset(
+                conn, scan_id="scan_annotations", identifier="example.com",
+                asset_type="DOMAIN",
+            )
+            origin = db.upsert_origin(
+                conn, asset_id=asset, scheme="https", host="example.com",
+                port=443, base_url="https://example.com",
+            )
+            ObservationRecorder(
+                conn, origin_id=origin, scan_id="scan_annotations",
+            ).record("fixture", [{
+                "method": "GET", "path": "/api", "source": "fixture",
+                "context": {"context_key": "fixture"},
+            }])
+            conn.close()
+
+            output = io.StringIO()
+            with (
+                patch("aidast.cli.CodexMainAgent", return_value=AnnotationAgent()),
+                redirect_stdout(output),
+            ):
+                result = main([
+                    "annotations", "resume", str(database),
+                    "--scan-id", "scan_annotations",
+                ])
+            self.assertEqual(result, 0)
+            self.assertEqual(json.loads(output.getvalue().splitlines()[-1])["tagged"], 1)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                result = main([
+                    "annotations", "status", str(database),
+                    "--scan-id", "scan_annotations",
+                ])
+            self.assertEqual(result, 0)
+            self.assertEqual(json.loads(output.getvalue())["pending"], 0)
+
     def test_run_uses_shared_database_and_starts_native_attack(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_dir:
             root = Path(temporary_dir)
