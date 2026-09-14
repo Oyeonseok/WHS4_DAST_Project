@@ -1,16 +1,17 @@
 # Validation 구현 현황 이해 문서
 
-- 기준일: 2026-09-13
+- 기준일: 2026-09-14
 - 관련 설계: [Validation 재구조화 설계](../superpowers/specs/2026-09-12-validation-refactor-design.md)
 - 상세 계획: [Validation 재구조화 구현 계획](../superpowers/plans/2026-09-12-validation-refactor-implementation.md)
 - 누적 변경 이력: [Validation 재구조화 변경 기록](VALIDATION_REFACTOR_CHANGES.md)
-- 구현 커밋: `aab3221`, `3065ece`, `c5f5b8c`, `af85da6`, `0723fa8`
+- 주요 구현 커밋: `aab3221`부터 `a75698b`까지
 
 ## 1. 무엇을 바꿨나
 
 기존 Validation은 별도 `Validation.db`와 7개 질문 중심으로 동작했다. 현재 구현은
 Recon, Attack, Chaining이 사용하는 `Pipeline.db` 안에서 후보의 출처, 재현 요청,
-관찰 증거, Blind 판정, 영향도와 최종 상태를 함께 추적하는 구조로 전환하는 중이다.
+관찰 증거, Blind 판정, 영향도와 최종 상태를 함께 추적하는 구조로 전환했다. 별도
+`Validation.db`, 7 Question API와 Report v1 경로는 제거됐다.
 
 핵심 목표는 다음 세 가지다.
 
@@ -28,11 +29,16 @@ flowchart TD
     C -->|예| K[KNOWN]
     C -->|아니오| P[현재 TargetPolicy 재검사]
     P -->|거절| O[OUT_OF_SCOPE]
-    P --> R[positive control + target 3회]
+    P --> R[positive control 1회 + negative control 1회 + target 3회]
     R -->|결과 혼재| R2[target 2회 추가]
-    R --> D[필요하면 제한된 development 1 cycle]
-    D --> F[claim을 숨긴 BlindAssessment 고정]
-    F --> U[Attack claim 공개 후 ClaimComparison]
+    R --> F[claim을 숨긴 BlindAssessment 생성]
+    R2 --> F
+    F -->|해결 가능한 blocker| D[development 최대 2 action]
+    D -->|성공| R3[fresh batch 재실행 및 BlindAssessment 재생성]
+    D -->|실패 또는 action 없음| G
+    F -->|blocker 없음| G[BlindAssessment hash 고정]
+    R3 --> G
+    G --> U[Attack claim 공개 후 ClaimComparison]
     U --> E[결정론적 impact 및 최종 상태 계산]
     E --> S[Pipeline.db에 evidence와 decision 저장]
 ```
@@ -55,6 +61,12 @@ native Attack의 `commit-finding`은 다음 항목을 하나의 transaction으�
 `CandidateIntegrityGate`가 completed Attack stage, confirmed attempt, Skill hash,
 endpoint, request, policy digest, payload와 evidence 관계를 다시 검사한다. 이 검사가
 실패하면 실제 요청을 보내지 않고 해당 case만 `INCONCLUSIVE`로 끝낸다.
+
+producer 저장 시점과 Candidate gate 양쪽에서 runtime kind가 Validation profile과 맞는지,
+target과 inert control 요청이 다른지, target proof가 최소 요건을 충족하는지도 검사한다.
+HTTP status-only proof, duration threshold가 없는 timing proof, console 실행 marker가 없는
+XSS proof는 허용하지 않는다. target과 negative control은 동일한 marker·selector·threshold를
+평가해야 하므로 무관한 assertion을 사용해 baseline 검사를 우회할 수 없다.
 
 runtime contract는 Attack이 실제 관찰에 사용한 target별 값에서 만든다. HTTP는 path/query,
 비밀이 아닌 header, JSON 또는 text body와 bounded assertion을 정규화한 뒤 별도 SHA-256에
@@ -85,8 +97,10 @@ source가 모두 맞으면 case ID lexical 순으로 하나를 선택한다. sig
 profile hash는 검증 방식의 속성이므로 KNOWN 중복 key에 포함하지 않는다.
 
 payload normalization과 구조 hash는 reproduction spec의 변조 검출에만 유지하며 KNOWN
-판정에는 사용하지 않는다. 이 단계는 현재 구조화된 메타데이터에 대한 기본 중복 검사이며,
-payload의 semantic 동등성을 판정하는 LLM 단계는 아직 추가하지 않았다.
+판정에는 사용하지 않는다. KNOWN은 구조화된 실행 메타데이터가 정확히 같은 경우만 처리한다.
+문자열 거리로 의미를 추측하는 Levenshtein·임베딩 유사도와 payload 의미를 판정하는 LLM은
+현재 KNOWN 경로에 사용하지 않는다. 의미가 애매한 후보를 자동 중복 처리해 미탐을 늘리지
+않기 위한 선택이다.
 
 KNOWN의 source case가 이후 `CONFIRMED`가 아니게 되면 이를 참조하던 KNOWN case도
 자동으로 `INCONCLUSIVE`가 된다.
@@ -112,7 +126,8 @@ Blind pass에서는 Attack의 결론과 영향 주장을 숨기고 다음 정보
 확인한다. schema가 잘못되면 한 번의 수정 기회를 주고, 다시 실패하면 해당 case만
 `INCONCLUSIVE`로 격리한다.
 
-기본 Validation 모델은 `gpt-5.6-sol`이다. native Codex 세션은 read-only sandbox에서
+기본 Validation 모델은 `gpt-5.6-sol`이다. stage에는 native runner 하나를 사용하되 Codex
+thread와 작업 directory는 case마다 분리한다. native Codex 세션은 read-only sandbox에서
 shell, web, browser, apps 등 모든 도구를 끈 상태로 실행한다. 첫 Blind pass에서 얻은
 thread ID는 같은 case의 unblind pass와 schema 수정 재시도에만 사용한다. 다음 case는 새
 thread와 작업 directory에서 시작하므로 이전에 공개된 claim이 Blind 문맥에 섞이지 않는다.
@@ -147,6 +162,11 @@ stage/case/attempt 소유권, rate, concurrency와 총 요청 예산을 dispatch
 ledger에는 query 값과 credential header 값을 저장하지 않는다. evidence metadata도 secret,
 민감 header, raw body를 제거하고 깊이, 항목 수와 바이트 크기를 제한한다.
 
+native HTTP·Browser·OOB·Chain adapter의 성공 관찰은 request ledger row를 반드시 남긴다.
+Coordinator는 evidence를 저장하기 전에 adapter가 반환한 모든 request ID가 현재
+scan·stage·case·attempt에 속한 `completed` row인지 다시 검사한다. 누락되거나 다른 attempt의
+ID를 인용한 관찰은 판정에 들어가지 않는다.
+
 Validation case, attempt, evidence, HTTP ledger, development action, impact hypothesis와
 reproduction spec은 shared `Pipeline.db` schema v9에 저장된다. case update에는 optimistic
 concurrency를 적용하고, reproduction spec은 trigger로 update와 delete를 막는다.
@@ -158,11 +178,17 @@ stage가 중단되면 진행 중 attempt는 `outcome_unknown`, case는 `interrup
 BlindAssessment/ClaimComparison은 hash와 참조를 검증한 뒤 재사용한다. 이 경우 요청과
 Blind assessment를 다시 실행하지 않는다.
 
+중단된 실제 요청에 `outcome_unknown`이 남아 있으면 원격 side effect를 중복 실행하지
+않도록 자동 재전송하지 않고 case를 `INCONCLUSIVE`로 닫는다. BlindAssessment 고정 뒤
+중단됐다면 새 case 격리 thread에서 ClaimComparison부터 재개한다.
+
 demonstrated Chain은 모든 node의 최신 상태가 `CONFIRMED` 또는 `KNOWN`일 때만 별도
 end-to-end replay를 수행한다. node 순서, 단계 사이 binding, 마지막 terminal assertion과
 각 reproduction spec을 검사한다. 이전 응답과 실제 binding 값, terminal impact claim은
 Blind assessment 전까지 숨긴다. 최종 impact는 node 점수를 더하지 않고 terminal effect를
-기준으로 다시 계산한다. Validation은 기존 Chaining 테이블을 수정하지 않는다.
+기준으로 다시 계산한다. 중간 source step은 원문 응답을 저장하지 않는 경계 때문에 HTTP만
+허용하며 Browser/OOB는 terminal step으로 사용할 수 있다. Validation은 기존 Chaining
+테이블을 수정하지 않는다.
 
 ## 9. Reporting과 CLI
 
@@ -184,39 +210,23 @@ Coordinator를 만들어 Validation을 자동 실행한다. 독립 `validate run
 또는 DB 옆 정책 파일로 같은 구성을 사용한다. application이 넣는 Coordinator 경계도
 테스트 transport와 별도 운영 adapter를 위해 유지한다.
 
-## 10. 아직 남은 작업
+## 10. 완료 상태와 운영 수용 범위
 
-현재 저장 구조, 상태 머신, 무결성 검사, Blind Agent, Chain replay와 보고서 연결은
-구현돼 있다. 실제 운영 경로를 완성하려면 다음 작업이 남아 있다.
+현재 계획에 포함된 로컬 코드 구현은 완료됐다. shared DB 저장 구조, 무결성 검사,
+HTTP/Browser/OOB 및 mixed terminal Chain replay, Blind Agent, 복구, Reporting과 CLI가
+연결돼 있다. 운영 투입 전에는 다음 환경 검증이 남아 있다.
 
-1. 승인된 외부 test target에서 Recon→Attack→Validation 전체 pipeline과 target별 proof 검증
-
-HTTP response marker와 정량 threshold는 공통 profile에서 추정하지 않고 Attack의 실제
-관찰에서 만들어진 immutable runtime contract로 받는다. generic HTTP adapter는 이 값이
-있는 unauthenticated Finding을 기본 경로에서 결정론적으로 실행한다. contract가 없거나
-`keyring://`/`vault://` reference가 필요한 Finding, Chain은 요청 없이 case 단위
-`INCONCLUSIVE`가 된다. `env://NAME`은 환경 변수의 JSON header map을 요청 직전에만
-해석해 authenticated HTTP replay를 지원한다. Playwright browser request는 current policy와
-Validation ledger를 매 요청 통과한다. HTTP Chain과 HTTP→Browser/OOB terminal Chain은
-명시적 응답 추출/요청 주입 계약으로 fresh 값을 전달한다. OOB callback은 설정 기반 HTTP
-arm/cursor/poll observer로 연결한다.
-중단 시 `outcome_unknown` 실행이 하나라도 남은 case는 자동 재전송하지 않고
-`INCONCLUSIVE`로 닫아 원격 side effect의 중복을 막는다.
-
-runtime contract 저장 전과 replay 전에는 profile-aware 최소 의미 검사를 수행한다. 동일한
-target/negative request, status-only HTTP proof, duration 없는 timing proof, 실행 marker 없는
-XSS와 동일한 OOB trigger는 거부한다. 실제 marker가 target의 자연 응답에도 존재하는지는
-정적 규칙으로 추측하지 않고 fresh control 관측에서 판단한다. 이때 negative control은
-target과 동일한 content marker·duration threshold·DOM/console assertion 또는 OOB callback
-기준을 사용해야 하므로 무관한 assertion으로 baseline 검사를 우회할 수 없다.
-
-native HTTP·Browser·OOB·Chain adapter의 성공 관찰은 Validation request ledger row를 반드시
-남긴다. Coordinator는 evidence 저장 전에 반환된 모든 request ID가 현재
-scan·stage·case·attempt에 속한 완료 row인지 다시 확인한다.
+1. 승인된 외부 test target에서 Recon→Attack→Chaining→Validation 전체 pipeline과
+   target별 proof 검증
 
 local live acceptance는 실제 HTTP socket으로 native Validation의 positive control,
 negative control과 target 3회, ledger·evidence·최종 `CONFIRMED` snapshot을 검증한다.
-`AIDAST_LIVE_ACCEPTANCE=1`에서 실행하며 외부 target의 Recon·Attack 계약 생성은 포함하지 않는다.
+`AIDAST_LIVE_ACCEPTANCE=1`에서 실행한다. 이 테스트는 저장된 Attack contract부터 시작하고
+판정 Agent를 fixture로 주입하므로 외부 target의 Recon·Attack 계약 생성과 실제 Codex CLI
+호출까지 증명하지는 않는다.
+
+현재 검증 결과는 live acceptance를 포함한 unittest 365개와 shared Reporting pytest 22개
+통과이며 compileall과 whitespace 검사도 통과했다.
 
 ## 11. 설계와 달라진 부분
 
@@ -243,6 +253,26 @@ strict schema로 고정했지만 selector, marker와 threshold는 공통값으�
 실제 target과 Attack runtime slot을 모르는 상태에서 이를 추정하면 정상 오류나 지연,
 markup을 exploit 성공으로 오인할 수 있어서다. 대신 Finding은 Attack이 작성한 target별
 runtime contract를 schema와 hash로 고정해 해당 실행 계열의 adapter에서 평가한다.
+
+target과 negative control이 서로 다른 proof assertion을 사용하면 무관한 marker로 baseline
+검사를 통과할 수 있어, 설계에 명시되지 않았던 proof 의미 동등성 검사를 producer와
+Candidate gate 양쪽에 추가했다. marker 자체의 정답은 추측하지 않고 fresh control이 같은
+marker를 관찰하도록 구조만 고정한다.
+
+### KNOWN 유사도 제거
+
+초기 구현에 있던 Levenshtein과 `known_similarity`는 문자열 모양이 비슷하다는 이유로 다른
+취약점을 중복 처리할 수 있어 제거했다. 임베딩도 같은 자동 중복 오판 문제를 만들 수 있어
+사용하지 않는다. KNOWN은 같은 scan의 현재 `CONFIRMED` case 중 취약점·endpoint·method·
+injection·parameter·identity role·Hunt Skill이 정확히 같은 경우만 인정한다. payload 구조
+hash는 무결성 검사용이며 KNOWN 입력이 아니다.
+
+### mixed Chain 범위
+
+Browser와 OOB는 terminal step으로 실행할 수 있지만 중간 source step으로는 허용하지 않는다.
+중간 binding을 만들려면 원문 DOM이나 callback 결과에서 값을 추출·보관해야 하는데, 현재
+증거 정책은 원문 응답을 저장하지 않는다. 이 경계를 약화하지 않고 HTTP scalar binding만
+중간 단계에 허용했다.
 
 ### legacy Reporting 제거
 
