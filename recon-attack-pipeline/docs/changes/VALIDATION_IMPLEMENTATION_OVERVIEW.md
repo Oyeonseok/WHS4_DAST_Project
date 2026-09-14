@@ -189,7 +189,7 @@ Coordinator를 만들어 Validation을 자동 실행한다. 독립 `validate run
 현재 저장 구조, 상태 머신, 무결성 검사, Blind Agent, Chain replay와 보고서 연결은
 구현돼 있다. 실제 운영 경로를 완성하려면 다음 작업이 남아 있다.
 
-1. 실제 target에서 동일 proof를 적용한 fresh negative control이 clear인지 수용 검증
+1. 승인된 외부 test target에서 Recon→Attack→Validation 전체 pipeline과 target별 proof 검증
 
 HTTP response marker와 정량 threshold는 공통 profile에서 추정하지 않고 Attack의 실제
 관찰에서 만들어진 immutable runtime contract로 받는다. generic HTTP adapter는 이 값이
@@ -213,6 +213,10 @@ target과 동일한 content marker·duration threshold·DOM/console assertion �
 native HTTP·Browser·OOB·Chain adapter의 성공 관찰은 Validation request ledger row를 반드시
 남긴다. Coordinator는 evidence 저장 전에 반환된 모든 request ID가 현재
 scan·stage·case·attempt에 속한 완료 row인지 다시 확인한다.
+
+local live acceptance는 실제 HTTP socket으로 native Validation의 positive control,
+negative control과 target 3회, ledger·evidence·최종 `CONFIRMED` snapshot을 검증한다.
+`AIDAST_LIVE_ACCEPTANCE=1`에서 실행하며 외부 target의 Recon·Attack 계약 생성은 포함하지 않는다.
 
 ## 11. 설계와 달라진 부분
 

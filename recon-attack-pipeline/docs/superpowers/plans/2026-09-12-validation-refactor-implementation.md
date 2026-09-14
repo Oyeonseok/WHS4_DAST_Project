@@ -66,10 +66,12 @@ Blind claim 공개 시점은 Coordinator가 assessment digest를 먼저 고정�
 
 ```bash
 TMPDIR=/private/tmp PYTHONPATH=src:tests .venv/bin/python -m unittest test_validation_evidence_policy test_validation_agent test_validation_store test_validation_report_cli -q
+AIDAST_LIVE_ACCEPTANCE=1 TMPDIR=/private/tmp PYTHONPATH=src .venv/bin/python -m unittest discover -s tests -p 'test_*.py'
 ```
 
 최신 전체 unittest는 macOS `/var` symlink 오인을 피하도록 `TMPDIR=/private/tmp`에서
-364개가 모두 통과했다. legacy 전용 unittest 30개를 제거했고, 기존 Reporting 보안
+365개가 모두 통과했다. live socket 수용 테스트는 `AIDAST_LIVE_ACCEPTANCE=1`로 활성화했다.
+legacy 전용 unittest 30개를 제거했고, 기존 Reporting 보안
 검사를 shared case fixture로 전환한 pytest 22개도 별도 통과했다. compileall과 diff
 whitespace 검사도 통과했다.
 
@@ -251,8 +253,8 @@ PYTHONPATH=src .venv/bin/python -m unittest discover -s tests -v
 | §10 요청 안전 | redaction, 저장 경계, current policy per-hop HTTP transport와 env/keyring/configured Vault credential resolver | 없음 |
 | §11 CLI | status, 보고서 입력, native HTTP/Playwright/OOB/Chain Coordinator 기반 run·resume·targeted 실행과 pipeline 자동 호출 | 없음 |
 | §12 복구·Report | lifecycle 저장 복구, 완료 batch·고정 assessment 재사용, outcome-unknown 재전송 차단, snapshot·eligibility·stale | 없음 |
-| §13 테스트 | 합성 fixture 및 HTTP adapter 통합 회귀 | 외부 test target과 전체 pipeline 수용 검증 |
+| §13 테스트 | 합성 fixture, HTTP adapter 통합 회귀, loopback 실제 socket 기반 native Validation 수용 검증 | 승인된 외부 test target의 Recon→Attack→Validation 전체 pipeline 수용 검증 |
 
-legacy Validation과 Report v1 경로는 제거됐다. 표에 남은 항목은 외부 test target 수용
-검증과 Attack이 target별로 작성한 동일 proof 기준이 fresh negative control에서 clear인지
-확인하는 운영 검증이다.
+legacy Validation과 Report v1 경로는 제거됐다. 표에 남은 항목은 승인된 외부 test target에서
+Recon·Attack이 실제 reproduction contract를 만들고 동일 proof 기준이 fresh negative
+control에서 clear한지 확인하는 전체 pipeline 운영 검증이다.

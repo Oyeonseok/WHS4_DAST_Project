@@ -2,6 +2,29 @@
 
 이 문서는 Validation 재구조화 구현 변경을 누적 기록한다. 관련 구현을 완료할 때마다 최신 날짜의 항목을 문서 상단에 추가한다.
 
+## 2026-09-14: 실제 HTTP 소켓 기반 native Validation 수용 검증
+
+- `ThreadingHTTPServer`로 격리된 local target을 띄우고 `build_native_validation_coordinator`
+  의 기본 HTTP adapter가 실제 socket을 통해 positive control, inert negative control과
+  target 3회를 실행하는 수용 테스트를 추가했다.
+- target은 다른 사용자의 `owner_id` marker를 반환하고 negative control은 같은 marker가
+  없는 응답을 반환한다. target과 negative에 동일 proof assertion이 적용된 상태에서만
+  `CONFIRMED`가 되는 흐름을 검증한다.
+- `TargetPolicy.json` 로드, current policy 검사, 실제 urllib transport, request ledger 5개,
+  attempt와 observation evidence 5개, Blind/unblind 판정 및 최종 shared DB snapshot을 한
+  테스트에서 확인한다.
+- 일반 sandbox와 기본 CI에서는 포트를 열지 않도록 live 테스트를
+  `AIDAST_LIVE_ACCEPTANCE=1`로 명시적으로 활성화한다.
+- live 테스트를 활성화한 전체 unittest 365개, shared Reporting pytest 22개,
+  compileall과 whitespace 검사가 통과했다.
+
+설계와 다른 점 및 이유:
+
+명세 §13.3은 외부 test target과 전체 pipeline 검증을 요구한다. 현재 제공된 승인 외부
+target과 credential이 없으므로 먼저 loopback의 실제 HTTP transport에서 native Validation
+경로를 검증했다. Recon·Attack이 실제 외부 target에서 reproduction contract를 생성하는
+구간과 외부 환경의 marker 적합성은 이 테스트가 증명하지 않으며 후속 수용 검증으로 남긴다.
+
 ## 2026-09-14: target과 negative control의 proof 기준 고정
 
 - target에서 보안 효과를 판단하는 assertion과 fresh negative control에서 효과 부재를
