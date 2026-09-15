@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sqlite3
 import shutil
 import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unicodedata
+from contextlib import closing
 from datetime import datetime, timezone
 from importlib.resources import files
 from pathlib import Path
@@ -312,7 +315,10 @@ class CodexMainAgent:
                 )
             try:
                 validate_policy_for_target(
-                    item, asset_type=item.asset_type, asset=item.asset
+                    item,
+                    asset_type=item.asset_type,
+                    asset=item.asset,
+                    scope_markdown=scope_markdown,
                 )
             except ValueError as exc:
                 raise MainAgentError(f"unsafe target policy: {exc}") from exc
@@ -700,6 +706,114 @@ class CodexMainAgent:
         )
         (agent_dir / "aidast-chaining.toml").write_text(content, encoding="utf-8")
 
+    @staticmethod
+    def _review_pending_attack_authorizations(
+        db_path: Path, stage_run_id: str, *, input_fn=None,
+    ) -> int:
+        """Resolve each currently pending Attack envelope with one user decision."""
+        if input_fn is None:
+            input_fn = input
+        with closing(sqlite3.connect(db_path)) as conn:
+            conn.execute("PRAGMA foreign_keys=ON")
+            conn.execute("PRAGMA busy_timeout=5000")
+            pending = conn.execute(
+                """SELECT e.envelope_id,e.scan_id,e.task_id,t.skill_name,e.method,
+                          e.origin,e.normalized_path,e.provenance_kind,e.max_requests,
+                          e.max_body_bytes,e.risk_class,e.approval_reason
+                   FROM attack_authorization_envelopes e
+                   JOIN attack_tasks t ON t.task_id=e.task_id
+                   JOIN stage_runs s ON s.stage_run_id=e.stage_run_id
+                   WHERE e.stage_run_id=? AND e.status='pending'
+                     AND t.status='running' AND s.status='running'
+                   ORDER BY e.requested_at,e.envelope_id""",
+                (stage_run_id,),
+            ).fetchall()
+        resolved = 0
+        for row in pending:
+            (
+                envelope_id, scan_id, task_id, skill_name, method, origin,
+                normalized_path, provenance_kind, max_requests, max_body_bytes,
+                risk_class, approval_reason,
+            ) = row
+            provenance = (
+                "Recon에서 발견된 경로 후보(해당 메서드는 미관측)"
+                if provenance_kind == "recon_candidate"
+                else "Attack Agent가 새로 제안한 경로"
+            )
+            print(
+                "\n[Attack 요청 승인 필요]\n"
+                f"  Skill  : {skill_name}\n"
+                f"  요청   : {method} {origin}{normalized_path}\n"
+                f"  근거   : {provenance}\n"
+                f"  위험   : {risk_class} ({approval_reason})\n"
+                f"  범위   : 현재 task, 최대 {max_requests}회, "
+                f"body {max_body_bytes // 1024} KiB, 15분, redirect 금지",
+                flush=True,
+            )
+            try:
+                answer = input_fn("  이 범위만 허용하려면 y, 거부하려면 N: ")
+            except (EOFError, KeyboardInterrupt):
+                answer = "N"
+            approved = str(answer).strip().casefold() == "y"
+            now = time.time()
+            with closing(sqlite3.connect(db_path, isolation_level=None)) as conn:
+                conn.execute("PRAGMA foreign_keys=ON")
+                conn.execute("PRAGMA busy_timeout=5000")
+                conn.execute("BEGIN IMMEDIATE")
+                try:
+                    cursor = conn.execute(
+                        """UPDATE attack_authorization_envelopes
+                           SET status=?,decided_at=?,expires_at=?
+                           WHERE envelope_id=? AND status='pending'""",
+                        (
+                            "approved" if approved else "denied", now,
+                            now + 15 * 60 if approved else None, envelope_id,
+                        ),
+                    )
+                    if cursor.rowcount == 1:
+                        conn.execute(
+                            """INSERT INTO audit_events
+                               (audit_event_id,scan_id,stage_run_id,task_id,
+                                event_type,details_json)
+                               VALUES (?,?,?,?,?,?)""",
+                            (
+                                "audit_" + uuid4().hex, scan_id, stage_run_id,
+                                task_id,
+                                "attack.authorization.approved" if approved
+                                else "attack.authorization.denied",
+                                json.dumps({
+                                    "envelope_id": envelope_id,
+                                    "method": method,
+                                    "origin": origin,
+                                    "normalized_path": normalized_path,
+                                    "max_requests": max_requests,
+                                    "max_body_bytes": max_body_bytes,
+                                    "risk_class": risk_class,
+                                    "approval_reason": approval_reason,
+                                    "ttl_seconds": 15 * 60,
+                                    "redirects_allowed": False,
+                                }, ensure_ascii=False, sort_keys=True),
+                            ),
+                        )
+                        resolved += 1
+                    conn.execute("COMMIT")
+                except Exception:
+                    conn.execute("ROLLBACK")
+                    raise
+        return resolved
+
+    @classmethod
+    def _attack_authorization_broker(
+        cls, db_path: Path, stage_run_id: str, stop: threading.Event,
+        errors: list[BaseException],
+    ) -> None:
+        try:
+            while not stop.is_set():
+                cls._review_pending_attack_authorizations(db_path, stage_run_id)
+                stop.wait(0.2)
+        except BaseException as exc:
+            errors.append(exc)
+
     def run_attack_orchestrator(
         self,
         *,
@@ -835,6 +949,15 @@ another codex exec process. Return only the required structured result.
                 str(result_path),
                 "-",
             ]
+            broker_stop = threading.Event()
+            broker_errors: list[BaseException] = []
+            broker = threading.Thread(
+                target=self._attack_authorization_broker,
+                args=(db_path, stage_run_id, broker_stop, broker_errors),
+                name="aidast-attack-authorization",
+                daemon=True,
+            )
+            broker.start()
             try:
                 completed = subprocess.run(
                     command,
@@ -848,6 +971,13 @@ another codex exec process. Return only the required structured result.
                 )
             except subprocess.TimeoutExpired as exc:
                 raise MainAgentError("native Attack Agent timed out") from exc
+            finally:
+                broker_stop.set()
+                broker.join(timeout=1)
+            if broker_errors:
+                raise MainAgentError(
+                    f"Attack authorization broker failed: {broker_errors[0]}"
+                ) from broker_errors[0]
             if completed.returncode != 0:
                 raise MainAgentError(
                     "native Attack Agent failed with exit code "
@@ -1164,7 +1294,8 @@ You compile an approved bug-bounty Scope into executable per-target policy JSON.
 Do not browse or execute tools. Produce exactly one policy for every supplied target.
 Never add a host, scheme, port, path, method, permission, or exception absent from Scope.md.
 Use the application defaults when a rule is unspecified: HTTPS only,
-GET/HEAD/OPTIONS only, 1 request/second, concurrency 3, depth 3, at most 2000
+GET/HEAD/OPTIONS only for both Recon and Attack, 1 request/second,
+concurrency 3, depth 3, at most 2000
 requests, no form submission, ffuf enabled without recursion, and no subdomains.
 Subdomains may be enabled only for an explicitly approved WILDCARD asset. Preserve each
 asset and asset_type exactly. For a WILDCARD asset such as `*.example.com`, put the
@@ -1177,6 +1308,15 @@ constraint. For every changed execution-control field, add one restriction_evide
 entry whose field names that exact field and whose source_quote is copied verbatim from
 Scope.md. Never increase a default and never infer a numeric limit from words such as
 "reasonable", "limited", "non-excessive", or "avoid disruption".
+Keep `allowed_methods` read-only because it controls Recon. Set
+`attack_authorization_mode` to `active_non_destructive` only when one verbatim
+quote in Scope.md Allowed activities authorizes active security, penetration, or
+vulnerability testing and is not limited to read-only or authentication. Copy
+that quote to `attack_authorization_evidence`. For this activity-level grant,
+put GET/HEAD/OPTIONS and every normal state-changing method not explicitly
+prohibited by Scope in `attack_allowed_methods`, even when the quote does not
+enumerate HTTP methods. Otherwise retain `read_only`, GET/HEAD/OPTIONS, and null evidence. Never
+copy an Attack method into Recon's `allowed_methods`.
 An execution start URL is an operator-supplied, narrower boundary under its canonical
 target. When the approved policy permits testing operator-owned assets, use its exact
 scheme, port, and path as the maximum executable boundary. It does not authorize any

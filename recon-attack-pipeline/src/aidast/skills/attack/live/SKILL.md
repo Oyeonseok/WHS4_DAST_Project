@@ -32,6 +32,14 @@ Recon and Attack records.
 - Never send target traffic with curl, wget, Invoke-WebRequest, a browser,
   sockets, Python networking, or any transport other than the configured HTTP
   request helper. It reserves the durable budget before one non-redirecting hop.
+- A Scope-authorized active, non-destructive Attack is still mediated by the
+  helper. Recon observation is provenance, not permission: normal bounded
+  mutations may test a static candidate or a newly proposed path. Classify every
+  state-changing request honestly with the required `risk_class`. External side
+  effects, high-impact paths, and DELETE requests not bound to a test resource
+  created by this task wait for the operator's single `y/N` envelope decision.
+  Destructive or bulk actions are rejected. Do not retry in parallel or attempt
+  another transport while approval is pending.
 
 # Attack loop
 

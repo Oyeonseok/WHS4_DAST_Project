@@ -11,6 +11,10 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from aidast.scope.models import AssetType
 
 
+HttpMethod = Literal["GET", "HEAD", "OPTIONS", "POST", "PUT", "PATCH", "DELETE"]
+SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
+
+
 class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -58,7 +62,14 @@ class TargetPolicyProposal(StrictModel):
     allowed_ports: list[Annotated[int, Field(ge=1, le=65535)]] = [443]
     allowed_path_prefixes: list[str] = ["/"]
     excluded_path_prefixes: list[str] = []
-    allowed_methods: list[Literal["GET", "HEAD", "OPTIONS", "POST", "PUT", "PATCH", "DELETE"]] = ["GET", "HEAD", "OPTIONS"]
+    # Recon transport remains read-only. Attack permissions are intentionally
+    # separate so a mutation grant cannot broaden crawlers or manual browsing.
+    allowed_methods: list[HttpMethod] = ["GET", "HEAD", "OPTIONS"]
+    attack_allowed_methods: list[HttpMethod] = ["GET", "HEAD", "OPTIONS"]
+    attack_authorization_mode: Literal[
+        "read_only", "active_non_destructive"
+    ] = "read_only"
+    attack_authorization_evidence: str | None = None
     limits: PolicyLimits = PolicyLimits()
     tools: ToolPolicy = ToolPolicy()
     policy_notes: list[str] = []
@@ -109,6 +120,12 @@ class TargetPolicy(TargetPolicyProposal):
             and self.allows_url_boundary(url)
         )
 
+    def allows_attack_url(self, url: str, *, method: str = "GET") -> bool:
+        return (
+            method.upper() in self.attack_allowed_methods
+            and self.allows_url_boundary(url)
+        )
+
     def mitm_rules(self, *, manual_auth_signing_key: str | None = None) -> dict:
         rules = {
             "enforcement_required": True,
@@ -140,6 +157,22 @@ def _path_matches(path: str, prefix: str) -> bool:
         return True
     normalized = prefix.rstrip("/")
     return path == normalized or path.startswith(normalized + "/")
+
+
+def _scope_allowed_activity_contains(scope_markdown: str, quote: str) -> bool:
+    match = re.search(
+        r"(?ims)^## Allowed activities\s*$\n(?P<body>.*?)(?=^## |\Z)",
+        scope_markdown,
+    )
+    return match is not None and quote in match.group("body")
+
+
+def _scope_prohibited_activity_body(scope_markdown: str) -> str:
+    match = re.search(
+        r"(?ims)^## Prohibited activities\s*$\n(?P<body>.*?)(?=^## |\Z)",
+        scope_markdown,
+    )
+    return match.group("body") if match is not None else ""
 
 
 def canonical_host_for_asset(asset_type: AssetType, asset: str) -> str | None:
@@ -188,7 +221,13 @@ def validate_start_url_for_target(
             raise ValueError("start URL path is outside the approved URL path")
 
 
-def validate_policy_for_target(policy: TargetPolicyProposal, *, asset_type: AssetType, asset: str) -> None:
+def validate_policy_for_target(
+    policy: TargetPolicyProposal,
+    *,
+    asset_type: AssetType,
+    asset: str,
+    scope_markdown: str | None = None,
+) -> None:
     if (policy.asset_type, policy.asset) != (asset_type, asset):
         raise ValueError(f"policy target does not match approved target: {asset}")
     canonical = canonical_host_for_asset(asset_type, asset)
@@ -226,7 +265,48 @@ def validate_policy_for_target(policy: TargetPolicyProposal, *, asset_type: Asse
             raise ValueError("non-URL policies may not broaden the default HTTPS scheme")
         if any(port != 443 for port in policy.allowed_ports):
             raise ValueError("non-URL policies may not broaden the default HTTPS port")
-    if any(method not in {"GET", "HEAD", "OPTIONS"} for method in policy.allowed_methods):
+    if any(method not in SAFE_METHODS for method in policy.allowed_methods):
         raise ValueError("Recon policies may not enable state-changing HTTP methods")
+    mutation_methods = {
+        method for method in policy.attack_allowed_methods if method not in SAFE_METHODS
+    }
+    quote = policy.attack_authorization_evidence
+    if policy.attack_authorization_mode == "read_only":
+        if mutation_methods or quote is not None:
+            raise ValueError(
+                "read-only Attack policy may not authorize state-changing methods"
+            )
+    else:
+        if not mutation_methods:
+            raise ValueError(
+                "active Attack policy must authorize at least one state-changing method"
+            )
+        if (
+            scope_markdown is None
+            or quote is None
+            or not _scope_allowed_activity_contains(scope_markdown, quote)
+        ):
+            raise ValueError(
+                "active Attack authorization evidence must come from Scope Allowed activities"
+            )
+        if re.search(r"read[- ]?only|읽기 전용", quote, re.I):
+            raise ValueError("read-only permission cannot authorize active Attack testing")
+        if re.search(
+            r"security (?:test|testing|assessment)|penetration test|"
+            r"vulnerability (?:test|testing|assessment)|보안 테스트|취약점 테스트|능동",
+            quote,
+            re.I,
+        ) is None:
+            raise ValueError(
+                "active Attack evidence must explicitly authorize security testing"
+            )
+        prohibited = _scope_prohibited_activity_body(scope_markdown)
+        for method in mutation_methods:
+            if re.search(
+                rf"(?<![A-Za-z]){re.escape(method)}(?![A-Za-z])", prohibited, re.I
+            ):
+                raise ValueError(
+                    f"Attack method {method} conflicts with Scope prohibited activities"
+                )
     if any(re.search(r"[?#[\]{}]", path) for path in policy.allowed_path_prefixes):
         raise ValueError("allowed path prefixes must be literal URL paths")

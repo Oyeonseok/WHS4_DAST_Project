@@ -94,6 +94,17 @@ CREATE TABLE IF NOT EXISTS attack_http_requests (
     response_status INTEGER CHECK(response_status IS NULL OR response_status BETWEEN 100 AND 599),
     response_bytes INTEGER CHECK(response_bytes IS NULL OR response_bytes >= 0),
     result_json TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(result_json)),
+    authorization_source TEXT CHECK(authorization_source IS NULL OR
+        authorization_source IN
+        ('scope_safe_method','scope_active_mutation','approved_envelope')),
+    authorization_reference_id TEXT,
+    endpoint_provenance TEXT CHECK(endpoint_provenance IS NULL OR
+        endpoint_provenance IN
+        ('network_observed','recon_candidate','agent_proposed')),
+    endpoint_reference_id TEXT REFERENCES endpoints(endpoint_id),
+    risk_class TEXT CHECK(risk_class IS NULL OR risk_class IN
+        ('http_probe','application_mutation','test_resource_create',
+         'test_resource_delete','external_side_effect','destructive_or_bulk')),
     error_message TEXT,
     scheduled_at REAL NOT NULL,
     dispatched_at REAL,
@@ -106,6 +117,40 @@ CREATE INDEX IF NOT EXISTS idx_attack_http_budget
     ON attack_http_requests(scan_id, policy_id, scheduled_at);
 CREATE INDEX IF NOT EXISTS idx_attack_http_active
     ON attack_http_requests(stage_run_id, status);
+
+CREATE TABLE IF NOT EXISTS attack_authorization_envelopes (
+    envelope_id TEXT PRIMARY KEY NOT NULL,
+    scan_id TEXT NOT NULL REFERENCES scans(scan_id),
+    stage_run_id TEXT NOT NULL,
+    task_id TEXT NOT NULL,
+    policy_id TEXT NOT NULL,
+    policy_sha256 TEXT NOT NULL CHECK(length(policy_sha256)=64),
+    method TEXT NOT NULL CHECK(method IN ('POST','PUT','PATCH','DELETE')),
+    origin TEXT NOT NULL,
+    normalized_path TEXT NOT NULL,
+    provenance_kind TEXT NOT NULL CHECK(provenance_kind IN ('recon_candidate','agent_proposed')),
+    evidence_endpoint_id TEXT REFERENCES endpoints(endpoint_id),
+    risk_class TEXT NOT NULL CHECK(risk_class IN
+        ('application_mutation','test_resource_create','test_resource_delete',
+         'external_side_effect')),
+    approval_reason TEXT NOT NULL CHECK(approval_reason IN
+        ('external_side_effect','high_impact_path','unproven_delete_ownership')),
+    max_requests INTEGER NOT NULL CHECK(max_requests BETWEEN 1 AND 10),
+    used_requests INTEGER NOT NULL DEFAULT 0 CHECK(used_requests BETWEEN 0 AND max_requests),
+    max_body_bytes INTEGER NOT NULL CHECK(max_body_bytes BETWEEN 0 AND 16384),
+    status TEXT NOT NULL CHECK(status IN ('pending','approved','denied','expired')),
+    requested_at REAL NOT NULL,
+    decided_at REAL,
+    expires_at REAL,
+    FOREIGN KEY(stage_run_id,scan_id) REFERENCES stage_runs(stage_run_id,scan_id),
+    FOREIGN KEY(task_id,scan_id) REFERENCES attack_tasks(task_id,scan_id)
+);
+CREATE INDEX IF NOT EXISTS idx_attack_authorization_pending
+    ON attack_authorization_envelopes(stage_run_id,status,requested_at);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_attack_authorization_active
+    ON attack_authorization_envelopes(
+        stage_run_id,task_id,policy_id,method,origin,normalized_path
+    ) WHERE status IN ('pending','approved');
 
 CREATE TABLE IF NOT EXISTS attack_facts (
     fact_id TEXT PRIMARY KEY NOT NULL,
@@ -614,6 +659,49 @@ def migrate_pipeline_schema(conn: sqlite3.Connection) -> None:
         )
     if "policy_sha256" not in request_columns:
         conn.execute("ALTER TABLE attack_http_requests ADD COLUMN policy_sha256 TEXT")
+    if "authorization_source" not in request_columns:
+        conn.execute(
+            "ALTER TABLE attack_http_requests ADD COLUMN authorization_source TEXT "
+            "CHECK(authorization_source IS NULL OR authorization_source IN "
+            "('scope_safe_method','scope_active_mutation','approved_envelope'))"
+        )
+    if "authorization_reference_id" not in request_columns:
+        conn.execute(
+            "ALTER TABLE attack_http_requests ADD COLUMN authorization_reference_id TEXT"
+        )
+    if "endpoint_provenance" not in request_columns:
+        conn.execute(
+            "ALTER TABLE attack_http_requests ADD COLUMN endpoint_provenance TEXT "
+            "CHECK(endpoint_provenance IS NULL OR endpoint_provenance IN "
+            "('network_observed','recon_candidate','agent_proposed'))"
+        )
+    if "endpoint_reference_id" not in request_columns:
+        conn.execute(
+            "ALTER TABLE attack_http_requests ADD COLUMN endpoint_reference_id TEXT "
+            "REFERENCES endpoints(endpoint_id)"
+        )
+    if "risk_class" not in request_columns:
+        conn.execute(
+            "ALTER TABLE attack_http_requests ADD COLUMN risk_class TEXT "
+            "CHECK(risk_class IS NULL OR risk_class IN "
+            "('http_probe','application_mutation','test_resource_create',"
+            "'test_resource_delete','external_side_effect','destructive_or_bulk'))"
+        )
+    envelope_columns = {
+        row[1] for row in conn.execute(
+            "PRAGMA table_info(attack_authorization_envelopes)"
+        )
+    }
+    if "risk_class" not in envelope_columns:
+        conn.execute(
+            "ALTER TABLE attack_authorization_envelopes ADD COLUMN risk_class "
+            "TEXT NOT NULL DEFAULT 'application_mutation'"
+        )
+    if "approval_reason" not in envelope_columns:
+        conn.execute(
+            "ALTER TABLE attack_authorization_envelopes ADD COLUMN approval_reason "
+            "TEXT NOT NULL DEFAULT 'high_impact_path'"
+        )
     reproduction_columns = {
         row[1] for row in conn.execute("PRAGMA table_info(finding_reproduction_specs)")
     }

@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 import sqlite3
 import tempfile
+import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 from pathlib import Path
 from unittest.mock import patch
@@ -44,7 +46,13 @@ class FakeOpener:
         return FakeResponse(request.full_url, body=body)
 
 
-def fixture(root: Path, *, max_requests: int = 1) -> tuple[Path, Path, Path, str, str]:
+def fixture(
+    root: Path,
+    *,
+    max_requests: int = 1,
+    attack_methods: list[str] | None = None,
+    observed_post: bool = False,
+) -> tuple[Path, Path, Path, str, str]:
     database = root / "Pipeline.db"
     conn = db.init_db(database)
     db.insert_scan(conn, scan_id="scan", scope_type="approved", scope_value="scope")
@@ -57,6 +65,21 @@ def fixture(root: Path, *, max_requests: int = 1) -> tuple[Path, Path, Path, str
         conn, origin_id=origin, method="GET", path="/api/profile",
         normalized_path="/api/profile", source_tool="fixture",
     )
+    if observed_post:
+        post_endpoint = db.upsert_endpoint(
+            conn, origin_id=origin, method="POST", path="/api/profile",
+            normalized_path="/api/profile", source_tool="playwright_login",
+        )
+        conn.execute(
+            """INSERT INTO endpoint_observations
+               (observation_id,endpoint_id,source_tool,discovery_kind,
+                association_method,observed_at)
+               VALUES (?,?,?,?,?,?)""",
+            (
+                db.new_id("observation"), post_endpoint, "playwright_login",
+                "http_request", "request_frame", db.now(),
+            ),
+        )
     conn.execute(
         "UPDATE scans SET status='completed',finished_at=CURRENT_TIMESTAMP WHERE scan_id='scan'"
     )
@@ -74,6 +97,19 @@ def fixture(root: Path, *, max_requests: int = 1) -> tuple[Path, Path, Path, str
             "include_subdomains": False, "allowed_ports": [443],
             "allowed_path_prefixes": ["/api"], "excluded_path_prefixes": ["/api/admin"],
             "allowed_methods": ["GET"],
+            "attack_allowed_methods": attack_methods or ["GET"],
+            "attack_authorization_mode": (
+                "active_non_destructive"
+                if any(method not in {"GET", "HEAD", "OPTIONS"}
+                       for method in (attack_methods or []))
+                else "read_only"
+            ),
+            "attack_authorization_evidence": (
+                "Non-destructive active security testing is allowed."
+                if any(method not in {"GET", "HEAD", "OPTIONS"}
+                       for method in (attack_methods or []))
+                else None
+            ),
             "limits": {"requests_per_second": 50, "concurrency": 1,
                        "timeout_seconds": 5, "max_depth": 1,
                        "max_requests": max_requests},
@@ -85,6 +121,334 @@ def fixture(root: Path, *, max_requests: int = 1) -> tuple[Path, Path, Path, str
 
 
 class AttackRequestGuardTests(unittest.TestCase):
+    def test_observed_attack_post_is_allowed_and_records_provenance(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            database, policy, payload, stage, task = fixture(
+                root, attack_methods=["GET", "POST"], observed_post=True,
+            )
+            payload.write_text(json.dumps({
+                "method": "POST",
+                "url": "https://example.test/api/profile",
+                "body": '{"probe":"bounded"}',
+                "risk_class": "application_mutation",
+            }), encoding="utf-8")
+            opener = FakeOpener()
+            with patch("aidast.attack.request_cli.build_opener", return_value=opener):
+                result = guarded_request(
+                    database, scan_id="scan", stage_run_id=stage, task_id=task,
+                    policy_path=policy, payload_path=payload,
+                )
+
+            self.assertEqual(result["status"], 200)
+            with closing(sqlite3.connect(database)) as conn:
+                source, reference, provenance = conn.execute(
+                    """SELECT authorization_source,authorization_reference_id,
+                              endpoint_provenance
+                       FROM attack_http_requests"""
+                ).fetchone()
+            self.assertEqual(source, "scope_active_mutation")
+            self.assertEqual(reference, "policy")
+            self.assertEqual(provenance, "network_observed")
+
+    def test_unobserved_normal_post_is_automatically_allowed_and_traced(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            database, policy, payload, stage, task = fixture(
+                root, attack_methods=["GET", "POST"],
+            )
+            payload.write_text(json.dumps({
+                "method": "POST", "url": "https://example.test/api/profile",
+                "risk_class": "application_mutation",
+            }), encoding="utf-8")
+            opener = FakeOpener()
+            with patch("aidast.attack.request_cli.build_opener", return_value=opener):
+                result = guarded_request(
+                    database, scan_id="scan", stage_run_id=stage, task_id=task,
+                    policy_path=policy, payload_path=payload,
+                )
+            self.assertEqual(result["status"], 200)
+            self.assertEqual(len(opener.calls), 1)
+            with closing(sqlite3.connect(database)) as conn:
+                request_auth = conn.execute(
+                    """SELECT authorization_source,authorization_reference_id,
+                              endpoint_provenance,risk_class
+                       FROM attack_http_requests"""
+                ).fetchone()
+                envelopes = conn.execute(
+                    "SELECT count(*) FROM attack_authorization_envelopes"
+                ).fetchone()[0]
+            self.assertEqual(request_auth, (
+                "scope_active_mutation", "policy", "recon_candidate",
+                "application_mutation",
+            ))
+            self.assertEqual(envelopes, 0)
+
+    def test_denied_unobserved_post_is_not_dispatched_or_reprompted(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            database, policy, payload, stage, task = fixture(
+                root, attack_methods=["GET", "POST"],
+            )
+            payload.write_text(json.dumps({
+                "method": "POST", "url": "https://example.test/api/new-action",
+                "risk_class": "external_side_effect",
+            }), encoding="utf-8")
+            opener = FakeOpener()
+            with patch("aidast.attack.request_cli.build_opener", return_value=opener):
+                with ThreadPoolExecutor(max_workers=1) as executor:
+                    future = executor.submit(
+                        guarded_request,
+                        database, scan_id="scan", stage_run_id=stage, task_id=task,
+                        policy_path=policy, payload_path=payload,
+                    )
+                    deadline = time.monotonic() + 3
+                    row = None
+                    while time.monotonic() < deadline and row is None:
+                        with closing(sqlite3.connect(database)) as conn:
+                            row = conn.execute(
+                                """SELECT envelope_id FROM attack_authorization_envelopes
+                                   WHERE status='pending'"""
+                            ).fetchone()
+                        if row is None:
+                            time.sleep(0.02)
+                    self.assertIsNotNone(row)
+                    with closing(sqlite3.connect(database)) as conn, conn:
+                        conn.execute(
+                            """UPDATE attack_authorization_envelopes
+                               SET status='denied',decided_at=? WHERE envelope_id=?""",
+                            (time.time(), row[0]),
+                        )
+                    with self.assertRaisesRegex(RequestGuardError, "denied by the user"):
+                        future.result(timeout=3)
+                with self.assertRaisesRegex(RequestGuardError, "denied by the user"):
+                    guarded_request(
+                        database, scan_id="scan", stage_run_id=stage, task_id=task,
+                        policy_path=policy, payload_path=payload,
+                    )
+            self.assertEqual(opener.calls, [])
+
+    def test_unobserved_mutation_body_over_16_kib_is_rejected_before_prompt(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            database, policy, payload, stage, task = fixture(
+                root, max_requests=20, attack_methods=["GET", "POST"],
+            )
+            payload.write_text(json.dumps({
+                "method": "POST",
+                "url": "https://example.test/api/new-action",
+                "body": "x" * (16_384 + 1),
+                "risk_class": "external_side_effect",
+            }), encoding="utf-8")
+            opener = FakeOpener()
+            with patch("aidast.attack.request_cli.build_opener", return_value=opener):
+                with self.assertRaisesRegex(RequestGuardError, "16 KiB"):
+                    guarded_request(
+                        database, scan_id="scan", stage_run_id=stage, task_id=task,
+                        policy_path=policy, payload_path=payload,
+                    )
+            self.assertEqual(opener.calls, [])
+            with closing(sqlite3.connect(database)) as conn:
+                count = conn.execute(
+                    "SELECT count(*) FROM attack_authorization_envelopes"
+                ).fetchone()[0]
+            self.assertEqual(count, 0)
+
+    def test_mutation_requires_active_scope_and_explicit_risk_class(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            database, policy, payload, stage, task = fixture(
+                root, max_requests=3, attack_methods=["GET", "POST"],
+            )
+            document = json.loads(policy.read_text(encoding="utf-8"))
+            document["policies"][0]["attack_authorization_mode"] = "read_only"
+            policy.write_text(json.dumps(document), encoding="utf-8")
+            payload.write_text(json.dumps({
+                "method": "POST", "url": "https://example.test/api/profile",
+                "risk_class": "application_mutation",
+            }), encoding="utf-8")
+            with self.assertRaisesRegex(RequestGuardError, "active non-destructive"):
+                guarded_request(
+                    database, scan_id="scan", stage_run_id=stage, task_id=task,
+                    policy_path=policy, payload_path=payload,
+                )
+
+            document["policies"][0]["attack_authorization_mode"] = (
+                "active_non_destructive"
+            )
+            policy.write_text(json.dumps(document), encoding="utf-8")
+            payload.write_text(json.dumps({
+                "method": "POST", "url": "https://example.test/api/profile",
+            }), encoding="utf-8")
+            with self.assertRaisesRegex(RequestGuardError, "risk_class"):
+                guarded_request(
+                    database, scan_id="scan", stage_run_id=stage, task_id=task,
+                    policy_path=policy, payload_path=payload,
+                )
+
+    def test_destructive_or_bulk_request_is_always_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            database, policy, payload, stage, task = fixture(
+                root, attack_methods=["GET", "POST"],
+            )
+            payload.write_text(json.dumps({
+                "method": "POST",
+                "url": "https://example.test/api/profile",
+                "risk_class": "destructive_or_bulk",
+            }), encoding="utf-8")
+            opener = FakeOpener()
+            with patch("aidast.attack.request_cli.build_opener", return_value=opener):
+                with self.assertRaisesRegex(RequestGuardError, "prohibited"):
+                    guarded_request(
+                        database, scan_id="scan", stage_run_id=stage, task_id=task,
+                        policy_path=policy, payload_path=payload,
+                    )
+            self.assertEqual(opener.calls, [])
+
+    def test_delete_of_resource_created_by_same_task_is_automatically_allowed(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            database, policy, payload, stage, task = fixture(
+                root, max_requests=3, attack_methods=["GET", "POST", "DELETE"],
+            )
+            opener = FakeOpener([b'{"id":"42"}', b'{"deleted":true}'])
+            with patch("aidast.attack.request_cli.build_opener", return_value=opener):
+                payload.write_text(json.dumps({
+                    "method": "POST",
+                    "url": "https://example.test/api/items",
+                    "risk_class": "test_resource_create",
+                    "captures": [{
+                        "name": "created_id", "source": "json_body", "path": ["id"],
+                    }],
+                }), encoding="utf-8")
+                created = guarded_request(
+                    database, scan_id="scan", stage_run_id=stage, task_id=task,
+                    policy_path=policy, payload_path=payload,
+                )
+                payload.write_text(json.dumps({
+                    "method": "DELETE",
+                    "url": "https://example.test/api/items/42",
+                    "risk_class": "test_resource_delete",
+                    "bindings": [{
+                        "name": "created_id",
+                        "source_request_id": created["request_id"],
+                        "capture_name": "created_id",
+                        "value": "42",
+                        "target_kind": "path_parameter",
+                        "target_path": ["id"],
+                    }],
+                }), encoding="utf-8")
+                deleted = guarded_request(
+                    database, scan_id="scan", stage_run_id=stage, task_id=task,
+                    policy_path=policy, payload_path=payload,
+                )
+            self.assertEqual(deleted["status"], 200)
+            self.assertEqual(len(opener.calls), 2)
+            with closing(sqlite3.connect(database)) as conn:
+                authorization = conn.execute(
+                    """SELECT authorization_source,risk_class
+                       FROM attack_http_requests WHERE method='DELETE'"""
+                ).fetchone()
+                envelopes = conn.execute(
+                    "SELECT count(*) FROM attack_authorization_envelopes"
+                ).fetchone()[0]
+            self.assertEqual(
+                authorization, ("scope_active_mutation", "test_resource_delete")
+            )
+            self.assertEqual(envelopes, 0)
+
+    def test_unproven_delete_requires_an_approval_envelope(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            database, policy, payload, stage, task = fixture(
+                root, max_requests=3, attack_methods=["GET", "DELETE"],
+            )
+            payload.write_text(json.dumps({
+                "method": "DELETE",
+                "url": "https://example.test/api/items/42",
+                "risk_class": "test_resource_delete",
+            }), encoding="utf-8")
+            opener = FakeOpener()
+            with (
+                patch("aidast.attack.request_cli.build_opener", return_value=opener),
+                patch(
+                    "aidast.attack.request_cli._await_approved_envelope",
+                    return_value="envelope_test",
+                ) as approve,
+            ):
+                result = guarded_request(
+                    database, scan_id="scan", stage_run_id=stage, task_id=task,
+                    policy_path=policy, payload_path=payload,
+                )
+            self.assertEqual(result["status"], 200)
+            self.assertEqual(
+                approve.call_args.kwargs["approval_reason"],
+                "unproven_delete_ownership",
+            )
+            with closing(sqlite3.connect(database)) as conn:
+                authorization = conn.execute(
+                    """SELECT authorization_source,authorization_reference_id
+                       FROM attack_http_requests"""
+                ).fetchone()
+            self.assertEqual(authorization, ("approved_envelope", "envelope_test"))
+
+    def test_high_impact_path_requires_approval_despite_lower_risk_label(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            database, policy, payload, stage, task = fixture(
+                root, max_requests=3, attack_methods=["GET", "POST"],
+            )
+            payload.write_text(json.dumps({
+                "method": "POST",
+                "url": "https://example.test/api/notifications/broadcast",
+                "risk_class": "application_mutation",
+            }), encoding="utf-8")
+            with (
+                patch("aidast.attack.request_cli.build_opener", return_value=FakeOpener()),
+                patch(
+                    "aidast.attack.request_cli._await_approved_envelope",
+                    return_value="envelope_test",
+                ) as approve,
+            ):
+                guarded_request(
+                    database, scan_id="scan", stage_run_id=stage, task_id=task,
+                    policy_path=policy, payload_path=payload,
+                )
+            self.assertEqual(
+                approve.call_args.kwargs["approval_reason"], "high_impact_path"
+            )
+
+    def test_mutation_budget_is_bounded_per_task_and_normalized_path(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            database, policy, payload, stage, task = fixture(
+                root, max_requests=20, attack_methods=["GET", "POST"],
+            )
+            opener = FakeOpener()
+            with patch("aidast.attack.request_cli.build_opener", return_value=opener):
+                for identifier in range(10):
+                    payload.write_text(json.dumps({
+                        "method": "POST",
+                        "url": f"https://example.test/api/items/{identifier}",
+                        "risk_class": "application_mutation",
+                    }), encoding="utf-8")
+                    guarded_request(
+                        database, scan_id="scan", stage_run_id=stage, task_id=task,
+                        policy_path=policy, payload_path=payload,
+                    )
+                payload.write_text(json.dumps({
+                    "method": "POST",
+                    "url": "https://example.test/api/items/999",
+                    "risk_class": "application_mutation",
+                }), encoding="utf-8")
+                with self.assertRaisesRegex(RequestGuardError, "mutation budget"):
+                    guarded_request(
+                        database, scan_id="scan", stage_run_id=stage, task_id=task,
+                        policy_path=policy, payload_path=payload,
+                    )
+            self.assertEqual(len(opener.calls), 10)
+
     def test_response_capture_is_cryptographically_bound_to_next_request(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

@@ -183,6 +183,72 @@ class NativeAttackCoordinatorTests(unittest.TestCase):
 
 
 class NativeAttackMainAgentTests(unittest.TestCase):
+    def test_attack_authorization_prompt_is_resolved_once_and_audited(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            database = completed_pipeline(Path(temporary))
+            with closing(sqlite3.connect(database)) as conn:
+                stage = start_stage_run(conn, scan_id="scan_native", stage="attack")
+                task = create_task(
+                    conn, stage_run_id=stage, skill_name="hunt-injection",
+                )
+            transition_task(database, "scan_native", stage, task, "running")
+            with closing(sqlite3.connect(database)) as conn, conn:
+                conn.executemany(
+                    """INSERT INTO attack_authorization_envelopes
+                       (envelope_id,scan_id,stage_run_id,task_id,policy_id,
+                        policy_sha256,method,origin,normalized_path,provenance_kind,
+                        risk_class,approval_reason,max_requests,max_body_bytes,
+                        status,requested_at)
+                       VALUES (?,'scan_native',?,?, 'policy',?,'POST',
+                               'https://example.test',?,'agent_proposed',
+                               'external_side_effect','external_side_effect',
+                               10,16384,'pending',1)""",
+                    [
+                        ("envelope_approve", stage, task, "a" * 64, "/api/items/:id"),
+                        ("envelope_deny", stage, task, "a" * 64, "/api/admin-action"),
+                    ],
+                )
+            answers = []
+            responses = iter(["y", "N"])
+
+            def approve(prompt: str) -> str:
+                answers.append(prompt)
+                return next(responses)
+
+            self.assertEqual(
+                CodexMainAgent._review_pending_attack_authorizations(
+                    database, stage, input_fn=approve,
+                ),
+                2,
+            )
+            self.assertEqual(
+                CodexMainAgent._review_pending_attack_authorizations(
+                    database, stage, input_fn=approve,
+                ),
+                0,
+            )
+            self.assertEqual(len(answers), 2)
+            with closing(sqlite3.connect(database)) as conn:
+                rows = conn.execute(
+                    """SELECT status,decided_at,expires_at
+                       FROM attack_authorization_envelopes ORDER BY envelope_id"""
+                ).fetchall()
+                event_types = {
+                    row[0] for row in conn.execute(
+                        """SELECT event_type FROM audit_events
+                           WHERE event_type LIKE 'attack.authorization.%'"""
+                    )
+                }
+            status, decided_at, expires_at = rows[0]
+            self.assertEqual(status, "approved")
+            self.assertGreater(expires_at, decided_at)
+            self.assertEqual(rows[1][0], "denied")
+            self.assertIsNone(rows[1][2])
+            self.assertEqual(event_types, {
+                "attack.authorization.approved",
+                "attack.authorization.denied",
+            })
+
     def test_main_stages_hunt_skills_and_custom_attack_agent(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

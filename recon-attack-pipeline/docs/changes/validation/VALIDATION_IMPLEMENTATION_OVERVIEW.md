@@ -1,8 +1,9 @@
 # Validation 구현 현황 이해 문서
 
-- 기준일: 2026-09-14
-- 관련 설계: [Validation 재구조화 설계](../superpowers/specs/2026-09-12-validation-refactor-design.md)
-- 상세 계획: [Validation 재구조화 구현 계획](../superpowers/plans/2026-09-12-validation-refactor-implementation.md)
+- 기준일: 2026-09-15
+- 대조 기준: `518bb35`와 현재 작업 트리의 미커밋 변경. 아래 Attack 메서드 권한 분리 설명은 미커밋 구현을 포함한다.
+- 관련 설계: [Validation 재구조화 설계](../../superpowers/specs/2026-09-12-validation-refactor-design.md)
+- 상세 계획: [Validation 재구조화 구현 계획](../../superpowers/plans/2026-09-12-validation-refactor-implementation.md)
 - 누적 변경 이력: [Validation 재구조화 변경 기록](VALIDATION_REFACTOR_CHANGES.md)
 - 주요 구현 커밋: `aab3221`부터 `a75698b`까지
 
@@ -33,9 +34,9 @@ flowchart TD
     R -->|결과 혼재| R2[target 2회 추가]
     R --> F[claim을 숨긴 BlindAssessment 생성]
     R2 --> F
-    F -->|해결 가능한 blocker| D[development 최대 2 action]
+    F -->|해결 가능한 blocker| D[resolver 연결 시 development 최대 2 action]
     D -->|성공| R3[fresh batch 재실행 및 BlindAssessment 재생성]
-    D -->|실패 또는 action 없음| G
+    D -->|실패 또는 action·resolver 없음| G
     F -->|blocker 없음| G[BlindAssessment hash 고정]
     R3 --> G
     G --> U[Attack claim 공개 후 ClaimComparison]
@@ -112,8 +113,20 @@ Hunt Skill 58개 모두에 fresh replay가 입증해야 할 보안 효과, contr
 판정 규칙과 허용 가능한 development action을 정의했다.
 
 일반적인 replay batch는 positive control 1회, negative control 1회, target 3회다.
-target 결과가 섞이면 2회를 더 실행한다. credential 갱신이나 second identity 준비처럼
-profile이 허용한 blocker 해결은 한 cycle에서 최대 두 action까지만 가능하다.
+최초 batch의 target 3회 결과가 섞이면 2회를 더 실행한다. 이 5회 관찰을 최종 판정에
+사용하면, policy 거절·명시적 비취약 증거·blocker 등 앞선 판정 조건에 해당하지 않는 한
+`INCONCLUSIVE`다. 추가 2회의 성공만으로 `CONFIRMED`로 승격하지 않는다.
+
+credential 갱신이나 second identity 준비처럼 profile이 허용한 blocker 해결은
+`PrerequisiteResolverPort`를 Coordinator의 `prerequisite_resolver`로 주입했을 때만
+실행한다. 해당 blocker의 action 중 최대 두 개를 순서대로 시도하고 첫 성공에서 멈춘다.
+성공하면 기존 관찰을 새 batch의 control 각 1회·target 3회로 대체하고 BlindAssessment를
+다시 생성한다. 이 development 이후 batch에는 결과 혼재 시 2회를 추가하는 분기가 없다.
+
+기본 native builder는 `prerequisite_resolver`를 연결하지 않으므로 credential 갱신이나
+second identity 준비를 자동 수행하지 않는다. resolver 또는 허용 action이 없으면 action
+기록 없이 development 경로를 종료한다. 이후에도 해결 가능한 blocker가 남아 있고 앞선
+판정 조건에 해당하지 않으면 `BLOCKED`가 된다.
 
 Blind pass에서는 Attack의 결론과 영향 주장을 숨기고 다음 정보만 LLM에 준다.
 
@@ -145,7 +158,7 @@ KNOWN이나 무결성 실패로 replay가 필요하지 않으면 Codex 세션도
 | `OUT_OF_SCOPE` | 현재 TargetPolicy가 endpoint 또는 method를 허용하지 않음 |
 | `UNDERPOWERED` | 취약점 효과는 확인됐지만 현재 입증된 기술 영향이 최소 기준보다 낮음 |
 | `CONTESTED` | Blind 관찰과 Attack claim이 충돌하지만 Attack 쪽 positive evidence도 존재 |
-| `BLOCKED` | 해결 가능한 blocker에 제한된 development를 수행했으나 fresh replay 조건을 충족하지 못함 |
+| `BLOCKED` | 해결 가능한 blocker가 development 경로 처리 후에도 남음. resolver·허용 action이 없어 실제 action을 수행하지 않은 경우도 포함 |
 | `INCONCLUSIVE` | 무결성, control, 관찰 횟수, schema 또는 원인 식별이 충분하지 않음 |
 
 impact는 Boundary, Sensitivity, Actor requirements 세 축을 각각 0~3점으로 계산한다.
@@ -157,6 +170,13 @@ eligibility와 보상 규칙은 포함하지 않는다. 따라서 설치 수에 
 규칙은 별도 프로그램 정책 계층에서 판단해야 한다.
 
 ## 7. 요청 안전성과 증거 저장
+
+현재 작업 트리의 TargetPolicy는 Recon용 `allowed_methods`와 Attack용
+`attack_allowed_methods`를 분리한다. 그러나 Validation의 `TargetPolicyProvider`,
+Coordinator와 요청 경계는 여전히 `allows_url()`을 통해 `allowed_methods`를 검사한다.
+따라서 `attack_allowed_methods`에만 허용한 POST 등의 후보는 무결성·KNOWN 검사 이후
+Validation policy 검사에서 `OUT_OF_SCOPE`가 될 수 있다. Attack의 메서드 권한이나
+task별 승인 envelope가 Validation replay 권한으로 자동 이어지지는 않는다.
 
 `ValidationRequestBroker`는 initial request와 redirect hop마다 current TargetPolicy,
 stage/case/attempt 소유권, rate, concurrency와 총 요청 예산을 dispatch 직전에 검사한다.
@@ -246,9 +266,10 @@ scheme은 trusted application이 backend callable을 명시적으로 주입해�
 
 ## 11. 완료 상태와 운영 수용 범위
 
-현재 계획에 포함된 로컬 코드 구현은 완료됐다. shared DB 저장 구조, 무결성 검사,
-HTTP/Browser/OOB 및 mixed terminal Chain replay, Blind Agent, 복구, Reporting과 CLI가
-연결돼 있다. 운영 투입 전에는 다음 환경 검증이 남아 있다.
+shared DB 저장 구조, 무결성 검사, HTTP/Browser/OOB 및 mixed terminal Chain replay,
+Blind Agent, 복구, Reporting과 CLI가 연결돼 있다. 다만 기본 native 구성에는 development
+resolver가 연결되지 않았으며, Attack 전용 메서드 권한도 Validation으로 이어지지 않는다.
+이 구현 범위를 전제로 운영 투입 전에는 다음 환경 검증이 남아 있다.
 
 1. 승인된 외부 test target에서 Recon→Attack→Chaining→Validation 전체 pipeline과
    target별 proof 검증
@@ -259,8 +280,21 @@ negative control과 target 3회, ledger·evidence·최종 `CONFIRMED` snapshot�
 판정 Agent를 fixture로 주입하므로 외부 target의 Recon·Attack 계약 생성과 실제 Codex CLI
 호출까지 증명하지는 않는다.
 
-현재 검증 결과는 live acceptance를 포함한 unittest 365개와 shared Reporting pytest 22개
-통과이며 compileall과 whitespace 검사도 통과했다.
+2026-09-14 문서에 기록된 당시 검증 결과는 live acceptance를 포함한 unittest 365개,
+shared Reporting pytest 22개, compileall과 whitespace 검사 통과다. 이 수치는 과거 기록이며
+당시 실행 명령과 정확한 테스트 대상 커밋은 이 문서에 기록돼 있지 않다.
+
+2026-09-15에는 위 대조 기준의 작업 트리에서 다음 범위만 재검증했다.
+실행 위치는 `recon-attack-pipeline/`이다.
+
+| 실행 명령 | 결과 |
+|---|---|
+| `.venv/bin/python -m unittest discover -s tests -p 'test_validation*.py' -q` | 99개 중 98개 통과, live acceptance 1개 생략 |
+| `TMPDIR=/private/tmp .venv/bin/python -m unittest discover -s tests -p 'test_shared_validation_reporting.py' -q` | 3개 통과 |
+
+shared Reporting은 기본 임시 경로에서 symlink 경유를 거부하는 오류가 발생해
+`TMPDIR=/private/tmp`로 재실행했다. 이번 확인에서는 live acceptance, 전체 테스트,
+compileall, 외부 target E2E와 실제 Codex CLI 호출을 재검증하지 않았다.
 
 ## 12. 설계와 달라진 부분
 

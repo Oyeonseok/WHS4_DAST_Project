@@ -54,6 +54,15 @@ capability disabled by default.
   record genuine explicit restrictions instead.
 - Keep safe request methods limited to the supplied application defaults unless the
   approved Scope and requested workflow explicitly support a narrower set.
+- `allowed_methods` belongs to Recon and must remain within `GET`, `HEAD`, and
+  `OPTIONS`. `attack_allowed_methods` is a separate Attack-stage authority. Set
+  `attack_authorization_mode` to `active_non_destructive` only when one exact quote
+  in Scope's Allowed activities authorizes active security, penetration, or
+  vulnerability testing without limiting it to read-only or authentication. Copy
+  that quote to `attack_authorization_evidence`. This activity authorization
+  enables normal in-boundary `POST`, `PUT`, `PATCH`, and `DELETE` without requiring
+  the quote to enumerate methods: include every one not explicitly prohibited by
+  Scope. Otherwise retain `read_only`, safe methods, and null evidence.
 - `manual_auth_post` enables interactive, request-by-request approval while an
   operator completes authentication. Preserve its application default unless Scope
   explicitly forbids authentication or all login submissions. It does not add

@@ -206,6 +206,104 @@ class TargetPolicyTests(unittest.TestCase):
                 proposal, asset_type=AssetType.DOMAIN, asset="example.com"
             )
 
+    def test_attack_methods_default_to_read_only_without_affecting_recon(self) -> None:
+        target = policy()
+
+        self.assertEqual(target.allowed_methods, ["GET", "HEAD", "OPTIONS"])
+        self.assertEqual(target.attack_allowed_methods, ["GET", "HEAD", "OPTIONS"])
+        self.assertEqual(target.attack_authorization_mode, "read_only")
+        self.assertIsNone(target.attack_authorization_evidence)
+
+    def test_active_testing_authorizes_mutations_without_method_enumeration(self) -> None:
+        quote = "Non-destructive active security testing is allowed."
+        proposal = TargetPolicyProposal(
+            asset_type=AssetType.DOMAIN,
+            asset="example.com",
+            allowed_hosts=["example.com"],
+            attack_allowed_methods=[
+                "GET", "HEAD", "OPTIONS", "POST", "PUT", "PATCH", "DELETE",
+            ],
+            attack_authorization_mode="active_non_destructive",
+            attack_authorization_evidence=quote,
+        )
+
+        validate_policy_for_target(
+            proposal,
+            asset_type=AssetType.DOMAIN,
+            asset="example.com",
+            scope_markdown=f"## Allowed activities\n\n- {quote}\n",
+        )
+        self.assertNotIn("POST", proposal.allowed_methods)
+        executable = TargetPolicy(
+            scope_id="scope",
+            policy_id="policy",
+            **proposal.model_dump(),
+        )
+        self.assertFalse(executable.allows_url("https://example.com", method="POST"))
+        self.assertTrue(
+            executable.allows_attack_url("https://example.com", method="POST")
+        )
+
+    def test_active_testing_rejects_missing_read_only_or_method_conflict(self) -> None:
+        base = dict(
+            asset_type=AssetType.DOMAIN,
+            asset="example.com",
+            allowed_hosts=["example.com"],
+            attack_allowed_methods=["GET", "POST"],
+            attack_authorization_mode="active_non_destructive",
+        )
+        cases = [
+            (
+                TargetPolicyProposal(**base),
+                "## Allowed activities\n\n- Read-only testing.\n",
+            ),
+            (
+                TargetPolicyProposal(
+                    **base,
+                    attack_authorization_evidence="Read-only security testing is allowed.",
+                ),
+                "## Allowed activities\n\n- Read-only security testing is allowed.\n",
+            ),
+            (
+                TargetPolicyProposal(
+                    **base,
+                    attack_authorization_evidence=(
+                        "Non-destructive active security testing is allowed."
+                    ),
+                ),
+                "## Allowed activities\n\n"
+                "- Non-destructive active security testing is allowed.\n\n"
+                "## Prohibited activities\n\n- POST requests are prohibited.\n",
+            ),
+        ]
+        for proposal, scope_markdown in cases:
+            with self.subTest(scope_markdown=scope_markdown):
+                with self.assertRaises(ValueError):
+                    validate_policy_for_target(
+                        proposal,
+                        asset_type=AssetType.DOMAIN,
+                        asset="example.com",
+                        scope_markdown=scope_markdown,
+                    )
+
+    def test_manual_login_or_read_only_permission_does_not_authorize_attack(self) -> None:
+        quote = "수동 로그인 단계 동안 인증 POST 요청과 읽기 전용 보안 테스트를 허용합니다."
+        proposal = TargetPolicyProposal(
+            asset_type=AssetType.DOMAIN,
+            asset="example.com",
+            allowed_hosts=["example.com"],
+            attack_allowed_methods=["GET", "POST"],
+            attack_authorization_mode="active_non_destructive",
+            attack_authorization_evidence=quote,
+        )
+        with self.assertRaisesRegex(ValueError, "read-only"):
+            validate_policy_for_target(
+                proposal,
+                asset_type=AssetType.DOMAIN,
+                asset="example.com",
+                scope_markdown=f"## Allowed activities\n\n- {quote}\n",
+            )
+
     def test_mitm_rules_are_fail_closed(self) -> None:
         rules = policy().mitm_rules()
         self.assertTrue(rules["enforcement_required"])

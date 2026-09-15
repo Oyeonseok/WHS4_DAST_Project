@@ -13,6 +13,7 @@ import base64
 import hashlib
 import json
 import math
+import re
 import sqlite3
 import sys
 import time
@@ -27,8 +28,23 @@ from uuid import uuid4
 MAX_REQUEST_BODY_BYTES = 200_000
 MAX_RESPONSE_BODY_BYTES = 200_000
 MAX_OUTPUT_CHARS = 250_000
+ATTACK_ENVELOPE_MAX_REQUESTS = 10
+ATTACK_ENVELOPE_MAX_BODY_BYTES = 16_384
+ATTACK_ENVELOPE_TTL_SECONDS = 15 * 60
+ACTIVE_MUTATION_MAX_REQUESTS_PER_TASK_PATH = 10
 SENSITIVE_HEADERS = {
     "authorization", "cookie", "proxy-authorization", "set-cookie", "x-api-key"
+}
+SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
+_PATH_IDENTIFIER = re.compile(r"/\d+(?=/|$)|/[0-9a-fA-F]{8,}(?=/|$)")
+_HIGH_IMPACT_PATH = re.compile(
+    r"(?:^|[-_/])(payments?|billing|checkout|purchases?|transfers?|emails?|sms|"
+    r"notifications?|broadcast|webhooks?|invites?)(?:[-_/]|$)",
+    re.I,
+)
+MUTATION_RISK_CLASSES = {
+    "application_mutation", "test_resource_create", "test_resource_delete",
+    "external_side_effect", "destructive_or_bulk",
 }
 
 
@@ -78,7 +94,9 @@ def _policy_allows(policy: dict, url: str, method: str) -> bool:
         parsed.scheme in policy.get("allowed_schemes", [])
         and host_allowed
         and port in policy.get("allowed_ports", [])
-        and method in policy.get("allowed_methods", [])
+        and method in policy.get(
+            "attack_allowed_methods", policy.get("allowed_methods", [])
+        )
         and any(_path_matches(path, str(prefix)) for prefix in allowed_paths)
         and not any(_path_matches(path, str(prefix)) for prefix in excluded_paths)
     )
@@ -114,6 +132,213 @@ def _select_policy(policy_path: Path, url: str, method: str) -> dict:
     if type(maximum) is not int or not 1 <= maximum <= 100_000:
         raise RequestGuardError("invalid TargetPolicy max_requests")
     return policy
+
+
+def _observed_mutation_endpoint(
+    db_path: Path, *, scan_id: str, method: str, url: str,
+) -> str | None:
+    """Return provenance for an exact network-observed mutation endpoint."""
+    parsed = urlsplit(url)
+    host = (parsed.hostname or "").casefold().rstrip(".")
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    path = parsed.path or "/"
+    normalized = _PATH_IDENTIFIER.sub("/:id", path) or "/"
+    with closing(sqlite3.connect(db_path)) as conn:
+        rows = conn.execute(
+            """SELECT e.endpoint_id,e.path,e.normalized_path
+               FROM endpoints e
+               JOIN origins o ON o.origin_id=e.origin_id
+               JOIN assets a ON a.asset_id=o.asset_id
+               WHERE a.scan_id=? AND upper(e.method)=? AND e.is_excluded=0
+                 AND lower(rtrim(o.host,'.'))=? AND o.scheme=? AND o.port=?
+                 AND EXISTS (
+                     SELECT 1 FROM endpoint_observations v
+                     WHERE v.endpoint_id=e.endpoint_id
+                       AND v.discovery_kind IN ('http_request','http_response')
+                 )""",
+            (scan_id, method, host, parsed.scheme, port),
+        ).fetchall()
+    matches = [
+        endpoint_id for endpoint_id, observed_path, normalized_path in rows
+        if path == observed_path or normalized == normalized_path
+    ]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _attack_destination(url: str) -> tuple[str, str, str, int]:
+    """Return stable approval identity plus DB origin fields for one URL."""
+    parsed = urlsplit(url)
+    host = (parsed.hostname or "").casefold().rstrip(".")
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    rendered_host = f"[{host}]" if ":" in host else host
+    default_port = (parsed.scheme == "https" and port == 443) or (
+        parsed.scheme == "http" and port == 80
+    )
+    origin = f"{parsed.scheme}://{rendered_host}"
+    if not default_port:
+        origin += f":{port}"
+    path = parsed.path or "/"
+    return origin, (_PATH_IDENTIFIER.sub("/:id", path) or "/"), host, port
+
+
+def _recon_candidate_endpoint(db_path: Path, *, scan_id: str, url: str) -> str | None:
+    """Find a Recon candidate at the same normalized path, independent of method."""
+    parsed = urlsplit(url)
+    _, normalized_path, host, port = _attack_destination(url)
+    with closing(sqlite3.connect(db_path)) as conn:
+        rows = conn.execute(
+            """SELECT e.endpoint_id
+               FROM endpoints e
+               JOIN origins o ON o.origin_id=e.origin_id
+               JOIN assets a ON a.asset_id=o.asset_id
+               WHERE a.scan_id=? AND e.is_excluded=0
+                 AND lower(rtrim(o.host,'.'))=? AND o.scheme=? AND o.port=?
+                 AND e.normalized_path=?
+               ORDER BY e.endpoint_id""",
+            (scan_id, host, parsed.scheme, port, normalized_path),
+        ).fetchall()
+    return rows[0][0] if rows else None
+
+
+def _endpoint_provenance(
+    db_path: Path, *, scan_id: str, method: str, url: str,
+) -> tuple[str, str | None]:
+    observed = _observed_mutation_endpoint(
+        db_path, scan_id=scan_id, method=method, url=url,
+    )
+    if observed is not None:
+        return "network_observed", observed
+    candidate = _recon_candidate_endpoint(db_path, scan_id=scan_id, url=url)
+    if candidate is not None:
+        return "recon_candidate", candidate
+    return "agent_proposed", None
+
+
+def _policy_sha256(policy: dict) -> str:
+    return hashlib.sha256(json.dumps(
+        policy, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")).hexdigest()
+
+
+def _await_approved_envelope(
+    db_path: Path, *, scan_id: str, stage_run_id: str, task_id: str,
+    policy: dict, method: str, url: str, body_bytes: int, risk_class: str,
+    approval_reason: str,
+) -> str:
+    """Create an approval request and consume one bounded authorization slot."""
+    if body_bytes > ATTACK_ENVELOPE_MAX_BODY_BYTES:
+        raise RequestGuardError(
+            "unobserved state-changing request body exceeds the 16 KiB Attack envelope limit"
+        )
+    origin, normalized_path, _, _ = _attack_destination(url)
+    evidence_endpoint_id = _recon_candidate_endpoint(
+        db_path, scan_id=scan_id, url=url,
+    )
+    provenance_kind = "recon_candidate" if evidence_endpoint_id else "agent_proposed"
+    policy_id = policy["policy_id"]
+    policy_digest = _policy_sha256(policy)
+    maximum = min(ATTACK_ENVELOPE_MAX_REQUESTS, policy["limits"]["max_requests"])
+    deadline = time.monotonic() + ATTACK_ENVELOPE_TTL_SECONDS
+
+    while time.monotonic() < deadline:
+        now = time.time()
+        with closing(sqlite3.connect(db_path, isolation_level=None)) as conn:
+            conn.execute("PRAGMA foreign_keys=ON")
+            conn.execute("PRAGMA busy_timeout=5000")
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                task = conn.execute(
+                    """SELECT s.status,t.status,t.scan_id,t.stage_run_id
+                       FROM attack_tasks t
+                       JOIN stage_runs s ON s.stage_run_id=t.stage_run_id
+                       WHERE t.task_id=?""",
+                    (task_id,),
+                ).fetchone()
+                if task != ("running", "running", scan_id, stage_run_id):
+                    raise RequestGuardError(
+                        "Attack authorization requires the configured running task"
+                    )
+                row = conn.execute(
+                    """SELECT envelope_id,status,used_requests,max_requests,
+                              max_body_bytes,expires_at,policy_sha256
+                       FROM attack_authorization_envelopes
+                       WHERE stage_run_id=? AND task_id=? AND policy_id=?
+                         AND method=? AND origin=? AND normalized_path=?
+                       ORDER BY requested_at DESC LIMIT 1""",
+                    (stage_run_id, task_id, policy_id, method, origin, normalized_path),
+                ).fetchone()
+                if row and row[6] != policy_digest and row[1] in {
+                    "pending", "approved",
+                }:
+                    conn.execute(
+                        """UPDATE attack_authorization_envelopes SET status='expired'
+                           WHERE envelope_id=? AND status IN ('pending','approved')""",
+                        (row[0],),
+                    )
+                    row = None
+                if row and row[1] == "approved":
+                    if row[5] is not None and now >= float(row[5]):
+                        conn.execute(
+                            """UPDATE attack_authorization_envelopes SET status='expired'
+                               WHERE envelope_id=? AND status='approved'""",
+                            (row[0],),
+                        )
+                    elif body_bytes > int(row[4]):
+                        raise RequestGuardError(
+                            "request body exceeds the approved Attack envelope"
+                        )
+                    elif int(row[2]) >= int(row[3]):
+                        conn.execute(
+                            """UPDATE attack_authorization_envelopes SET status='expired'
+                               WHERE envelope_id=? AND status='approved'""",
+                            (row[0],),
+                        )
+                    else:
+                        conn.execute(
+                            """UPDATE attack_authorization_envelopes
+                               SET used_requests=used_requests+1
+                               WHERE envelope_id=? AND status='approved'
+                                 AND used_requests < max_requests""",
+                            (row[0],),
+                        )
+                        conn.execute("COMMIT")
+                        return str(row[0])
+                elif row and row[1] == "denied":
+                    raise RequestGuardError("Attack envelope was denied by the user")
+                elif row and row[1] == "pending":
+                    conn.execute("COMMIT")
+                    time.sleep(0.2)
+                    continue
+
+                envelope_id = "envelope_" + uuid4().hex
+                conn.execute(
+                    """INSERT INTO attack_authorization_envelopes
+                       (envelope_id,scan_id,stage_run_id,task_id,policy_id,policy_sha256,
+                        method,origin,normalized_path,provenance_kind,evidence_endpoint_id,
+                        risk_class,approval_reason,max_requests,max_body_bytes,status,requested_at)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'pending',?)""",
+                    (
+                        envelope_id, scan_id, stage_run_id, task_id, policy_id,
+                        policy_digest, method, origin, normalized_path, provenance_kind,
+                        evidence_endpoint_id, risk_class, approval_reason, maximum,
+                        ATTACK_ENVELOPE_MAX_BODY_BYTES, now,
+                    ),
+                )
+                conn.execute("COMMIT")
+            except Exception:
+                conn.execute("ROLLBACK")
+                raise
+        time.sleep(0.2)
+
+    with closing(sqlite3.connect(db_path)) as conn, conn:
+        conn.execute(
+            """UPDATE attack_authorization_envelopes SET status='expired'
+               WHERE stage_run_id=? AND task_id=? AND policy_id=? AND method=?
+                 AND origin=? AND normalized_path=? AND status='pending'""",
+            (stage_run_id, task_id, policy_id, method, origin, normalized_path),
+        )
+    raise RequestGuardError("Attack envelope approval timed out after 15 minutes")
 
 
 def _request_data(item: dict) -> tuple[dict[str, str], bytes | None]:
@@ -281,6 +506,52 @@ def _binding_hashes(
     return consumed, contracts
 
 
+def _has_created_resource_path_binding(
+    db_path: Path, *, task_id: str, bindings: object,
+    binding_contracts: dict[str, dict],
+) -> bool:
+    """Prove a DELETE path identifier came from this task's create response."""
+    if not isinstance(bindings, list):
+        return False
+    source_ids = {
+        raw.get("source_request_id")
+        for raw in bindings
+        if isinstance(raw, dict)
+        and isinstance(raw.get("name"), str)
+        and binding_contracts.get(raw["name"], {}).get("target_kind")
+        == "path_parameter"
+    }
+    source_ids.discard(None)
+    if not source_ids:
+        return False
+    placeholders = ",".join("?" for _ in source_ids)
+    with closing(sqlite3.connect(db_path)) as conn:
+        row = conn.execute(
+            f"""SELECT 1 FROM attack_http_requests
+                 WHERE request_id IN ({placeholders}) AND task_id=?
+                   AND method='POST' AND risk_class='test_resource_create'
+                   AND status='completed' AND response_status BETWEEN 200 AND 299
+                 LIMIT 1""",
+            (*source_ids, task_id),
+        ).fetchone()
+    return row is not None
+
+
+def _mutation_risk_class(item: dict, *, method: str) -> str:
+    risk_class = item.get("risk_class")
+    if not isinstance(risk_class, str) or risk_class not in MUTATION_RISK_CLASSES:
+        raise RequestGuardError(
+            "state-changing requests require a supported risk_class"
+        )
+    if risk_class == "destructive_or_bulk":
+        raise RequestGuardError("destructive or bulk Attack requests are prohibited")
+    if method != "DELETE" and risk_class == "test_resource_delete":
+        raise RequestGuardError("test_resource_delete risk_class requires DELETE")
+    if method == "DELETE" and risk_class == "test_resource_create":
+        raise RequestGuardError("DELETE cannot use test_resource_create risk_class")
+    return risk_class
+
+
 def _response_metadata(
     item: dict, *, status_code: int, response_headers: object,
     response_body: bytes,
@@ -395,6 +666,9 @@ def _redacted_url(url: str) -> str:
 def _reserve(
     db_path: Path, *, scan_id: str, stage_run_id: str, task_id: str,
     policy: dict, method: str, url: str, fingerprint: str,
+    authorization_source: str, authorization_reference_id: str | None,
+    endpoint_provenance: str, endpoint_reference_id: str | None,
+    risk_class: str,
 ) -> tuple[str, float]:
     limits = policy["limits"]
     now = time.time()
@@ -413,15 +687,29 @@ def _reserve(
             if task != ("running", "running", scan_id, stage_run_id):
                 raise RequestGuardError("HTTP requests require the configured running Attack task")
             policy_id = policy["policy_id"]
-            policy_sha256 = hashlib.sha256(json.dumps(
-                policy, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False,
-            ).encode("utf-8")).hexdigest()
+            policy_sha256 = _policy_sha256(policy)
             used = conn.execute(
                 "SELECT COUNT(*) FROM attack_http_requests WHERE scan_id=? AND policy_id=?",
                 (scan_id, policy_id),
             ).fetchone()[0]
             if used >= limits["max_requests"]:
                 raise RequestGuardError("TargetPolicy HTTP request budget exhausted")
+            if method not in SAFE_METHODS:
+                _, normalized_path, _, _ = _attack_destination(url)
+                mutation_rows = conn.execute(
+                    """SELECT method,url FROM attack_http_requests
+                       WHERE task_id=? AND policy_id=?""",
+                    (task_id, policy_id),
+                ).fetchall()
+                path_uses = sum(
+                    1 for prior_method, prior_url in mutation_rows
+                    if prior_method not in SAFE_METHODS
+                    and _attack_destination(prior_url)[1] == normalized_path
+                )
+                if path_uses >= ACTIVE_MUTATION_MAX_REQUESTS_PER_TASK_PATH:
+                    raise RequestGuardError(
+                        "Attack mutation budget exhausted for this task and path"
+                    )
             active = conn.execute(
                 """SELECT COUNT(*) FROM attack_http_requests r
                    JOIN stage_runs s ON s.stage_run_id=r.stage_run_id
@@ -440,11 +728,14 @@ def _reserve(
             conn.execute(
                 """INSERT INTO attack_http_requests
                    (request_id,scan_id,stage_run_id,task_id,policy_id,policy_sha256,method,url,
-                    request_fingerprint,status,scheduled_at)
-                   VALUES (?,?,?,?,?,?,?,?,?, 'reserved',?)""",
+                    request_fingerprint,authorization_source,authorization_reference_id,
+                    endpoint_provenance,endpoint_reference_id,risk_class,status,scheduled_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'reserved',?)""",
                 (
                     request_id, scan_id, stage_run_id, task_id, policy_id, policy_sha256, method,
-                    _redacted_url(url), fingerprint, scheduled,
+                    _redacted_url(url), fingerprint, authorization_source,
+                    authorization_reference_id, endpoint_provenance,
+                    endpoint_reference_id, risk_class, scheduled,
                 ),
             )
             conn.execute("COMMIT")
@@ -489,6 +780,45 @@ def guarded_request(
         db_path, scan_id=scan_id, stage_run_id=stage_run_id, task_id=task_id,
         bindings=item.get("bindings"), url=url, headers=headers, body=body,
     )
+    endpoint_provenance, endpoint_reference_id = _endpoint_provenance(
+        db_path, scan_id=scan_id, method=method, url=url,
+    )
+    if method in SAFE_METHODS:
+        if item.get("risk_class", "http_probe") != "http_probe":
+            raise RequestGuardError("safe HTTP methods must use risk_class http_probe")
+        risk_class = "http_probe"
+        authorization_source = "scope_safe_method"
+        authorization_reference_id = policy["policy_id"]
+    else:
+        if policy.get("attack_authorization_mode") != "active_non_destructive":
+            raise RequestGuardError(
+                "state-changing requests require active non-destructive Scope authorization"
+            )
+        risk_class = _mutation_risk_class(item, method=method)
+        high_impact_path = _HIGH_IMPACT_PATH.search(
+            urlsplit(url).path or "/"
+        ) is not None
+        delete_is_owned = method == "DELETE" and _has_created_resource_path_binding(
+            db_path, task_id=task_id, bindings=item.get("bindings"),
+            binding_contracts=consumed_binding_contracts,
+        )
+        approval_reason = (
+            "external_side_effect" if risk_class == "external_side_effect"
+            else "high_impact_path" if high_impact_path
+            else "unproven_delete_ownership" if method == "DELETE" and not delete_is_owned
+            else None
+        )
+        if approval_reason is not None:
+            authorization_reference_id = _await_approved_envelope(
+                db_path, scan_id=scan_id, stage_run_id=stage_run_id,
+                task_id=task_id, policy=policy, method=method, url=url,
+                body_bytes=len(body or b""),
+                risk_class=risk_class, approval_reason=approval_reason,
+            )
+            authorization_source = "approved_envelope"
+        else:
+            authorization_source = "scope_active_mutation"
+            authorization_reference_id = policy["policy_id"]
     timeout_value = item.get("timeout_seconds", policy["limits"]["timeout_seconds"])
     if isinstance(timeout_value, bool) or not isinstance(timeout_value, (int, float)):
         raise RequestGuardError("timeout_seconds must be numeric")
@@ -503,6 +833,11 @@ def guarded_request(
     request_id, scheduled = _reserve(
         db_path, scan_id=scan_id, stage_run_id=stage_run_id, task_id=task_id,
         policy=policy, method=method, url=url, fingerprint=fingerprint,
+        authorization_source=authorization_source,
+        authorization_reference_id=authorization_reference_id,
+        endpoint_provenance=endpoint_provenance,
+        endpoint_reference_id=endpoint_reference_id,
+        risk_class=risk_class,
     )
     delay = scheduled - time.time()
     if delay > 0:
@@ -557,6 +892,15 @@ def guarded_request(
         raise
     result_metadata["consumed_binding_hashes"] = consumed_bindings
     result_metadata["consumed_binding_contracts"] = consumed_binding_contracts
+    result_metadata["authorization"] = {
+        "source": authorization_source,
+        "reference_id": authorization_reference_id,
+    }
+    result_metadata["endpoint_provenance"] = {
+        "kind": endpoint_provenance,
+        "reference_id": endpoint_reference_id,
+    }
+    result_metadata["risk_class"] = risk_class
     _set_status(
         db_path, request_id, status="completed", response_status=status_code,
         response_bytes=len(response_body),

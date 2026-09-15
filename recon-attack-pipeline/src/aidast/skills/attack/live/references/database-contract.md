@@ -43,7 +43,18 @@ PYTHON HTTP_REQUEST_HELPER request --db PIPELINE_DB --scan-id SCAN_ID --stage-ru
 ```
 
 The request payload contains `method`, `url`, optional string `headers`, optional
-UTF-8 `body` (or `body_base64`), and optional `timeout_seconds`. The helper
+UTF-8 `body` (or `body_base64`), and optional `timeout_seconds`. A state-changing
+request must also contain exactly one `risk_class`:
+
+- `application_mutation`: ordinary bounded form/API mutation.
+- `test_resource_create`: creates disposable data whose captured identifier may
+  authorize a later same-task DELETE.
+- `test_resource_delete`: deletes only such a cryptographically bound test resource.
+- `external_side_effect`: may trigger payment, email, SMS, notification, webhook,
+  invitation, or another effect outside the target data plane; requires approval.
+- `destructive_or_bulk`: destructive, disruptive, or mass action; always rejected.
+
+Safe methods use `http_probe` implicitly. The helper
 validates task state and TargetPolicy, reserves the durable shared request/rate/
 concurrency budget, disables proxies and redirects, and returns a JSON response
 with `request_id`, `request_fingerprint`, status, sanitized headers, and a
