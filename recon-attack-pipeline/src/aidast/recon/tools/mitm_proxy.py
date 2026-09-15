@@ -49,6 +49,7 @@ def start_mitmproxy(
     capture_path: Path, *, port: int | None = None, scope_rules: dict | None = None
 ) -> tuple[subprocess.Popen | None, str | None]:
     required = scope_rules is not None and scope_rules.get("enforcement_required", True) is not False
+    scope_file: Path | None = None
     if scope_rules is not None:
         validate_scope_rules(scope_rules)
     if shutil.which("mitmdump") is None:
@@ -87,6 +88,8 @@ def start_mitmproxy(
     try:
         proc = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except OSError as exc:
+        if scope_file is not None:
+            scope_file.unlink(missing_ok=True)
         if required:
             raise RuntimeError("required policy proxy could not start") from exc
         print(f"  [경고] mitmdump 실행 실패: {exc} - mitmproxy 관찰 없이 진행")
@@ -95,10 +98,17 @@ def start_mitmproxy(
     if not _wait_for_proxy_port(selected_port, process=proc):
         print("  [경고] mitmdump가 제시간에 포트를 열지 않음 - mitmproxy 관찰 없이 진행")
         proc.terminate()
+        if scope_file is not None:
+            scope_file.unlink(missing_ok=True)
         if required:
             raise RuntimeError("required policy proxy did not become ready")
         return None, None
 
+    # The addon has loaded the rules by the time its listening socket opens.
+    # Remove the file so the short-lived authentication grant is not left in
+    # the system temp directory.
+    if scope_file is not None:
+        scope_file.unlink(missing_ok=True)
     print(f"  [mitmproxy] 127.0.0.1:{selected_port}에서 관찰 시작")
     return proc, f"http://127.0.0.1:{selected_port}"
 

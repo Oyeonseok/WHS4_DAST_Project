@@ -17,9 +17,12 @@ Playwright는 메인 크롤러가 아니다.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import queue
 import socket
 import subprocess
+import threading
 import time
 import urllib.request
 
@@ -35,6 +38,7 @@ from playwright.sync_api import (
     sync_playwright,
 )
 
+from aidast.core.http_safety import AUTH_CAPABILITY_HEADER, issue_request_capability
 from aidast.recon.policy import TargetPolicy
 from aidast.recon.tools.api_secondary_discovery import _http_request
 
@@ -154,6 +158,51 @@ class InteractionConfig:
 
 class PlaywrightDriver:
 
+    # These controls only dismiss passive, first-visit chrome.  Keep the
+    # selectors exact: a generic "Dismiss"/"Close" click could acknowledge a
+    # security prompt or perform an application action on an arbitrary target.
+    _PASSIVE_OVERLAY_DISMISS_SELECTORS = (
+        '[role="dialog"][aria-label="cookieconsent"] '
+        '[aria-label="dismiss cookie message"]',
+        '[role="dialog"] [aria-label="Close Welcome Banner"]',
+    )
+
+    # Some Angular Material/MDC versions paint the floating label over the
+    # geometric centre of mat-select. A real pointer click then targets the
+    # decorative label instead of the enabled combobox. Forward only clicks
+    # originating inside that same select field; other labels and controls are
+    # untouched.
+    _MATERIAL_SELECT_CLICK_BRIDGE = """
+    document.addEventListener('click', event => {
+        const target = event.target;
+        if (!(target instanceof Element) || target.closest('mat-select')) {
+            return;
+        }
+        const field = target.closest(
+            'mat-form-field.mat-form-field-type-mat-select'
+        );
+        const select = field && field.querySelector(
+            'mat-select[role="combobox"][aria-haspopup="listbox"]'
+        );
+        if (select && select.getAttribute('aria-disabled') !== 'true') {
+            select.click();
+        }
+    }, true);
+    """
+
+    # Closing a WebSocket from Playwright's synchronous route_web_socket
+    # callback can deadlock the dispatcher while a SPA is bootstrapping. Block
+    # construction inside the page before application code runs instead. This
+    # preserves the fail-closed WebSocket boundary without a re-entrant
+    # Playwright protocol call.
+    _BLOCK_WEBSOCKETS_SCRIPT = """
+    Object.defineProperty(globalThis, 'WebSocket', {
+        value: undefined,
+        writable: false,
+        configurable: false,
+    });
+    """
+
     def __init__(
         self,
         base_url: str,
@@ -162,6 +211,7 @@ class PlaywrightDriver:
         interaction_config: InteractionConfig | None = None,
         proxy_url: str | None = None,
         target_policy: TargetPolicy | None = None,
+        manual_auth_signing_key: str | None = None,
     ):
 
         if target_policy is not None and not proxy_url:
@@ -183,6 +233,11 @@ class PlaywrightDriver:
         self.proxy_url = (
             proxy_url
         )
+        self._manual_auth_signing_key = manual_auth_signing_key
+        self._manual_auth_commands: queue.Queue[str] | None = None
+        self._manual_auth_completion: threading.Event | None = None
+        self._manual_auth_approval_pending: threading.Event | None = None
+        self._manual_auth_decided_requests: set[str] = set()
 
         self.playwright: (
             Playwright | None
@@ -618,6 +673,9 @@ class PlaywrightDriver:
             ),
         )
 
+        self.context.add_init_script(
+            script=self._MATERIAL_SELECT_CLICK_BRIDGE,
+        )
         self._register_context_handlers()
         self.page = self.context.new_page()
         self._register_page_handlers(self.page)
@@ -640,12 +698,96 @@ class PlaywrightDriver:
                 and not parsed.username and not parsed.password
                 and self.target_policy.allows_url(request.url, method=request.method)
             )
+            manual_auth_candidate = (
+                self.target_policy is not None
+                and self.target_policy.tools.manual_auth_post
+                and self._phase == "login"
+                and bool(self._manual_auth_signing_key)
+                and request.method.upper() == "POST"
+                and not parsed.username and not parsed.password
+                and self.target_policy.allows_url_boundary(request.url)
+            )
         except Exception:
             allowed = False
+            manual_auth_candidate = False
         if allowed:
             route.continue_()
+        elif manual_auth_candidate and self._approve_manual_auth_request(
+            method=request.method,
+            url=request.url,
+            request_fingerprint=self._manual_auth_request_fingerprint(request),
+        ):
+            headers = dict(request.headers)
+            try:
+                headers[AUTH_CAPABILITY_HEADER] = issue_request_capability(
+                    self._manual_auth_signing_key,
+                    method=request.method,
+                    url=request.url,
+                    ttl_seconds=20,
+                )
+            except (TypeError, ValueError):
+                route.abort("blockedbyclient")
+            else:
+                route.continue_(headers=headers)
         else:
             route.abort("blockedbyclient")
+
+    @staticmethod
+    def _manual_auth_request_fingerprint(request) -> str:
+        """Hash an exact retry without retaining credentials or request bodies."""
+        body = getattr(request, "post_data_buffer", None)
+        if not isinstance(body, bytes):
+            text = getattr(request, "post_data", None)
+            body = text.encode("utf-8") if isinstance(text, str) else b""
+        material = (
+            request.method.upper().encode("ascii", errors="ignore")
+            + b"\n"
+            + request.url.encode("utf-8")
+            + b"\n"
+            + hashlib.sha256(body).digest()
+        )
+        return hashlib.sha256(material).hexdigest()
+
+    def _approve_manual_auth_request(
+        self,
+        *,
+        method: str,
+        url: str,
+        request_fingerprint: str | None = None,
+    ) -> bool:
+        """Ask the operator to approve exactly one pending authentication POST."""
+        fingerprint = request_fingerprint or hashlib.sha256(
+            f"{method.upper()}\n{url}".encode("utf-8")
+        ).hexdigest()
+        # A user decision applies to one exact request occurrence. If the SPA
+        # automatically retries the same URL and body, silently block it instead
+        # of creating an unbounded approval loop. A changed form body receives a
+        # different fingerprint and can be reviewed as a new request.
+        if fingerprint in self._manual_auth_decided_requests:
+            return False
+
+        commands = self._manual_auth_commands
+        completed = self._manual_auth_completion
+        pending = self._manual_auth_approval_pending
+        if commands is None or completed is None or pending is None or completed.is_set():
+            return False
+
+        parsed = urlparse(url)
+        default_port = 443 if parsed.scheme == "https" else 80
+        port = f":{parsed.port}" if parsed.port and parsed.port != default_port else ""
+        display_target = f"{parsed.scheme}://{parsed.hostname}{port}{parsed.path or '/'}"
+        print()
+        print("  [인증 요청 승인 필요]")
+        print(f"  {method.upper()} {display_target}")
+        print("  이 요청 1건만 허용하려면 y, 거부하려면 N을 입력하세요.")
+
+        pending.set()
+        try:
+            decision = commands.get()
+        finally:
+            pending.clear()
+        self._manual_auth_decided_requests.add(fingerprint)
+        return decision.strip().lower() in {"y", "yes"}
 
     def _register_context_handlers(
         self,
@@ -656,8 +798,12 @@ class PlaywrightDriver:
 
         if self.target_policy is not None:
             self.context.route("**/*", self._guard_request)
-            # WebSocket messages are outside the HTTP policy contract.
-            self.context.route_web_socket("**/*", lambda route: route.close())
+            # WebSocket messages are outside the HTTP policy contract. Install
+            # the block before page scripts run; do not synchronously call back
+            # into Playwright from a WebSocket route event.
+            self.context.add_init_script(
+                script=self._BLOCK_WEBSOCKETS_SCRIPT,
+            )
 
         def on_request(
             request,
@@ -684,15 +830,16 @@ class PlaywrightDriver:
             )
 
             from aidast.recon import db
-            from aidast.recon.annotations import safe_url, safe_text
+            from aidast.recon.annotations import safe_url
+            # Never issue a synchronous Playwright command such as
+            # page.title(), or traverse request.frame, from a request event
+            # callback. The callback runs while Playwright is dispatching that
+            # request; a nested protocol/object traversal can deadlock the
+            # dispatcher and prevent a SPA from sending subsequent API
+            # requests. Page metadata is optional observation context and is
+            # collected from non-event paths when available.
             page_url = ''
             page_title = ''
-            try:
-                page = request.frame.page
-                page_url = safe_url(request.frame.url)
-                page_title = safe_text(page.title())
-            except Exception:
-                pass
             context = dict(self._action_context or {})
             context.setdefault('context_key', f'{self._phase}:{page_url}')
             context.setdefault('action_type', 'navigation')
@@ -927,6 +1074,133 @@ class PlaywrightDriver:
     # Manual Authentication
     # =====================================================
 
+    def _dismiss_passive_auth_overlays(
+        self,
+        page: Page,
+    ) -> int:
+        """Dismiss known passive first-visit overlays before manual auth.
+
+        Angular Material renders both dialogs and ``mat-select`` option panels
+        in the global CDK overlay container.  A welcome dialog left in that
+        container intercepts pointer events, making a visible and enabled
+        ``mat-select`` appear broken.  DOM ``click()`` is intentional here: it
+        avoids Playwright waiting on two overlapping first-visit dialogs while
+        still running the application's own click handler.
+        """
+
+        selectors = json.dumps(
+            self._PASSIVE_OVERLAY_DISMISS_SELECTORS,
+        )
+        script = f"""
+        () => {{
+            const selectors = {selectors};
+            let dismissed = 0;
+            for (const selector of selectors) {{
+                for (const element of document.querySelectorAll(selector)) {{
+                    if (!(element instanceof HTMLElement)) {{
+                        continue;
+                    }}
+                    if (element.dataset.aidastDismissed === 'true') {{
+                        continue;
+                    }}
+                    const style = window.getComputedStyle(element);
+                    if (
+                        style.display === 'none'
+                        || style.visibility === 'hidden'
+                        || element.getClientRects().length === 0
+                    ) {{
+                        continue;
+                    }}
+                    element.dataset.aidastDismissed = 'true';
+                    element.click();
+                    dismissed += 1;
+                }}
+            }}
+            return dismissed;
+        }}
+        """
+
+        dismissed = 0
+        # SPA dialogs are mounted shortly after DOMContentLoaded.  Retry for a
+        # short bounded window so the manual-auth prompt is not delayed on
+        # sites without either overlay.
+        for _ in range(4):
+            try:
+                dismissed += int(page.evaluate(script) or 0)
+            except Exception:
+                break
+            page.wait_for_timeout(250)
+
+        return dismissed
+
+    def _wait_for_manual_auth_completion(
+        self,
+        page: Page,
+    ) -> None:
+        """Wait for terminal confirmation while pumping Playwright events.
+
+        ``context.route()`` handlers run through Playwright's synchronous event
+        dispatcher. Calling builtin ``input()`` on that same thread prevents
+        route callbacks from reaching ``continue_()`` when the operator moves
+        around the browser, leaving SPA API requests pending indefinitely.
+        Only terminal input runs in the helper thread; every Playwright call
+        remains on the owning thread.
+        """
+
+        completed = threading.Event()
+        commands: queue.Queue[str] = queue.Queue()
+        approval_pending = threading.Event()
+        errors: list[BaseException] = []
+
+        self._manual_auth_commands = commands
+        self._manual_auth_completion = completed
+        self._manual_auth_approval_pending = approval_pending
+
+        def wait_for_input() -> None:
+            try:
+                while not completed.is_set():
+                    value = input(
+                        "  로그인 완료 후 Enter "
+                        "(인증 POST 승인 요청 시 y/N) > "
+                    )
+                    if approval_pending.is_set():
+                        commands.put(value)
+                        # Do not read ahead and accidentally enqueue a command
+                        # for the next request before the current route callback
+                        # has consumed this decision.
+                        while approval_pending.is_set() and not completed.is_set():
+                            time.sleep(0.01)
+                    elif not value.strip():
+                        completed.set()
+            except BaseException as exc:  # propagate EOF and interrupted input
+                errors.append(exc)
+                if approval_pending.is_set():
+                    commands.put("")
+            finally:
+                completed.set()
+
+        input_thread = threading.Thread(
+            target=wait_for_input,
+            name="aidast-manual-auth-input",
+            daemon=True,
+        )
+        input_thread.start()
+
+        try:
+            while not completed.is_set():
+                # Playwright's own wait keeps its sync dispatcher active,
+                # allowing request/response/route callbacks to run during
+                # manual browsing. A route callback may synchronously wait for
+                # the terminal reader without moving Playwright off this thread.
+                page.wait_for_timeout(100)
+
+            if errors:
+                raise errors[0]
+        finally:
+            self._manual_auth_commands = None
+            self._manual_auth_completion = None
+            self._manual_auth_approval_pending = None
+
     def capture_and_start(
         self,
     ) -> None:
@@ -942,6 +1216,7 @@ class PlaywrightDriver:
         """
 
         self._phase = "login"
+        self._manual_auth_decided_requests.clear()
 
         self._launch_manual_browser()
 
@@ -986,6 +1261,18 @@ class PlaywrightDriver:
                 f"{exc}"
             )
 
+        dismissed_overlays = (
+            self._dismiss_passive_auth_overlays(
+                page,
+            )
+        )
+        if dismissed_overlays:
+            print(
+                "  [Playwright] "
+                "로그인 입력을 가리는 초기 안내창 "
+                f"{dismissed_overlays}개를 닫았습니다."
+            )
+
         print()
         print(
             "  브라우저에서 직접 로그인해주세요."
@@ -1001,17 +1288,20 @@ class PlaywrightDriver:
         )
         print()
 
-        input(
-            "  로그인 완료 후 Enter > "
+        self._wait_for_manual_auth_completion(
+            page,
         )
 
+        # Revoke the browser side of the request-signing authority before any
+        # runtime crawling or interaction begins.
+        self._phase = "runtime"
+        self._manual_auth_signing_key = None
+        self._manual_auth_decided_requests.clear()
         self.save_session()
 
         # 로그인 과정 중 발생한 401은
         # 세션 만료로 취급하지 않음
         self._auth_expired = False
-
-        self._phase = "runtime"
 
         print()
         print(
@@ -2199,6 +2489,7 @@ class PlaywrightDriver:
                 '[role="button"][aria-controls], '
                 '[role="button"][aria-expanded], '
                 '[role="button"][aria-haspopup], '
+                '[role="combobox"][aria-haspopup="listbox"], '
                 'summary, '
                 'nav button'
             )
@@ -2349,7 +2640,21 @@ class PlaywrightDriver:
                     'association_method': 'action_time_window',
                 }
                 try:
-                    element.click(timeout=1500)
+                    click_target = element
+                    if tag == "mat-select":
+                        material_trigger = element.locator(
+                            ".mat-mdc-select-trigger"
+                        )
+                        if material_trigger.count():
+                            click_target = material_trigger
+                        # MDC's floating mat-label can cover the geometric
+                        # centre of the trigger even though the select is
+                        # visible and enabled.  The candidate has already
+                        # passed the safety filters, so bypass only that
+                        # pointer hit-test for mat-select.
+                        click_target.click(timeout=1500, force=True)
+                    else:
+                        click_target.click(timeout=1500)
                     page.wait_for_timeout(config.action_wait_ms)
                 finally:
                     self._action_context = None

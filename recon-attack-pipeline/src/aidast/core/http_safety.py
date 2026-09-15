@@ -2,14 +2,130 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
+import hmac
+import json
+import secrets
+import time
 from collections.abc import Mapping
+from urllib.parse import urlsplit
+
+
+AUTH_CAPABILITY_HEADER = "X-AIDAST-Auth-Capability"
+AUTH_CAPABILITY_VERSION = 1
+
+
+def _base64url_encode(value: bytes) -> str:
+    return base64.urlsafe_b64encode(value).rstrip(b"=").decode("ascii")
+
+
+def _base64url_decode(value: str) -> bytes:
+    return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
+
+
+def _request_binding(method: str, url: str) -> str:
+    """Return a stable, non-secret digest for one exact HTTP request target."""
+    parsed = urlsplit(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise ValueError("request capability requires an absolute HTTP(S) URL")
+    if parsed.username or parsed.password:
+        raise ValueError("request capability does not allow URL credentials")
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    target = (
+        f"{method.upper()}\n{parsed.scheme.lower()}\n"
+        f"{parsed.hostname.lower().rstrip('.')}\n{port}\n"
+        f"{parsed.path or '/'}\n{parsed.query}"
+    )
+    return hashlib.sha256(target.encode("utf-8")).hexdigest()
+
+
+def issue_request_capability(
+    signing_key: str,
+    *,
+    method: str,
+    url: str,
+    ttl_seconds: int = 20,
+    now: int | None = None,
+) -> str:
+    """Issue a short-lived capability bound to one method and exact target."""
+    if not isinstance(signing_key, str) or len(signing_key) < 32:
+        raise ValueError("request capability requires a strong signing key")
+    if method.upper() != "POST":
+        raise ValueError("manual authentication capability may allow POST only")
+    if not 1 <= ttl_seconds <= 60:
+        raise ValueError("request capability TTL must be between 1 and 60 seconds")
+    issued_at = int(time.time() if now is None else now)
+    payload = {
+        "v": AUTH_CAPABILITY_VERSION,
+        "m": method.upper(),
+        "t": _request_binding(method, url),
+        "iat": issued_at,
+        "exp": issued_at + ttl_seconds,
+        "n": secrets.token_urlsafe(18),
+    }
+    encoded = _base64url_encode(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    )
+    signature = hmac.new(
+        signing_key.encode("utf-8"), encoded.encode("ascii"), hashlib.sha256
+    ).digest()
+    return f"{encoded}.{_base64url_encode(signature)}"
+
+
+def validate_request_capability(
+    token: str,
+    signing_key: str,
+    *,
+    method: str,
+    url: str,
+    max_ttl_seconds: int,
+    used_nonces: set[str],
+    now: int | None = None,
+) -> bool:
+    """Validate and consume a request-bound capability, rejecting replay."""
+    try:
+        encoded, supplied_signature = token.split(".", 1)
+        expected_signature = _base64url_encode(hmac.new(
+            signing_key.encode("utf-8"), encoded.encode("ascii"), hashlib.sha256
+        ).digest())
+        if not hmac.compare_digest(supplied_signature, expected_signature):
+            return False
+        payload = json.loads(_base64url_decode(encoded).decode("utf-8"))
+        if not isinstance(payload, dict) or set(payload) != {
+            "v", "m", "t", "iat", "exp", "n",
+        }:
+            return False
+        current = int(time.time() if now is None else now)
+        issued_at = payload["iat"]
+        expires_at = payload["exp"]
+        nonce = payload["n"]
+        valid = (
+            payload["v"] == AUTH_CAPABILITY_VERSION
+            and payload["m"] == method.upper() == "POST"
+            and payload["t"] == _request_binding(method, url)
+            and type(issued_at) is int
+            and type(expires_at) is int
+            and 0 < expires_at - issued_at <= max_ttl_seconds
+            and issued_at <= current <= expires_at
+            and isinstance(nonce, str)
+            and len(nonce) >= 16
+            and nonce not in used_nonces
+        )
+        if valid:
+            used_nonces.add(nonce)
+        return valid
+    except (ValueError, TypeError, KeyError, UnicodeError, json.JSONDecodeError):
+        return False
 
 
 def is_sensitive_header(name: str) -> bool:
     normalized = name.lower().replace("_", "-")
     return (
         normalized in {"authorization", "proxy-authorization", "cookie", "set-cookie"}
-        or any(part in normalized for part in ("token", "secret", "api-key", "apikey"))
+        or any(part in normalized for part in (
+            "token", "secret", "api-key", "apikey", "capability",
+        ))
     )
 
 
@@ -52,4 +168,18 @@ def validate_scope_rules(rules: object) -> dict:
     maximum = rules.get("max_requests")
     if type(maximum) is not int or maximum < 1:
         raise ValueError("scope rules require a positive max_requests")
+    grant = rules.get("request_bound_auth_grant")
+    if grant is not None:
+        if not isinstance(grant, dict) or set(grant) != {
+            "allowed_methods", "signing_key", "max_ttl_seconds",
+        }:
+            raise ValueError("invalid request-bound auth grant")
+        if grant.get("allowed_methods") != ["POST"]:
+            raise ValueError("request-bound auth grant may allow POST only")
+        signing_key = grant.get("signing_key")
+        if not isinstance(signing_key, str) or len(signing_key) < 32:
+            raise ValueError("request-bound auth grant requires a strong signing key")
+        ttl = grant.get("max_ttl_seconds")
+        if type(ttl) is not int or not 1 <= ttl <= 60:
+            raise ValueError("invalid request-bound auth grant TTL")
     return rules

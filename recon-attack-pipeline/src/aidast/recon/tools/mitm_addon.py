@@ -27,6 +27,8 @@ from mitmproxy import ctx, http
 _safety = runpy.run_path(str(Path(__file__).resolve().parents[2] / "core" / "http_safety.py"))
 sanitize_headers = _safety["sanitize_headers"]
 validate_scope_rules = _safety["validate_scope_rules"]
+AUTH_CAPABILITY_HEADER = _safety["AUTH_CAPABILITY_HEADER"]
+validate_request_capability = _safety["validate_request_capability"]
 
 
 class ScopeAndCaptureAddon:
@@ -36,6 +38,7 @@ class ScopeAndCaptureAddon:
         self.out_path: Path | None = None
         self.rules: dict = {}
         self.request_count = 0
+        self.used_auth_nonces: set[str] = set()
         self.enforcement_required = True
 
     def load(self, loader) -> None:
@@ -61,6 +64,7 @@ class ScopeAndCaptureAddon:
             self.scope_loaded = False
             self.allowed_hosts = set()
             self.rules = {}
+            self.used_auth_nonces = set()
             try:
                 if not ctx.options.scope_file:
                     raise ValueError("scope_file is missing")
@@ -98,13 +102,35 @@ class ScopeAndCaptureAddon:
         allowed_paths = self.rules.get("allowed_path_prefixes", ["/"])
         excluded_paths = self.rules.get("excluded_path_prefixes", [])
         allowed_methods = self.rules.get("allowed_methods", ["GET", "HEAD", "OPTIONS"])
+        method = flow.request.method.upper()
+        grant = self.rules.get("request_bound_auth_grant")
+        presented_token = flow.request.headers.get(AUTH_CAPABILITY_HEADER, "")
+        # This control header is local to the browser/proxy trust boundary and
+        # must never be disclosed to the target or persisted in captures.
+        if AUTH_CAPABILITY_HEADER in flow.request.headers:
+            del flow.request.headers[AUTH_CAPABILITY_HEADER]
+        temporary_method_allowed = (
+            isinstance(grant, dict)
+            and method in grant.get("allowed_methods", [])
+            and isinstance(grant.get("signing_key"), str)
+            and isinstance(presented_token, str)
+            and bool(presented_token)
+            and validate_request_capability(
+                presented_token,
+                grant["signing_key"],
+                method=method,
+                url=flow.request.pretty_url,
+                max_ttl_seconds=grant.get("max_ttl_seconds", 0),
+                used_nonces=self.used_auth_nonces,
+            )
+        )
         max_requests = int(self.rules.get("max_requests", 3000))
         boundary_allowed = (
             host_allowed
             and not (parsed.username or parsed.password)
             and parsed.scheme in self.rules.get("allowed_schemes", ["https"])
             and port in self.rules.get("allowed_ports", [443])
-            and flow.request.method.upper() in allowed_methods
+            and (method in allowed_methods or temporary_method_allowed)
             and any(self._path_matches(path, prefix) for prefix in allowed_paths)
             and not any(self._path_matches(path, prefix) for prefix in excluded_paths)
         )

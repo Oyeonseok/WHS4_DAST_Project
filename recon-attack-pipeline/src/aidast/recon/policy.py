@@ -26,6 +26,9 @@ class PolicyLimits(StrictModel):
 class ToolPolicy(StrictModel):
     playwright_interaction: bool = False
     form_submission: bool = False
+    # During manual authentication, same-boundary POST requests are held for
+    # operator approval and receive a short-lived, request-bound capability.
+    manual_auth_post: bool = True
     katana_headless: bool = True
     ffuf_enabled: bool = True
     ffuf_recursion: bool = False
@@ -35,6 +38,7 @@ class ToolPolicy(StrictModel):
 PolicyControlledField = Literal[
     "requests_per_second", "concurrency", "timeout_seconds", "max_depth",
     "max_requests", "playwright_interaction", "form_submission",
+    "manual_auth_post",
     "katana_headless", "ffuf_enabled", "ffuf_recursion",
     "mitm_capture_bodies",
 ]
@@ -83,7 +87,7 @@ class TargetPolicy(TargetPolicyProposal):
             and any(candidate.endswith("." + root) for root in allowed_hosts)
         )
 
-    def allows_url(self, url: str, *, method: str = "GET") -> bool:
+    def allows_url_boundary(self, url: str) -> bool:
         try:
             parsed = urlsplit(url)
             host = (parsed.hostname or "").lower().rstrip(".")
@@ -95,13 +99,18 @@ class TargetPolicy(TargetPolicyProposal):
             parsed.scheme in self.allowed_schemes
             and self.allows_host(host)
             and port in self.allowed_ports
-            and method.upper() in self.allowed_methods
             and any(_path_matches(path, prefix) for prefix in self.allowed_path_prefixes)
             and not any(_path_matches(path, prefix) for prefix in self.excluded_path_prefixes)
         )
 
-    def mitm_rules(self) -> dict:
-        return {
+    def allows_url(self, url: str, *, method: str = "GET") -> bool:
+        return (
+            method.upper() in self.allowed_methods
+            and self.allows_url_boundary(url)
+        )
+
+    def mitm_rules(self, *, manual_auth_signing_key: str | None = None) -> dict:
+        rules = {
             "enforcement_required": True,
             "allowed_schemes": self.allowed_schemes,
             "allowed_hosts": self.allowed_hosts,
@@ -113,6 +122,13 @@ class TargetPolicy(TargetPolicyProposal):
             "max_requests": self.limits.max_requests,
             "mitm_capture_bodies": self.tools.mitm_capture_bodies,
         }
+        if self.tools.manual_auth_post and manual_auth_signing_key:
+            rules["request_bound_auth_grant"] = {
+                "allowed_methods": ["POST"],
+                "signing_key": manual_auth_signing_key,
+                "max_ttl_seconds": 30,
+            }
+        return rules
 
 
 class TargetPolicySetProposal(StrictModel):

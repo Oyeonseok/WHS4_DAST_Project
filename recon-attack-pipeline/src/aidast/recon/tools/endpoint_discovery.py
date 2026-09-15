@@ -1390,6 +1390,7 @@ def discover_endpoints(
     observation_callback=None,
     run_id: str | None = None,
     identity_id: str | None = None,
+    manual_auth_signing_key: str | None = None,
 ) -> list[dict]:
 
     if target_policy is not None and not mitm_proxy_url:
@@ -1488,6 +1489,7 @@ def discover_endpoints(
                     or mitm_proxy_url
                 ),
                 target_policy=target_policy,
+                manual_auth_signing_key=manual_auth_signing_key,
             )
         )
 

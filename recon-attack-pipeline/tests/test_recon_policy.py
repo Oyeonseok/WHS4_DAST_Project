@@ -10,6 +10,7 @@ from aidast.recon.policy import (
     RestrictionEvidence,
     TargetPolicy,
     TargetPolicyProposal,
+    ToolPolicy,
     validate_policy_for_target,
 )
 from aidast.recon.policy import TargetPolicySetProposal
@@ -210,6 +211,22 @@ class TargetPolicyTests(unittest.TestCase):
         self.assertTrue(rules["enforcement_required"])
         self.assertEqual(rules["allowed_hosts"], ["example.com"])
         self.assertEqual(rules["allowed_methods"], ["GET", "HEAD", "OPTIONS"])
+        self.assertNotIn("request_bound_auth_grant", rules)
+
+    def test_mitm_rules_issue_request_bound_post_signing_authority(self) -> None:
+        signing_key = "a" * 32
+        rules = policy().mitm_rules(manual_auth_signing_key=signing_key)
+        self.assertEqual(rules["request_bound_auth_grant"], {
+            "allowed_methods": ["POST"],
+            "signing_key": signing_key,
+            "max_ttl_seconds": 30,
+        })
+
+        disabled = policy(tools=ToolPolicy(manual_auth_post=False))
+        self.assertNotIn(
+            "request_bound_auth_grant",
+            disabled.mitm_rules(manual_auth_signing_key=signing_key),
+        )
 
     def test_url_policy_cannot_broaden_approved_path(self) -> None:
         proposal = TargetPolicyProposal(

@@ -1036,7 +1036,8 @@ def _print_policy_preview(policies) -> None:
         print(
             "  playwright: "
             f"interaction={policy.tools.playwright_interaction}, "
-            f"form_submission={policy.tools.form_submission}"
+            f"form_submission={policy.tools.form_submission}, "
+            f"manual_auth_post_approval={policy.tools.manual_auth_post}"
         )
         print(
             "  mitmproxy: enforcement=true, "

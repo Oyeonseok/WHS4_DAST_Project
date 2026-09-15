@@ -13,6 +13,7 @@ results are always merged together with no separate re-crawl decision.
 from __future__ import annotations
 
 import functools
+import secrets
 from pathlib import Path
 from urllib.parse import urlparse
 from uuid import NAMESPACE_URL, uuid5
@@ -371,7 +372,16 @@ class ReconExecutor:
         # origins.main_crawler_mode(SPA 추정값)는 더 이상 실행 분기에 쓰이지
         # 않는다 - 참고용 기록으로만 origins 테이블에 남아 있다.
         capture_path = Path(f"mitm_capture_{self.scan_id}.jsonl")
-        rules = policy.mitm_rules() if policy is not None else self.scope_rules
+        manual_auth_signing_key = (
+            secrets.token_urlsafe(32)
+            if policy is not None and policy.tools.manual_auth_post
+            else None
+        )
+        rules = (
+            policy.mitm_rules(manual_auth_signing_key=manual_auth_signing_key)
+            if policy is not None
+            else self.scope_rules
+        )
         proxy_process, proxy_url = start_mitmproxy(capture_path, scope_rules=rules)
         if self.require_policy_enforcement and proxy_url is None:
             raise ReconExecutionError("정책 강제 mitmproxy를 시작할 수 없음")
@@ -386,6 +396,7 @@ class ReconExecutor:
                 target_policy=policy,
                 observation_callback=recorder.record,
                 run_id=self.scan_id,
+                manual_auth_signing_key=manual_auth_signing_key,
             )
         finally:
             stop_mitmproxy(proxy_process)

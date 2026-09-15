@@ -54,6 +54,13 @@ capability disabled by default.
   record genuine explicit restrictions instead.
 - Keep safe request methods limited to the supplied application defaults unless the
   approved Scope and requested workflow explicitly support a narrower set.
+- `manual_auth_post` enables interactive, request-by-request approval while an
+  operator completes authentication. Preserve its application default unless Scope
+  explicitly forbids authentication or all login submissions. It does not add
+  `POST` to the Recon crawler's `allowed_methods`, does not approve an endpoint by
+  its name, and must never be interpreted as a phase-wide POST allowance or general
+  form-submission permission. Each approved request receives a short-lived,
+  method-and-target-bound, single-use capability enforced by the local proxy.
 
 # Output
 

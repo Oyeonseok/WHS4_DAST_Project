@@ -10,7 +10,11 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 from urllib.error import HTTPError
 
-from aidast.core.http_safety import sanitize_headers
+from aidast.core.http_safety import (
+    AUTH_CAPABILITY_HEADER,
+    issue_request_capability,
+    sanitize_headers,
+)
 from aidast.core.request_broker import RequestBroker, RequestPolicyError
 from aidast.recon.policy import TargetPolicy
 from aidast.recon.tools.http_probe import probe
@@ -168,6 +172,56 @@ class ProxyBoundaryTests(unittest.TestCase):
         flow = self.flow()
         self.addon.request(flow)
         self.assertTrue(flow.metadata["aidast_policy_blocked"])
+
+    def test_proxy_accepts_request_bound_auth_post_and_strips_control_header(self):
+        signing_key = "a" * 32
+        self.configure_rules(policy().mitm_rules(manual_auth_signing_key=signing_key))
+        flow = self.flow()
+        flow.request.method = "POST"
+        flow.request.headers[AUTH_CAPABILITY_HEADER] = issue_request_capability(
+            signing_key, method="POST", url=flow.request.pretty_url,
+        )
+
+        self.addon.request(flow)
+
+        self.assertNotIn("aidast_policy_blocked", flow.metadata)
+        self.assertNotIn(AUTH_CAPABILITY_HEADER, flow.request.headers)
+        self.assertEqual(
+            sanitize_headers({AUTH_CAPABILITY_HEADER: "sensitive"}),
+            {AUTH_CAPABILITY_HEADER: "[REDACTED]"},
+        )
+
+    def test_proxy_rejects_invalid_replayed_or_mismatched_auth_capability(self):
+        signing_key = "a" * 32
+        self.configure_rules(policy().mitm_rules(manual_auth_signing_key=signing_key))
+        valid = issue_request_capability(
+            signing_key, method="POST", url="https://example.com/app",
+        )
+        cases = [
+            ("POST", "https://example.com/app", "invalid"),
+            ("PUT", "https://example.com/app", valid),
+            ("POST", "https://example.com/app/other", valid),
+        ]
+        for method, url, presented in cases:
+            with self.subTest(method=method, url=url):
+                flow = self.flow()
+                flow.request.method = method
+                flow.request.pretty_url = url
+                flow.request.headers[AUTH_CAPABILITY_HEADER] = presented
+                self.addon.request(flow)
+                self.assertTrue(flow.metadata["aidast_policy_blocked"])
+                self.assertNotIn(AUTH_CAPABILITY_HEADER, flow.request.headers)
+
+        first = self.flow()
+        first.request.method = "POST"
+        first.request.headers[AUTH_CAPABILITY_HEADER] = valid
+        self.addon.request(first)
+        self.assertNotIn("aidast_policy_blocked", first.metadata)
+        replay = self.flow()
+        replay.request.method = "POST"
+        replay.request.headers[AUTH_CAPABILITY_HEADER] = valid
+        self.addon.request(replay)
+        self.assertTrue(replay.metadata["aidast_policy_blocked"])
 
     def test_capture_omits_bodies_by_default_and_redacts_headers(self):
         self.configure_rules(policy().mitm_rules())
