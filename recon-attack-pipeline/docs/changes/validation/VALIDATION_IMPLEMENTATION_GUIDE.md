@@ -497,6 +497,48 @@ native Coordinator 생성 자체를 실패시킬 수 있다.
 | Browser·OOB는 Chain의 마지막 단계만 지원 | 중간 단계의 binding source로 사용할 수 없음 |
 | 과거 Validation.db·Report v1 경로 제거 | 과거 DB 자동 이관을 제공하지 않음 |
 
+### 남은 구현과 후속 검증
+
+기본 native HTTP Developing과 Coordinator 연결은 구현됐다. 아래 항목은 현재
+구현의 오류 목록이 아니라, 현재 경계 밖에 남은 확장 구현과 운영 수용
+검증을 구분한 목록이다.
+
+#### 확장 구현 과제
+
+| 우선순위 | 항목 | 현재 동작 | 남은 구현·완료 기준 |
+|---|---|---|---|
+| P0 | Attack의 development contract 생성 커버리지 | Blind Agent는 관찰을 보고 blocker 축을 분석하지만, Developing은 Attack이 Finding에 미리 고정한 contract만 선택·실행한다. Attack은 exact request와 non-status assertion을 실제로 알 때만 선택적으로 contract를 저장한다. | 승인된 외부 test target에서 Attack이 지원 blocker별로 유효한 contract를 생산하는지 검증하고, 누락 패턴을 Skill·producer test로 보강한다. 요청을 즉석에서 추측해 실행하는 planner는 추가 승인·안전 설계 없이 도입하지 않는다. |
+| P1 | Browser·OOB Developing resolver | 기본 resolver는 same-origin HTTP setup/refresh 요청 하나만 실행한다. | Browser 세션 복구와 OOB arm/setup에 대한 immutable contract, trusted executor, policy·ledger ownership, assertion 평가와 resume 테스트를 각각 구현한다. |
+| P1 | 다단계·동적 setup workflow | Development action 하나는 고정된 요청 하나이며 response로 다음 요청을 재작성하지 않는다. | 단계별 contract와 scalar binding allowlist, 민감 값 비저장, 중간 실패·`outcome_unknown` 복구 규칙을 정의한 뒤 trusted resolver를 구현한다. 전체 action 상한은 현재 정책인 2개를 유지한다. |
+| P1 | 고위험 action의 별도 승인 경로 | Native resolver는 `DELETE`, 결제·전송·메시지·webhook 경로와 외부 origin을 거절한다. Attack task의 기존 approval envelope도 승계하지 않는다. | Validation 전용 사용자 승인 DTO, 유효기간·대상·메서드 binding, one-shot 소비, audit ledger와 취소 절차를 설계·구현한 뒤에만 허용한다. |
+| P2 | Chain의 Browser·OOB 중간 binding | Browser와 OOB는 terminal step으로만 실행할 수 있다. | DOM·callback 결과에서 후속 요청에 필요한 최소 scalar만 추출하는 contract와 증거 redaction·binding ownership 검증을 구현한다. |
+| P2 | UNDERPOWERED 후속 연동 | `ImpactGapAnalyzer`는 후속 입증 가설과 `validation`·`chaining`·`manual` owner를 저장하지만 실행하지 않는다. | 가설을 새 Attack/Chaining 작업으로 명시적으로 인계하는 별도 workflow를 추가한다. 가설은 실행 전까지 Validation 증거·점수·판정에 사용하지 않는다. |
+| P3 | 과거 데이터 이관 도구 | 기존 Finding의 null development contract, 과거 `Validation.db`, Report v1을 자동 보강·이관하지 않는다. | 운영상 필요가 확정될 때만 원본 불변과 dry-run·backup·audit 결과를 보장하는 명시적 migration command를 별도 설계한다. contract는 과거 증거에서 추측해 채우지 않는다. |
+
+P0의 핵심은 resolver 등록 여부가 아니라 **실제 Attack 결과에 실행 가능한
+development contract가 충분히 남는지**다. 계약이 없으면 기본 resolver가 등록돼
+있어도 요청을 만들지 않고 `BLOCKED`로 종료한다.
+
+#### 설계상 비목표
+
+다음은 현재 MVP의 누락이 아니라 의도적으로 Validation의 책임에서 제외한
+항목이다. 범위를 바꾸려면 먼저 재구조화 설계를 갱신해야 한다.
+
+- Validation에서 새 취약점, payload 계열이나 chain을 탐색하는 기능
+- 다른 scan·다른 Pipeline DB까지 확장한 KNOWN 검색
+- `CONTESTED` 결과의 자동 재심과 사람 판정 대체
+- 보고서의 외부 플랫폼 자동 제출
+- Development 가설이나 추가 replay를 현재 impact·severity를 높이는 증거로 사용하는 동작
+
+#### 운영 수용 검증 과제
+
+| 우선순위 | 검증 | 완료 기준 |
+|---|---|---|
+| P0 | 외부 target 전체 E2E | 승인된 test target에서 Recon→Attack→development contract 생성→Chaining→Validation→Reporting이 하나의 Pipeline DB로 완료되고 비종결 case가 남지 않음 |
+| P0 | 실제 Codex Blind/Unblind | fixture Agent가 아닌 실제 Codex CLI가 staged allowlist만 보고 schema·evidence binding을 지키며 assessment와 comparison을 생성함 |
+| P1 | Local live acceptance | `AIDAST_LIVE_ACCEPTANCE=1`로 실제 HTTP socket, control, target 3회, Developing, ledger와 최종 snapshot을 검증하고 skip 없이 통과함 |
+| P1 | 전체 test suite | Reporting Agent test에 필요한 `pytest`를 개발 의존성으로 준비하고 전체 suite가 수집 오류·skip·assertion 실패 없이 통과함 |
+
 Validation의 정책 확인, 실행 관리, redirect(다른 URL로 이동), 브라우저 요청에는
 공통 검사 함수인 `allows_validation_url()`이 적용된다. 권한 조건은 다음처럼 읽으면 된다.
 
