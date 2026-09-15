@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import math
-from typing import Callable
+from typing import Callable, Literal
 from urllib.error import HTTPError
 from urllib.parse import urljoin, urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
@@ -39,12 +39,16 @@ class RequestBroker:
     """
 
     def __init__(self, policy: TargetPolicy | None, *, transport: Callable | None = None,
-                 max_redirects: int = 10, max_body_bytes: int = 200_000) -> None:
+                 max_redirects: int = 10, max_body_bytes: int = 200_000,
+                 authority: Literal["recon", "validation"] = "recon") -> None:
         if not isinstance(policy, TargetPolicy):
             raise RequestPolicyError("an approved TargetPolicy is required for HTTP requests")
         if max_redirects < 0 or max_body_bytes < 0:
             raise ValueError("request bounds must be nonnegative")
+        if authority not in {"recon", "validation"}:
+            raise ValueError("unsupported HTTP request authority")
         self.policy = policy
+        self.authority = authority
         self.transport = transport if transport is not None else build_opener(_NoRedirect()).open
         self.max_redirects = max_redirects
         self.max_body_bytes = max_body_bytes
@@ -98,7 +102,12 @@ class RequestBroker:
     def _validate(self, url: str, method: str) -> None:
         try:
             parsed = urlsplit(url)
-            valid = not (parsed.username or parsed.password) and self.policy.allows_url(url, method=method)
+            allows = (
+                self.policy.allows_validation_url
+                if self.authority == "validation"
+                else self.policy.allows_url
+            )
+            valid = not (parsed.username or parsed.password) and allows(url, method=method)
         except ValueError:
             valid = False
         if not valid:

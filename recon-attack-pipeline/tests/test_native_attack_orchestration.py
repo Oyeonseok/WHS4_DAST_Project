@@ -18,7 +18,7 @@ from aidast.orchestration.attack import AttackCoordinator, AttackCoordinatorErro
 from aidast.pipeline.lifecycle import create_task, finish_stage_run, start_stage_run
 from aidast.recon import db
 from aidast.validation import (CandidateIntegrityGate, HttpRuntimeContract,
-                               canonical_sha256)
+                               DevelopmentRuntimeContract, canonical_sha256)
 
 
 class FakeNativeMain:
@@ -394,6 +394,24 @@ class NativeAttackDatabaseCliTests(unittest.TestCase):
                 "positive_control": positive_attempt,
                 "negative_control": negative_attempt,
             }
+            development_contract = {
+                "schema_version": 1,
+                "actions": [{
+                    "contract_id": "refresh-current-role",
+                    "action_type": "refresh_current_role_credential",
+                    "blocker_axis": "identity_auth",
+                    "endpoint_template": "/api/session/refresh",
+                    "method": "GET",
+                    "risk_class": "http_probe",
+                    "request": {},
+                    "assertions": [{
+                        "assertion_id": "refresh-marker",
+                        "kind": "body_contains",
+                        "expected": "refreshed",
+                    }],
+                    "credential_roles": [],
+                }],
+            }
             finding.write_text(json.dumps({
                 "scan_id": "scan_native", "endpoint_id": endpoint_id,
                 "vuln_type": "CORS", "severity": "MEDIUM",
@@ -407,6 +425,7 @@ class NativeAttackDatabaseCliTests(unittest.TestCase):
                     "required_identity_roles": [],
                     "source_request_ids": ["http_fixture"],
                     "runtime_contract": runtime_contract,
+                    "development_contract": development_contract,
                 },
                 "evidence": [{
                     "role": "unauthenticated", "method": "GET",
@@ -428,7 +447,9 @@ class NativeAttackDatabaseCliTests(unittest.TestCase):
                     (attempt_result["attempt_id"],),
                 ).fetchone()
                 stored_runtime = conn.execute(
-                    "SELECT runtime_contract_json,runtime_contract_sha256 "
+                    """SELECT runtime_contract_json,runtime_contract_sha256,
+                              development_contract_json,development_contract_sha256
+                       """
                     "FROM finding_reproduction_specs WHERE finding_id=?",
                     (result["finding_id"],),
                 ).fetchone()
@@ -441,6 +462,13 @@ class NativeAttackDatabaseCliTests(unittest.TestCase):
             ).model_dump(mode="json")
             self.assertEqual(json.loads(stored_runtime[0]), normalized_runtime)
             self.assertEqual(stored_runtime[1], canonical_sha256(normalized_runtime))
+            normalized_development = DevelopmentRuntimeContract.model_validate(
+                development_contract
+            ).model_dump(mode="json")
+            self.assertEqual(json.loads(stored_runtime[2]), normalized_development)
+            self.assertEqual(
+                stored_runtime[3], canonical_sha256(normalized_development)
+            )
 
             second_attempt = root / "second-attempt.json"
             second_attempt.write_text(json.dumps({

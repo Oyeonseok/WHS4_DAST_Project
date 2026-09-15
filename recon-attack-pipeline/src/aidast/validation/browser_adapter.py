@@ -68,7 +68,7 @@ class BrowserReproductionPort:
         runtime = BrowserRuntimeContract.model_validate(blind_case.runtime_contract)
         attempt = runtime.for_attempt(attempt_kind)
         url, headers, body = render_http_request(blind_case.endpoint, attempt.navigation)
-        if body is not None or not policy.allows_url(url, method="GET"):
+        if body is not None or not policy.allows_validation_url(url, method="GET"):
             return ReproductionObservation(
                 outcome="blocked", signal_type="dom_effect", signal_observed=False,
                 details={"reason": "current_policy_rejected"},
@@ -122,7 +122,7 @@ class BrowserReproductionPort:
             else BrowserObservationSnapshot.model_validate(raw)
         if set(snapshot.elements) != set(selectors):
             raise ValueError("browser executor returned undeclared or missing selectors")
-        if not policy.allows_url(snapshot.final_url, method="GET"):
+        if not policy.allows_validation_url(snapshot.final_url, method="GET"):
             return ReproductionObservation(
                 outcome="blocked", signal_type="dom_effect", signal_observed=False,
                 details={"reason": "browser_redirect_out_of_scope"},

@@ -104,6 +104,26 @@ class ValidationRequestBrokerTests(unittest.TestCase):
             broker.request("https://test/items/7", method="POST")
         self.assertEqual(self.conn.execute("SELECT count(*) FROM validation_http_requests").fetchone()[0], 0)
 
+    def test_scope_authorized_mutation_uses_validation_authority(self):
+        self.policy = self.policy.model_copy(update={
+            "attack_allowed_methods": ["GET", "HEAD", "OPTIONS", "POST"],
+            "attack_authorization_mode": "active_non_destructive",
+            "attack_authorization_evidence": "Active security testing is allowed.",
+        })
+        self.blind = self.blind.model_copy(update={"method": "POST"})
+
+        result = self.broker().request(
+            "https://test/items/7", method="POST", data=b"fixture"
+        )
+
+        self.assertEqual(result.status_code, 200)
+        self.assertEqual(
+            tuple(self.conn.execute(
+                "SELECT method,status FROM validation_http_requests"
+            ).fetchone()),
+            ("POST", "completed"),
+        )
+
     def test_browser_transport_can_ledger_policy_allowed_subresources(self):
         broker = self.broker()
         request_id = broker.begin_observed_request(

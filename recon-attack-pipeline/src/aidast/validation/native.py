@@ -14,7 +14,9 @@ from .http_oob_observer import HttpJsonOobObserver
 from .oob_adapter import OobObserver, OobReproductionPort
 from .policy import TargetPolicyProvider
 from .playwright_browser import PlaywrightBrowserExecutor
+from .reproduction import PrerequisiteResolverPort
 from .runtime_adapter import RuntimeReproductionRouter
+from .development import NativePrerequisiteResolver
 
 
 def build_native_validation_coordinator(
@@ -23,6 +25,8 @@ def build_native_validation_coordinator(
     credential_backends: Mapping[str, Callable[[str], object]] | None = None,
     browser_executor: BrowserExecutor | None = None,
     oob_observer: OobObserver | None = None,
+    prerequisite_resolver: PrerequisiteResolverPort | None = None,
+    development_transport: Callable | None = None,
 ) -> ValidationCoordinator:
     """Build the default HTTP runtime; the Codex runner remains lazy per stage."""
     try:
@@ -55,4 +59,12 @@ def build_native_validation_coordinator(
         agent=None,
         reproduction=reproduction,
         policy_provider=policy_provider,
+        prerequisite_resolver=(
+            prerequisite_resolver
+            if prerequisite_resolver is not None
+            else NativePrerequisiteResolver(
+                credential_resolver=resolver, transport=development_transport,
+                policy_provider=policy_provider,
+            )
+        ),
     )

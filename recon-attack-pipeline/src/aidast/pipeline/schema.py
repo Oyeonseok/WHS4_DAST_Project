@@ -511,9 +511,14 @@ CREATE TABLE IF NOT EXISTS finding_reproduction_specs (
     source_policy_sha256 TEXT NOT NULL CHECK(length(source_policy_sha256)=64),
     runtime_contract_json TEXT CHECK(runtime_contract_json IS NULL OR json_valid(runtime_contract_json)),
     runtime_contract_sha256 TEXT CHECK(runtime_contract_sha256 IS NULL OR length(runtime_contract_sha256)=64),
+    development_contract_json TEXT CHECK(
+        development_contract_json IS NULL OR json_valid(development_contract_json)),
+    development_contract_sha256 TEXT CHECK(
+        development_contract_sha256 IS NULL OR length(development_contract_sha256)=64),
     spec_sha256 TEXT NOT NULL CHECK(length(spec_sha256)=64),
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    CHECK((runtime_contract_json IS NULL) = (runtime_contract_sha256 IS NULL))
+    CHECK((runtime_contract_json IS NULL) = (runtime_contract_sha256 IS NULL)),
+    CHECK((development_contract_json IS NULL) = (development_contract_sha256 IS NULL))
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_active_validation_stage
@@ -714,6 +719,17 @@ def migrate_pipeline_schema(conn: sqlite3.Connection) -> None:
         conn.execute(
             "ALTER TABLE finding_reproduction_specs ADD COLUMN runtime_contract_sha256 "
             "TEXT CHECK(runtime_contract_sha256 IS NULL OR length(runtime_contract_sha256)=64)"
+        )
+    if "development_contract_json" not in reproduction_columns:
+        conn.execute(
+            "ALTER TABLE finding_reproduction_specs ADD COLUMN development_contract_json "
+            "TEXT CHECK(development_contract_json IS NULL OR json_valid(development_contract_json))"
+        )
+    if "development_contract_sha256" not in reproduction_columns:
+        conn.execute(
+            "ALTER TABLE finding_reproduction_specs ADD COLUMN development_contract_sha256 "
+            "TEXT CHECK(development_contract_sha256 IS NULL OR "
+            "length(development_contract_sha256)=64)"
         )
     binding_columns = {
         row[1] for row in conn.execute("PRAGMA table_info(chain_execution_bindings)")

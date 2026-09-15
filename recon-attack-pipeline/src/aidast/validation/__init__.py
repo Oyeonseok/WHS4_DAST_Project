@@ -4,7 +4,8 @@ from .gaps import ImpactGapAnalyzer
 from .decision import DecisionEngine, DecisionInput
 from .coordinator import (PolicyProvider, ValidationAgentRunner,
                           ValidationCoordinator, ValidationCoordinatorError)
-from .blind import (AttackClaim, BlindCase, BlindDisclosureError, StagedBlindCase)
+from .blind import (AttackClaim, BlindCase, BlindDisclosureError,
+                    DevelopmentCapability, StagedBlindCase)
 from .integrity import (CandidateIntegrityError, CandidateIntegrityGate,
                         ValidatedCandidate, canonical_reproduction_spec,
                         reproduction_spec_digest)
@@ -44,6 +45,8 @@ from .chain_contract import (ChainBindingContract, ChainRuntimeContract,
                              ChainStepContract, extract_chain_value,
                              inject_chain_value)
 from .chain_adapter import ChainReproductionPort
+from .development import (DevelopmentActionContract, DevelopmentRuntimeContract,
+                          NativePrerequisiteResolver)
 from .runtime_semantics import RuntimeSemanticError, validate_runtime_semantics
 from .status import shared_validation_status
 __all__ = ["ValidationError"]
@@ -58,7 +61,8 @@ __all__ += ["shared_validation_status"]
 __all__ += ["DecisionEngine", "DecisionInput"]
 __all__ += ["PolicyProvider", "ValidationAgentRunner", "ValidationCoordinator",
             "ValidationCoordinatorError"]
-__all__ += ["AttackClaim", "BlindCase", "BlindDisclosureError", "StagedBlindCase"]
+__all__ += ["AttackClaim", "BlindCase", "BlindDisclosureError",
+            "DevelopmentCapability", "StagedBlindCase"]
 __all__ += ["CandidateIntegrityError", "CandidateIntegrityGate", "ValidatedCandidate",
             "canonical_reproduction_spec", "reproduction_spec_digest"]
 __all__ += ["ResolvedValidationProfile", "SkillProfileResolver", "ValidationProfile",
@@ -86,3 +90,5 @@ __all__ += ["BrowserExecutionError", "BrowserPolicyRejection",
             "PlaywrightBrowserExecutor"]
 __all__ += ["ChainBindingContract", "ChainRuntimeContract", "ChainStepContract",
             "extract_chain_value", "inject_chain_value", "ChainReproductionPort"]
+__all__ += ["DevelopmentActionContract", "DevelopmentRuntimeContract",
+            "NativePrerequisiteResolver"]

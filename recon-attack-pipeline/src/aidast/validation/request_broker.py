@@ -50,14 +50,37 @@ class ValidationRequestBroker:
     """Reserve every initial/redirect hop before an injected transport sends it."""
 
     def __init__(self, *, db_path: Path, scan_id: str, stage_run_id: str,
-                 case_id: str, attempt_id: str, blind_case: BlindCase,
+                 case_id: str, attempt_id: str | None, blind_case: BlindCase,
                  policy: TargetPolicy, transport: Callable | None = None,
                  credential_resolver: Callable[[str], Mapping[str, str]] | None = None,
+                 development_action_id: str | None = None,
+                 credential_references: tuple[str, ...] | None = None,
+                 request_boundary: tuple[str, str] | None = None,
+                 max_redirects: int = 10,
                  sleeper: Callable[[float], None] = time.sleep,
                  clock: Callable[[], float] = time.time):
+        if (attempt_id is None) == (development_action_id is None):
+            raise ValueError("Validation requests require exactly one execution owner")
+        if development_action_id is not None and request_boundary is None:
+            raise ValueError("development requests require an exact request boundary")
+        if request_boundary is not None and (
+            len(request_boundary) != 2
+            or not all(isinstance(item, str) and item for item in request_boundary)
+        ):
+            raise ValueError("Validation request boundary is invalid")
         self.db_path = Path(db_path).expanduser().resolve()
         self.scan_id, self.stage_run_id, self.case_id = scan_id, stage_run_id, case_id
         self.attempt_id, self.blind_case, self.policy = attempt_id, blind_case, policy
+        self.development_action_id = development_action_id
+        self.credential_references = (
+            blind_case.credential_references
+            if credential_references is None else credential_references
+        )
+        self.request_boundary = (
+            (request_boundary[0].upper(), request_boundary[1])
+            if request_boundary is not None else None
+        )
+        self.max_redirects = max_redirects
         self.transport = transport or build_opener(_NoRedirect()).open
         self.credential_resolver = credential_resolver
         self.sleeper, self.clock = sleeper, clock
@@ -68,7 +91,7 @@ class ValidationRequestBroker:
         method = method.upper()
         self._restrict(url, method)
         merged = dict(headers or {})
-        for reference in self.blind_case.credential_references:
+        for reference in self.credential_references:
             if self.credential_resolver is None:
                 raise ValidationCredentialError("credential references require a trusted resolver")
             try:
@@ -81,7 +104,8 @@ class ValidationRequestBroker:
             merged.update(resolved)
         broker = RequestBroker(
             self.policy, transport=self._ledger_transport,
-            max_redirects=10, max_body_bytes=200_000,
+            max_redirects=self.max_redirects, max_body_bytes=200_000,
+            authority="validation",
         )
         try:
             return broker.request(url, method=method, headers=merged, data=data, timeout=timeout)
@@ -97,7 +121,7 @@ class ValidationRequestBroker:
         """Reserve a request sent by a trusted browser transport."""
         method = method.upper()
         try:
-            allowed = self.policy.allows_url(url, method=method)
+            allowed = self.policy.allows_validation_url(url, method=method)
         except ValueError:
             allowed = False
         if not allowed:
@@ -126,6 +150,12 @@ class ValidationRequestBroker:
         )
 
     def _restrict(self, url: str, method: str) -> None:
+        if self.request_boundary is not None:
+            if (method, url) != self.request_boundary:
+                raise ValidationPolicyRejection(
+                    "request is outside the staged development contract"
+                )
+            return
         if method != self.blind_case.method:
             raise ValidationPolicyRejection("method is outside the staged reproduction spec")
         expected, actual = urlsplit(self.blind_case.endpoint), urlsplit(url)
@@ -173,14 +203,26 @@ class ValidationRequestBroker:
             conn.execute("PRAGMA busy_timeout=5000")
             conn.execute("BEGIN IMMEDIATE")
             try:
-                owner = conn.execute(
-                    """SELECT s.status,c.latest_stage_run_id,a.case_id,a.stage_run_id
-                    FROM validation_attempts a JOIN validation_cases c ON c.case_id=a.case_id
-                    JOIN stage_runs s ON s.stage_run_id=a.stage_run_id WHERE a.attempt_id=?""",
-                    (self.attempt_id,),
-                ).fetchone()
+                if self.attempt_id is not None:
+                    owner = conn.execute(
+                        """SELECT s.status,c.latest_stage_run_id,a.case_id,a.stage_run_id
+                        FROM validation_attempts a JOIN validation_cases c ON c.case_id=a.case_id
+                        JOIN stage_runs s ON s.stage_run_id=a.stage_run_id WHERE a.attempt_id=?""",
+                        (self.attempt_id,),
+                    ).fetchone()
+                else:
+                    owner = conn.execute(
+                        """SELECT s.status,c.latest_stage_run_id,a.case_id,a.stage_run_id
+                        FROM validation_development_actions a
+                        JOIN validation_cases c ON c.case_id=a.case_id
+                        JOIN stage_runs s ON s.stage_run_id=a.stage_run_id
+                        WHERE a.action_id=? AND a.status IN ('planned','running')""",
+                        (self.development_action_id,),
+                    ).fetchone()
                 if owner != ("running", self.stage_run_id, self.case_id, self.stage_run_id):
-                    raise ValidationRequestError("request requires the current running case attempt")
+                    raise ValidationRequestError(
+                        "request requires the current running case execution"
+                    )
                 used = conn.execute(
                     "SELECT count(*) FROM validation_http_requests WHERE scan_id=? AND policy_id=?",
                     (self.scan_id, self.policy.policy_id),
@@ -201,11 +243,12 @@ class ValidationRequestBroker:
                                 if previous is not None else now_value)
                 conn.execute(
                     """INSERT INTO validation_http_requests
-                    (request_id,scan_id,stage_run_id,case_id,attempt_id,policy_id,policy_sha256,
-                     method,url,request_fingerprint,status,scheduled_at)
-                    VALUES (?,?,?,?,?,?,?,?,?,?,'reserved',?)""",
-                    (request_id, self.scan_id, self.stage_run_id, self.case_id, self.attempt_id,
-                     self.policy.policy_id, policy_sha, method, _safe_url(url), fingerprint, scheduled),
+                    (request_id,scan_id,stage_run_id,case_id,attempt_id,development_action_id,
+                     policy_id,policy_sha256,method,url,request_fingerprint,status,scheduled_at)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,'reserved',?)""",
+                    (request_id, self.scan_id, self.stage_run_id, self.case_id,
+                     self.attempt_id, self.development_action_id, self.policy.policy_id,
+                     policy_sha, method, _safe_url(url), fingerprint, scheduled),
                 )
                 conn.execute("COMMIT")
             except Exception:

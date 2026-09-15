@@ -24,7 +24,10 @@ class TargetPolicyProvider:
             raise ValueError("TargetPolicy.json contains duplicate policy IDs")
 
     def __call__(self, endpoint: str, method: str) -> TargetPolicy:
-        matches = [policy for policy in self._policies if policy.allows_url(endpoint, method=method)]
+        matches = [
+            policy for policy in self._policies
+            if policy.allows_validation_url(endpoint, method=method)
+        ]
         if len(matches) != 1:
             raise ValueError("endpoint must match exactly one current TargetPolicy")
         return matches[0]

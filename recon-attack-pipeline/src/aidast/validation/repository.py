@@ -225,6 +225,19 @@ class ValidationRepository:
             )
         return identifier
 
+    def start_development_action(self, action_id: str) -> None:
+        with self.conn:
+            cursor = self.conn.execute(
+                """UPDATE validation_development_actions
+                   SET status='running',started_at=?
+                   WHERE action_id=? AND status='planned'""",
+                (now(), action_id),
+            )
+            if cursor.rowcount != 1:
+                raise ValidationRepositoryError(
+                    "development action is missing or already started"
+                )
+
     def finish_development_action(self, action_id: str, *, succeeded: bool,
                                   details: dict[str, Any] | None = None) -> None:
         with self.conn:
@@ -237,6 +250,25 @@ class ValidationRepository:
             )
             if cursor.rowcount != 1:
                 raise ValidationRepositoryError("development action is missing or already finished")
+
+    def mark_development_action_outcome_unknown(
+        self, action_id: str, *, details: dict[str, Any] | None = None,
+    ) -> None:
+        with self.conn:
+            cursor = self.conn.execute(
+                """UPDATE validation_development_actions
+                   SET status='outcome_unknown',details_json=?,
+                       started_at=COALESCE(started_at,?),finished_at=?
+                   WHERE action_id=? AND status IN ('planned','running')""",
+                (
+                    canonical_json(sanitize_metadata(details or {})),
+                    now(), now(), action_id,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise ValidationRepositoryError(
+                    "development action is missing or already finished"
+                )
 
     def add_impact_hypothesis(self, *, case_id: str, stage_run_id: str, ordinal: int,
                               proposal: dict[str, Any], skill_sha256: str,

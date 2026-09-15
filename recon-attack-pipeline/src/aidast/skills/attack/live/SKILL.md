@@ -68,7 +68,11 @@ Recon and Attack records.
    supporting open attempt IDs in `lead_attempt_ids` and the official
    `reproduction` object described by the database contract. This atomically
    creates the Finding and reproduction spec, then promotes those attempts to
-   `confirmed`. A high-confidence
+   `confirmed`. If you observed a specific, bounded setup or refresh request
+   that Validation may need after an objective blocker, include its optional
+   `development_contract`. Do not invent a generic login, resource creation,
+   encoding change, or timing adjustment: omit the contract unless its exact
+   same-origin request and non-status success assertion are known. A high-confidence
    fact is useful context but is never a substitute for this promotion.
 8. Close all leads for the task, then transition it to `completed`. Continue
    until every configured task is `completed` or `skipped`. Chaining is not part

@@ -2,6 +2,57 @@
 
 이 문서는 Validation 재구조화 구현 변경을 누적 기록한다. 관련 구현을 완료할 때마다 최신 날짜의 항목을 문서 상단에 추가한다.
 
+## 2026-09-15: immutable contract 기반 native Developing 실행
+
+- Attack `commit-finding`이 선택적인 development contract를 strict schema로 검증해
+  reproduction spec과 함께 JSON/hash로 고정한다. action은 profile allowlist와 선언된
+  identity role 안에 있어야 하며 case당 최대 두 개다.
+- Blind 입력에는 실행 가능한 action의 ID, blocker 축, method/path, risk class와 contract
+  hash만 공개한다. LLM은 fresh observation으로 객관적인 blocker를 진단하고, Coordinator가
+  같은 축의 profile action과 hash-bound contract를 선택한다.
+- 기본 native builder와 CLI에 `NativePrerequisiteResolver`를 등록했다. resolver는 정확한
+  same-origin HTTP 계약만 current TargetPolicy와 development 전용 request ledger를 거쳐
+  실행하고, redirect 없이 non-status response assertion까지 통과한 경우에만 성공한다.
+- 성공하면 기존 결과를 합치지 않고 control 2회와 target 3회의 fresh batch를 실행한다.
+  계약 누락·불일치·policy/credential/assertion 실패는 action 실패로 닫고, 선행 판정 조건이
+  없으며 blocker가 남으면 `BLOCKED`로 판정한다.
+  결과 불명 요청은 `outcome_unknown`으로 남겨 resume 재전송을 막는다.
+- DELETE, 외부 origin, path traversal, query가 섞인 endpoint, high-impact mutation path,
+  sensitive inline header와 status-only 성공 기준은 계약 단계에서 거절한다. Attack task의
+  승인 envelope도 이 독립 실행 권한으로 승계하지 않는다.
+- Validation 115개 중 114개 통과(로컬 live acceptance 1개 생략), 관련 policy·broker·native
+  Attack 계약 47개, 공유 Validation–Reporting 3개와 compileall이 통과했다. 전체 unittest
+  419개에서는 코드 assertion 실패 없이 미설치 개발 의존성 `pytest`로 수집 1건만 실패했다.
+
+설계와 다른 점 및 이유:
+
+기본 resolver는 임의 shell·Browser/OOB setup이나 runtime/payload 재작성을 허용하지 않고,
+Attack이 실제 target에 맞춰 미리 고정한 HTTP setup/refresh만 실행한다. LLM이 blocker를
+분석하면서 새 endpoint나 mutation을 만들어내지 못하게 실행 권한과 해석 권한을 분리했다.
+
+## 2026-09-15: Validation replay 권한과 native development 주입 연결
+
+- Recon의 읽기 전용 `allowed_methods`를 넓히지 않고 Scope에 근거한
+  `active_non_destructive`와 `attack_allowed_methods`를 Validation 상태 변경 replay에도
+  적용하는 `allows_validation_url()` 경계를 추가했다.
+- policy provider, Coordinator, HTTP redirect broker와 Browser adapter가 모두 같은
+  Validation 권한 검사를 사용하도록 통일했다. 안전 메서드는 Recon·Attack 허용 집합의
+  교집합으로 제한한다.
+- Attack source request가 `scope_active_mutation`으로 실행된 경우만 상태 변경 replay의
+  입력으로 허용한다. 특정 task의 `approved_envelope`에 의존했거나 권한 provenance가 없는
+  과거 mutation row는 후보 무결성 검사에서 거절한다.
+- 이 중간 단계에서는 native coordinator builder가 trusted application의
+  `prerequisite_resolver`를 Coordinator로 전달하도록 연결했지만 기본 CLI에는 아직
+  등록하지 않았다. 바로 위 최신 변경에서 immutable contract 기반 기본 resolver를 추가했다.
+- Validation 103개(로컬 live acceptance 1개 생략), 공유 Validation–Reporting 3개,
+  관련 Recon/core policy 40개 테스트와 compileall이 통과했다.
+
+설계와 다른 점 및 이유:
+
+Attack task의 사용자 승인 envelope는 method·path·횟수·TTL과 task에 묶인 권한이므로 별도
+Validation case로 승계하지 않는다. 자동 replay는 Scope-level active mutation으로 이미 허용된
+source request로 제한하고, 별도 승인이 필요했던 후보는 fail-closed해 권한 범위를 보존한다.
+
 ## 2026-09-14: 실제 HTTP 소켓 기반 native Validation 수용 검증
 
 - `ThreadingHTTPServer`로 격리된 local target을 띄우고 `build_native_validation_coordinator`

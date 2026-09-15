@@ -1,7 +1,7 @@
 # Validation 구현 현황 이해 문서
 
 - 기준일: 2026-09-15
-- 대조 기준: `518bb35`와 현재 작업 트리의 미커밋 변경. 아래 Attack 메서드 권한 분리 설명은 미커밋 구현을 포함한다.
+- 대조 기준: `c20256c`와 현재 작업 트리의 Validation 권한 연결 변경.
 - 관련 설계: [Validation 재구조화 설계](../../superpowers/specs/2026-09-12-validation-refactor-design.md)
 - 상세 계획: [Validation 재구조화 구현 계획](../../superpowers/plans/2026-09-12-validation-refactor-implementation.md)
 - 누적 변경 이력: [Validation 재구조화 변경 기록](VALIDATION_REFACTOR_CHANGES.md)
@@ -34,9 +34,9 @@ flowchart TD
     R -->|결과 혼재| R2[target 2회 추가]
     R --> F[claim을 숨긴 BlindAssessment 생성]
     R2 --> F
-    F -->|해결 가능한 blocker| D[resolver 연결 시 development 최대 2 action]
+    F -->|해결 가능한 blocker| D[profile 및 immutable contract가 일치하면 development 최대 2 action]
     D -->|성공| R3[fresh batch 재실행 및 BlindAssessment 재생성]
-    D -->|실패 또는 action·resolver 없음| G
+    D -->|실패 또는 실행 계약 없음| G
     F -->|blocker 없음| G[BlindAssessment hash 고정]
     R3 --> G
     G --> U[Attack claim 공개 후 ClaimComparison]
@@ -57,6 +57,7 @@ native Attack의 `commit-finding`은 다음 항목을 하나의 transaction으�
 - endpoint, method, payload template, parameter와 identity role
 - TargetPolicy, Skill, request fingerprint에 묶인 immutable reproduction spec
 - HTTP/browser/OOB target·positive control·negative control의 runtime 계약
+- 선택적으로 exact HTTP setup/refresh와 assertion을 고정한 development 계약
 
 이 중 하나라도 서로 맞지 않으면 Finding을 commit하지 않는다. Validation을 시작할 때
 `CandidateIntegrityGate`가 completed Attack stage, confirmed attempt, Skill hash,
@@ -117,22 +118,32 @@ Hunt Skill 58개 모두에 fresh replay가 입증해야 할 보안 효과, contr
 사용하면, policy 거절·명시적 비취약 증거·blocker 등 앞선 판정 조건에 해당하지 않는 한
 `INCONCLUSIVE`다. 추가 2회의 성공만으로 `CONFIRMED`로 승격하지 않는다.
 
-credential 갱신이나 second identity 준비처럼 profile이 허용한 blocker 해결은
-`PrerequisiteResolverPort`를 Coordinator의 `prerequisite_resolver`로 주입했을 때만
-실행한다. 해당 blocker의 action 중 최대 두 개를 순서대로 시도하고 첫 성공에서 멈춘다.
+credential 갱신이나 declared resource 준비처럼 profile이 허용한 blocker 해결은 Blind LLM이
+현재 evidence에서 객관적인 blocker 축을 식별한 뒤 진행한다. Coordinator는 그 축의 profile
+allowlist와 Attack이 Finding에 hash 고정한 development contract를 대조한다. 기본 native
+`PrerequisiteResolverPort`는 일치한 action 중 최대 두 개를 순서대로 시도하고 첫 성공에서 멈춘다.
 성공하면 기존 관찰을 새 batch의 control 각 1회·target 3회로 대체하고 BlindAssessment를
 다시 생성한다. 이 development 이후 batch에는 결과 혼재 시 2회를 추가하는 분기가 없다.
 
-기본 native builder는 `prerequisite_resolver`를 연결하지 않으므로 credential 갱신이나
-second identity 준비를 자동 수행하지 않는다. resolver 또는 허용 action이 없으면 action
-기록 없이 development 경로를 종료한다. 이후에도 해결 가능한 blocker가 남아 있고 앞선
-판정 조건에 해당하지 않으면 `BLOCKED`가 된다.
+native builder와 기본 CLI는 `NativePrerequisiteResolver`를 등록한다. 이 resolver는 계약의
+origin-relative method/URL 하나만 current TargetPolicy와 development action 소유 ledger를
+통해 보내며 redirect를 따르지 않는다. 상태 코드 외 target-specific assertion까지 모두
+통과해야 성공한다. 계약·credential이 없거나 profile/hash/policy가 맞지 않으면 새 요청을
+추측하지 않고 action을 실패로 기록한다. 이후 blocker가 남으면 `BLOCKED`가 된다. 기본 구현
+범위는 same-origin HTTP setup/refresh이며 shell, Browser/OOB setup과 runtime/payload 재작성은
+자동 수행하지 않는다.
+
+schema v9의 기존 DB에는 development column을 additive migration으로 추가하지만 과거
+reproduction spec에 실행 계약을 추측해 채우지는 않는다. 해당 row는 immutable이므로 기존
+Finding에 계약이 없으면 native development는 fail-closed하고, 새 Attack 결과가 계약을
+포함해 Finding을 생성해야 한다.
 
 Blind pass에서는 Attack의 결론과 영향 주장을 숨기고 다음 정보만 LLM에 준다.
 
 - 검증된 Skill과 Validation profile
 - endpoint, method, payload 구조와 identity role
 - control 및 fresh target의 정제된 observation
+- 실행 가능한 development capability의 ID·blocker 축·method/path·risk class·contract hash
 
 `BlindAssessment`가 schema와 hash를 포함한 evidence로 고정된 뒤에만 Attack claim을
 공개한다. 같은 LLM 세션에서 `ClaimComparison`을 생성해 두 판단 사이의 의미 충돌을
@@ -171,19 +182,19 @@ eligibility와 보상 규칙은 포함하지 않는다. 따라서 설치 수에 
 
 ## 7. 요청 안전성과 증거 저장
 
-현재 작업 트리의 TargetPolicy는 Recon용 `allowed_methods`와 Attack용
-`attack_allowed_methods`를 분리한다. 그러나 Validation의 `TargetPolicyProvider`,
-Coordinator와 요청 경계는 여전히 `allows_url()`을 통해 `allowed_methods`를 검사한다.
-따라서 `attack_allowed_methods`에만 허용한 POST 등의 후보는 무결성·KNOWN 검사 이후
-Validation policy 검사에서 `OUT_OF_SCOPE`가 될 수 있다. Attack의 메서드 권한이나
-task별 승인 envelope가 Validation replay 권한으로 자동 이어지지는 않는다.
+TargetPolicy는 Recon용 `allowed_methods`와 Attack용 `attack_allowed_methods`를 분리한다.
+Validation의 `TargetPolicyProvider`, Coordinator와 요청 경계는 `allows_validation_url()`을
+사용한다. 안전 메서드는 두 허용 집합의 교집합을 사용하며, 상태 변경 replay는 Scope에 근거한
+active 권한과 Attack 메서드 허용을 모두 요구한다. source request가 scope-level active mutation으로
+실행된 경우만 replay할 수 있다. 특정 Attack task의 승인 envelope와 provenance가 없는 과거 mutation
+row는 Validation 권한으로 승계하지 않고 후보 무결성 검사에서 fail-closed한다.
 
 `ValidationRequestBroker`는 initial request와 redirect hop마다 current TargetPolicy,
-stage/case/attempt 소유권, rate, concurrency와 총 요청 예산을 dispatch 직전에 검사한다.
+stage/case/attempt 또는 development action 소유권, rate, concurrency와 총 요청 예산을 dispatch 직전에 검사한다.
 ledger에는 query 값과 credential header 값을 저장하지 않는다. evidence metadata도 secret,
 민감 header, raw body를 제거하고 깊이, 항목 수와 바이트 크기를 제한한다.
 
-native HTTP·Browser·OOB·Chain adapter의 성공 관찰은 request ledger row를 반드시 남긴다.
+native HTTP·Browser·OOB·Chain adapter의 성공 관찰과 native development 성공은 request ledger row를 반드시 남긴다.
 Coordinator는 evidence를 저장하기 전에 adapter가 반환한 모든 request ID가 현재
 scan·stage·case·attempt에 속한 `completed` row인지 다시 검사한다. 누락되거나 다른 attempt의
 ID를 인용한 관찰은 판정에 들어가지 않는다.
@@ -248,6 +259,7 @@ application이 넣는 Coordinator 경계도 테스트 transport와 별도 운영
 | 조정 | `validation/coordinator.py`, `decision.py`, `matching.py`, `impact.py`, `gaps.py` |
 | 입력 무결성 | `validation/integrity.py`, `runtime_semantics.py`, `evidence_policy.py` |
 | replay 계약 | `runtime_contract.py`, `browser_contract.py`, `oob_contract.py`, `chain_contract.py` |
+| development 계약·실행 | `development.py`, `native.py` |
 | native 실행 | `native.py`, `http_adapter.py`, `browser_adapter.py`, `oob_adapter.py`, `chain_adapter.py` |
 | 요청 통제·비밀 | `request_broker.py`, `credentials.py`, `http_oob_observer.py`, `playwright_browser.py` |
 | Blind Agent | `codex_runner.py`, `blind.py`, `models.py` |
@@ -267,8 +279,9 @@ scheme은 trusted application이 backend callable을 명시적으로 주입해�
 ## 11. 완료 상태와 운영 수용 범위
 
 shared DB 저장 구조, 무결성 검사, HTTP/Browser/OOB 및 mixed terminal Chain replay,
-Blind Agent, 복구, Reporting과 CLI가 연결돼 있다. 다만 기본 native 구성에는 development
-resolver가 연결되지 않았으며, Attack 전용 메서드 권한도 Validation으로 이어지지 않는다.
+Blind Agent, 복구, Reporting과 CLI가 연결돼 있다. Scope-level active method authority는
+Validation replay에 연결됐고 기본 native builder와 CLI에는 immutable HTTP development
+contract resolver가 등록된다. task-bound Attack 승인 envelope는 Validation에 승계되지 않는다.
 이 구현 범위를 전제로 운영 투입 전에는 다음 환경 검증이 남아 있다.
 
 1. 승인된 외부 test target에서 Recon→Attack→Chaining→Validation 전체 pipeline과
@@ -284,17 +297,19 @@ negative control과 target 3회, ledger·evidence·최종 `CONFIRMED` snapshot�
 shared Reporting pytest 22개, compileall과 whitespace 검사 통과다. 이 수치는 과거 기록이며
 당시 실행 명령과 정확한 테스트 대상 커밋은 이 문서에 기록돼 있지 않다.
 
-2026-09-15에는 위 대조 기준의 작업 트리에서 다음 범위만 재검증했다.
+2026-09-15에는 native Developing 구현을 포함한 작업 트리에서 다음 범위를 재검증했다.
 실행 위치는 `recon-attack-pipeline/`이다.
 
 | 실행 명령 | 결과 |
 |---|---|
-| `.venv/bin/python -m unittest discover -s tests -p 'test_validation*.py' -q` | 99개 중 98개 통과, live acceptance 1개 생략 |
+| `TMPDIR=/private/tmp .venv/bin/python -m unittest discover -s tests -p 'test_validation*.py' -q` | 115개 중 114개 통과, live acceptance 1개 생략 |
+| `TMPDIR=/private/tmp .venv/bin/python -m unittest tests.test_recon_policy tests.test_request_broker tests.test_native_attack_orchestration -q` | 47개 통과 |
 | `TMPDIR=/private/tmp .venv/bin/python -m unittest discover -s tests -p 'test_shared_validation_reporting.py' -q` | 3개 통과 |
+| `.venv/bin/python -m compileall -q src tests` | 통과 |
 
-shared Reporting은 기본 임시 경로에서 symlink 경유를 거부하는 오류가 발생해
-`TMPDIR=/private/tmp`로 재실행했다. 이번 확인에서는 live acceptance, 전체 테스트,
-compileall, 외부 target E2E와 실제 Codex CLI 호출을 재검증하지 않았다.
+전체 unittest 419개 실행에서는 코드 assertion 실패가 없었지만 개발 의존성 `pytest`가
+설치되지 않아 `test_reporting_agent.py` 수집 1건이 실패했고 live acceptance 1개가 생략됐다.
+외부 target E2E와 실제 Codex CLI 호출은 재검증하지 않았다.
 
 ## 12. 설계와 달라진 부분
 

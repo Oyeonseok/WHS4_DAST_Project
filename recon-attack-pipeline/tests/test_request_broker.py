@@ -105,6 +105,24 @@ class RequestBrokerTests(unittest.TestCase):
                 "https://example.com/app", method="POST", data=b"data")
         self.assertEqual(transport.call_count, 1)
 
+    def test_validation_authority_uses_active_methods_without_widening_recon(self):
+        active = policy(
+            attack_allowed_methods=["GET", "HEAD", "OPTIONS", "POST"],
+            attack_authorization_mode="active_non_destructive",
+            attack_authorization_evidence="Active security testing is allowed.",
+        )
+        validation_transport = MagicMock(return_value=response())
+
+        result = RequestBroker(
+            active, transport=validation_transport, authority="validation"
+        ).request("https://example.com/app/items", method="POST", data=b"fixture")
+
+        self.assertEqual(result.status_code, 200)
+        with self.assertRaises(RequestPolicyError):
+            RequestBroker(active, transport=MagicMock()).request(
+                "https://example.com/app/items", method="POST", data=b"fixture"
+            )
+
     def test_disabled_body_capture_does_not_read_response(self):
         result = response(headers={"Set-Cookie": "secret", "Content-Type": "text/plain"})
         captured = RequestBroker(policy(), transport=MagicMock(return_value=result)).request(

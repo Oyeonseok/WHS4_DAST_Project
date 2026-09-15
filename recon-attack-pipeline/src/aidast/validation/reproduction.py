@@ -51,5 +51,7 @@ class ReproductionPort(Protocol):
 
 class PrerequisiteResolverPort(Protocol):
     def perform(
-        self, blind_case: BlindCase, *, action_type: str, blocker_axis: str
+        self, blind_case: BlindCase, *, action_type: str, blocker_axis: str,
+        contract: Any, action_id: str, db_path: Path, scan_id: str,
+        stage_run_id: str, case_id: str, policy: TargetPolicy,
     ) -> dict[str, Any]: ...

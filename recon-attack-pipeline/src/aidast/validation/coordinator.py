@@ -16,7 +16,7 @@ from .decision import DecisionEngine, DecisionInput
 from .integrity import CandidateIntegrityError, CandidateIntegrityGate, ValidatedCandidate
 from .matching import KnownCandidate, KnownMatcher, MATCHER_VERSION
 from .models import (BlindAssessment, ClaimComparison, ValidationStageResult,
-                     canonical_sha256)
+                     canonical_json, canonical_sha256)
 from .repository import ValidationRepository
 from .reproduction import PrerequisiteResolverPort, ReproductionObservation, ReproductionPort
 
@@ -252,7 +252,9 @@ class ValidationCoordinator:
                           evidence_ids=())
             return False
         policy_digest = canonical_sha256(policy.model_dump(mode="json"))
-        if not policy.allows_url(blind_view["endpoint"], method=blind_view["method"]):
+        if not policy.allows_validation_url(
+            blind_view["endpoint"], method=blind_view["method"]
+        ):
             repo.finalize(case["case_id"], stage_run_id=stage_run_id, expected_version=version,
                           status="OUT_OF_SCOPE", decision={"reason": "current_policy_rejected"},
                           evidence_ids=())
@@ -357,13 +359,20 @@ class ValidationCoordinator:
                 "identity_auth", "state_setup", "encoding_transport", "timing_concurrency"
             }:
                 development_used = True
-                succeeded = self._develop(repo, candidate, stage_run_id, assessment.blocker_axis)
+                succeeded, development_evidence = self._develop(
+                    repo, candidate, stage_run_id, assessment.blocker_axis,
+                    policy=policy,
+                )
+                evidence_ids = development_evidence + evidence_ids
+                repo.set_processing_phase(
+                    case["case_id"], stage_run_id=stage_run_id,
+                    phase="blind_replay",
+                )
                 if succeeded:
-                    repo.set_processing_phase(case["case_id"], stage_run_id=stage_run_id,
-                                              phase="blind_replay")
                     observations, evidence_ids = self._execute_batch(
                         repo, candidate, stage_run_id, policy=policy, batch_no=2
                     )
+                    evidence_ids = development_evidence + evidence_ids
                     try:
                         assessment = self._assessment(blind_view, tuple(observations))
                     except ValidationCoordinatorError:
@@ -449,8 +458,13 @@ class ValidationCoordinator:
                 item["attempt_kind"] == "target" and item["explicit_non_exploit"]
                 for item in observations
             ),
-            topology_or_unknown_cause=(assessment.reproduced is None
-                                       or assessment.blocker_axis == "environment_topology"),
+            topology_or_unknown_cause=(
+                assessment.blocker_axis == "environment_topology"
+                or (
+                    assessment.reproduced is None
+                    and assessment.blocker_axis is None
+                )
+            ),
             resolvable_blocker=assessment.blocker_axis in {
                 "identity_auth", "state_setup", "encoding_transport", "timing_concurrency"
             }, development_used=development_used, target_observations=targets,
@@ -726,33 +740,163 @@ class ValidationCoordinator:
         return comparison, rows[0]["evidence_id"]
 
     def _develop(self, repo: ValidationRepository, candidate: ValidatedCandidate,
-                 stage_run_id: str, blocker_axis: str) -> bool:
+                 stage_run_id: str, blocker_axis: str, *,
+                 policy: TargetPolicy) -> tuple[bool, list[str]]:
         repo.set_processing_phase(candidate.case_id, stage_run_id=stage_run_id, phase="developing")
         actions = [item for item in candidate.profile.profile.allowed_development_actions
                    if item.blocker_axis == blocker_axis][:2]
         if not actions or self.prerequisite_resolver is None:
-            return False
-        for ordinal, action in enumerate(actions, 1):
-            action_id = repo.add_development_action(
-                case_id=candidate.case_id, stage_run_id=stage_run_id, ordinal=ordinal,
-                blocker_axis=blocker_axis, action_type=action.action_type,
+            return False, []
+        stored = {
+            row["ordinal"]: row for row in repo.conn.execute(
+                """SELECT action_id,ordinal,action_type,blocker_axis,status,details_json
+                   FROM validation_development_actions
+                   WHERE case_id=? AND stage_run_id=? ORDER BY ordinal""",
+                (candidate.case_id, stage_run_id),
             )
+        }
+        evidence_ids = [row[0] for row in repo.conn.execute(
+            """SELECT evidence_id FROM validation_evidence
+               WHERE case_id=? AND stage_run_id=?
+                 AND development_action_id IS NOT NULL
+               ORDER BY created_at,evidence_id""",
+            (candidate.case_id, stage_run_id),
+        )]
+        contracts = {
+            (item.action_type, item.blocker_axis): item
+            for item in candidate.development_actions
+        }
+        for ordinal, action in enumerate(actions, 1):
+            previous = stored.get(ordinal)
+            if previous is not None:
+                if (
+                    previous["action_type"] != action.action_type
+                    or previous["blocker_axis"] != blocker_axis
+                ):
+                    raise ValidationCoordinatorError(
+                        "stored development action no longer matches the profile"
+                    )
+                if previous["status"] == "succeeded":
+                    return True, evidence_ids
+                if previous["status"] == "failed":
+                    continue
+                raise ValidationCoordinatorError(
+                    "development action has an unsafe resumable state"
+                )
+            action_id = repo.add_development_action(
+                case_id=candidate.case_id, stage_run_id=stage_run_id,
+                ordinal=ordinal, blocker_axis=blocker_axis,
+                action_type=action.action_type,
+                details={"phase": "native_development_analysis"},
+            )
+            repo.start_development_action(action_id)
             try:
                 result = self.prerequisite_resolver.perform(
                     candidate.staged._blind_case, action_type=action.action_type,
                     blocker_axis=blocker_axis,
+                    contract=contracts.get((action.action_type, blocker_axis)),
+                    action_id=action_id, db_path=self.db_path,
+                    scan_id=candidate.scan_id, stage_run_id=stage_run_id,
+                    case_id=candidate.case_id, policy=policy,
                 )
-                succeeded = bool(result.get("succeeded")) if isinstance(result, dict) else False
-                repo.finish_development_action(action_id, succeeded=succeeded,
-                                               details=result if isinstance(result, dict) else {})
+                if not isinstance(result, dict) or type(result.get("succeeded")) is not bool:
+                    raise ValidationCoordinatorError(
+                        "prerequisite resolver returned an invalid result"
+                    )
+                self._validate_development_ledger(
+                    repo.conn, candidate=candidate, stage_run_id=stage_run_id,
+                    action_id=action_id, result=result,
+                )
+                succeeded = result["succeeded"]
             except Exception as exc:
-                repo.finish_development_action(
-                    action_id, succeeded=False, details={"error_type": type(exc).__name__}
-                )
+                unknown = repo.conn.execute(
+                    """SELECT request_id FROM validation_http_requests
+                       WHERE development_action_id=? AND status='outcome_unknown'""",
+                    (action_id,),
+                ).fetchall()
+                if unknown:
+                    repo.mark_development_action_outcome_unknown(
+                        action_id,
+                        details={
+                            "reason": "development_request_outcome_unknown",
+                            "error_type": type(exc).__name__,
+                            "request_ids": [row[0] for row in unknown],
+                        },
+                    )
+                    raise ValidationCoordinatorError(
+                        "development request outcome is unknown"
+                    ) from exc
+                if isinstance(exc, ValidationCoordinatorError):
+                    repo.finish_development_action(
+                        action_id, succeeded=False,
+                        details={
+                            "reason": "development_result_integrity_failed",
+                            "error_type": type(exc).__name__,
+                        },
+                    )
+                    raise
+                result = {
+                    "succeeded": False,
+                    "reason": "development_execution_failed",
+                    "error_type": type(exc).__name__,
+                    "request_ids": [],
+                }
                 succeeded = False
+            encoded = canonical_json(result).encode("utf-8")
+            evidence_id = repo.add_evidence(
+                case_id=candidate.case_id, stage_run_id=stage_run_id,
+                development_action_id=action_id,
+                evidence_kind="development_observation", details=result,
+                content_sha256=canonical_sha256(result), content_length=len(encoded),
+            )
+            evidence_ids.append(evidence_id)
+            repo.finish_development_action(
+                action_id, succeeded=succeeded, details=result,
+            )
             if succeeded:
-                return True
-        return False
+                return True, evidence_ids
+        return False, evidence_ids
+
+    def _validate_development_ledger(
+        self, conn: sqlite3.Connection, *, candidate: ValidatedCandidate,
+        stage_run_id: str, action_id: str, result: dict[str, Any],
+    ) -> None:
+        raw_ids = result.get("request_ids", ())
+        if not isinstance(raw_ids, (list, tuple)) or any(
+            not isinstance(item, str) or not item for item in raw_ids
+        ) or len(raw_ids) != len(set(raw_ids)):
+            raise ValidationCoordinatorError(
+                "prerequisite resolver returned invalid request ledger IDs"
+            )
+        request_ids = tuple(raw_ids)
+        if (
+            getattr(self.prerequisite_resolver, "requires_request_ledger", False)
+            and result.get("succeeded") is True and not request_ids
+        ):
+            raise ValidationCoordinatorError(
+                "native development succeeded without a Validation request ledger row"
+            )
+        if not request_ids:
+            return
+        placeholders = ",".join("?" for _ in request_ids)
+        rows = conn.execute(
+            f"""SELECT request_id,status FROM validation_http_requests
+                WHERE scan_id=? AND stage_run_id=? AND case_id=?
+                  AND development_action_id=? AND attempt_id IS NULL
+                  AND request_id IN ({placeholders})""",
+            (
+                candidate.scan_id, stage_run_id, candidate.case_id, action_id,
+                *request_ids,
+            ),
+        ).fetchall()
+        if {row["request_id"] for row in rows} != set(request_ids):
+            raise ValidationCoordinatorError(
+                "development request ledger IDs do not belong to the current action"
+            )
+        if any(row["status"] != "completed" for row in rows):
+            raise ValidationCoordinatorError(
+                "development result cites an unfinished request ledger row"
+            )
 
     def _assessment(self, blind: dict[str, Any], observations: tuple[dict[str, Any], ...]) -> BlindAssessment:
         return self._agent_call("assess", blind, observations, model=BlindAssessment)

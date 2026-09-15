@@ -126,6 +126,27 @@ class TargetPolicy(TargetPolicyProposal):
             and self.allows_url_boundary(url)
         )
 
+    def allows_validation_url(self, url: str, *, method: str = "GET") -> bool:
+        """Authorize a fresh Validation replay without widening Recon.
+
+        Safe methods remain bounded by both stage method sets. State-changing
+        methods require the Scope-grounded active Attack authority; any
+        request-specific Attack approval is checked separately from the source
+        request ledger and is never inherited here.
+        """
+        normalized = method.upper()
+        if normalized in SAFE_METHODS:
+            method_allowed = (
+                normalized in self.allowed_methods
+                and normalized in self.attack_allowed_methods
+            )
+        else:
+            method_allowed = (
+                self.attack_authorization_mode == "active_non_destructive"
+                and normalized in self.attack_allowed_methods
+            )
+        return method_allowed and self.allows_url_boundary(url)
+
     def mitm_rules(self, *, manual_auth_signing_key: str | None = None) -> dict:
         rules = {
             "enforcement_required": True,

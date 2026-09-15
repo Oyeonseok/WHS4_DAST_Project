@@ -39,6 +39,14 @@ class ValidationSchemaTests(unittest.TestCase):
                     "validation_http_requests", "finding_reproduction_specs"}
         names = {row[0] for row in self.conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         self.assertLessEqual(expected, names)
+        reproduction_columns = {
+            row[1] for row in self.conn.execute(
+                "PRAGMA table_info(finding_reproduction_specs)"
+            )
+        }
+        self.assertTrue({
+            "development_contract_json", "development_contract_sha256",
+        }.issubset(reproduction_columns))
 
     def test_target_and_active_stage_uniqueness(self):
         self.conn.execute("""INSERT INTO validation_cases

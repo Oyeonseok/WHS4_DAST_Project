@@ -243,6 +243,26 @@ class TargetPolicyTests(unittest.TestCase):
         self.assertTrue(
             executable.allows_attack_url("https://example.com", method="POST")
         )
+        self.assertTrue(
+            executable.allows_validation_url("https://example.com", method="POST")
+        )
+        self.assertTrue(
+            executable.allows_validation_url("https://example.com", method="DELETE")
+        )
+
+    def test_validation_mutations_require_active_scope_authority(self) -> None:
+        read_only = policy(attack_allowed_methods=["GET", "POST"])
+
+        self.assertFalse(
+            read_only.allows_validation_url(
+                "https://example.com/app/items", method="POST"
+            )
+        )
+        self.assertTrue(
+            read_only.allows_validation_url(
+                "https://example.com/app/items", method="GET"
+            )
+        )
 
     def test_active_testing_rejects_missing_read_only_or_method_conflict(self) -> None:
         base = dict(

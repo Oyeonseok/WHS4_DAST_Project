@@ -1,6 +1,7 @@
 """End-to-end shared DB Validation coordination with deterministic fakes."""
 
 import json
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -12,8 +13,10 @@ from aidast.recon.policy import PolicyLimits, TargetPolicy, ToolPolicy
 from aidast.scope.models import AssetType
 from aidast.validation import (CandidateIntegrityError, CandidateIntegrityGate,
                                ClaimComparison, HttpReproductionPort,
+                               NativePrerequisiteResolver,
                                ReproductionObservation,
                                ValidationCoordinator, ValidationCoordinatorError,
+                               build_native_validation_coordinator,
                                canonical_reproduction_spec)
 
 
@@ -126,8 +129,35 @@ class BlockThenPassPort(FakePort):
 
 
 class SuccessfulPrerequisite:
-    def perform(self, blind_case, *, action_type, blocker_axis):
-        return {"succeeded": True, "action_type": action_type}
+    def perform(self, blind_case, *, action_type, blocker_axis, **context):
+        return {
+            "succeeded": True, "action_type": action_type,
+            "request_ids": [],
+        }
+
+
+class MissingDevelopmentLedger(SuccessfulPrerequisite):
+    requires_request_ledger = True
+
+
+class DevelopmentResponse:
+    status = 200
+    headers = {"Content-Type": "application/json"}
+
+    def read(self, maximum):
+        return b'{"refreshed":true}'
+
+    def close(self):
+        pass
+
+
+class InterruptedDevelopmentTransport:
+    def __init__(self):
+        self.calls = 0
+
+    def __call__(self, request, timeout):
+        self.calls += 1
+        raise RuntimeError("development transport completion is unknown")
 
 
 class CrashedAgent(FakeAgent):
@@ -300,6 +330,108 @@ class ValidationCoordinatorTests(unittest.TestCase):
                     case_id="case", scan_id="scan", finding_id="finding"
                 )
 
+    def test_candidate_gate_rejects_development_contract_hash_mismatch(self):
+        from aidast.validation import DevelopmentRuntimeContract
+
+        development = DevelopmentRuntimeContract.model_validate({
+            "schema_version": 1,
+            "actions": [{
+                "contract_id": "refresh-current-role",
+                "action_type": "refresh_current_role_credential",
+                "blocker_axis": "identity_auth",
+                "endpoint_template": "/auth/refresh",
+                "method": "POST",
+                "risk_class": "application_mutation",
+                "request": {},
+                "assertions": [{
+                    "assertion_id": "credential-refreshed",
+                    "kind": "json_equals",
+                    "path": ["refreshed"],
+                    "expected": True,
+                }],
+                "credential_roles": [],
+            }],
+        }).model_dump(mode="json")
+        with db.connect(self.path) as conn:
+            conn.execute("DROP TRIGGER finding_reproduction_specs_no_update")
+            conn.execute(
+                """UPDATE finding_reproduction_specs
+                   SET development_contract_json=?,development_contract_sha256=?
+                   WHERE finding_id='finding'""",
+                (
+                    json.dumps(development, sort_keys=True, separators=(",", ":")),
+                    "0" * 64,
+                ),
+            )
+            conn.commit()
+            with self.assertRaisesRegex(
+                CandidateIntegrityError, "development_contract_sha256",
+            ):
+                CandidateIntegrityGate(conn).validate_finding(
+                    case_id="case", scan_id="scan", finding_id="finding",
+                )
+
+    def test_candidate_gate_does_not_inherit_task_approved_envelope(self):
+        with db.connect(self.path) as conn:
+            conn.row_factory = sqlite3.Row
+            conn.execute(
+                """UPDATE attack_http_requests
+                   SET method='POST',authorization_source='approved_envelope'
+                   WHERE request_id='http'"""
+            )
+            attempt = conn.execute(
+                """SELECT task_id,request_fingerprint FROM attack_attempts
+                   WHERE attempt_id='attempt'"""
+            ).fetchone()
+            attempts = [{
+                "task_id": attempt[0], "request_fingerprint": attempt[1],
+            }]
+            with self.assertRaisesRegex(
+                CandidateIntegrityError, "source_request_authorization"
+            ):
+                CandidateIntegrityGate(conn)._source_requests(
+                    "scan",
+                    {
+                        "source_request_ids": ["http"],
+                        "method": "POST",
+                        "source_policy_sha256": conn.execute(
+                            "SELECT policy_sha256 FROM attack_http_requests WHERE request_id='http'"
+                        ).fetchone()[0],
+                        "endpoint_template": "/objects/{id}",
+                    },
+                    attempts,
+                    "https://test",
+                )
+
+    def test_candidate_gate_accepts_scope_authorized_mutation_source(self):
+        with db.connect(self.path) as conn:
+            conn.row_factory = sqlite3.Row
+            conn.execute(
+                """UPDATE attack_http_requests
+                   SET method='POST',authorization_source='scope_active_mutation'
+                   WHERE request_id='http'"""
+            )
+            attempt = conn.execute(
+                """SELECT task_id,request_fingerprint FROM attack_attempts
+                   WHERE attempt_id='attempt'"""
+            ).fetchone()
+            attempts = [{
+                "task_id": attempt[0], "request_fingerprint": attempt[1],
+            }]
+            CandidateIntegrityGate(conn)._source_requests(
+                "scan",
+                {
+                    "source_request_ids": ["http"],
+                    "method": "POST",
+                    "source_policy_sha256": conn.execute(
+                        "SELECT policy_sha256 FROM attack_http_requests WHERE request_id='http'"
+                    ).fetchone()[0],
+                    "endpoint_template": "/objects/{id}",
+                },
+                attempts,
+                "https://test",
+            )
+
     def test_run_executes_fresh_three_with_controls_and_commits_confirmed(self):
         port = FakePort()
         result = ValidationCoordinator(
@@ -400,6 +532,229 @@ class ValidationCoordinatorTests(unittest.TestCase):
             self.assertEqual(conn.execute(
                 "SELECT count(DISTINCT batch_no) FROM validation_attempts"
             ).fetchone()[0], 2)
+
+    def test_native_development_cannot_succeed_without_request_ledger(self):
+        with self.assertRaisesRegex(
+            ValidationCoordinatorError,
+            "native development succeeded without a Validation request ledger row",
+        ):
+            ValidationCoordinator(
+                db_path=self.path, agent=BlockerAgent(),
+                reproduction=BlockThenPassPort(),
+                policy_provider=lambda endpoint, method: self.policy,
+                prerequisite_resolver=MissingDevelopmentLedger(),
+            ).run("scan")
+
+        with db.connect(self.path) as conn:
+            self.assertEqual(conn.execute(
+                "SELECT status FROM validation_development_actions"
+            ).fetchone(), ("failed",))
+
+    def test_native_development_executes_immutable_contract_and_fresh_batch(self):
+        from aidast.validation import DevelopmentRuntimeContract, canonical_sha256
+
+        development = DevelopmentRuntimeContract.model_validate({
+            "schema_version": 1,
+            "actions": [{
+                "contract_id": "refresh-current-role",
+                "action_type": "refresh_current_role_credential",
+                "blocker_axis": "identity_auth",
+                "endpoint_template": "/auth/refresh",
+                "method": "POST",
+                "risk_class": "application_mutation",
+                "request": {},
+                "assertions": [{
+                    "assertion_id": "credential-refreshed",
+                    "kind": "json_equals",
+                    "path": ["refreshed"],
+                    "expected": True,
+                }],
+                "credential_roles": [],
+            }],
+        })
+        document = development.model_dump(mode="json")
+        with db.connect(self.path) as conn:
+            conn.execute("DROP TRIGGER finding_reproduction_specs_no_update")
+            conn.execute(
+                """UPDATE finding_reproduction_specs
+                   SET development_contract_json=?,development_contract_sha256=?
+                   WHERE finding_id='finding'""",
+                (
+                    json.dumps(document, sort_keys=True, separators=(",", ":")),
+                    canonical_sha256(document),
+                ),
+            )
+            conn.commit()
+        self.policy = self.policy.model_copy(update={
+            "attack_allowed_methods": ["GET", "HEAD", "OPTIONS", "POST"],
+            "attack_authorization_mode": "active_non_destructive",
+            "attack_authorization_evidence": "Active security testing is allowed.",
+        })
+        port = BlockThenPassPort()
+
+        result = ValidationCoordinator(
+            db_path=self.path, agent=BlockerAgent(), reproduction=port,
+            policy_provider=lambda endpoint, method: self.policy,
+            prerequisite_resolver=NativePrerequisiteResolver(
+                transport=lambda request, timeout: DevelopmentResponse(),
+            ),
+        ).run("scan")
+
+        self.assertEqual(result.summary["statuses"], {"CONFIRMED": 1})
+        self.assertEqual(len(port.calls), 10)
+        with db.connect(self.path) as conn:
+            action = conn.execute(
+                """SELECT status,action_type FROM validation_development_actions"""
+            ).fetchone()
+            request = conn.execute(
+                """SELECT attempt_id,development_action_id,method,status
+                   FROM validation_http_requests"""
+            ).fetchone()
+            evidence = conn.execute(
+                """SELECT evidence_kind,development_action_id
+                   FROM validation_evidence
+                   WHERE evidence_kind='development_observation'"""
+            ).fetchone()
+        self.assertEqual(
+            action, ("succeeded", "refresh_current_role_credential")
+        )
+        self.assertIsNone(request[0])
+        self.assertEqual(request[2:], ("POST", "completed"))
+        self.assertEqual(evidence, ("development_observation", request[1]))
+
+    def test_native_builder_registers_default_development_resolver(self):
+        policy_path = Path(self.temp.name) / "TargetPolicy.json"
+        policy_path.write_text(json.dumps({
+            "policies": [self.policy.model_dump(mode="json")],
+        }), encoding="utf-8")
+
+        coordinator = build_native_validation_coordinator(
+            db_path=self.path, policy_path=policy_path,
+        )
+
+        self.assertIsInstance(
+            coordinator.prerequisite_resolver, NativePrerequisiteResolver,
+        )
+        self.assertIsNotNone(coordinator.prerequisite_resolver.policy_provider)
+
+    def test_interrupted_native_development_is_not_redispatched_on_resume(self):
+        from aidast.validation import DevelopmentRuntimeContract, canonical_sha256
+
+        development = DevelopmentRuntimeContract.model_validate({
+            "schema_version": 1,
+            "actions": [{
+                "contract_id": "refresh-current-role",
+                "action_type": "refresh_current_role_credential",
+                "blocker_axis": "identity_auth",
+                "endpoint_template": "/auth/refresh",
+                "method": "POST",
+                "risk_class": "application_mutation",
+                "request": {},
+                "assertions": [{
+                    "assertion_id": "credential-refreshed",
+                    "kind": "json_equals",
+                    "path": ["refreshed"],
+                    "expected": True,
+                }],
+                "credential_roles": [],
+            }],
+        })
+        document = development.model_dump(mode="json")
+        with db.connect(self.path) as conn:
+            conn.execute("DROP TRIGGER finding_reproduction_specs_no_update")
+            conn.execute(
+                """UPDATE finding_reproduction_specs
+                   SET development_contract_json=?,development_contract_sha256=?
+                   WHERE finding_id='finding'""",
+                (
+                    json.dumps(document, sort_keys=True, separators=(",", ":")),
+                    canonical_sha256(document),
+                ),
+            )
+            conn.commit()
+        self.policy = self.policy.model_copy(update={
+            "attack_allowed_methods": ["GET", "HEAD", "OPTIONS", "POST"],
+            "attack_authorization_mode": "active_non_destructive",
+            "attack_authorization_evidence": "Active security testing is allowed.",
+        })
+        transport = InterruptedDevelopmentTransport()
+        coordinator = ValidationCoordinator(
+            db_path=self.path, agent=BlockerAgent(),
+            reproduction=BlockThenPassPort(),
+            policy_provider=lambda endpoint, method: self.policy,
+            prerequisite_resolver=NativePrerequisiteResolver(transport=transport),
+        )
+
+        with self.assertRaisesRegex(
+            ValidationCoordinatorError, "development request outcome is unknown",
+        ):
+            coordinator.run("scan")
+        self.assertEqual(transport.calls, 1)
+        with db.connect(self.path) as conn:
+            stage_id = conn.execute(
+                "SELECT stage_run_id FROM stage_runs WHERE stage='validation'"
+            ).fetchone()[0]
+            self.assertEqual(conn.execute(
+                "SELECT status FROM validation_development_actions"
+            ).fetchone(), ("outcome_unknown",))
+            self.assertEqual(conn.execute(
+                "SELECT status FROM validation_http_requests"
+            ).fetchone(), ("outcome_unknown",))
+
+        result = ValidationCoordinator(
+            db_path=self.path, agent=FakeAgent(), reproduction=FakePort(),
+            policy_provider=lambda endpoint, method: self.policy,
+            prerequisite_resolver=NativePrerequisiteResolver(
+                transport=lambda request, timeout: DevelopmentResponse(),
+            ),
+        ).resume(stage_id)
+
+        self.assertTrue(result.summary["resumed"])
+        self.assertEqual(transport.calls, 1)
+        with db.connect(self.path) as conn:
+            self.assertEqual(conn.execute(
+                "SELECT current_status FROM validation_cases"
+            ).fetchone(), ("INCONCLUSIVE",))
+            self.assertEqual(conn.execute(
+                "SELECT count(*) FROM validation_http_requests"
+            ).fetchone()[0], 1)
+
+    def test_native_development_without_contract_fails_closed_as_blocked(self):
+        result = ValidationCoordinator(
+            db_path=self.path, agent=BlockerAgent(),
+            reproduction=BlockThenPassPort(),
+            policy_provider=lambda endpoint, method: self.policy,
+            prerequisite_resolver=NativePrerequisiteResolver(),
+        ).run("scan")
+
+        self.assertEqual(result.summary["statuses"], {"BLOCKED": 1})
+        with db.connect(self.path) as conn:
+            action = conn.execute(
+                """SELECT status,details_json FROM validation_development_actions"""
+            ).fetchone()
+            requests = conn.execute(
+                "SELECT count(*) FROM validation_http_requests"
+            ).fetchone()[0]
+        self.assertEqual(action[0], "failed")
+        self.assertEqual(
+            json.loads(action[1])["reason"], "development_contract_missing"
+        )
+        self.assertEqual(requests, 0)
+
+    def test_native_builder_wires_injected_prerequisite_resolver(self):
+        policy_path = Path(self.temp.name) / "TargetPolicy.json"
+        policy_path.write_text(json.dumps({
+            "policies": [self.policy.model_dump(mode="json")],
+        }), encoding="utf-8")
+        resolver = SuccessfulPrerequisite()
+
+        coordinator = build_native_validation_coordinator(
+            db_path=self.path,
+            policy_path=policy_path,
+            prerequisite_resolver=resolver,
+        )
+
+        self.assertIs(coordinator.prerequisite_resolver, resolver)
 
     def test_resume_reuses_completed_batch_without_redispatch(self):
         first_port = FakePort()

@@ -350,21 +350,51 @@ def commit_finding(db_path: Path, scan_id: str, payload_path: Path) -> dict:
                 or len(roles) != len(set(roles))):
             raise ValueError("invalid reproduction identity roles")
         runtime_contract = reproduction.get("runtime_contract")
+        development_contract = reproduction.get("development_contract")
         runtime_contract_json = None
         runtime_contract_sha256 = None
+        resolved_profile = None
+        if runtime_contract is not None or development_contract is not None:
+            from aidast.validation.profiles import SkillProfileResolver
+            resolved_profile = SkillProfileResolver().resolve(attack_skill_name).profile
         if runtime_contract is not None:
             from aidast.validation.runtime_contract import validate_runtime_contract
             from aidast.validation.models import canonical_json, canonical_sha256
-            from aidast.validation.profiles import SkillProfileResolver
             from aidast.validation.runtime_semantics import validate_runtime_semantics
             validated_runtime = validate_runtime_contract(runtime_contract)
             validate_runtime_semantics(
                 validated_runtime,
-                SkillProfileResolver().resolve(attack_skill_name).profile,
+                resolved_profile,
             )
             runtime_contract = validated_runtime.model_dump(mode="json")
             runtime_contract_json = canonical_json(runtime_contract)
             runtime_contract_sha256 = canonical_sha256(runtime_contract)
+        development_contract_json = None
+        development_contract_sha256 = None
+        if development_contract is not None:
+            from aidast.validation.development import DevelopmentRuntimeContract
+            from aidast.validation.models import canonical_json, canonical_sha256
+            validated_development = DevelopmentRuntimeContract.model_validate(
+                development_contract
+            )
+            allowed_actions = {
+                (action.action_type, action.blocker_axis)
+                for action in resolved_profile.allowed_development_actions
+            }
+            if any(
+                (action.action_type, action.blocker_axis) not in allowed_actions
+                for action in validated_development.actions
+            ):
+                raise ValueError("development contract exceeds the Validation profile")
+            if any(
+                role not in roles
+                for action in validated_development.actions
+                for role in action.credential_roles
+            ):
+                raise ValueError("development contract uses an undeclared identity role")
+            development_contract = validated_development.model_dump(mode="json")
+            development_contract_json = canonical_json(development_contract)
+            development_contract_sha256 = canonical_sha256(development_contract)
         from aidast.validation.integrity import canonical_reproduction_spec
         spec = canonical_reproduction_spec(
             finding_id=finding_id, attack_skill_name=attack_skill_name,
@@ -426,8 +456,9 @@ def commit_finding(db_path: Path, scan_id: str, payload_path: Path) -> dict:
             (finding_id,attack_skill_name,endpoint_id,method,endpoint_template,injection_location,
              parameter_name,payload_template_json,required_identity_roles_json,
              source_attempt_ids_json,source_request_ids_json,payload_structure_sha256,
-             source_policy_sha256,runtime_contract_json,runtime_contract_sha256,spec_sha256)
-             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+             source_policy_sha256,runtime_contract_json,runtime_contract_sha256,
+             development_contract_json,development_contract_sha256,spec_sha256)
+             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (spec["finding_id"], spec["attack_skill_name"], spec["endpoint_id"], spec["method"],
              spec["endpoint_template"], spec["injection_location"], spec["parameter_name"],
              json.dumps(spec["payload_template"], ensure_ascii=False, sort_keys=True, separators=(",", ":")),
@@ -435,7 +466,9 @@ def commit_finding(db_path: Path, scan_id: str, payload_path: Path) -> dict:
              json.dumps(spec["source_attempt_ids"], ensure_ascii=False, separators=(",", ":")),
              json.dumps(spec["source_request_ids"], ensure_ascii=False, separators=(",", ":")),
              spec["payload_structure_sha256"], spec["source_policy_sha256"],
-             runtime_contract_json, runtime_contract_sha256, spec["spec_sha256"]),
+             runtime_contract_json, runtime_contract_sha256,
+             development_contract_json, development_contract_sha256,
+             spec["spec_sha256"]),
         )
         return {
             "finding_id": finding_id,

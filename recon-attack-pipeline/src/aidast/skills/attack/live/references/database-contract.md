@@ -108,6 +108,25 @@ and let the trusted Validation runtime resolve their opaque references. Browser,
 OOB, and multi-step findings may omit this HTTP-only contract until their
 dedicated runtime contract is available.
 
+`reproduction` may also include one immutable `development_contract` when
+Attack knows the exact prerequisite request needed to recover from an objective
+Validation blocker:
+
+```json
+{"schema_version":1,"actions":[{"contract_id":"refresh-current-role","action_type":"refresh_current_role_credential","blocker_axis":"identity_auth","endpoint_template":"/session/refresh","method":"POST","risk_class":"application_mutation","request":{},"assertions":[{"assertion_id":"session-refreshed","kind":"json_equals","path":["refreshed"],"expected":true}],"credential_roles":["current-user"]}]}
+```
+
+Each contract contains one or two actions and must match the selected Hunt
+Skill's Validation profile allowlist. Its endpoint is a literal same-origin
+path; put fixed query values in `request.query_parameters`. `GET`, `HEAD`, and
+`OPTIONS` require `risk_class: "http_probe"`; `POST`, `PUT`, and `PATCH` require
+`application_mutation` or `test_resource_create`. `DELETE`, absolute URLs,
+redirect following, path traversal, high-impact paths, sensitive headers, and
+status-only success assertions are rejected. Credential roles must be declared
+in `required_identity_roles`; store no secret value. Omit the contract when the
+exact request or a target-specific success marker is unknown. Validation then
+fails the development action closed instead of asking the LLM to invent one.
+
 The native Validation runtime resolves `env://NAME` references and lazily uses
 Python keyring for `keyring://SERVICE/ACCOUNT`. Both secrets contain a JSON
 object whose keys and values are the HTTP credential headers, for example

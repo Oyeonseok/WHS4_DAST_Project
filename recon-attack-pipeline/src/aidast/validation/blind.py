@@ -10,6 +10,18 @@ from .models import (BlindAssessment, Digest, Identifier, StrictContract,
                      canonical_sha256)
 
 
+class DevelopmentCapability(StrictContract):
+    contract_id: Identifier
+    action_type: Identifier
+    blocker_axis: Literal[
+        "identity_auth", "state_setup", "encoding_transport", "timing_concurrency"
+    ]
+    endpoint_template: str
+    method: str
+    risk_class: Literal["http_probe", "application_mutation", "test_resource_create"]
+    contract_sha256: Digest
+
+
 class BlindCase(StrictContract):
     case_id: Identifier
     target_kind: Literal["finding", "chain"]
@@ -23,6 +35,7 @@ class BlindCase(StrictContract):
     signal_types: tuple[str, ...]
     controls: dict[str, Any]
     runtime_contract: dict[str, Any] | None = None
+    development_capabilities: tuple[DevelopmentCapability, ...] = ()
     attack_skill_name: Identifier
     attack_skill_sha256: Digest
     validation_skill_sha256: Digest

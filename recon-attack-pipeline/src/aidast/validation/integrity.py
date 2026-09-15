@@ -9,11 +9,12 @@ from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urljoin, urlsplit
 
-from .blind import AttackClaim, BlindCase, StagedBlindCase
+from .blind import AttackClaim, BlindCase, DevelopmentCapability, StagedBlindCase
 from .matching import canonical_payload, payload_structure_sha256
 from .models import canonical_sha256
 from .profiles import ResolvedValidationProfile, SkillProfileResolver, ValidationProfileError
 from .runtime_contract import validate_runtime_contract
+from .development import DevelopmentActionContract, DevelopmentRuntimeContract
 
 
 class CandidateIntegrityError(ValueError):
@@ -34,6 +35,7 @@ class ValidatedCandidate:
     source_policy_sha256: str
     profile: ResolvedValidationProfile
     staged: StagedBlindCase
+    development_actions: tuple[DevelopmentActionContract, ...] = ()
 
 
 SPEC_DIGEST_FIELDS = (
@@ -88,6 +90,21 @@ class CandidateIntegrityGate:
             runtime_contract = runtime.model_dump(mode="json")
             if canonical_sha256(runtime_contract) != runtime_sha256:
                 raise CandidateIntegrityError("runtime_contract_sha256")
+        development_json = spec.pop("development_contract_json", None)
+        development_sha256 = spec.pop("development_contract_sha256", None)
+        if (development_json is None) != (development_sha256 is None):
+            raise CandidateIntegrityError("development_contract_binding")
+        development_actions: tuple[DevelopmentActionContract, ...] = ()
+        if development_json is not None:
+            try:
+                development = DevelopmentRuntimeContract.model_validate_json(
+                    development_json
+                )
+            except (ValueError, TypeError):
+                raise CandidateIntegrityError("development_contract_schema") from None
+            if canonical_sha256(development.model_dump(mode="json")) != development_sha256:
+                raise CandidateIntegrityError("development_contract_sha256")
+            development_actions = development.actions
         if reproduction_spec_digest(spec) != spec["spec_sha256"]:
             raise CandidateIntegrityError("spec_sha256")
         if payload_structure_sha256(spec["payload_template"]) != spec["payload_structure_sha256"]:
@@ -116,10 +133,24 @@ class CandidateIntegrityGate:
                 validate_runtime_semantics(runtime, profile.profile)
             except RuntimeSemanticError:
                 raise CandidateIntegrityError("runtime_profile_semantics") from None
+        allowed_actions = {
+            (item.action_type, item.blocker_axis)
+            for item in profile.profile.allowed_development_actions
+        }
+        if any(
+            (item.action_type, item.blocker_axis) not in allowed_actions
+            for item in development_actions
+        ):
+            raise CandidateIntegrityError("development_profile_scope")
         roles = spec["required_identity_roles"]
         if (not isinstance(roles, list) or len(roles) != len(set(roles))
                 or any(not isinstance(role, str) or not role for role in roles)):
             raise CandidateIntegrityError("identity_roles")
+        if any(
+            role not in roles
+            for action in development_actions for role in action.credential_roles
+        ):
+            raise CandidateIntegrityError("development_identity_roles")
         references = []
         for role in roles:
             row = self.conn.execute(
@@ -149,6 +180,20 @@ class CandidateIntegrityGate:
                 "baseline_samples": profile.profile.baseline_samples,
             },
             runtime_contract=runtime_contract,
+            development_capabilities=tuple(
+                DevelopmentCapability(
+                    contract_id=action.contract_id,
+                    action_type=action.action_type,
+                    blocker_axis=action.blocker_axis,
+                    endpoint_template=action.endpoint_template,
+                    method=action.method,
+                    risk_class=action.risk_class,
+                    contract_sha256=canonical_sha256(
+                        action.model_dump(mode="json")
+                    ),
+                )
+                for action in development_actions
+            ),
             attack_skill_name=spec["attack_skill_name"],
             attack_skill_sha256=profile.attack_skill_sha256,
             validation_skill_sha256=profile.validation_skill_sha256,
@@ -162,7 +207,7 @@ class CandidateIntegrityGate:
         return ValidatedCandidate(
             case_id, scan_id, finding_id, finding["vuln_type"], spec["endpoint_template"],
             spec["parameter_name"], spec["payload_template"], spec["source_policy_sha256"],
-            profile, StagedBlindCase(blind, claim),
+            profile, StagedBlindCase(blind, claim), development_actions,
         )
 
     def validate_chain(self, *, case_id: str, scan_id: str, chain_id: str) -> ValidatedCandidate:
@@ -303,12 +348,18 @@ class CandidateIntegrityGate:
             "attack_skill_sha256": combined_skill_sha,
             "profile_sha256": combined_profile_sha,
         })
-        required_roles = tuple(dict.fromkeys(
-            role for item in node_blinds for role in item.required_identity_roles
-        ))
-        credential_refs = tuple(dict.fromkeys(
-            ref for item in node_blinds for ref in item.credential_references
-        ))
+        credentials_by_role: dict[str, str] = {}
+        for item in node_blinds:
+            if len(item.required_identity_roles) != len(item.credential_references):
+                raise CandidateIntegrityError("chain_identity_roles")
+            for role, reference in zip(
+                item.required_identity_roles, item.credential_references,
+            ):
+                if role in credentials_by_role and credentials_by_role[role] != reference:
+                    raise CandidateIntegrityError("chain_identity_roles")
+                credentials_by_role.setdefault(role, reference)
+        required_roles = tuple(credentials_by_role)
+        credential_refs = tuple(credentials_by_role.values())
         blind = BlindCase(
             case_id=case_id, target_kind="chain", endpoint=node_blinds[-1].endpoint,
             method=node_blinds[-1].method,
@@ -323,6 +374,9 @@ class CandidateIntegrityGate:
                 "baseline_samples": terminal.profile.profile.baseline_samples,
                 "terminal_only": True,
             }, runtime_contract=chain_runtime,
+            development_capabilities=(
+                terminal.staged._blind_case.development_capabilities
+            ),
             attack_skill_name="chain", attack_skill_sha256=combined_skill_sha,
             validation_skill_sha256=terminal.profile.validation_skill_sha256,
             validation_profile_sha256=combined_profile_sha,
@@ -338,7 +392,7 @@ class CandidateIntegrityGate:
         return ValidatedCandidate(
             case_id, scan_id, chain_id, "chain", terminal.endpoint_template,
             terminal.parameter_name, composite_payload, terminal.source_policy_sha256,
-            profile, StagedBlindCase(blind, claim),
+            profile, StagedBlindCase(blind, claim), terminal.development_actions,
         )
 
     def _source_attempts(self, scan_id: str, finding_id: str, identifiers: Any) -> list[sqlite3.Row]:
@@ -370,7 +424,8 @@ class CandidateIntegrityGate:
         pairs = {(row["task_id"], row["request_fingerprint"]) for row in attempts}
         placeholders = ",".join("?" for _ in identifiers)
         rows = self.conn.execute(
-            f"""SELECT request_id,task_id,request_fingerprint,method,policy_sha256,status,url
+            f"""SELECT request_id,task_id,request_fingerprint,method,policy_sha256,status,url,
+            authorization_source
             FROM attack_http_requests WHERE scan_id=? AND request_id IN ({placeholders})""",
             (scan_id, *identifiers),
         ).fetchall()
@@ -391,6 +446,19 @@ class CandidateIntegrityGate:
             for row in rows
         ):
             raise CandidateIntegrityError("request_attempt_policy_binding")
+        for row in rows:
+            method = row["method"].upper()
+            authorization = row["authorization_source"]
+            if method in {"GET", "HEAD", "OPTIONS"}:
+                # NULL is accepted only for safe-method rows written before the
+                # authorization provenance columns were introduced.
+                if authorization not in {None, "scope_safe_method"}:
+                    raise CandidateIntegrityError("source_request_authorization")
+            elif authorization != "scope_active_mutation":
+                # A task-bound approved envelope must never become replay
+                # authority for an independent Validation case. Legacy mutation
+                # rows without provenance also fail closed.
+                raise CandidateIntegrityError("source_request_authorization")
 
 
 def canonical_reproduction_spec(**values: Any) -> dict[str, Any]:
