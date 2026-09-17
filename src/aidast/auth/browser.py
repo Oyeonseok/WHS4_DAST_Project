@@ -10,12 +10,19 @@ import socket
 import subprocess
 import time
 from dataclasses import dataclass
+from collections.abc import Iterable
 from importlib.resources import files
 from pathlib import Path
 from urllib.parse import urlsplit
 
 from aidast.recon.policy import validate_start_url_for_target
 from aidast.scope.models import AssetType
+from aidast.auth.endpoints import (
+    AuthenticationEndpoint,
+    AuthenticationEndpointError,
+    parse_authentication_endpoints,
+    serialize_authentication_endpoints,
+)
 
 
 class BrowserLoginError(RuntimeError):
@@ -71,6 +78,8 @@ class TargetSession:
     scope_id: str
     asset_type: str
     asset: str
+    authentication_endpoints: tuple[AuthenticationEndpoint, ...] = ()
+    has_authentication_endpoint_provenance: bool = False
 
     def verify(self) -> None:
         try:
@@ -82,7 +91,16 @@ class TargetSession:
             for path in (self.state_path, Path(str(self.state_path) + ".sessionstorage.json")):
                 if hashlib.sha256(path.read_bytes()).hexdigest() != doc["sha256"][path.name]:
                     raise ValueError("session snapshot changed")
-        except (OSError, ValueError, KeyError) as exc:
+            has_provenance = "authentication_endpoints" in doc
+            endpoints = parse_authentication_endpoints(
+                doc.get("authentication_endpoints", []), target_origin=origin(self.start_url)
+            )
+            if (
+                has_provenance != self.has_authentication_endpoint_provenance
+                or endpoints != self.authentication_endpoints
+            ):
+                raise ValueError("session endpoint provenance changed")
+        except (OSError, ValueError, KeyError, AuthenticationEndpointError) as exc:
             raise BrowserLoginError("session bundle is missing, changed, or belongs to another target/account") from exc
 
     def runtime_path(self, run_id: str) -> Path:
@@ -97,6 +115,21 @@ class TargetSession:
             storage.chmod(0o600)
         return path
 
+    def replace_authentication_endpoints(
+        self, items: Iterable[AuthenticationEndpoint]
+    ) -> None:
+        endpoints = parse_authentication_endpoints(
+            serialize_authentication_endpoints(items), target_origin=origin(self.start_url)
+        )
+        try:
+            document = json.loads(self.bundle_path.read_text(encoding="utf-8"))
+            document["authentication_endpoints"] = serialize_authentication_endpoints(endpoints)
+            _write(self.bundle_path, document)
+        except (OSError, ValueError, TypeError) as exc:
+            raise BrowserLoginError("cannot refresh authentication endpoint provenance") from exc
+        object.__setattr__(self, "authentication_endpoints", endpoints)
+        object.__setattr__(self, "has_authentication_endpoint_provenance", True)
+
 
 def load_session(path: Path, *, scope_id: str, asset_type: str, asset: str, identity: str,
                  start_url: str | None = None) -> TargetSession:
@@ -104,11 +137,15 @@ def load_session(path: Path, *, scope_id: str, asset_type: str, asset: str, iden
         doc = json.loads(path.read_text(encoding="utf-8"))
         selected_url = start_url or doc["start_url"]
         validate_start_url_for_target(selected_url, asset_type=AssetType(asset_type), asset=asset)
+        has_provenance = "authentication_endpoints" in doc
+        endpoints = parse_authentication_endpoints(
+            doc.get("authentication_endpoints", []), target_origin=origin(selected_url)
+        )
         result = TargetSession(path.resolve(), path.resolve().parent / "storage.json", selected_url,
-                               identity, scope_id, asset_type, asset)
+                               identity, scope_id, asset_type, asset, endpoints, has_provenance)
         result.verify()
         return result
-    except (OSError, ValueError, KeyError) as exc:
+    except (OSError, ValueError, KeyError, AuthenticationEndpointError) as exc:
         raise BrowserLoginError("cannot load the selected target session") from exc
 
 
@@ -228,12 +265,27 @@ def collect_target_sessions(targets, *, scope_id: str, run_id: str, identity: st
             storage_path = Path(str(state_path) + ".sessionstorage.json")
             _write(state_path, state)
             _write(storage_path, storage)
+            endpoints = []
+            for item in raw.get("authentication_endpoints", []):
+                if not isinstance(item, dict):
+                    continue
+                endpoint = AuthenticationEndpoint.from_request(
+                    item.get("method", ""), item.get("url", ""),
+                    target_origin=origin(url), observed_at=item.get("observed_at"),
+                )
+                if endpoint is not None:
+                    endpoints.append(endpoint)
+            endpoints = list(parse_authentication_endpoints(
+                serialize_authentication_endpoints(endpoints), target_origin=origin(url)
+            ))
             bundle = directory / "Session.json"
-            _write(bundle, {"schema_version": "1.0", "scope_id": scope_id, "run_id": run_id,
+            _write(bundle, {"schema_version": "1.1", "scope_id": scope_id, "run_id": run_id,
                            "asset_type": key[0], "asset": key[1], "start_url": url, "identity": identity,
                            "authentication": "operator_confirmed", "created_at": time.time(),
+                           "authentication_endpoints": serialize_authentication_endpoints(endpoints),
                            "sha256": {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in (state_path, storage_path)}})
-            session = TargetSession(bundle, state_path, url, identity, scope_id, *key)
+            session = TargetSession(bundle, state_path, url, identity, scope_id, *key,
+                                    tuple(endpoints), True)
             session.verify()
             result[key] = session
             print(f"Target session saved: {bundle}")
