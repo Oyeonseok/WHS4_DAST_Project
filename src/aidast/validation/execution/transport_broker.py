@@ -249,6 +249,53 @@ class ValidationTransportBroker:
                  sender: Callable[[float], TransportDispatchResult[T]]) -> tuple[str, T]:
         return self.dispatch_reserved(self.reserve(spec), sender)
 
+    def abandon_reserved(self, reservations: tuple[TransportReservation, ...], *,
+                         reason: str = "Abandoned") -> tuple[str, ...]:
+        """Terminalize only this owner's never-dispatched reservations atomically.
+
+        Running or dispatched rows are intentionally untouched: their outcome may
+        be side-effecting and must remain unknown/recovered by normal lifecycle
+        rules rather than being downgraded to an unsent abandonment.
+        """
+        if not isinstance(reservations, tuple) or any(
+            not isinstance(item, TransportReservation) for item in reservations
+        ):
+            raise ValidationTransportError("reserved operation cleanup requires reservations")
+        operation_ids = tuple(item.operation_id for item in reservations)
+        if not operation_ids:
+            return ()
+        if len(operation_ids) != len(set(operation_ids)):
+            raise ValidationTransportError("reserved operation cleanup contains duplicates")
+        with closing(self._connect()) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                self._check_owner(conn)
+                placeholders = ",".join("?" for _ in operation_ids)
+                abandoned = tuple(row[0] for row in conn.execute(
+                    f"""SELECT operation_id FROM validation_transport_operations
+                    WHERE operation_id IN ({placeholders}) AND scan_id=? AND stage_run_id=?
+                      AND case_id=? AND attempt_id=? AND policy_id=?
+                      AND status='reserved' AND dispatched_at IS NULL""",
+                    (*operation_ids, self.scan_id, self.stage_run_id, self.case_id,
+                     self.attempt_id, self.policy.policy_id),
+                ))
+                cursor = conn.execute(
+                    f"""UPDATE validation_transport_operations
+                    SET status='failed',error_message=?,finished_at=?
+                    WHERE operation_id IN ({placeholders}) AND scan_id=? AND stage_run_id=?
+                      AND case_id=? AND attempt_id=? AND policy_id=?
+                      AND status='reserved' AND dispatched_at IS NULL""",
+                    (reason[:256], self.clock(), *operation_ids, self.scan_id, self.stage_run_id,
+                     self.case_id, self.attempt_id, self.policy.policy_id),
+                )
+                conn.execute("COMMIT")
+            except BaseException:
+                conn.execute("ROLLBACK")
+                raise
+        if cursor.rowcount != len(abandoned):
+            raise ValidationTransportError("reserved operation cleanup changed concurrently")
+        return abandoned
+
     def _finish(self, operation_id: str, status: str, *, response_bytes: int | None = None,
                 result_json: str = "{}", error_message: str | None = None) -> None:
         with closing(self._connect()) as conn:

@@ -55,6 +55,19 @@ class ValidationTransportBrokerTests(unittest.TestCase):
             self.broker(concurrency=1).reserve_group((self.spec(), self.spec(1)), "group")
         self.assertEqual(self.rows(), [])
 
+    def test_abandon_reserved_terminalizes_only_never_dispatched_rows(self):
+        broker = self.broker(concurrency=2)
+        first, second = broker.reserve_group((self.spec(), self.spec(1)), "group")
+        self.conn.execute(
+            "UPDATE validation_transport_operations SET status='running',dispatched_at=100 WHERE operation_id=?",
+            (second.operation_id,),
+        )
+        self.conn.commit()
+        broker.abandon_reserved((first, second))
+        self.assertEqual([tuple(row) for row in self.conn.execute(
+            "SELECT status,dispatched_at,error_message FROM validation_transport_operations ORDER BY member_ordinal"
+        )], [("failed", None, "Abandoned"), ("running", 100.0, None)])
+
     def test_group_conflict_rolls_back_earlier_members(self):
         broker = self.broker(concurrency=10)
         broker.reserve_group((self.spec(),), "group")

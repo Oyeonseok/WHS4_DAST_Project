@@ -1,4 +1,4 @@
-"""Atomic, barrier-released HTTP and multipart Validation transport."""
+"""Atomic, bounded barrier execution for HTTP and multipart Validation children."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ import queue
 import sqlite3
 import threading
 import time
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor, TimeoutError
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping
@@ -15,6 +15,7 @@ from urllib.error import HTTPError
 from urllib.request import Request, build_opener
 from uuid import uuid4
 
+from aidast.core.http_safety import is_sensitive_header
 from aidast.core.request_broker import BrokerResponse
 from aidast.recon.policy import TargetPolicy
 
@@ -22,30 +23,39 @@ from ..contracts.binary import BinaryArtifactResolver, BinaryArtifactUnavailable
 from ..contracts.concurrent_contract import (
     ConcurrentAggregateAssertion, ConcurrentAttemptContract, ConcurrentRuntimeContract,
 )
-from ..contracts.models import BlindCase, ReproductionObservation
-from ..contracts.multipart_contract import MultipartRequestTemplate, encode_multipart
-from ..contracts.runtime_contract import (
-    HttpRequestTemplate, evaluate_http_response, render_http_request,
+from ..contracts.models import BlindCase, ReproductionObservation, canonical_sha256
+from ..contracts.multipart_contract import (
+    MultipartAttemptContract, MultipartRequestTemplate, _ADAPTER_OWNED_HEADERS, encode_multipart,
 )
+from ..contracts.runtime_contract import (
+    HttpRequestTemplate, _HEADER_NAME, evaluate_http_response, render_http_request,
+)
+from ..persistence.evidence_policy import sanitize_metadata
 from .credentials import PipelineCredentialResolver
 from .multipart_adapter import MultipartReproductionPort, _NoRedirect
 from .transport_broker import (
-    TransportDispatchResult, TransportOperationSpec, ValidationTransportBroker,
-    ValidationTransportError,
+    TransportDispatchResult, TransportOperationSpec, TransportReservation,
+    ValidationTransportBroker, ValidationTransportError,
 )
 
 
 _MAX_RESPONSE_BYTES = 200_000
+_HTTP_TRANSPORT_HEADERS = frozenset({
+    "host", "content-length", "transfer-encoding", "trailer", "connection",
+    "keep-alive", "upgrade", "te", "expect", "proxy-connection",
+})
 
 
 class ConcurrentExecutionError(ValidationTransportError):
-    """A concurrent attempt could not establish a definite terminal observation."""
+    """A concurrent attempt cannot establish definite bounded evidence."""
+
+
+class _CredentialUnavailable(Exception):
+    pass
 
 
 @dataclass(frozen=True)
 class ConcurrentMemberResult:
-    """Sanitized terminal fact for one pre-reserved group member."""
-
     ordinal: int
     operation_id: str
     response_status: int | None
@@ -61,7 +71,8 @@ class _PreparedRequest:
     url: str
     headers: Mapping[str, str]
     body: bytes | None
-    request_sha256: str
+    payload_sha256: str
+    components_sha256: str
 
 
 def evaluate_concurrent_results(
@@ -69,44 +80,36 @@ def evaluate_concurrent_results(
     assertions: tuple[ConcurrentAggregateAssertion, ...], *, start_skew_ms: float,
     final_evaluation: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Evaluate only bounded aggregate facts, never response contents."""
+    """Conjoin required member, aggregate, and final proof facts."""
     completed = tuple(item for item in results if not item.outcome_unknown and item.evaluation is not None)
+    member_passed = len(completed) == len(results) and all(
+        bool(item.evaluation["signal_observed"]) for item in completed
+    )
     success_count = sum(bool(item.evaluation["signal_observed"]) for item in completed)
-    response_digests = {item.response_sha256 for item in completed if item.response_sha256 is not None}
-    values: dict[str, Any] = {
-        "success_count": success_count,
-        "distinct_response_digests": len(response_digests),
-        "start_skew_ms": start_skew_ms,
-    }
-    assertion_results = []
+    digest_count = len({item.response_sha256 for item in completed if item.response_sha256})
+    assertion_results: list[dict[str, Any]] = []
     for assertion in assertions:
         if assertion.kind == "success_count_equals":
             actual, passed = success_count, success_count == assertion.expected
         elif assertion.kind == "success_count_at_least":
             actual, passed = success_count, success_count >= assertion.expected
         elif assertion.kind == "distinct_response_digests_at_least":
-            actual, passed = len(response_digests), len(response_digests) >= assertion.expected
+            actual, passed = digest_count, digest_count >= assertion.expected
         else:
             actual = None if final_evaluation is None else final_evaluation.get("signal_observed")
-            passed = actual is not None and actual == assertion.expected
+            passed = actual is True
         assertion_results.append({
             "assertion_id": assertion.assertion_id, "kind": assertion.kind,
-            "passed": passed, "actual": actual,
+            "expected": assertion.expected, "actual": actual, "passed": passed,
         })
-    return values | {
-        "signal_observed": (
-            all(item["passed"] for item in assertion_results)
-            if assertion_results else bool(completed) and all(
-                bool(item.evaluation["signal_observed"]) for item in completed
-            )
-        ),
-        "assertions": assertion_results,
+    return {
+        "signal_observed": member_passed and all(item["passed"] for item in assertion_results),
+        "success_count": success_count, "distinct_response_digests": digest_count,
+        "start_skew_ms": start_skew_ms, "assertions": assertion_results,
     }
 
 
 class ConcurrentReproductionPort:
-    """Dispatch an already-authorized finite group through one release barrier."""
-
     requires_request_ledger = True
 
     def __init__(self, *, transport: Callable | None = None,
@@ -128,58 +131,106 @@ class ConcurrentReproductionPort:
             ConcurrentRuntimeContract.model_validate(blind_case.runtime_contract)
         except ValueError:
             return "concurrent_runtime_contract_invalid"
-        if blind_case.credential_references and self.credential_resolver is None:
-            return "credential_reference_unavailable"
         return None
 
     @staticmethod
     def _observation(blind_case: BlindCase, *, outcome: str, observed: bool | None,
                      details: Mapping[str, Any], blocker_axis: str | None = None,
                      policy_allowed: bool = True) -> ReproductionObservation:
-        digest = hashlib.sha256(b"").hexdigest()
-        values = {
-            "outcome": outcome, "signal_type": blind_case.signal_types[0],
-            "signal_observed": observed, "blocker_axis": blocker_axis,
-            "details": dict(details), "content_sha256": digest, "content_length": 0,
-            "policy_allowed": policy_allowed,
-        }
-        # The existing generic envelope predates durable concurrent attempts.
-        # Preserve its wire compatibility while exposing the mandated unknown state.
-        if outcome == "outcome_unknown":
-            return ReproductionObservation.model_construct(**values)
-        return ReproductionObservation(**values)
+        return ReproductionObservation(
+            outcome=outcome, signal_type=blind_case.signal_types[0], signal_observed=observed,
+            blocker_axis=blocker_axis, details=dict(details),
+            content_sha256=canonical_sha256(details), content_length=0,
+            policy_allowed=policy_allowed,
+        )
 
-    def _resolved_headers(self, blind_case: BlindCase) -> dict[str, str] | None:
+    def _resolved_headers(self, blind_case: BlindCase) -> dict[str, str]:
+        if blind_case.credential_references and self.credential_resolver is None:
+            raise _CredentialUnavailable
         headers: dict[str, str] = {}
         for reference in blind_case.credential_references:
-            if self.credential_resolver is None:
-                return None
             try:
-                resolved = PipelineCredentialResolver._headers(self.credential_resolver(reference))
-            except (ImportError, OSError, KeyError, ValueError, sqlite3.Error):
-                return None
+                raw = self.credential_resolver(reference)
+            except (ImportError, OSError, KeyError, sqlite3.Error):
+                raise _CredentialUnavailable from None
+            except ValueError:
+                if isinstance(self.credential_resolver, PipelineCredentialResolver):
+                    raise _CredentialUnavailable from None
+                raise ConcurrentExecutionError("credential resolver failed") from None
+            try:
+                resolved = PipelineCredentialResolver._headers(raw)
+            except ValueError:
+                raise ConcurrentExecutionError("credential resolver returned invalid headers") from None
             if {name.casefold() for name in headers} & {name.casefold() for name in resolved}:
-                return None
+                raise ConcurrentExecutionError("credential header collision")
             headers.update(resolved)
         return headers
 
+    @staticmethod
+    def _merged_headers(template: Mapping[str, str], credentials: Mapping[str, str], *, multipart: bool) -> dict[str, str]:
+        merged: dict[str, str] = {}
+        for source in (template, credentials):
+            for name, value in source.items():
+                folded = name.casefold() if isinstance(name, str) else ""
+                if (not isinstance(name, str) or _HEADER_NAME.fullmatch(name) is None
+                        or not isinstance(value, str) or len(value) > 16_384
+                        or "\r" in value or "\n" in value):
+                    raise ConcurrentExecutionError("concurrent request headers are invalid")
+                if any(key.casefold() == folded for key in merged):
+                    raise ConcurrentExecutionError("credential header collision")
+                owned = _ADAPTER_OWNED_HEADERS if multipart else _HTTP_TRANSPORT_HEADERS
+                if folded in owned:
+                    raise ConcurrentExecutionError("transport-owned request headers are forbidden")
+                if source is template and is_sensitive_header(name):
+                    raise ConcurrentExecutionError("credential headers must use opaque references")
+                merged[name] = value
+        if len(merged) > 32:
+            raise ConcurrentExecutionError("concurrent request has too many headers")
+        return merged
+
     def _prepare(self, attempt: ConcurrentAttemptContract, endpoint: str,
-                 credential_headers: Mapping[str, str]) -> _PreparedRequest:
-        if isinstance(attempt.request, MultipartRequestTemplate):
-            from ..contracts.multipart_contract import MultipartAttemptContract
-            multipart_attempt = MultipartAttemptContract(
-                request=attempt.request, assertions=attempt.member_assertions,
-            )
-            url, headers, body = encode_multipart(multipart_attempt, endpoint, self.artifact_resolver)
+                 credential_headers: Mapping[str, str], *, method: str = "GET") -> _PreparedRequest:
+        multipart = isinstance(attempt.request, MultipartRequestTemplate)
+        if multipart:
+            rendered = MultipartAttemptContract(request=attempt.request, assertions=attempt.member_assertions)
+            url, template_headers, body = encode_multipart(rendered, endpoint, self.artifact_resolver)
         elif isinstance(attempt.request, HttpRequestTemplate):
-            url, headers, body = render_http_request(endpoint, attempt.request)
-        else:  # pragma: no cover - Pydantic union prevents this boundary bypass.
+            url, template_headers, body = render_http_request(endpoint, attempt.request)
+        else:  # pragma: no cover - validated union prevents this path.
             raise ConcurrentExecutionError("concurrent child is not HTTP or multipart")
-        if {name.casefold() for name in headers} & {name.casefold() for name in credential_headers}:
-            raise ConcurrentExecutionError("credential header collision")
-        headers = dict(headers) | dict(credential_headers)
+        headers = self._merged_headers(template_headers, credential_headers, multipart=multipart)
         payload = body or b""
-        return _PreparedRequest(url, headers, body, hashlib.sha256(payload).hexdigest())
+        components = canonical_sha256({
+            "method": method.upper(), "url": url, "payload_sha256": hashlib.sha256(payload).hexdigest(),
+            "headers": sorted((name.casefold(), value) for name, value in headers.items()),
+        })
+        return _PreparedRequest(url, headers, body, hashlib.sha256(payload).hexdigest(), components)
+
+    def _prepare_final(self, attempt: ConcurrentAttemptContract, endpoint: str,
+                       credentials: Mapping[str, str], *, method: str) -> _PreparedRequest | None:
+        if attempt.final_verification is None:
+            return None
+        url, headers, body = render_http_request(endpoint, attempt.final_verification.request)
+        merged = self._merged_headers(headers, credentials, multipart=False)
+        payload = body or b""
+        components = canonical_sha256({
+            "method": method.upper(), "url": url, "payload_sha256": hashlib.sha256(payload).hexdigest(),
+            "headers": sorted((name.casefold(), value) for name, value in merged.items()),
+        })
+        return _PreparedRequest(url, merged, body, hashlib.sha256(payload).hexdigest(), components)
+
+    @staticmethod
+    def _policy_allowed(policy: TargetPolicy, prepared: tuple[_PreparedRequest, ...], method: str) -> bool:
+        try:
+            return all(policy.allows_validation_url(item.url, method=method) for item in prepared)
+        except ValueError:
+            return False
+
+    @staticmethod
+    def _metadata(prepared: _PreparedRequest) -> dict[str, object]:
+        return {"request_payload_sha256": prepared.payload_sha256,
+                "request_payload_length": len(prepared.body or b""),
+                "request_components_sha256": prepared.components_sha256}
 
     @staticmethod
     def _pre_dispatch_error(error: ValidationTransportError) -> bool:
@@ -187,6 +238,52 @@ class ConcurrentReproductionPort:
             "TargetPolicy request budget exhausted", "TargetPolicy concurrency limit reached",
             "TargetPolicy validation byte budget exhausted",
         ))
+
+    def _send(self, prepared: _PreparedRequest, method: str, deadline: float,
+              timeout: float) -> tuple[BrokerResponse, float, int, dict[str, object]]:
+        remaining = deadline - self.clock()
+        if remaining <= 0:
+            raise ConcurrentExecutionError("concurrent attempt deadline exceeded")
+        request = Request(prepared.url, data=prepared.body, headers=dict(prepared.headers), method=method)
+        started, dispatch_ns = self.clock(), self.monotonic_ns()
+        try:
+            response = self.transport(request, timeout=min(timeout, remaining))
+        except HTTPError as error:
+            response = error
+        timer = threading.Timer(max(0.0, deadline - self.clock()), response.close)
+        timer.daemon = True
+        timer.start()
+        try:
+            body = MultipartReproductionPort._read_complete_response(response, deadline=deadline, clock=self.clock)
+            result = BrokerResponse(int(getattr(response, "status", getattr(response, "code", 0))), response.geturl(),
+                dict(getattr(response, "headers", {}) or {}), body)
+        finally:
+            timer.cancel()
+            response.close()
+        duration = max(0.0, (self.clock() - started) * 1000)
+        if self.clock() >= deadline:
+            raise ConcurrentExecutionError("concurrent attempt deadline exceeded")
+        return result, duration, dispatch_ns, self._metadata(prepared) | {
+            "response_payload_sha256": hashlib.sha256(body).hexdigest(),
+            "response_payload_length": len(body), "response_status": result.status_code,
+        }
+
+    def _compact_details(self, results: tuple[ConcurrentMemberResult, ...], operation_ids: list[str],
+                         aggregate: Mapping[str, Any], skew_passed: bool | None) -> dict[str, Any]:
+        assertions = [{"assertion_sha256": canonical_sha256({"kind": item["kind"], "expected": item["expected"]}),
+                       "passed": item["passed"]} for item in aggregate["assertions"]]
+        if skew_passed is not None:
+            assertions.append({"assertion_sha256": canonical_sha256({"kind": "start_skew_at_most_ms"}),
+                               "passed": skew_passed})
+        return {"operation_ids": operation_ids, "start_skew_ms": aggregate["start_skew_ms"],
+                "members": [{"ordinal": item.ordinal, "status": item.response_status,
+                             "response_sha256": item.response_sha256, "response_bytes": item.response_bytes,
+                             "duration_ms": item.duration_ms,
+                             "evaluation": {"signal_observed": None if item.evaluation is None else item.evaluation["signal_observed"]}}
+                            for item in results],
+                "aggregate": {"success_count": aggregate["success_count"],
+                              "distinct_response_digests": aggregate["distinct_response_digests"],
+                              "assertions": assertions}}
 
     def execute(self, blind_case: BlindCase, *, attempt_kind: str, batch_no: int,
                 ordinal: int, attempt_id: str, db_path: Path, scan_id: str,
@@ -197,55 +294,44 @@ class ConcurrentReproductionPort:
         runtime = ConcurrentRuntimeContract.model_validate(blind_case.runtime_contract)
         attempt = runtime.for_attempt(attempt_kind)
         if runtime.total_members > policy.limits.concurrency:
-            return self._observation(
-                blind_case, outcome="blocked", observed=False, blocker_axis="timing_concurrency",
-                details={"reason": "current_policy_rejected"}, policy_allowed=False,
-            )
-        credential_headers = self._resolved_headers(blind_case)
-        if credential_headers is None:
-            return self._observation(
-                blind_case, outcome="blocked", observed=False, blocker_axis="identity_auth",
-                details={"reason": "credential_reference_unavailable"},
-            )
+            return self._observation(blind_case, outcome="blocked", observed=False, blocker_axis="timing_concurrency",
+                details={"reason": "current_policy_rejected"}, policy_allowed=False)
         try:
-            prepared = self._prepare(attempt, blind_case.endpoint, credential_headers)
+            credentials = self._resolved_headers(blind_case)
+            members = tuple(self._prepare(attempt, blind_case.endpoint, credentials, method=blind_case.method)
+                            for _ in range(runtime.total_members))
+            final = self._prepare_final(attempt, blind_case.endpoint, credentials, method=blind_case.method)
+        except _CredentialUnavailable:
+            return self._observation(blind_case, outcome="blocked", observed=False, blocker_axis="identity_auth",
+                details={"reason": "credential_reference_unavailable"})
         except BinaryArtifactUnavailable:
-            return self._observation(
-                blind_case, outcome="blocked", observed=False, blocker_axis="encoding_transport",
-                details={"reason": "artifact_unavailable"},
-            )
-        except ValueError as exc:
-            raise ConcurrentExecutionError("concurrent request preflight failed") from exc
+            return self._observation(blind_case, outcome="blocked", observed=False, blocker_axis="encoding_transport",
+                details={"reason": "artifact_unavailable"})
+        except (ValueError, ConcurrentExecutionError):
+            return self._observation(blind_case, outcome="blocked", observed=False, blocker_axis="encoding_transport",
+                details={"reason": "runtime_preflight_failed"})
+        prepared_all = members + (() if final is None else (final,))
+        if not self._policy_allowed(policy, prepared_all, blind_case.method):
+            return self._observation(blind_case, outcome="blocked", observed=False,
+                details={"reason": "current_policy_rejected"}, policy_allowed=False)
 
-        broker = ValidationTransportBroker(
-            db_path=db_path, scan_id=scan_id, stage_run_id=stage_run_id, case_id=case_id,
-            attempt_id=attempt_id, blind_case=blind_case, policy=policy,
-        )
-        request_bytes = len(prepared.body or b"")
-        metadata = {
-            "request_payload_sha256": prepared.request_sha256,
-            "request_payload_length": request_bytes,
-        }
-        specs = tuple(
-            TransportOperationSpec(
-                runtime_kind="concurrent", operation_kind="member", destination=prepared.url,
-                policy_url=prepared.url, method=blind_case.method, request_bytes=request_bytes,
-                max_response_bytes=_MAX_RESPONSE_BYTES, concurrency_units=1, metadata=metadata,
-            ) for _ in range(runtime.total_members)
-        )
+        broker = ValidationTransportBroker(db_path=db_path, scan_id=scan_id, stage_run_id=stage_run_id,
+            case_id=case_id, attempt_id=attempt_id, blind_case=blind_case, policy=policy)
+        specs = tuple(TransportOperationSpec(runtime_kind="concurrent", operation_kind="member",
+            destination=item.url, policy_url=item.url, method=blind_case.method, request_bytes=len(item.body or b""),
+            max_response_bytes=_MAX_RESPONSE_BYTES, concurrency_units=1, metadata=self._metadata(item)) for item in members)
         try:
             reservations = broker.reserve_group(specs, "vgrp_" + uuid4().hex)
-        except ValidationTransportError as exc:
-            if self._pre_dispatch_error(exc):
-                return self._observation(
-                    blind_case, outcome="blocked", observed=False,
-                    details={"reason": "current_policy_rejected"}, policy_allowed=False,
-                )
+        except ValidationTransportError as error:
+            if self._pre_dispatch_error(error):
+                return self._observation(blind_case, outcome="blocked", observed=False,
+                    details={"reason": "current_policy_rejected"}, policy_allowed=False)
             raise
 
         deadline = self.clock() + min(float(policy.limits.timeout_seconds), runtime.barrier_timeout_seconds)
-        barrier = threading.Barrier(runtime.total_members + 1)
-        ready: queue.Queue[int] = queue.Queue(maxsize=runtime.total_members)
+        cancel, ready = threading.Event(), queue.Queue(maxsize=runtime.total_members)
+        ready_barrier = threading.Barrier(runtime.total_members + 1)
+        send_barrier = threading.Barrier(runtime.total_members + 1)
         dispatch_times: list[int] = []
         dispatch_lock = threading.Lock()
 
@@ -255,153 +341,107 @@ class ConcurrentReproductionPort:
                 raise ConcurrentExecutionError("concurrent attempt deadline exceeded")
             return value
 
-        def send_member(member_ordinal: int, timeout: float) -> TransportDispatchResult[tuple[BrokerResponse, float, int]]:
-            ready.put(member_ordinal)
-            try:
-                barrier.wait(timeout=min(runtime.barrier_timeout_seconds, remaining()))
-            except threading.BrokenBarrierError as exc:
-                raise ConcurrentExecutionError("concurrent release barrier failed") from exc
-            started = self.clock()
-            request = Request(prepared.url, data=prepared.body, headers=dict(prepared.headers), method=blind_case.method)
-            try:
-                # Keep the timestamp adjacent to the ordinary transport call.
-                dispatch_ns = self.monotonic_ns()
-                with dispatch_lock:
-                    dispatch_times.append(dispatch_ns)
-                response = self.transport(request, timeout=min(timeout, remaining()))
-            except HTTPError as error:
-                response = error
-            try:
-                body = MultipartReproductionPort._read_complete_response(response)
-                headers = dict(getattr(response, "headers", {}) or {})
-                response_url = response.geturl()
-                status = int(getattr(response, "status", getattr(response, "code", 0)))
-            finally:
-                response.close()
-            duration_ms = max(0.0, (self.clock() - started) * 1000)
-            broker_response = BrokerResponse(status, response_url, headers, body)
-            response_metadata = metadata | {
-                "response_payload_sha256": hashlib.sha256(body).hexdigest(),
-                "response_payload_length": len(body), "response_status": status,
-            }
-            return TransportDispatchResult((broker_response, duration_ms, dispatch_ns), len(body), response_metadata)
+        def wait_scheduled(reservation: TransportReservation) -> None:
+            while True:
+                delay = reservation.scheduled_at - time.time()
+                if delay <= 0:
+                    return
+                if cancel.wait(min(delay, remaining())):
+                    raise ConcurrentExecutionError("concurrent readiness cancelled")
 
-        def dispatch_member(member_ordinal: int) -> ConcurrentMemberResult:
+        def worker(index: int) -> ConcurrentMemberResult:
+            reservation, prepared = reservations[index], members[index]
             try:
-                operation_id, (response, duration_ms, _) = broker.dispatch_reserved(
-                    reservations[member_ordinal], lambda timeout: send_member(member_ordinal, timeout),
-                )
-                evaluation = evaluate_http_response(response, attempt.member_assertions, duration_ms=duration_ms)
-                return ConcurrentMemberResult(
-                    member_ordinal, operation_id, response.status_code,
-                    hashlib.sha256(response.body).hexdigest(), len(response.body), duration_ms, evaluation,
-                )
+                wait_scheduled(reservation)
+                ready.put(index)
+                ready_barrier.wait(timeout=remaining())
+                def sender(timeout: float) -> TransportDispatchResult[tuple[BrokerResponse, float]]:
+                    try:
+                        send_barrier.wait(timeout=remaining())
+                    except threading.BrokenBarrierError as exc:
+                        raise ConcurrentExecutionError("concurrent send barrier failed") from exc
+                    response, duration, dispatch_ns, metadata = self._send(prepared, blind_case.method, deadline, timeout)
+                    with dispatch_lock:
+                        dispatch_times.append(dispatch_ns)
+                    return TransportDispatchResult((response, duration), len(response.body), metadata)
+                operation_id, (response, duration) = broker.dispatch_reserved(reservation, sender)
+                return ConcurrentMemberResult(index, operation_id, response.status_code,
+                    hashlib.sha256(response.body).hexdigest(), len(response.body), duration,
+                    evaluate_http_response(response, attempt.member_assertions, duration_ms=duration))
             except BaseException:
-                return ConcurrentMemberResult(
-                    member_ordinal, reservations[member_ordinal].operation_id, None, None, 0, None, None,
-                    outcome_unknown=True,
-                )
+                cancel.set()
+                return ConcurrentMemberResult(index, reservation.operation_id, None, None, 0, None, None, True)
 
-        futures: list[Future[ConcurrentMemberResult]] = []
-        with ThreadPoolExecutor(max_workers=runtime.total_members) as executor:
-            futures = [executor.submit(dispatch_member, member_ordinal)
-                       for member_ordinal in range(runtime.total_members)]
+        executor = ThreadPoolExecutor(max_workers=runtime.total_members)
+        futures: list[Future[ConcurrentMemberResult]] = [executor.submit(worker, index) for index in range(runtime.total_members)]
+        released = False
+        try:
+            for _ in reservations:
+                ready.get(timeout=remaining())
+            ready_barrier.wait(timeout=remaining())
+            released = True
+            send_barrier.wait(timeout=remaining())
+        except (queue.Empty, TimeoutError, ConcurrentExecutionError, threading.BrokenBarrierError):
+            cancel.set()
+            ready_barrier.abort()
+            send_barrier.abort()
+        results: list[ConcurrentMemberResult] = []
+        for index, future in enumerate(futures):
             try:
-                for _ in reservations:
-                    ready.get(timeout=min(runtime.barrier_timeout_seconds, remaining()))
-                barrier.wait(timeout=min(runtime.barrier_timeout_seconds, remaining()))
-            except (queue.Empty, ConcurrentExecutionError, threading.BrokenBarrierError):
-                barrier.abort()
-            results = tuple(future.result() for future in futures)
+                results.append(future.result(timeout=max(0.01, deadline - self.clock())))
+            except (TimeoutError, BaseException):
+                cancel.set()
+                results.append(ConcurrentMemberResult(index, reservations[index].operation_id, None, None, 0, None, None, True))
+        cancel.set()
+        ready_barrier.abort()
+        send_barrier.abort()
+        executor.shutdown(wait=True, cancel_futures=True)
+        result_tuple = tuple(results)
+        try:
+            broker.abandon_reserved(reservations)
+        except ValidationTransportError:
+            pass
+        operation_ids = [item.operation_id for item in result_tuple]
+        if not released or any(item.outcome_unknown for item in result_tuple) or len(dispatch_times) != runtime.total_members:
+            return self._observation(blind_case, outcome="outcome_unknown", observed=None,
+                details={"operation_ids": operation_ids, "reason": "member_outcome_unknown"})
 
-        if any(item.outcome_unknown for item in results) or len(dispatch_times) != runtime.total_members:
-            return self._observation(
-                blind_case, outcome="outcome_unknown", observed=None,
-                details={"operation_ids": [item.operation_id for item in results], "reason": "member_outcome_unknown"},
-            )
-        start_skew_ms = (max(dispatch_times) - min(dispatch_times)) / 1_000_000
-        final_evaluation, final_operation_id = None, None
-        if attempt.final_verification is not None:
+        skew = (max(dispatch_times) - min(dispatch_times)) / 1_000_000
+        final_evaluation: Mapping[str, Any] | None = None
+        if final is not None:
+            final_spec = TransportOperationSpec(runtime_kind="concurrent", operation_kind="final_verification",
+                destination=final.url, policy_url=final.url, method=blind_case.method, request_bytes=len(final.body or b""),
+                max_response_bytes=_MAX_RESPONSE_BYTES, concurrency_units=1, metadata=self._metadata(final))
+            final_reservation: TransportReservation | None = None
             try:
-                final_evaluation, final_operation_id = self._final_verification(
-                    broker, attempt, blind_case, credential_headers, deadline,
-                )
+                final_reservation = broker.reserve(final_spec)
+                operation_ids.append(final_reservation.operation_id)
+                def final_sender(timeout: float) -> TransportDispatchResult[tuple[BrokerResponse, float]]:
+                    response, duration, _, metadata = self._send(final, blind_case.method, deadline, timeout)
+                    return TransportDispatchResult((response, duration), len(response.body), metadata)
+                _, (response, duration) = broker.dispatch_reserved(final_reservation, final_sender)
+                final_evaluation = evaluate_http_response(response, attempt.final_verification.assertions, duration_ms=duration)
             except BaseException:
-                return self._observation(
-                    blind_case, outcome="outcome_unknown", observed=None,
-                    details={"operation_ids": [item.operation_id for item in results],
-                             "reason": "final_verification_outcome_unknown"},
-                )
-        aggregate = evaluate_concurrent_results(
-            results, attempt.aggregate_assertions, start_skew_ms=start_skew_ms,
-            final_evaluation=final_evaluation,
-        )
-        if attempt.start_skew_at_most_ms is not None:
-            aggregate["assertions"].append({
-                "assertion_id": "start_skew_at_most_ms", "kind": "start_skew_at_most_ms",
-                "passed": start_skew_ms <= attempt.start_skew_at_most_ms,
-                "actual": start_skew_ms,
-            })
-            aggregate["signal_observed"] = all(item["passed"] for item in aggregate["assertions"])
-        observed = bool(aggregate["signal_observed"])
-        details = {
-            "operation_ids": [item.operation_id for item in results],
-            "start_skew_ms": start_skew_ms, "aggregate": aggregate,
-            "members": [{
-                "ordinal": item.ordinal, "status": item.response_status,
-                "response_sha256": item.response_sha256, "response_bytes": item.response_bytes,
-                "duration_ms": item.duration_ms, "evaluation": item.evaluation,
-            } for item in results],
-        }
-        if final_operation_id is not None:
-            details["final_operation_id"] = final_operation_id
-        return self._observation(
-            blind_case, outcome="observed" if observed else "not_observed", observed=observed, details=details,
-        )
+                if final_reservation is not None and final_reservation.operation_id not in operation_ids:
+                    operation_ids.append(final_reservation.operation_id)
+                if final_reservation is not None:
+                    try:
+                        broker.abandon_reserved((final_reservation,))
+                    except ValidationTransportError:
+                        pass
+                return self._observation(blind_case, outcome="outcome_unknown", observed=None,
+                    details={"operation_ids": operation_ids, "reason": "final_verification_outcome_unknown"})
 
-    def _final_verification(self, broker: ValidationTransportBroker, attempt: ConcurrentAttemptContract,
-                            blind_case: BlindCase, credential_headers: Mapping[str, str], deadline: float) -> tuple[dict[str, Any], str]:
-        assert attempt.final_verification is not None
-        url, headers, body = render_http_request(blind_case.endpoint, attempt.final_verification.request)
-        if {name.casefold() for name in headers} & {name.casefold() for name in credential_headers}:
-            raise ConcurrentExecutionError("credential header collision")
-        headers = dict(headers) | dict(credential_headers)
-        request_body = body or b""
-        spec = TransportOperationSpec(
-            runtime_kind="concurrent", operation_kind="final_verification", destination=url,
-            policy_url=url, method=blind_case.method, request_bytes=len(request_body),
-            max_response_bytes=_MAX_RESPONSE_BYTES, concurrency_units=1,
-            metadata={"request_payload_sha256": hashlib.sha256(request_body).hexdigest(),
-                      "request_payload_length": len(request_body)},
-        )
-        reservation = broker.reserve(spec)
-        started = self.clock()
-
-        def sender(timeout: float) -> TransportDispatchResult[BrokerResponse]:
-            remaining = deadline - self.clock()
-            if remaining <= 0:
-                raise ConcurrentExecutionError("concurrent attempt deadline exceeded")
-            request = Request(url, data=body, headers=headers, method=blind_case.method)
-            try:
-                response = self.transport(request, timeout=min(timeout, remaining))
-            except HTTPError as error:
-                response = error
-            try:
-                captured = MultipartReproductionPort._read_complete_response(response)
-                result = BrokerResponse(
-                    int(getattr(response, "status", getattr(response, "code", 0))), response.geturl(),
-                    dict(getattr(response, "headers", {}) or {}), captured,
-                )
-            finally:
-                response.close()
-            return TransportDispatchResult(
-                result, len(captured),
-                {"response_payload_sha256": hashlib.sha256(captured).hexdigest(),
-                 "response_payload_length": len(captured), "response_status": result.status_code},
-            )
-
-        operation_id, response = broker.dispatch_reserved(reservation, sender)
-        return evaluate_http_response(
-            response, attempt.final_verification.assertions,
-            duration_ms=max(0.0, (self.clock() - started) * 1000),
-        ), operation_id
+        aggregate = evaluate_concurrent_results(result_tuple, attempt.aggregate_assertions,
+            start_skew_ms=skew, final_evaluation=final_evaluation)
+        skew_passed = attempt.start_skew_at_most_ms is None or skew <= attempt.start_skew_at_most_ms
+        observed = bool(aggregate["signal_observed"]) and skew_passed
+        details = self._compact_details(result_tuple, operation_ids, aggregate,
+            skew_passed if attempt.start_skew_at_most_ms is not None else None)
+        try:
+            sanitize_metadata({**details, "validation_runtime": {"explicit_non_exploit": False, "policy_allowed": True}})
+        except ValueError:
+            return self._observation(blind_case, outcome="outcome_unknown", observed=None,
+                details={"operation_ids": operation_ids, "reason": "evidence_persistence_unavailable"})
+        return self._observation(blind_case, outcome="observed" if observed else "not_observed",
+            observed=observed, details=details)

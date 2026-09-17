@@ -7,6 +7,7 @@ from aidast.validation import (HttpRequestTemplate, HttpRuntimeContract,
                                ResponseAssertion, evaluate_http_response,
                                canonical_sha256, render_http_request,
                                validate_runtime_contract)
+from aidast.validation.contracts.models import ReproductionObservation
 
 
 def legacy_contract_document() -> dict[str, object]:
@@ -117,6 +118,22 @@ class ValidationRuntimeContractTests(unittest.TestCase):
     def test_unknown_explicit_runtime_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "unsupported runtime kind"):
             validate_runtime_contract({"runtime_kind": "raw", "schema_version": 1})
+
+    def test_unknown_reproduction_observation_is_typed_and_indeterminate(self):
+        observation = ReproductionObservation(
+            outcome="outcome_unknown", signal_type="timing", signal_observed=None,
+            details={"operation_ids": ["vop_inert"]},
+            content_sha256=canonical_sha256({"inert": True}), content_length=0,
+        )
+        self.assertEqual(
+            ReproductionObservation.model_validate_json(observation.model_dump_json()).outcome,
+            "outcome_unknown",
+        )
+        with self.assertRaises(ValueError):
+            ReproductionObservation(
+                outcome="outcome_unknown", signal_type="timing", signal_observed=False,
+                details={}, content_sha256=canonical_sha256({"inert": True}), content_length=0,
+            )
 
 
 if __name__ == "__main__":
