@@ -7,11 +7,12 @@ import importlib
 import json
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from unittest.mock import patch
 from urllib.parse import urlsplit
 
 import grpc
-from google.protobuf import descriptor_pb2
+from google.protobuf import any_pb2, descriptor_pb2, descriptor_pool
 import test_validation_request_broker as request_fixture
 from aidast.recon.policy import PolicyLimits
 from aidast.validation.execution.transport_broker import ValidationTransportError
@@ -42,6 +43,22 @@ def runtime_document():
            "negative_control": copy.deepcopy(attempt)}
     doc["negative_control"]["message"] = {"value": "inert"}
     return doc
+
+
+@contextmanager
+def loopback_service(handler, loaded):
+    server = grpc.server(ThreadPoolExecutor(max_workers=2))
+    server.add_generic_rpc_handlers((grpc.method_handlers_generic_handler("fixture.Echo", {
+        "Unary": grpc.unary_unary_rpc_method_handler(handler,
+            request_deserializer=loaded.response_class.FromString,
+            response_serializer=lambda response: response.SerializeToString()),
+    }),))
+    port = server.add_insecure_port("127.0.0.1:0")
+    server.start()
+    try:
+        yield f"http://127.0.0.1:{port}"
+    finally:
+        server.stop(0).wait()
 
 
 class GrpcContractTests(unittest.TestCase):
@@ -177,6 +194,9 @@ class ScriptedCall:
 
     def details(self):
         return self.detail
+
+    def initial_metadata(self):
+        return ()
 
 
 class ScriptedRpcError(grpc.RpcError, ScriptedCall):
@@ -409,7 +429,12 @@ class GrpcAdapterTests(unittest.TestCase):
             self.assertTrue(self.execute().signal_observed)
             self.assertIn(("grpc.enable_http_proxy", 0), create.call_args.kwargs["options"])
             self.assertIn(("grpc.enable_retries", 0), create.call_args.kwargs["options"])
-            self.assertIn(("grpc.max_receive_message_length", 1_000_000), create.call_args.kwargs["options"])
+            options = dict(create.call_args.kwargs["options"])
+            self.assertGreater(options["grpc.max_receive_message_length"], 1_000_000)
+            self.assertLessEqual(options["grpc.max_receive_message_length"], 1_048_576)
+            self.assertGreater(options["grpc.max_metadata_size"], 32_768)
+            self.assertLessEqual(options["grpc.max_metadata_size"], 65_536)
+            self.assertEqual(options["grpc.absolute_max_metadata_size"], options["grpc.max_metadata_size"])
         for endpoint, factory in (("http://127.0.0.1", "insecure_channel"), ("https://127.0.0.1", "secure_channel")):
             with self.subTest(endpoint=endpoint), patch.object(grpc, factory) as create:
                 mod.default_channel_factory(endpoint, options=(("grpc.enable_http_proxy", 0),))
@@ -468,3 +493,89 @@ class GrpcAdapterTests(unittest.TestCase):
             self.assertEqual(received, ["target", "inert", "denied", "unavailable", "large"])
         finally:
             server.stop(0).wait()
+
+    def test_loopback_local_capture_bounds_and_peer_diagnostic_text_have_distinct_outcomes(self):
+        from aidast.validation.contracts.grpc_contract import GrpcRuntimeContract
+        loaded = GrpcRuntimeContract.model_validate(runtime_document()).target.load(None)
+        diagnostic = "CLIENT: Received message larger than max (40 vs. 32)"
+        def handler(request, context):
+            if request.value == "peer":
+                context.abort(grpc.StatusCode.RESOURCE_EXHAUSTED, diagnostic)
+            if request.value == "body":
+                return loaded.response_class(value="x" * 1_000_001)
+            if request.value == "initial":
+                context.send_initial_metadata((("x-tag", "x" * 60_000),))
+            if request.value == "trailer":
+                context.set_trailing_metadata((("x-tag", "x" * 60_000),))
+            if request.value == "native-trailer":
+                context.set_trailing_metadata((("x-tag", "x" * 131_072),))
+            return loaded.response_class(value="target")
+        with loopback_service(handler, loaded) as endpoint:
+            for kind in ("body", "initial", "trailer", "native-trailer"):
+                with self.subTest(kind=kind):
+                    doc = runtime_document()
+                    doc["target"]["message"] = {"value": kind}
+                    doc["target"]["assertions"] = [{"assertion_id": "status", "kind": "grpc_status_equals",
+                                                   "expected": "RESOURCE_EXHAUSTED"}]
+                    with self.assertRaises(ValidationTransportError):
+                        self.execute(doc=doc, endpoint=endpoint)
+                    self.assertEqual(self.rows()[-1]["status"], "outcome_unknown")
+            doc["target"]["message"] = {"value": "peer"}
+            result = self.execute(doc=doc, endpoint=endpoint)
+            self.assertTrue(result.signal_observed)
+            self.assertEqual(self.rows()[-1]["status"], "completed")
+            self.assertNotIn(diagnostic, result.model_dump_json())
+
+    def test_deserialized_body_lost_by_final_error_is_incomplete_capture(self):
+        class DroppedResponse(ScriptedChannel):
+            def with_call(self, *args, **kwargs):
+                self.deserializer(self.response)
+                raise ScriptedRpcError(grpc.StatusCode.RESOURCE_EXHAUSTED)
+        channel = DroppedResponse()
+        with self.assertRaises(ValidationTransportError):
+            self.execute(channel)
+        self.assertTrue(channel.closed)
+        self.assertEqual(self.rows()[-1]["status"], "outcome_unknown")
+
+    def test_loopback_repeated_trailers_match_any_exact_occurrence_and_preserve_order(self):
+        from aidast.validation.contracts.grpc_contract import GrpcRuntimeContract
+        loaded = GrpcRuntimeContract.model_validate(runtime_document()).target.load(None)
+        def handler(request, context):
+            context.set_trailing_metadata((("x-tag", "first"), ("x-tag", "second")))
+            return loaded.response_class(value="target")
+        with loopback_service(handler, loaded) as endpoint:
+            for expected, observed in (("first", True), ("second", True), ("absent", False)):
+                with self.subTest(expected=expected):
+                    doc = runtime_document()
+                    doc["target"]["assertions"].extend([
+                        {"assertion_id": "status", "kind": "grpc_status_equals", "expected": "OK"},
+                        {"assertion_id": "tag", "kind": "trailer_equals", "trailer": "x-tag", "expected": expected},
+                    ])
+                    result = self.execute(doc=doc, endpoint=endpoint)
+                    self.assertEqual(result.signal_observed, observed)
+                    self.assertEqual(self.rows()[-1]["status"], "completed")
+                    self.assertEqual([item["name"] for item in result.details["trailers"]], ["x-tag", "x-tag"])
+                    self.assertEqual([item["sha256"] for item in result.details["trailers"]],
+                        [hashlib.sha256(b"first").hexdigest(), hashlib.sha256(b"second").hexdigest()])
+                    self.assertNotIn("second", result.model_dump_json())
+
+    def test_loopback_private_any_round_trip_uses_descriptor_owning_pool(self):
+        from aidast.validation.contracts.grpc_contract import GrpcRuntimeContract
+        ds = descriptor_set()
+        ds.file[0].dependency.append("google/protobuf/any.proto")
+        ds.file[0].message_type[0].field.add(name="payload", number=2, type=11, label=1,
+                                          type_name=".google.protobuf.Any")
+        ds.file.add().ParseFromString(any_pb2.DESCRIPTOR.serialized_pb)
+        doc = runtime_document()
+        doc["target"]["descriptor"] = binary(ds.SerializeToString())
+        doc["target"]["message"] = {"payload": {
+            "@type": "type.googleapis.com/fixture.Message", "value": "private-marker"}}
+        doc["target"]["assertions"] = [{"assertion_id": "nested", "kind": "protobuf_path_equals",
+                                         "path": ["payload", "value"], "expected": "private-marker"}]
+        loaded = GrpcRuntimeContract.model_validate(doc).target.load(None)
+        with loopback_service(lambda request, context: request, loaded) as endpoint:
+            result = self.execute(doc=doc, endpoint=endpoint)
+        self.assertTrue(result.signal_observed)
+        self.assertNotIn("private-marker", result.model_dump_json())
+        with self.assertRaises(KeyError):
+            descriptor_pool.Default().FindMessageTypeByName("fixture.Message")

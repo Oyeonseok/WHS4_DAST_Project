@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import re
 import sqlite3
 import time
 from pathlib import Path
@@ -15,7 +14,7 @@ from aidast.recon.policy import TargetPolicy
 from ..contracts.binary import BinaryArtifactResolver, BinaryArtifactUnavailable
 from ..contracts.grpc_contract import (
     GrpcRuntimeContract, bounded_metadata, endpoint_authority, evaluate_grpc_response,
-    valid_credential_references,
+    valid_credential_references, bounded_response_metadata,
 )
 from ..contracts.models import BlindCase, ReproductionObservation, canonical_json, canonical_sha256
 from ..persistence.evidence_policy import sanitize_metadata
@@ -23,6 +22,13 @@ from .credentials import PipelineCredentialResolver
 from .transport_broker import (
     TransportDispatchResult, TransportOperationSpec, ValidationTransportBroker, ValidationTransportError,
 )
+
+
+# Native safety ceilings have finite headroom above all permitted application
+# captures (1,000,000 body bytes and 32,768 metadata bytes). The adapter enforces
+# the tighter contract limits on delivered data, without interpreting peer text.
+_NATIVE_BODY_BYTES = 1_048_576
+_NATIVE_METADATA_BYTES = 65_536
 
 
 class GrpcSessionError(ValidationTransportError):
@@ -151,25 +157,29 @@ class GrpcReproductionPort:
             raise
 
         def dispatch(timeout):
-            channel, raw_response, capture_failed = None, None, False
+            channel, raw_response, captured_response, capture_failed = None, None, None, False
 
             def deserialize(value):
-                nonlocal raw_response, capture_failed
+                nonlocal raw_response, captured_response, capture_failed
                 try:
+                    if raw_response is not None:
+                        raise ValueError("gRPC unary response repeated")
                     response = loaded.deserialize_response(value)
                 except Exception:
                     capture_failed = True
                     raise
                 raw_response = value
+                captured_response = response
                 return response
 
             try:
                 remaining()
                 channel = self.channel_factory(attempt.endpoint, options=(
                     ("grpc.enable_http_proxy", 0), ("grpc.enable_retries", 0),
-                    ("grpc.max_receive_message_length", attempt.max_response_bytes),
+                    ("grpc.max_receive_message_length", _NATIVE_BODY_BYTES),
                     ("grpc.max_send_message_length", attempt.max_request_bytes),
-                    ("grpc.max_metadata_size", 32_768),
+                    ("grpc.max_metadata_size", _NATIVE_METADATA_BYTES),
+                    ("grpc.absolute_max_metadata_size", _NATIVE_METADATA_BYTES),
                 ))
                 unary = channel.unary_unary(loaded.method_path, request_serializer=lambda value: value,
                                             response_deserializer=deserialize)
@@ -182,18 +192,18 @@ class GrpcReproductionPort:
                 code, trailers, detail = call.code(), call.trailing_metadata(), call.details()
                 if not isinstance(code, grpc.StatusCode):
                     raise ValueError
-                # The official receive cap can reject a message before the
-                # deserializer runs. Its bounded public diagnostic identifies a
-                # local capture failure, not application status evidence.
-                local_receive_overflow = (code is grpc.StatusCode.RESOURCE_EXHAUSTED
-                    and isinstance(detail, str) and re.search(
-                        r"CLIENT: Received message larger than max \(\d+ vs\. \d+\)", detail) is not None)
-                if capture_failed or local_receive_overflow:
+                bounded_response_metadata(call.initial_metadata())
+                if capture_failed or (raw_response is not None and response is not captured_response):
                     raise ValueError
                 if code is grpc.StatusCode.OK and (response is None or raw_response is None):
                     raise ValueError
                 if code is not grpc.StatusCode.OK and response is not None:
                     raise ValueError
+                # Public grpcio results do not expose rejection provenance past
+                # the native ceilings. A trailer-only peer error and a native
+                # rejection before capture can have identical public call state.
+                # Only delivered captures and their local consistency establish
+                # the boundary here; details/debug strings cannot prove origin.
                 evaluation = evaluate_grpc_response(
                     status=code.name, response=response, trailers=trailers, error_detail=detail,
                     duration_ms=(self.clock() - started) * 1000, response_bytes=raw_response or b"",

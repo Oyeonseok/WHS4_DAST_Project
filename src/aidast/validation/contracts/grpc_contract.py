@@ -246,6 +246,27 @@ class GrpcRuntimeContract(_GrpcContract):
         return getattr(self, attempt_kind)
 
 
+def bounded_response_metadata(value: object) -> tuple[tuple[str, str | bytes], ...]:
+    """Keep ordered repeated metadata entries while bounding the complete capture."""
+    if not isinstance(value, (tuple, list)) or len(value) > 32:
+        raise ValueError("gRPC response metadata invalid or incomplete")
+    entries, total = [], 0
+    for entry in value:
+        if not isinstance(entry, (tuple, list)) or len(entry) != 2:
+            raise ValueError("gRPC response metadata invalid")
+        name, content = entry
+        if (type(name) is not str or not 1 <= len(name) <= 256
+                or _METADATA_NAME.fullmatch(name) is None
+                or type(content) is not (bytes if name.endswith("-bin") else str)):
+            raise ValueError("gRPC response metadata invalid")
+        raw = content if isinstance(content, bytes) else content.encode("utf-8")
+        total += len(name) + len(raw)
+        if len(raw) > 16_384 or total > 32_768:
+            raise ValueError("gRPC response metadata exceeds byte limit")
+        entries.append((name, content))
+    return tuple(entries)
+
+
 def evaluate_grpc_response(*, status: str, response: Any, trailers: object,
                            error_detail: str, duration_ms: float, response_bytes: bytes,
                            assertions: tuple[GrpcAssertion, ...]) -> dict:
@@ -255,26 +276,17 @@ def evaluate_grpc_response(*, status: str, response: Any, trailers: object,
     if (status not in STATUS_NAMES or type(error_detail) is not str
             or len(error_detail.encode("utf-8")) > 16_384
             or type(response_bytes) is not bytes or len(response_bytes) > MAX_BYTES
-            or not math.isfinite(duration_ms) or duration_ms < 0
-            or not isinstance(trailers, (tuple, list)) or len(trailers) > 32):
+            or not math.isfinite(duration_ms) or duration_ms < 0):
         raise ValueError("gRPC response metadata invalid or incomplete")
-    values, metadata, total = {}, [], 0
-    for entry in trailers:
-        if not isinstance(entry, (tuple, list)) or len(entry) != 2:
-            raise ValueError("gRPC trailers invalid")
-        name, value = entry
-        if (type(name) is not str or not 1 <= len(name) <= 256
-                or _METADATA_NAME.fullmatch(name) is None or name in values
-                or type(value) is not (bytes if name.endswith("-bin") else str)):
-            raise ValueError("gRPC trailers invalid")
+    entries = bounded_response_metadata(trailers)
+    metadata = []
+    for name, value in entries:
         raw = value if isinstance(value, bytes) else value.encode("utf-8")
-        total += len(name) + len(raw)
-        if len(raw) > 16_384 or total > 32_768:
-            raise ValueError("gRPC trailers exceed byte limit")
-        values[name] = value
         if not is_sensitive_header(name) and not _SENSITIVE_METADATA.search(name) and not name.startswith("grpc-"):
             metadata.append({"name": name, "length": len(raw), "sha256": hashlib.sha256(raw).hexdigest()})
-    message = MessageToDict(response, preserving_proto_field_name=True) if response is not None else None
+    message = (MessageToDict(response, preserving_proto_field_name=True,
+                             descriptor_pool=response.DESCRIPTOR.file.pool)
+               if response is not None else None)
     results = []
     for assertion in assertions:
         actual = _MISSING
@@ -283,7 +295,9 @@ def evaluate_grpc_response(*, status: str, response: Any, trailers: object,
         elif assertion.kind == "protobuf_path_equals" and message is not None:
             actual = _json_path(message, assertion.path)
         elif assertion.kind == "trailer_equals":
-            actual = values.get(assertion.trailer.lower(), _MISSING)
+            # A repeated trailer assertion matches any one exact occurrence.
+            actual = (assertion.expected if any(name == assertion.trailer.lower() and value == assertion.expected
+                                               for name, value in entries) else _MISSING)
         elif assertion.kind == "error_detail_contains":
             actual = assertion.expected if assertion.expected in error_detail else _MISSING
         elif assertion.kind.startswith("duration_"):
