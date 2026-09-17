@@ -1,6 +1,7 @@
 # Python
 __pycache__/
 *.pyc
+.pytest_cache/
 .venv/
 *.egg-info/
 
@@ -9,8 +10,17 @@ __pycache__/
 
 # 로컬 로그인 세션 / 브라우저 프로필 (실제 쿠키·JWT 토큰 포함 - 절대 커밋 금지)
 .aidast_sessions/
+.tmp-cdp-profile*/
 
 # 정찰 실행 산출물 (재실행마다 새로 생기는 로컬 데이터)
+result/
+/Scope/
+/Runs/
+/AttackRuns/
+/ValidationRuns/
+/ReportRuns/
+Recon.db
+Report.db
 recon_juiceshop.db
 recon_juiceshop.db-wal
 recon_juiceshop.db-shm
@@ -24,14 +34,5 @@ scope_rules_*.json
 .DS_Store
 .vscode/
 
-# 통합 파이프라인 로컬 입력·실행 산출물
-/Scope/
-Runs/
-AttackRuns/
-ValidationRuns/
-ReportRuns/
-dist/
-*.db
-*.db-wal
-*.db-shm
-*-surface*.json
+# Local pre-migration database backups
+.aidast_db_backups/
