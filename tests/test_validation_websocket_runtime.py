@@ -213,11 +213,15 @@ class WebSocketAdapterTests(unittest.TestCase):
             self.fail("bounded WebSocket adapter is not implemented")
 
     def execute(self, connector=None, *, document=None, endpoint="ws://127.0.0.1/items",
+                source_endpoint=None,
                 attempt_kind="target", policy=None, credentials=(), **options):
         doc = document or runtime_document()
         for name in ("target", "positive_control", "negative_control"):
             doc[name]["endpoint"] = endpoint
-        blind = self.blind.model_copy(update={"endpoint": endpoint, "credential_references": credentials,
+        if source_endpoint is None:
+            source_endpoint = endpoint.replace("wss://", "https://", 1).replace("ws://", "http://", 1)
+        blind = self.blind.model_copy(update={"endpoint": source_endpoint,
+                                             "credential_references": credentials,
                                              "runtime_contract": doc})
         policy = policy or self.policy.model_copy(update={
             "allowed_schemes": ["http"], "allowed_hosts": ["127.0.0.1"],
@@ -230,6 +234,43 @@ class WebSocketAdapterTests(unittest.TestCase):
 
     def rows(self):
         return self.conn.execute("SELECT operation_kind,status,concurrency_units,result_json,error_message FROM validation_transport_operations ORDER BY scheduled_at").fetchall()
+
+    def test_http_source_identity_bridges_to_exact_websocket_transport_endpoint(self):
+        captured = []
+        connection = ScriptedConnection(['{"message":"target"}'])
+
+        def connector(endpoint, **kwargs):
+            captured.append(endpoint)
+            return connection
+
+        result = self.execute(
+            connector,
+            endpoint="ws://127.0.0.1/items?room=1",
+            source_endpoint="http://127.0.0.1/items?room=1",
+        )
+
+        self.assertTrue(result.signal_observed)
+        self.assertEqual(captured, ["ws://127.0.0.1/items?room=1"])
+
+    def test_websocket_source_bridge_rejects_destination_differences(self):
+        for source_endpoint in (
+            "http://127.0.0.2/items?room=1",
+            "http://127.0.0.1/other?room=1",
+            "http://127.0.0.1/items?room=2",
+            "https://127.0.0.1/items?room=1",
+        ):
+            with self.subTest(source_endpoint=source_endpoint):
+                doc = runtime_document()
+                for name in ("target", "positive_control", "negative_control"):
+                    doc[name]["endpoint"] = "ws://127.0.0.1/items?room=1"
+                blind = self.blind.model_copy(update={
+                    "endpoint": source_endpoint,
+                    "runtime_contract": doc,
+                })
+                self.assertEqual(
+                    self.port_class()().unsupported_reason(blind),
+                    "websocket_endpoint_mismatch",
+                )
 
     def test_policy_rejection_precedes_connector_and_resolver(self):
         calls = []

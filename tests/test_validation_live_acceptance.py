@@ -8,20 +8,30 @@ import sqlite3
 import tempfile
 import threading
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from unittest.mock import patch
 
+import grpc
+from websockets.sync.server import serve
+
+from aidast.attack.db_cli import commit_finding
 from aidast.pipeline.lifecycle import create_task, finish_stage_run, start_stage_run, transition_task
+from aidast.pipeline.live_schema import migrate_live_pipeline_schema
 from aidast.recon import db
 from aidast.recon.policy import PolicyLimits, TargetPolicy, ToolPolicy
 from aidast.scope.models import AssetType
 from aidast.validation import (
     ClaimComparison,
+    SkillProfileResolver,
     build_native_validation_coordinator,
     canonical_reproduction_spec,
     canonical_sha256,
     validate_runtime_contract,
 )
+
+from test_attack_cli import AttackCliTests
 
 
 class _ObjectHandler(BaseHTTPRequestHandler):
@@ -112,6 +122,198 @@ class ValidationLiveAcceptanceTests(unittest.TestCase):
         self.port = self.server.server_address[1]
         self.base_url = f"http://127.0.0.1:{self.port}"
 
+    def _run_staged_protocol(self, *, runtime_kind, skill_name, base_url, method,
+                             runtime, policy, expected_status="CONFIRMED",
+                             **native_resources):
+        protocol_root = self.root / runtime_kind
+        protocol_root.mkdir()
+        database, payload, _ = AttackCliTests.protocol_finding_fixture(
+            protocol_root, runtime_kind=runtime_kind, skill_name=skill_name,
+            base_url=base_url, method=method, policy_id=policy.policy_id,
+            policy_sha256=canonical_sha256(policy.model_dump(mode="json")),
+        )
+        finding = json.loads(payload.read_text(encoding="utf-8"))
+        finding["reproduction"]["runtime_contract"] = runtime
+        payload.write_text(json.dumps(finding), encoding="utf-8")
+        resolved = SkillProfileResolver().resolve(skill_name)
+        profile_document = resolved.profile.model_dump()
+        profile_document["runtime_kinds"] = (runtime_kind,)
+        compatible = resolved.model_copy(update={
+            "profile": type(resolved.profile).model_validate(profile_document),
+        })
+        policy_path = protocol_root / "TargetPolicy.json"
+        policy_path.write_text(json.dumps({
+            "policies": [policy.model_dump(mode="json")],
+        }), encoding="utf-8")
+
+        with patch(
+            "aidast.validation.core.profiles.SkillProfileResolver.resolve",
+            return_value=compatible,
+        ):
+            commit_finding(database, "scan", payload)
+            with db.connect(database) as conn:
+                transition_task(conn, "task", status="completed")
+                finish_stage_run(conn, "attack")
+                chain = start_stage_run(
+                    conn, scan_id="scan", stage="chaining", stage_run_id="chain",
+                )
+                finish_stage_run(conn, chain, status="skipped")
+            coordinator = build_native_validation_coordinator(
+                db_path=database, policy_path=policy_path, **native_resources,
+            )
+            coordinator.agent = _AcceptanceAgent()
+            result = coordinator.run("scan")
+
+        with sqlite3.connect(database) as verified:
+            case_status, decision_json = verified.execute(
+                "SELECT current_status,decision_json FROM validation_cases"
+            ).fetchone()
+            attempts = verified.execute(
+                "SELECT count(*) FROM validation_attempts WHERE finished_at IS NOT NULL"
+            ).fetchone()[0]
+            operations = verified.execute(
+                "SELECT count(*),sum(status='completed') "
+                "FROM validation_transport_operations WHERE runtime_kind=?",
+                (runtime_kind,),
+            ).fetchone()
+        self.assertEqual(
+            result.summary["statuses"], {expected_status: 1}, decision_json,
+        )
+        self.assertEqual(case_status, expected_status)
+        self.assertEqual(attempts, 5 if expected_status == "CONFIRMED" else 0)
+        self.assertEqual(operations[0], operations[1] or 0)
+        return operations[0]
+
+    def test_real_attack_staging_reaches_native_websocket_coordinator(self):
+        received = []
+
+        def handler(connection):
+            message = connection.recv()
+            received.append(message)
+            connection.send(message)
+
+        server = serve(handler, "127.0.0.1", 0)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(lambda: (server.shutdown(), thread.join(timeout=2)))
+        port = server.socket.getsockname()[1]
+        base_url = f"http://127.0.0.1:{port}"
+        contract_endpoint = f"ws://127.0.0.1:{port}/items"
+        runtime = AttackCliTests.protocol_runtime("websocket")
+        for name in ("target", "positive_control", "negative_control"):
+            runtime[name]["endpoint"] = contract_endpoint
+        runtime["positive_control"]["frames"] = runtime["target"]["frames"]
+        policy = TargetPolicy(
+            asset_type=AssetType.URL, asset=f"{base_url}/items",
+            allowed_schemes=["http"], allowed_hosts=["127.0.0.1"],
+            allowed_ports=[port], allowed_path_prefixes=["/items"],
+            allowed_methods=["GET"], limits=PolicyLimits(requests_per_second=50),
+            tools=ToolPolicy(), scope_id="ws-scope", policy_id="ws-policy",
+        )
+
+        operation_count = self._run_staged_protocol(
+            runtime_kind="websocket", skill_name="hunt-websocket",
+            base_url=base_url, method="GET", runtime=runtime, policy=policy,
+        )
+
+        self.assertEqual(operation_count, 10)
+        self.assertEqual(len(received), 5)
+
+    def test_real_attack_staging_reaches_native_grpc_coordinator(self):
+        runtime = AttackCliTests.protocol_runtime("grpc")
+        validated = validate_runtime_contract(runtime)
+        loaded = validated.target.load(None)
+        received = []
+
+        def handler(request, context):
+            received.append(request.value)
+            return request
+
+        server = grpc.server(ThreadPoolExecutor(max_workers=2))
+        server.add_generic_rpc_handlers((grpc.method_handlers_generic_handler(
+            "fixture.Echo", {
+                "Unary": grpc.unary_unary_rpc_method_handler(
+                    handler,
+                    request_deserializer=loaded.response_class.FromString,
+                    response_serializer=lambda response: response.SerializeToString(),
+                ),
+            },
+        ),))
+        port = server.add_insecure_port("127.0.0.1:0")
+        server.start()
+        self.addCleanup(lambda: server.stop(0).wait())
+        base_url = f"http://127.0.0.1:{port}"
+        for name in ("target", "positive_control", "negative_control"):
+            runtime[name]["endpoint"] = base_url
+        runtime["positive_control"]["message"] = runtime["target"]["message"]
+        policy = TargetPolicy(
+            asset_type=AssetType.URL, asset=f"{base_url}/items",
+            allowed_schemes=["http"], allowed_hosts=["127.0.0.1"],
+            allowed_ports=[port], allowed_path_prefixes=["/items"],
+            allowed_methods=["POST"], attack_allowed_methods=["POST"],
+            attack_authorization_mode="active_non_destructive",
+            attack_authorization_evidence="Bounded loopback unary fixture.",
+            limits=PolicyLimits(requests_per_second=50), tools=ToolPolicy(),
+            scope_id="grpc-scope", policy_id="grpc-policy",
+        )
+
+        operation_count = self._run_staged_protocol(
+            runtime_kind="grpc", skill_name="hunt-grpc",
+            base_url=base_url, method="POST", runtime=runtime, policy=policy,
+        )
+
+        self.assertEqual(operation_count, 5)
+        self.assertEqual(len(received), 5)
+
+    def test_real_staging_rejects_incompatible_protocol_destinations_before_dispatch(self):
+        for runtime_kind, skill_name, method, contract_endpoint, resource_name in (
+            (
+                "websocket", "hunt-websocket", "GET",
+                f"ws://127.0.0.1:{self.port}/different",
+                "websocket_connector",
+            ),
+            (
+                "grpc", "hunt-grpc", "POST",
+                "http://127.0.0.1:1",
+                "grpc_channel_factory",
+            ),
+        ):
+            with self.subTest(runtime_kind=runtime_kind):
+                runtime = AttackCliTests.protocol_runtime(runtime_kind)
+                for name in ("target", "positive_control", "negative_control"):
+                    runtime[name]["endpoint"] = contract_endpoint
+                if runtime_kind == "websocket":
+                    runtime["positive_control"]["frames"] = runtime["target"]["frames"]
+                else:
+                    runtime["positive_control"]["message"] = runtime["target"]["message"]
+                policy = TargetPolicy(
+                    asset_type=AssetType.URL, asset=f"{self.base_url}/items",
+                    allowed_schemes=["http"], allowed_hosts=["127.0.0.1"],
+                    allowed_ports=[self.port], allowed_path_prefixes=["/items"],
+                    allowed_methods=[method],
+                    attack_allowed_methods=[method],
+                    attack_authorization_mode=(
+                        "active_non_destructive" if method == "POST" else "read_only"
+                    ),
+                    attack_authorization_evidence=(
+                        "Bounded loopback unary fixture." if method == "POST" else None
+                    ),
+                    limits=PolicyLimits(requests_per_second=50), tools=ToolPolicy(),
+                    scope_id=f"{runtime_kind}-mismatch-scope",
+                    policy_id=f"{runtime_kind}-mismatch-policy",
+                )
+                calls = []
+
+                operation_count = self._run_staged_protocol(
+                    runtime_kind=runtime_kind, skill_name=skill_name,
+                    base_url=self.base_url, method=method, runtime=runtime,
+                    policy=policy, expected_status="INCONCLUSIVE",
+                    **{resource_name: lambda *args, **kwargs: calls.append(args)},
+                )
+
+                self.assertEqual(operation_count, 0)
+                self.assertEqual(calls, [])
+
     def test_native_http_pipeline_confirms_only_with_clear_live_negative_control(self):
         database = self.root / "Pipeline.db"
         policy_path = self.root / "TargetPolicy.json"
@@ -133,6 +335,7 @@ class ValidationLiveAcceptanceTests(unittest.TestCase):
         }), encoding="utf-8")
 
         conn = db.init_db(database)
+        migrate_live_pipeline_schema(conn)
         db.insert_scan(
             conn, scan_id="acceptance-scan", scope_type="test",
             scope_value="local-live-target",

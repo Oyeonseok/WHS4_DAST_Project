@@ -91,7 +91,7 @@ class WebSocketReproductionPort:
             return "websocket_runtime_contract_missing"
         try:
             runtime = WebSocketRuntimeContract.model_validate(blind_case.runtime_contract)
-            if any(attempt.endpoint != blind_case.endpoint for attempt in
+            if any(policy_url(attempt.endpoint) != blind_case.endpoint for attempt in
                    (runtime.target, runtime.positive_control, runtime.negative_control)):
                 return "websocket_endpoint_mismatch"
         except ValueError:

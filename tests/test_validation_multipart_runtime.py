@@ -285,9 +285,9 @@ class _ParsedHttpResponse:
 class MultipartAdapterSafetyTests(unittest.TestCase):
     setUp = request_fixture.ValidationRequestBrokerTests.setUp
 
-    def blind_with_runtime(self, runtime):
+    def blind_with_runtime(self, runtime, *, credentials=()):
         return self.blind.model_copy(update={
-            "endpoint": "https://test/items", "credential_references": (),
+            "endpoint": "https://test/items", "credential_references": credentials,
             "runtime_contract": runtime.model_dump(mode="json"),
         })
 
@@ -305,9 +305,10 @@ class MultipartAdapterSafetyTests(unittest.TestCase):
             target=document, positive_control=attempt("baseline"), negative_control=attempt("inert"),
         )
 
-    def execute(self, runtime, transport, **port_options):
+    def execute(self, runtime, transport, *, credentials=(), **port_options):
         return MultipartReproductionPort(transport=transport, **port_options).execute(
-            self.blind_with_runtime(runtime), attempt_kind="target", batch_no=1, ordinal=1,
+            self.blind_with_runtime(runtime, credentials=credentials),
+            attempt_kind="target", batch_no=1, ordinal=1,
             attempt_id="attempt", db_path=self.path, scan_id="scan", stage_run_id="stage",
             case_id="case", policy=self.policy,
         )
@@ -338,6 +339,58 @@ class MultipartAdapterSafetyTests(unittest.TestCase):
         self.assertIn("content-length", captured[0])
         self.assertNotIn("transfer-encoding", captured[0])
         self.assertNotIn("trailer", captured[0])
+
+    def test_opaque_credential_reference_resolves_before_reservation_and_dispatch(self):
+        captured = []
+
+        def credential(reference):
+            self.assertEqual(reference, "opaque")
+            self.assertEqual(self.conn.execute(
+                "SELECT count(*) FROM validation_transport_operations"
+            ).fetchone()[0], 0)
+            return {"Authorization": "Bearer private-marker"}
+
+        def transport(request, timeout):
+            captured.append({name.casefold(): value for name, value in request.header_items()})
+            return _ScriptedResponse(request.full_url, [b"uploaded", b""])
+
+        result = self.execute(
+            self.runtime(), transport, credentials=("opaque",),
+            credential_resolver=credential,
+        )
+
+        self.assertTrue(result.signal_observed)
+        self.assertEqual(captured[0]["authorization"], "Bearer private-marker")
+        stored = self.conn.execute(
+            "SELECT result_json FROM validation_transport_operations"
+        ).fetchone()[0]
+        self.assertNotIn("private-marker", stored + result.model_dump_json())
+
+    def test_unavailable_or_invalid_credentials_block_before_reservation_and_dispatch(self):
+        def unavailable(reference):
+            raise ValueError("private-marker")
+
+        for resolver in (
+            None,
+            unavailable,
+            lambda reference: {"Authorization": 123},
+            lambda reference: {"Authorization": "Bearer ☃"},
+            lambda reference: {"Host": "elsewhere"},
+            lambda reference: {"x-inert": "override"},
+        ):
+            with self.subTest(resolver=resolver):
+                calls = []
+                result = self.execute(
+                    self.runtime(), lambda request, timeout: calls.append(request),
+                    credentials=("opaque",), credential_resolver=resolver,
+                )
+                self.assertEqual(result.outcome, "blocked")
+                self.assertEqual(result.details, {"reason": "credential_reference_unavailable"})
+                self.assertNotIn("private-marker", result.model_dump_json())
+                self.assertFalse(calls)
+                self.assertEqual(self.conn.execute(
+                    "SELECT count(*) FROM validation_transport_operations"
+                ).fetchone()[0], 0)
 
     def test_exact_bound_response_is_indeterminate_without_extra_read(self):
         response = _ScriptedResponse("https://test/items", [b" " * 200_000, b""])

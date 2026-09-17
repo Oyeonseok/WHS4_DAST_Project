@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import sqlite3
 import time
 from pathlib import Path
 from typing import Callable
@@ -16,6 +17,7 @@ from ..contracts.binary import BinaryArtifactResolver, BinaryArtifactUnavailable
 from ..contracts.models import BlindCase, ReproductionObservation
 from ..contracts.multipart_contract import MultipartRuntimeContract, encode_multipart
 from ..contracts.runtime_contract import evaluate_http_response
+from .credentials import PipelineCredentialResolver
 from .transport_broker import (
     TransportDispatchResult, TransportOperationSpec, ValidationTransportBroker,
     ValidationTransportError,
@@ -24,6 +26,11 @@ from .transport_broker import (
 
 _MAX_RESPONSE_BYTES = 200_000
 _RESPONSE_READ_CHUNK_BYTES = 65_536
+_ADAPTER_OWNED_HEADERS = frozenset({
+    "content-type", "content-length", "content-disposition", "transfer-encoding",
+    "trailer", "host", "connection", "keep-alive", "upgrade", "te", "expect",
+    "proxy-connection",
+})
 
 
 class MultipartResponseIncompleteError(ValidationTransportError):
@@ -41,9 +48,11 @@ class MultipartReproductionPort:
     requires_request_ledger = True
 
     def __init__(self, *, artifact_resolver: BinaryArtifactResolver | None = None,
+                 credential_resolver: Callable | None = None,
                  transport: Callable | None = None,
                  clock: Callable[[], float] = time.monotonic):
         self.artifact_resolver = artifact_resolver
+        self.credential_resolver = credential_resolver
         self.transport = transport or build_opener(_NoRedirect()).open
         self.clock = clock
 
@@ -52,8 +61,6 @@ class MultipartReproductionPort:
             return "multipart_adapter_does_not_support_chain"
         if (blind_case.runtime_contract or {}).get("runtime_kind") != "multipart":
             return "multipart_runtime_contract_missing"
-        if blind_case.credential_references:
-            return "multipart_runtime_does_not_support_credentials"
         try:
             MultipartRuntimeContract.model_validate(blind_case.runtime_contract)
         except ValueError:
@@ -67,6 +74,31 @@ class MultipartReproductionPort:
             blocker_axis="encoding_transport", details={"reason": "artifact_unavailable"},
             content_sha256=hashlib.sha256(b"").hexdigest(), content_length=0,
         )
+
+    @staticmethod
+    def _blocked(blind_case: BlindCase, reason: str, *, policy_allowed: bool = True,
+                 blocker_axis: str | None = None) -> ReproductionObservation:
+        return ReproductionObservation(
+            outcome="blocked", signal_type=blind_case.signal_types[0], signal_observed=False,
+            blocker_axis=blocker_axis, details={"reason": reason},
+            content_sha256=hashlib.sha256(b"").hexdigest(), content_length=0,
+            policy_allowed=policy_allowed,
+        )
+
+    @staticmethod
+    def _merge_credential_headers(headers: dict[str, str], raw: object) -> dict[str, str]:
+        resolved = PipelineCredentialResolver._headers(raw)
+        names = {name.casefold() for name in headers}
+        resolved_names = [name.casefold() for name in resolved]
+        caller_names = names - _ADAPTER_OWNED_HEADERS
+        if (len(resolved_names) != len(set(resolved_names))
+                or names.intersection(resolved_names)
+                or any(name in _ADAPTER_OWNED_HEADERS for name in resolved_names)
+                or len(caller_names | set(resolved_names)) > 32
+                or any(any(not 32 <= ord(char) <= 126 for char in value)
+                       for value in resolved.values())):
+            raise ValueError("multipart credential headers invalid")
+        return headers | resolved
 
     @staticmethod
     def _is_pre_dispatch_policy_or_budget_error(error: ValidationTransportError) -> bool:
@@ -143,6 +175,24 @@ class MultipartReproductionPort:
             url, headers, body = encode_multipart(attempt, blind_case.endpoint, self.artifact_resolver)
         except BinaryArtifactUnavailable:
             return self._artifact_blocked(blind_case)
+        if not policy.allows_validation_url(url, method=blind_case.method):
+            return self._blocked(
+                blind_case, "current_policy_rejected", policy_allowed=False,
+            )
+        for reference in blind_case.credential_references:
+            if self.credential_resolver is None:
+                return self._blocked(
+                    blind_case, "credential_reference_unavailable", blocker_axis="identity_auth",
+                )
+            try:
+                raw_headers = self.credential_resolver(reference)
+                headers = self._merge_credential_headers(headers, raw_headers)
+            except (ImportError, OSError, KeyError, ValueError, sqlite3.Error):
+                return self._blocked(
+                    blind_case, "credential_reference_unavailable", blocker_axis="identity_auth",
+                )
+            except Exception:
+                raise ValidationTransportError("multipart credential resolution failed") from None
         broker = ValidationTransportBroker(
             db_path=db_path, scan_id=scan_id, stage_run_id=stage_run_id, case_id=case_id,
             attempt_id=attempt_id, blind_case=blind_case, policy=policy,
@@ -185,11 +235,8 @@ class MultipartReproductionPort:
         except ValidationTransportError as exc:
             if not self._is_pre_dispatch_policy_or_budget_error(exc):
                 raise
-            return ReproductionObservation(
-                outcome="blocked", signal_type=blind_case.signal_types[0], signal_observed=False,
-                details={"reason": "current_policy_rejected"},
-                content_sha256=hashlib.sha256(b"").hexdigest(), content_length=0,
-                policy_allowed=False,
+            return self._blocked(
+                blind_case, "current_policy_rejected", policy_allowed=False,
             )
         started = self.clock()
         operation_id, response = broker.dispatch_reserved(reservation, sender)

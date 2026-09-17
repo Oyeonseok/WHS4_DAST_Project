@@ -75,7 +75,8 @@ def build_native_validation_coordinator(
         ),
         multipart=_optional_adapter(
             "aidast.validation.execution.multipart_adapter", "MultipartReproductionPort",
-            artifact_resolver=artifact_resolver, transport=multipart_transport,
+            artifact_resolver=artifact_resolver, credential_resolver=resolver,
+            transport=multipart_transport,
         ),
         websocket=_optional_adapter(
             "aidast.validation.execution.websocket_adapter", "WebSocketReproductionPort",
@@ -85,7 +86,13 @@ def build_native_validation_coordinator(
         ),
         grpc=_optional_adapter(
             "aidast.validation.execution.grpc_adapter", "GrpcReproductionPort",
-            dependencies=("grpc", "google.protobuf"),
+            dependencies=(
+                "grpc",
+                "google.protobuf.descriptor_pb2",
+                "google.protobuf.descriptor_pool",
+                "google.protobuf.json_format",
+                "google.protobuf.message_factory",
+            ),
             channel_factory=grpc_channel_factory, credential_resolver=resolver,
             artifact_resolver=artifact_resolver,
         ),

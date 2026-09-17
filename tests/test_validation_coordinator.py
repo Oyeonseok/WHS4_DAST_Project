@@ -804,6 +804,7 @@ class ValidationCoordinatorTests(unittest.TestCase):
 
         self.assertIsInstance(router.multipart, MultipartReproductionPort)
         self.assertIs(router.multipart.transport, multipart_transport)
+        self.assertIs(router.multipart.credential_resolver, resolver)
         self.assertIs(router.multipart.artifact_resolver, artifact_resolver)
         self.assertIsInstance(router.websocket, WebSocketReproductionPort)
         self.assertIs(router.websocket.connector, websocket_connector)
@@ -887,6 +888,43 @@ class ValidationCoordinatorTests(unittest.TestCase):
             )),
             "grpc_adapter_unavailable",
         )
+
+    def test_native_builder_rejects_missing_lazy_protobuf_component_before_advertising_grpc(self):
+        policy_path = Path(self.temp.name) / "TargetPolicy.json"
+        policy_path.write_text(json.dumps({
+            "policies": [self.policy.model_dump(mode="json")],
+        }), encoding="utf-8")
+        real_import_module = importlib.import_module
+
+        for missing in (
+            "google.protobuf.descriptor_pb2",
+            "google.protobuf.descriptor_pool",
+            "google.protobuf.json_format",
+            "google.protobuf.message_factory",
+        ):
+            with self.subTest(missing=missing):
+                def import_with_missing_component(name, package=None):
+                    if name == missing:
+                        raise ImportError("lazy protobuf component unavailable")
+                    return real_import_module(name, package)
+
+                with patch("importlib.import_module", side_effect=import_with_missing_component):
+                    coordinator = build_native_validation_coordinator(
+                        db_path=self.path, policy_path=policy_path,
+                    )
+
+                router = coordinator.reproduction
+                self.assertIsNotNone(router.http)
+                self.assertIsNotNone(router.multipart)
+                self.assertIsNotNone(router.websocket)
+                self.assertIsNone(router.grpc)
+                self.assertIsNotNone(router.concurrent)
+                self.assertEqual(
+                    router.unsupported_reason(SimpleNamespace(
+                        runtime_contract={"runtime_kind": "grpc"},
+                    )),
+                    "grpc_adapter_unavailable",
+                )
 
     def test_interrupted_native_development_is_not_redispatched_on_resume(self):
         from aidast.validation import DevelopmentRuntimeContract, canonical_sha256

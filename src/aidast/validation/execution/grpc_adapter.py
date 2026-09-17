@@ -7,7 +7,7 @@ import sqlite3
 import time
 from pathlib import Path
 from typing import Callable
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit
 
 from aidast.recon.policy import TargetPolicy
 
@@ -33,6 +33,15 @@ _NATIVE_METADATA_BYTES = 65_536
 
 class GrpcSessionError(ValidationTransportError):
     """A unary operation cannot establish a complete bounded observation."""
+
+
+def _source_origin(endpoint: str) -> str:
+    """Return the immutable HTTP(S) source origin without relaxing authority equality."""
+    parsed = urlsplit(endpoint)
+    if (parsed.scheme not in {"http", "https"} or not parsed.hostname
+            or parsed.username is not None or parsed.password is not None or parsed.fragment):
+        raise ValueError("gRPC source endpoint requires an HTTP(S) URL")
+    return urlunsplit((parsed.scheme, parsed.netloc, "", "", ""))
 
 
 def default_channel_factory(endpoint: str, *, options: tuple):
@@ -62,7 +71,7 @@ class GrpcReproductionPort:
             return "grpc_runtime_contract_missing"
         try:
             runtime = GrpcRuntimeContract.model_validate(blind_case.runtime_contract)
-            if any(attempt.endpoint != blind_case.endpoint for attempt in
+            if any(attempt.endpoint != _source_origin(blind_case.endpoint) for attempt in
                    (runtime.target, runtime.positive_control, runtime.negative_control)):
                 return "grpc_endpoint_mismatch"
         except ValueError:
@@ -86,9 +95,10 @@ class GrpcReproductionPort:
         runtime = GrpcRuntimeContract.model_validate(blind_case.runtime_contract)
         attempt = runtime.for_attempt(attempt_kind)
         url = f"{attempt.endpoint}/{attempt.service}/{attempt.method}"
+        policy_url = blind_case.endpoint
         # Trusted local resources are not consulted for out-of-policy targets.
         # Reserve below repeats the authorization alongside atomic budget checks.
-        if not policy.allows_validation_url(url, method="POST"):
+        if not policy.allows_validation_url(policy_url, method="POST"):
             return self._blocked(blind_case, "current_policy_rejected", policy_allowed=False)
         started = self.clock()
         deadline = started + min(attempt.deadline_seconds, policy.limits.timeout_seconds)
@@ -141,7 +151,8 @@ class GrpcReproductionPort:
             attempt_id=attempt_id, blind_case=blind_case, policy=policy, sleeper=paced_sleep,
         )
         spec = TransportOperationSpec(
-            runtime_kind="grpc", operation_kind="unary", destination=url, policy_url=url, method="POST",
+            runtime_kind="grpc", operation_kind="unary", destination=url,
+            policy_url=policy_url, method="POST",
             request_bytes=len(loaded.request_bytes), max_response_bytes=attempt.max_response_bytes,
             concurrency_units=1, metadata={"request_sha256": hashlib.sha256(loaded.request_bytes).hexdigest(),
                 "descriptor_sha256": attempt.descriptor.sha256, "descriptor_length": attempt.descriptor.length},

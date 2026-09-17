@@ -12,6 +12,7 @@ from contextlib import closing, redirect_stderr, redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
+from urllib.parse import urlsplit
 
 from aidast.cli import main
 from aidast.attack.db_cli import commit_finding
@@ -129,7 +130,9 @@ class AttackCliTests(unittest.TestCase):
         raise AssertionError(runtime_kind)
 
     @staticmethod
-    def protocol_finding_fixture(root, *, runtime_kind, skill_name):
+    def protocol_finding_fixture(root, *, runtime_kind, skill_name,
+                                 base_url="http://127.0.0.1", method="GET",
+                                 policy_id="policy", policy_sha256="b" * 64):
         database = root / "Attack.db"
         conn = db.init_db(database)
         migrate_live_pipeline_schema(conn)
@@ -140,13 +143,15 @@ class AttackCliTests(unittest.TestCase):
         asset = db.insert_asset(
             conn, scan_id="scan", identifier="127.0.0.1", asset_type="DOMAIN",
         )
+        parsed = urlsplit(base_url)
         origin = db.upsert_origin(
-            conn, asset_id=asset, scheme="http", host="127.0.0.1", port=80,
-            base_url="http://127.0.0.1",
+            conn, asset_id=asset, scheme=parsed.scheme, host=parsed.hostname,
+            port=parsed.port or (443 if parsed.scheme == "https" else 80),
+            base_url=base_url,
         )
         conn.execute(
             "INSERT INTO endpoints(endpoint_id,origin_id,method,normalized_path) "
-            "VALUES ('endpoint',?,'GET','/items')", (origin,),
+            "VALUES ('endpoint',?,?,'/items')", (origin, method),
         )
         stage = start_stage_run(conn, scan_id="scan", stage="attack", stage_run_id="attack")
         task = create_task(
@@ -163,9 +168,11 @@ class AttackCliTests(unittest.TestCase):
         conn.execute(
             """INSERT INTO attack_http_requests
                (request_id,scan_id,stage_run_id,task_id,policy_id,policy_sha256,method,url,
-                request_fingerprint,status,response_status,response_bytes,scheduled_at)
-               VALUES ('source','scan','attack','task','policy',?,'GET',?,?,'completed',200,2,0)""",
-            ("b" * 64, "http://127.0.0.1/items", "a" * 64),
+                request_fingerprint,status,response_status,response_bytes,scheduled_at,
+                authorization_source)
+               VALUES ('source','scan','attack','task',?,?,?,?,?,'completed',200,2,0,?)""",
+            (policy_id, policy_sha256, method, f"{base_url}/items", "a" * 64,
+             "scope_active_mutation" if method not in {"GET", "HEAD"} else None),
         )
         conn.commit()
         conn.close()
@@ -176,14 +183,14 @@ class AttackCliTests(unittest.TestCase):
             "vuln_type": "test", "severity": "LOW", "title": "Protocol fixture",
             "lead_attempt_ids": ["attempt"],
             "reproduction": {
-                "method": "GET", "endpoint_template": "/items",
+                "method": method, "endpoint_template": "/items",
                 "injection_location": "query", "parameter_name": "variant",
                 "payload_template": {"variant": "<slot:string>"},
                 "required_identity_roles": [], "source_request_ids": ["source"],
                 "runtime_contract": runtime,
             },
             "evidence": [{
-                "method": "GET", "url": "http://127.0.0.1/items",
+                "method": method, "url": f"{base_url}/items",
                 "response_status": 200, "response_body": "ok",
             }],
         }), encoding="utf-8")
@@ -402,9 +409,19 @@ class AttackCliTests(unittest.TestCase):
             database, payload, _ = self.protocol_finding_fixture(
                 Path(directory), runtime_kind="grpc", skill_name="hunt-grpc",
             )
+            resolved = SkillProfileResolver().resolve("hunt-grpc")
+            profile_document = resolved.profile.model_dump()
+            profile_document["runtime_kinds"] = ("multipart",)
+            incompatible = resolved.model_copy(update={
+                "profile": type(resolved.profile).model_validate(profile_document),
+            })
 
-            with self.assertRaisesRegex(ValueError, "runtime.*profile"):
-                commit_finding(database, "scan", payload)
+            with patch(
+                "aidast.validation.core.profiles.SkillProfileResolver.resolve",
+                return_value=incompatible,
+            ):
+                with self.assertRaisesRegex(ValueError, "runtime.*profile"):
+                    commit_finding(database, "scan", payload)
 
 
 if __name__ == "__main__":

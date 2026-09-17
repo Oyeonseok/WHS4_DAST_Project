@@ -237,19 +237,22 @@ class GrpcAdapterTests(unittest.TestCase):
         except ModuleNotFoundError:
             self.fail("bounded unary gRPC adapter is not implemented")
 
-    def execute(self, channel=None, *, doc=None, endpoint="http://127.0.0.1", policy=None,
+    def execute(self, channel=None, *, doc=None, endpoint="http://127.0.0.1", source_endpoint=None,
+                policy=None,
                 credentials=(), attempt_kind="target", channel_factory=None, **options):
         doc = doc or runtime_document()
         for name in ("target", "positive_control", "negative_control"):
             doc[name]["endpoint"] = endpoint
-        blind = self.blind.model_copy(update={"endpoint": endpoint, "method": "POST",
+        source_endpoint = source_endpoint or endpoint + "/fixture.Echo/Unary"
+        blind = self.blind.model_copy(update={"endpoint": source_endpoint, "method": "POST",
             "credential_references": credentials, "runtime_contract": doc})
         policy = policy or self.policy.model_copy(update={
             "allowed_schemes": ["http"], "allowed_hosts": ["127.0.0.1"],
             "allowed_ports": [urlsplit(endpoint).port or 80], "allowed_methods": ["POST"],
             "attack_allowed_methods": ["POST"], "attack_authorization_evidence": "Inert loopback validation only.",
             "attack_authorization_mode": "active_non_destructive",
-            "allowed_path_prefixes": ["/fixture.Echo/Unary"], "limits": PolicyLimits(requests_per_second=50),
+            "allowed_path_prefixes": [urlsplit(source_endpoint).path or "/"],
+            "limits": PolicyLimits(requests_per_second=50),
         })
         if channel is not None:
             channel_factory = lambda *a, **kw: channel
@@ -259,6 +262,36 @@ class GrpcAdapterTests(unittest.TestCase):
 
     def rows(self):
         return self.conn.execute("SELECT * FROM validation_transport_operations ORDER BY scheduled_at").fetchall()
+
+    def test_staged_http_path_authorizes_exact_grpc_authority_without_becoming_channel_target(self):
+        captured = []
+        channel = ScriptedChannel()
+
+        def channel_factory(endpoint, **kwargs):
+            captured.append(endpoint)
+            return channel
+
+        result = self.execute(
+            source_endpoint="http://127.0.0.1/items",
+            channel_factory=channel_factory,
+        )
+
+        self.assertTrue(result.signal_observed)
+        self.assertEqual(captured, ["http://127.0.0.1"])
+        self.assertEqual(self.rows()[0]["destination"], "http://127.0.0.1/fixture.Echo/Unary")
+
+    def test_grpc_source_bridge_rejects_different_authority(self):
+        doc = runtime_document()
+        blind = self.blind.model_copy(update={
+            "endpoint": "http://127.0.0.2/items",
+            "method": "POST",
+            "runtime_contract": doc,
+        })
+
+        self.assertEqual(
+            self.port_class()().unsupported_reason(blind),
+            "grpc_endpoint_mismatch",
+        )
 
     def test_policy_rejection_precedes_descriptor_credentials_and_channel(self):
         calls = []
