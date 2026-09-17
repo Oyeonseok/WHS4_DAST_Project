@@ -249,7 +249,7 @@ class NativeChainingMainAgentTests(unittest.TestCase):
                 output = Path(command[command.index("--output-last-message") + 1])
                 output.write_text(ChainingStageResult(
                     status="COMPLETED", scan_id="scan_chain",
-                    db_path=str(database.resolve()), stage_run_id="stage_chain",
+                    db_path="broker://pipeline", stage_run_id="stage_chain",
                     chaining_agent_ids=["/root/aidast_chaining"],
                 ).model_dump_json(), encoding="utf-8")
                 return SimpleNamespace(returncode=0, stderr="")
@@ -266,6 +266,7 @@ class NativeChainingMainAgentTests(unittest.TestCase):
                     chain_tasks=[{"task_id": "task_chain", "source_finding_id": "finding_chain_0"}],
                 )
             self.assertEqual(result.chaining_agent_ids, ["/root/aidast_chaining"])
+            self.assertEqual(result.db_path, str(database.resolve()))
 
 
 class ChainingDatabaseCliTests(unittest.TestCase):

@@ -10,6 +10,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from aidast.agents.main import CodexMainAgent
+from aidast.agents.native_pipeline import _bind_pipeline_database_reference
 from aidast.attack.db_cli import (
     commit_attempt, commit_finding, query, resolve_attempt, transition_task,
 )
@@ -118,6 +119,34 @@ class NativeAttackCoordinatorTests(unittest.TestCase):
             coordinator.run("scan_native")
             with self.assertRaisesRegex(AttackCoordinatorError, "already exists"):
                 coordinator.run("scan_native")
+
+    def test_foreign_database_reference_is_not_bound_and_is_rejected(self) -> None:
+        class ForeignDatabaseMain(FakeNativeMain):
+            def run_attack_orchestrator(self, **kwargs) -> AttackStageResult:
+                result = super().run_attack_orchestrator(**kwargs)
+                return result.model_copy(update={"db_path": "/tmp/foreign.db"})
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            database = completed_pipeline(root)
+            scope, policy = root / "Scope.md", root / "TargetPolicy.json"
+            scope.write_text("# approved", encoding="utf-8")
+            policy.write_text("{}", encoding="utf-8")
+
+            untrusted = AttackStageResult(
+                status="COMPLETED", scan_id="scan_native",
+                db_path="/tmp/foreign.db", stage_run_id="stage_attack",
+                attack_agent_ids=["/root/aidast_attack"],
+            )
+            self.assertEqual(
+                _bind_pipeline_database_reference(untrusted, database).db_path,
+                "/tmp/foreign.db",
+            )
+            with self.assertRaisesRegex(AttackCoordinatorError, "mismatch: db_path"):
+                AttackCoordinator(
+                    agent=ForeignDatabaseMain(), db_path=database,
+                    scope_path=scope, policy_path=policy,
+                ).run("scan_native")
 
     def test_unresolved_lead_prevents_stage_completion(self) -> None:
         class UnresolvedLeadMain(FakeNativeMain):
@@ -305,7 +334,7 @@ class NativeAttackMainAgentTests(unittest.TestCase):
                 output = Path(command[command.index("--output-last-message") + 1])
                 output.write_text(AttackStageResult(
                     status="COMPLETED", scan_id="scan_native",
-                    db_path=str(database.resolve()), stage_run_id="stage_attack",
+                    db_path="broker://pipeline", stage_run_id="stage_attack",
                     attack_agent_ids=["/root/aidast_attack"],
                 ).model_dump_json(), encoding="utf-8")
                 return SimpleNamespace(returncode=0, stderr="")
@@ -327,6 +356,7 @@ class NativeAttackMainAgentTests(unittest.TestCase):
                     selection_reasons={"hunt-idor": ("identifier parameter",)},
                 )
             self.assertEqual(result.attack_agent_ids, ["/root/aidast_attack"])
+            self.assertEqual(result.db_path, str(database.resolve()))
 
 
 class NativeAttackDatabaseCliTests(unittest.TestCase):
