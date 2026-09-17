@@ -10,9 +10,10 @@ import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime, timezone
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from pydantic import ValidationError
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
 from aidast.agents.main import CodexMainAgent, MainAgentError
 from aidast.cli import main
@@ -28,6 +29,11 @@ from aidast.scope.models import (
     SourceEvidence,
 )
 from aidast.scope.paths import ScopePathError, identify_program
+from aidast.scope.reader import (
+    ProgramPageError,
+    RuntimeBrowserProgramPageReader,
+    _same_program_url,
+)
 
 
 def sample_page() -> ProgramPage:
@@ -82,6 +88,60 @@ class FakeMainAgent:
 
 
 class ScopeCoordinatorTests(unittest.TestCase):
+    def test_authenticated_reader_is_primary_and_interpreted_offline(self) -> None:
+        class UnexpectedNativeAgent(FakeMainAgent):
+            interpreted = False
+
+            def collect_scope(self, program_url: str):
+                raise AssertionError("native browser must not run")
+
+            def interpret_captured_scope(self, page: ProgramPage) -> ScopeAnalysis:
+                self.interpreted = True
+                return sample_analysis()
+
+        class AuthenticatedReader:
+            def read(self, url: str) -> ProgramPage:
+                return sample_page()
+
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            agent = UnexpectedNativeAgent()
+            document = ScopeCoordinator(Path(temporary_dir) / "Scope").collect(
+                "https://bugcrowd.com/example",
+                main_agent=agent,
+                primary_reader=AuthenticatedReader(),
+                approved_by="reviewer",
+                review=lambda _: True,
+            )
+
+        self.assertIsNotNone(document)
+        self.assertTrue(agent.interpreted)
+
+    def test_primary_reader_must_be_complete_before_interpretation(self) -> None:
+        class UnexpectedInterpretAgent(FakeMainAgent):
+            def interpret_captured_scope(self, page: ProgramPage) -> ScopeAnalysis:
+                raise AssertionError("incomplete capture must not be interpreted")
+
+        class BlockedReader:
+            def read(self, url: str) -> ProgramPage:
+                return sample_page().model_copy(
+                    update={
+                        "capture_status": CaptureStatus.BLOCKED,
+                        "capture_reason": CaptureReason.AUTHENTICATION_REQUIRED,
+                    }
+                )
+
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            with self.assertRaisesRegex(
+                CoordinatorError, "AUTHENTICATION_REQUIRED"
+            ):
+                ScopeCoordinator(Path(temporary_dir) / "Scope").collect(
+                    "https://bugcrowd.com/example",
+                    main_agent=UnexpectedInterpretAgent(),
+                    primary_reader=BlockedReader(),
+                    approved_by="reviewer",
+                    review=lambda _: True,
+                )
+
     def test_normalizes_relative_publish_destination_to_absolute_path(self) -> None:
         coordinator = ScopeCoordinator("Scope/example")
 
@@ -368,6 +428,126 @@ class CodexMainAgentTests(unittest.TestCase):
             CodexMainAgent._verify_grounding(sample_page(), analysis)
 
 
+class RuntimeBrowserProgramPageReaderTests(unittest.TestCase):
+    def test_stable_text_retries_transient_body_timeout(self) -> None:
+        text = "in scope " * 100
+        page = MagicMock()
+        page.locator.return_value.inner_text.side_effect = [
+            PlaywrightTimeoutError("SPA still loading"),
+            text,
+            text,
+            text,
+            text,
+        ]
+        reader = RuntimeBrowserProgramPageReader(
+            identity="researcher",
+            timeout_seconds=1,
+            session_root=Path("unused-in-this-test"),
+        )
+
+        self.assertEqual(reader._wait_for_stable_text(page), text.strip())
+
+    def test_program_url_match_requires_exact_origin_and_path(self) -> None:
+        expected = "https://app.intigriti.com/researcher/programs/a/b/detail"
+        self.assertTrue(_same_program_url(expected, expected + "?tab=scope"))
+        self.assertTrue(_same_program_url(expected + "/", expected))
+        self.assertTrue(
+            _same_program_url(
+                expected,
+                "https://app.intigriti.com/programs/a/b/detail",
+            )
+        )
+        self.assertTrue(
+            _same_program_url(
+                expected,
+                "https://app.intigriti.com/programs/a/b/detail/scope",
+            )
+        )
+        self.assertFalse(
+            _same_program_url(
+                expected,
+                "http://app.intigriti.com/researcher/programs/a/b/detail",
+            )
+        )
+        self.assertFalse(
+            _same_program_url(expected, "https://app.intigriti.com/login")
+        )
+        self.assertFalse(
+            _same_program_url(
+                expected,
+                "https://example.com/researcher/programs/a/b/detail",
+            )
+        )
+        self.assertFalse(
+            _same_program_url(
+                expected,
+                "https://app.intigriti.com/programs/a/another/detail",
+            )
+        )
+
+    def test_runtime_browser_uses_persistent_profile_and_captures_exact_page(self) -> None:
+        url = "https://app.intigriti.com/researcher/programs/a/b/detail"
+        text = ("Program rules and in scope assets. example.com is in scope. " * 20)
+        page = MagicMock()
+        page.url = url
+        page.title.return_value = "Program"
+        page.goto.return_value = MagicMock(status=200, url=url)
+        page.locator.return_value.inner_text.return_value = text
+        page.get_by_text.return_value.count.return_value = 0
+
+        context = MagicMock()
+        context.pages = [page]
+        playwright = MagicMock()
+        playwright.chromium.launch_persistent_context.return_value = context
+        manager = MagicMock()
+        manager.__enter__.return_value = playwright
+
+        with tempfile.TemporaryDirectory() as temporary_dir, patch(
+            "aidast.scope.reader._validate_public_https_url"
+        ), patch("aidast.scope.reader.sync_playwright", return_value=manager):
+            reader = RuntimeBrowserProgramPageReader(
+                identity="intigriti-user",
+                timeout_seconds=1,
+                session_root=Path(temporary_dir),
+                input_fn=lambda _: "",
+                output_fn=lambda _: None,
+            )
+            captured = reader.read(url)
+
+            kwargs = playwright.chromium.launch_persistent_context.call_args.kwargs
+            self.assertFalse(kwargs["headless"])
+            self.assertIn("browser-profile", kwargs["user_data_dir"])
+            self.assertEqual(captured.capture_status, CaptureStatus.COMPLETE)
+            self.assertEqual(captured.final_url.unicode_string(), url)
+            context.route.assert_not_called()
+            page.get_by_text.assert_not_called()
+            context.close.assert_called_once_with()
+
+    def test_runtime_browser_rejects_page_that_did_not_return_to_program(self) -> None:
+        with self.assertRaisesRegex(
+            ProgramPageError, "observed same-origin paths: /login"
+        ):
+            RuntimeBrowserProgramPageReader._select_program_page(
+                [MagicMock(url="https://app.intigriti.com/login")],
+                "https://app.intigriti.com/researcher/programs/a/b/detail",
+            )
+
+    def test_scope_parser_exposes_authenticated_browser_options(self) -> None:
+        from aidast.cli import _parser
+
+        args = _parser().parse_args(
+            [
+                "scope",
+                "https://app.intigriti.com/researcher/programs/a/b/detail",
+                "--login-mode",
+                "runtime-browser",
+                "--identity",
+                "researcher",
+            ]
+        )
+        self.assertEqual(args.scope_login_mode, "runtime-browser")
+        self.assertEqual(args.scope_identity, "researcher")
+
 class ScopeModelTests(unittest.TestCase):
     def test_rejects_whitespace_only_asset_and_evidence(self) -> None:
         with self.assertRaises(ValidationError):
@@ -383,6 +563,40 @@ class ScopeModelTests(unittest.TestCase):
 
 
 class CliTests(unittest.TestCase):
+    def test_scope_runtime_browser_uses_authenticated_primary_reader(self) -> None:
+        class AuthenticatedReader:
+            def read(self, url: str) -> ProgramPage:
+                return sample_page()
+
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir) / "Scope"
+            with (
+                patch("aidast.cli.CodexMainAgent", return_value=FakeMainAgent()),
+                patch(
+                    "aidast.cli.RuntimeBrowserProgramPageReader",
+                    return_value=AuthenticatedReader(),
+                ) as reader_type,
+                patch("builtins.input", return_value="y"),
+                redirect_stdout(io.StringIO()),
+            ):
+                result = main(
+                    [
+                        "scope",
+                        "https://bugcrowd.com/engagements/example",
+                        "--output-dir",
+                        str(root),
+                        "--login-mode",
+                        "runtime-browser",
+                        "--identity",
+                        "researcher",
+                    ]
+                )
+
+        self.assertEqual(result, 0)
+        reader_type.assert_called_once_with(
+            identity="researcher", timeout_seconds=45.0
+        )
+
     def test_scope_reports_extraction_before_review(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_dir:
             root = Path(temporary_dir) / "Scope"
