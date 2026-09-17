@@ -464,7 +464,11 @@ class PlaywrightDriver:
         self,
         port: int,
         *,
-        timeout_seconds: float = 10.0,
+        # A cold Chrome-for-Testing launch on macOS can take well over ten
+        # seconds while component caches are initialized.  Keep this above
+        # the observed cold-start time so a healthy browser is not mistaken
+        # for a refused CDP connection.
+        timeout_seconds: float = 30.0,
     ) -> str:
 
         endpoint = (
@@ -525,11 +529,11 @@ class PlaywrightDriver:
         self,
     ) -> None:
 
-        if self.context is not None:
-            try:
-                self.context.unroute_all(behavior="ignoreErrors")
-            except Exception:
-                pass
+        # Do not call BrowserContext.unroute_all() while tearing down the
+        # complete runtime. Playwright can wait forever for an in-flight route
+        # callback even with ``ignoreErrors``. The managed browser close or
+        # external Chromium process termination below releases every route
+        # together with the context.
 
         # -------------------------------------------------
         # Playwright가 직접 실행한 Browser
@@ -604,6 +608,15 @@ class PlaywrightDriver:
 
         assert self.playwright is not None
 
+        # The operator-facing login flow needs a visible, directly connected
+        # Chromium.  Once a session snapshot exists, use Playwright's managed
+        # runtime instead of starting a GUI process and attaching over CDP.
+        # On macOS the latter can remain alive without ever opening its CDP
+        # port; managed headless launch avoids that GUI bootstrap dependency.
+        if not manual_login:
+            self._launch_managed_runtime()
+            return
+
         # 기존 Runtime 종료
         self._shutdown_runtime()
 
@@ -613,6 +626,19 @@ class PlaywrightDriver:
             parents=True,
             exist_ok=True,
         )
+
+        # Chromium can leave these profile-local symlinks behind when a CDP
+        # process is terminated during session restore.  A retry with the
+        # same run-scoped profile then exits before opening its debugging
+        # port.  This profile belongs exclusively to this driver/run, and the
+        # tracked process has already been stopped by _shutdown_runtime().
+        for name in ("SingletonLock", "SingletonSocket", "SingletonCookie"):
+            lock = self.profile_path / name
+            try:
+                if lock.is_symlink() or lock.exists():
+                    lock.unlink()
+            except OSError:
+                pass
 
         self.session_path.parent.mkdir(
             parents=True,
@@ -680,8 +706,33 @@ class PlaywrightDriver:
             )
         )
 
-        if not manual_login:
-            self._attach_manual_browser()
+    def _launch_managed_runtime(self) -> None:
+        self._ensure_playwright()
+        assert self.playwright is not None
+
+        self._shutdown_runtime()
+
+        launch_options: dict = {
+            "headless": True,
+            "args": [
+                "--disable-dev-shm-usage",
+                "--disable-blink-features=AutomationControlled",
+                # Chromium otherwise bypasses configured proxies for loopback.
+                "--proxy-bypass-list=<-loopback>",
+            ],
+        }
+        if self.proxy_url:
+            launch_options["proxy"] = {"server": self.proxy_url}
+
+        self.browser = self.playwright.chromium.launch(**launch_options)
+        self._browser_kind = "managed"
+        self.context = self.browser.new_context(ignore_https_errors=True)
+        self.context.add_init_script(
+            "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
+        )
+        self._register_context_handlers()
+        self.page = self.context.new_page()
+        self._register_page_handlers(self.page)
 
     def _attach_manual_browser(self) -> None:
         """Attach only after manual login, or to the policy-enforced runtime."""
@@ -838,8 +889,35 @@ class PlaywrightDriver:
 
         if self.target_policy is not None:
             self.context.route("**/*", self._guard_request)
-            # WebSocket messages are outside the HTTP policy contract.
-            self.context.route_web_socket("**/*", lambda route: route.close())
+            # WebSocket messages are outside the HTTP policy contract.  Do
+            # not call WebSocketRoute.close() from its synchronous callback:
+            # recent Playwright versions can deadlock by re-entering the sync
+            # dispatcher.  Blocking construction before application scripts
+            # run keeps the channel closed and lets Socket.IO fall back to
+            # proxy-observable HTTP polling.
+            self.context.add_init_script(
+                """
+                (() => {
+                    class PolicyBlockedWebSocket {
+                        static CONNECTING = 0;
+                        static OPEN = 1;
+                        static CLOSING = 2;
+                        static CLOSED = 3;
+                        constructor() {
+                            throw new DOMException(
+                                'WebSocket blocked by target policy',
+                                'SecurityError'
+                            );
+                        }
+                    }
+                    Object.defineProperty(globalThis, 'WebSocket', {
+                        value: PolicyBlockedWebSocket,
+                        configurable: false,
+                        writable: false
+                    });
+                })();
+                """
+            )
 
         def on_request(
             request,
@@ -1171,11 +1249,11 @@ class PlaywrightDriver:
                 if not self.save_session():
                     raise RuntimeError("could not save the target session after return")
                 break
-            except RuntimeError:
+            except RuntimeError as exc:
                 self._shutdown_runtime()
                 if attempt != 0:
                     raise
-                print("  [Playwright] 복사된 세션이 Shopify에서 거부되었습니다.")
+                print(f"  [Playwright] 복사된 세션 복원 실패: {exc}")
                 print("  [Playwright] Phase 2 Chromium 창에서 직접 로그인한 뒤 Enter를 눌러주세요.")
                 self._phase = "login"
                 self._launch_manual_browser(manual_login=True)
@@ -1593,8 +1671,20 @@ class PlaywrightDriver:
         # Keep the browser kind, profile, and launch mode stable across phases.
         # Switching to a managed headless browser causes some sites to require
         # connection verification again even when cookies were restored.
-        self._launch_manual_browser()
-        self._restore_target_session()
+        # A crawler's CDP hand-off can occasionally leave Chromium unable to
+        # open its replacement debugging port on the first launch.  Retry once
+        # after the normal runtime cleanup; _launch_manual_browser also removes
+        # run-scoped profile singleton files before starting the replacement.
+        for attempt in range(2):
+            try:
+                self._launch_manual_browser()
+                self._restore_target_session()
+                break
+            except RuntimeError as exc:
+                self._shutdown_runtime()
+                if attempt != 0:
+                    raise
+                print(f"  [Playwright] Runtime 복구 1차 실패, 정리 후 재시도: {exc}")
         self._auth_expired = False
 
     # =====================================================

@@ -240,6 +240,8 @@ aidast recon "https://lab.aidast.invalid/juice-shop" \
   --max-depth 2 \
   --max-concurrency 2 \
   --timeout-seconds 15 \
+  --ffuf-wordlist resources/wordlists/common.txt \
+  --tag-batch-size 50 \
   --execute \
   --tag-after
 ```
