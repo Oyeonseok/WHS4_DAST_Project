@@ -8,6 +8,7 @@ from .browser_contract import BrowserRuntimeContract
 from .models import canonical_json, canonical_sha256
 from .multipart_contract import MultipartRuntimeContract
 from .oob_contract import OobRuntimeContract
+from .websocket_contract import WebSocketRuntimeContract
 from ..core.profiles import ValidationProfile
 from .runtime_contract import HttpRuntimeContract
 
@@ -44,7 +45,7 @@ def _same_proof_assertions(
 
 
 def validate_runtime_semantics(
-    runtime: HttpRuntimeContract | BrowserRuntimeContract | OobRuntimeContract | MultipartRuntimeContract,
+    runtime: HttpRuntimeContract | BrowserRuntimeContract | OobRuntimeContract | MultipartRuntimeContract | WebSocketRuntimeContract,
     profile: ValidationProfile,
 ) -> None:
     """Reject controls or assertions that cannot establish the profile signal."""
@@ -124,6 +125,20 @@ def validate_runtime_semantics(
             raise RuntimeSemanticError(
                 "multipart target proof requires a header, body, or JSON assertion"
             )
+        return
+
+    if isinstance(runtime, WebSocketRuntimeContract):
+        _different(
+            [frame.model_dump(mode="json") for frame in runtime.target.frames],
+            [frame.model_dump(mode="json") for frame in runtime.negative_control.frames],
+            "WebSocket target and inert negative outbound frames must differ",
+        )
+        _same_proof_assertions(
+            runtime.target.assertions, runtime.negative_control.assertions,
+            frozenset({"text_contains", "json_equals", "binary_sha256", "close_code_equals",
+                       "subprotocol_equals", "frame_kind_sequence"}),
+            "WebSocket negative control must evaluate the same target proof assertions",
+        )
         return
 
     if isinstance(runtime, OobRuntimeContract):

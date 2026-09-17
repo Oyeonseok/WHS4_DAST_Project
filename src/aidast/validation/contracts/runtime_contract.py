@@ -171,6 +171,9 @@ def validate_runtime_contract(value: Any) -> HttpRuntimeContract | Any:
     if kind == "multipart":
         from .multipart_contract import MultipartRuntimeContract
         return MultipartRuntimeContract.model_validate(value)
+    if kind == "websocket":
+        from .websocket_contract import WebSocketRuntimeContract
+        return WebSocketRuntimeContract.model_validate(value)
     if kind == "http":
         return HttpRuntimeContract.model_validate(value)
     raise ValueError(f"runtime kind is not yet available: {kind}")
