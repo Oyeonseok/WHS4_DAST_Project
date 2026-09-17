@@ -22,10 +22,19 @@ class ValidationProfileTests(unittest.TestCase):
     def test_every_packaged_hunt_skill_has_exactly_one_bound_profile(self):
         expected = tuple(entry.skill_id for entry in load_catalog() if entry.skill_id != "chain")
         self.assertEqual(SkillProfileResolver().validate_coverage(), expected)
-        profile_root = files("aidast.skills.validation").joinpath("profiles")
-        actual = tuple(sorted(item.name.removesuffix(".json") for item in profile_root.iterdir()
-                              if item.name.endswith(".json")))
+        library_root = files("aidast.skills.validation").joinpath("library")
+        actual = tuple(sorted(item.name for item in library_root.iterdir() if item.is_dir()))
         self.assertEqual(actual, tuple(sorted(expected)))
+        for skill_name in actual:
+            skill_root = library_root.joinpath(skill_name)
+            self.assertTrue(skill_root.joinpath("SKILL.md").is_file())
+            self.assertTrue(skill_root.joinpath("contract.json").is_file())
+
+    def test_resolved_profile_includes_base_and_skill_specific_guidance(self):
+        resolved = SkillProfileResolver().resolve("hunt-idor")
+        self.assertIn("name: aidast-blind-validation", resolved.validation_base_skill_text)
+        self.assertIn("hunt-idor validation", resolved.validation_skill_text)
+        self.assertIn("cross-role-object-access", resolved.validation_skill_text)
 
     def test_profiles_define_skill_specific_effects_and_bounded_controls(self):
         criteria = set()
@@ -136,6 +145,8 @@ class ValidationProfileTests(unittest.TestCase):
         self.assertIs(runner.assess(blind, ()), assessment)
         first_prompt = agent._run_structured.call_args_list[0].kwargs["prompt"]
         self.assertNotIn("claimed_impact", first_prompt)
+        self.assertIn(resolved.validation_base_skill_text, first_prompt)
+        self.assertIn(resolved.validation_skill_text, first_prompt)
         self.assertIs(runner.compare(
             {"claimed_impact": "cross-user read"}, assessment.model_dump(mode="json")
         ), comparison)

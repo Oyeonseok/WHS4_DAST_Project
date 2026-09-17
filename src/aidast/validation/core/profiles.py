@@ -1,4 +1,4 @@
-"""Machine-readable Validation profiles bound to packaged Hunt Skills."""
+"""Validation Skills and machine-readable contracts bound to Hunt Skills."""
 
 from __future__ import annotations
 
@@ -116,44 +116,115 @@ class ResolvedValidationProfile(StrictContract):
     attack_skill_sha256: Digest
     validation_skill_sha256: Digest
     attack_skill_text: str
+    validation_base_skill_text: str
     validation_skill_text: str
 
 
+class ValidationSkillCatalogEntry(StrictContract):
+    skill_id: Identifier
+    skill_path: str
+    contract_path: str
+    skill_sha256: Digest
+    contract_sha256: Digest
+
+    @model_validator(mode="after")
+    def canonical_paths(self) -> "ValidationSkillCatalogEntry":
+        root = f"library/{self.skill_id}"
+        if self.skill_path != f"{root}/SKILL.md" or self.contract_path != f"{root}/contract.json":
+            raise ValueError("Validation Skill catalog path is invalid")
+        return self
+
+
+def _load_validation_catalog() -> tuple[ValidationSkillCatalogEntry, ...]:
+    try:
+        text = files("aidast.skills.validation").joinpath(
+            "catalog", "index.json"
+        ).read_text(encoding="utf-8")
+        document = json.loads(text)
+        if (
+            not isinstance(document, dict)
+            or document.get("schema_version") != 1
+            or not isinstance(document.get("entries"), list)
+            or document.get("entry_count") != len(document["entries"])
+        ):
+            raise ValidationProfileError("Validation Skill catalog is invalid")
+        entries = tuple(
+            ValidationSkillCatalogEntry.model_validate(item)
+            for item in document["entries"]
+        )
+        names = tuple(item.skill_id for item in entries)
+        if names != tuple(sorted(set(names))):
+            raise ValidationProfileError("Validation Skill catalog is not canonical")
+        return entries
+    except ValidationProfileError:
+        raise
+    except (OSError, TypeError, ValueError, KeyError) as exc:
+        raise ValidationProfileError("Validation Skill catalog is missing or invalid") from exc
+
+
 class SkillProfileResolver:
-    """Load a profile only when both packaged Skill digests still match."""
+    """Load one Attack Skill, Validation Skill, and executable contract binding."""
 
     def resolve(self, attack_skill_name: str) -> ResolvedValidationProfile:
-        entries = {entry.skill_id: entry for entry in load_catalog() if entry.skill_id != "chain"}
-        entry = entries.get(attack_skill_name)
-        if entry is None:
+        attack_entries = {
+            entry.skill_id: entry for entry in load_catalog() if entry.skill_id != "chain"
+        }
+        validation_entries = {
+            entry.skill_id: entry for entry in _load_validation_catalog()
+        }
+        attack_entry = attack_entries.get(attack_skill_name)
+        validation_entry = validation_entries.get(attack_skill_name)
+        if attack_entry is None:
             raise ValidationProfileError("Attack Skill is not a packaged Hunt Skill")
+        if validation_entry is None:
+            raise ValidationProfileError("Validation Skill is not packaged")
         root = files("aidast.skills")
         try:
-            attack_text = root.joinpath("attack", entry.source_path).read_text(encoding="utf-8")
-            validation_text = root.joinpath("validation", "BASE_SKILL.md").read_text(encoding="utf-8")
-            profile_text = root.joinpath(
-                "validation", "profiles", f"{attack_skill_name}.json"
+            attack_text = root.joinpath(
+                "attack", attack_entry.source_path
             ).read_text(encoding="utf-8")
-            raw = json.loads(profile_text)
-            profile = ValidationProfile.model_validate_json(profile_text)
+            validation_root = root.joinpath("validation")
+            base_text = validation_root.joinpath("BASE_SKILL.md").read_text(encoding="utf-8")
+            validation_text = validation_root.joinpath(
+                validation_entry.skill_path
+            ).read_text(encoding="utf-8")
+            contract_text = validation_root.joinpath(
+                validation_entry.contract_path
+            ).read_text(encoding="utf-8")
+            raw = json.loads(contract_text)
+            profile = ValidationProfile.model_validate_json(contract_text)
         except (OSError, ValueError, TypeError) as exc:
-            raise ValidationProfileError("Validation profile is missing or invalid") from exc
+            raise ValidationProfileError("Validation Skill contract is missing or invalid") from exc
         attack_digest = hashlib.sha256(attack_text.encode("utf-8")).hexdigest()
-        if attack_digest != entry.source_sha256:
+        validation_digest = hashlib.sha256(validation_text.encode("utf-8")).hexdigest()
+        contract_digest = hashlib.sha256(contract_text.encode("utf-8")).hexdigest()
+        if attack_digest != attack_entry.source_sha256:
             raise ValidationProfileError("packaged Attack Skill digest mismatch")
+        if validation_digest != validation_entry.skill_sha256:
+            raise ValidationProfileError("packaged Validation Skill digest mismatch")
+        if contract_digest != validation_entry.contract_sha256:
+            raise ValidationProfileError("packaged Validation contract digest mismatch")
         if profile.attack_skill_name != attack_skill_name:
-            raise ValidationProfileError("Validation profile is bound to another Attack Skill")
+            raise ValidationProfileError("Validation contract is bound to another Attack Skill")
+        combined_validation_digest = hashlib.sha256(canonical_json({
+            "base": hashlib.sha256(base_text.encode("utf-8")).hexdigest(),
+            "skill": validation_digest,
+        }).encode("utf-8")).hexdigest()
         return ResolvedValidationProfile(
             profile=profile,
             profile_sha256=hashlib.sha256(canonical_json(raw).encode("utf-8")).hexdigest(),
             attack_skill_sha256=attack_digest,
-            validation_skill_sha256=hashlib.sha256(validation_text.encode("utf-8")).hexdigest(),
+            validation_skill_sha256=combined_validation_digest,
             attack_skill_text=attack_text,
+            validation_base_skill_text=base_text,
             validation_skill_text=validation_text,
         )
 
     def validate_coverage(self) -> tuple[str, ...]:
         names = tuple(entry.skill_id for entry in load_catalog() if entry.skill_id != "chain")
+        validation_names = tuple(entry.skill_id for entry in _load_validation_catalog())
+        if validation_names != names:
+            raise ValidationProfileError("Validation Skill coverage differs from Attack catalog")
         for name in names:
             self.resolve(name)
         return names

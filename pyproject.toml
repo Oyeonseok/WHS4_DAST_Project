@@ -46,7 +46,13 @@ where = ["src"]
 "aidast.skills.attack.live" = ["SKILL.md", "references/*.md"]
 "aidast.skills.chaining.orchestrator" = ["SKILL.md"]
 "aidast.skills.chaining.live" = ["SKILL.md", "references/*.md"]
-"aidast.skills.validation" = ["SKILL.md", "BASE_SKILL.md", "profiles/*.json"]
+"aidast.skills.validation" = [
+  "SKILL.md",
+  "BASE_SKILL.md",
+  "catalog/*.json",
+  "library/*/SKILL.md",
+  "library/*/contract.json",
+]
 "aidast.skills.validation.legacy" = ["SKILL.md"]
 "aidast.skills.reporting" = ["SKILL.md", "references/*.md"]
 "aidast.skills.reporting.legacy" = ["SKILL.md"]
