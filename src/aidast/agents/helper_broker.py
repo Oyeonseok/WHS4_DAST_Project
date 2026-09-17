@@ -5,7 +5,9 @@ from __future__ import annotations
 import json
 import os
 import secrets
-import socket
+import shutil
+import signal
+import stat
 import subprocess
 import sys
 import threading
@@ -21,6 +23,7 @@ _HELPER_MODULES: dict[HelperName, str] = {
 }
 _MAX_MESSAGE_BYTES = 64 * 1024
 _MAX_RESPONSE_BYTES = 2 * 1024 * 1024
+_CLIENT_TIMEOUT_SECONDS = 185
 
 
 class HelperBrokerError(RuntimeError):
@@ -40,11 +43,16 @@ class HelperCommandBroker:
         self.database = database.expanduser().resolve(strict=True)
         self.work_dir = work_dir.expanduser().resolve(strict=True)
         self.python_executable = python_executable.expanduser().resolve(strict=True)
-        self.socket_path = self.work_dir / ".aidast-helper.sock"
+        self.exchange_path = self.work_dir / ".aidast-helper"
+        self.request_path = self.exchange_path / "requests"
+        self.response_path = self.exchange_path / "responses"
+        self.lock_path = self.exchange_path / "client.lock"
         self.token = secrets.token_urlsafe(32)
         self._stop = threading.Event()
         self._ready = threading.Event()
         self._errors: list[Exception] = []
+        self._process_lock = threading.Lock()
+        self._active_process: subprocess.Popen[str] | None = None
         self._thread = threading.Thread(
             target=self._serve,
             name="aidast-helper-broker",
@@ -56,6 +64,10 @@ class HelperCommandBroker:
         return self
 
     def start(self) -> None:
+        if os.name != "posix":
+            raise HelperBrokerError(
+                "secure native helper transport requires a POSIX host"
+            )
         self._thread.start()
         if not self._ready.wait(timeout=5):
             raise HelperBrokerError("helper broker did not start")
@@ -69,13 +81,20 @@ class HelperCommandBroker:
 
     def close(self) -> None:
         self._stop.set()
-        try:
-            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as wake:
-                wake.connect(str(self.socket_path))
-        except OSError:
-            pass
+        with self._process_lock:
+            active_process = self._active_process
+            if active_process is not None and active_process.poll() is None:
+                _signal_process_group(active_process, signal.SIGTERM)
         self._thread.join(timeout=5)
-        self.socket_path.unlink(missing_ok=True)
+        if self._thread.is_alive():
+            with self._process_lock:
+                active_process = self._active_process
+                if active_process is not None and active_process.poll() is None:
+                    _signal_process_group(active_process, signal.SIGKILL)
+            self._thread.join(timeout=2)
+        if self._thread.is_alive():
+            raise HelperBrokerError("helper broker did not stop")
+        shutil.rmtree(self.exchange_path, ignore_errors=True)
         if self._errors:
             raise HelperBrokerError(f"helper broker failed: {self._errors[0]}")
 
@@ -125,30 +144,51 @@ class HelperCommandBroker:
         return prepared
 
     def _serve(self) -> None:
+        request_fd: int | None = None
+        response_fd: int | None = None
         try:
-            self.socket_path.unlink(missing_ok=True)
-            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as server:
-                server.bind(str(self.socket_path))
-                self.socket_path.chmod(0o600)
-                server.listen(8)
-                server.settimeout(0.2)
-                self._ready.set()
-                while not self._stop.is_set():
-                    try:
-                        connection, _ = server.accept()
-                    except TimeoutError:
+            self.exchange_path.mkdir(mode=0o700)
+            self.request_path.mkdir(mode=0o700)
+            self.response_path.mkdir(mode=0o700)
+            self.lock_path.touch(mode=0o600, exist_ok=False)
+            directory_flags = os.O_RDONLY | os.O_DIRECTORY
+            if hasattr(os, "O_NOFOLLOW"):
+                directory_flags |= os.O_NOFOLLOW
+            request_fd = os.open(self.request_path, directory_flags)
+            response_fd = os.open(self.response_path, directory_flags)
+            self._ready.set()
+            while not self._stop.is_set():
+                handled = False
+                for request_name in os.listdir(request_fd):
+                    if not _valid_request_name(request_name):
                         continue
-                    with connection:
-                        if self._stop.is_set():
-                            break
-                        self._handle(connection)
+                    handled = True
+                    self._handle(
+                        request_fd=request_fd,
+                        response_fd=response_fd,
+                        request_name=request_name,
+                    )
+                if not handled:
+                    self._stop.wait(0.05)
         except OSError as exc:
             self._errors.append(exc)
             self._ready.set()
+        finally:
+            if request_fd is not None:
+                os.close(request_fd)
+            if response_fd is not None:
+                os.close(response_fd)
 
-    def _handle(self, connection: socket.socket) -> None:
+    def _handle(
+        self,
+        *,
+        request_fd: int,
+        response_fd: int,
+        request_name: str,
+    ) -> None:
         try:
-            request = json.loads(_receive(connection).decode("utf-8"))
+            raw_request = _read_request(request_fd, request_name)
+            request = json.loads(raw_request.decode("utf-8"))
             if (
                 not isinstance(request, dict)
                 or request.get("token") != self.token
@@ -158,7 +198,50 @@ class HelperCommandBroker:
                 raise ValueError("invalid helper broker request")
             helper: HelperName = request["helper"]
             arguments = self.prepare_arguments(request["arguments"])
-            completed = subprocess.run(
+            completed = self._run_helper(helper, arguments)
+            response = {
+                "returncode": completed.returncode,
+                "stdout": completed.stdout,
+                "stderr": completed.stderr,
+            }
+        except (
+            OSError,
+            ValueError,
+            TypeError,
+            json.JSONDecodeError,
+            HelperBrokerError,
+            subprocess.SubprocessError,
+        ) as exc:
+            response = {
+                "returncode": 1,
+                "stdout": "",
+                "stderr": f"aidast-helper: {exc}\n",
+            }
+        finally:
+            try:
+                os.unlink(request_name, dir_fd=request_fd)
+            except FileNotFoundError:
+                pass
+        raw_response = json.dumps(response).encode("utf-8")
+        if len(raw_response) > _MAX_RESPONSE_BYTES:
+            raw_response = json.dumps(
+                {
+                    "returncode": 1,
+                    "stdout": "",
+                    "stderr": "aidast-helper: helper response is too large\n",
+                }
+            ).encode("utf-8")
+        _publish_response(response_fd, request_name, raw_response)
+
+    def _run_helper(
+        self,
+        helper: HelperName,
+        arguments: list[str],
+    ) -> subprocess.CompletedProcess[str]:
+        with self._process_lock:
+            if self._stop.is_set():
+                raise HelperBrokerError("helper broker is stopping")
+            process = subprocess.Popen(
                 [
                     str(self.python_executable),
                     "-m",
@@ -173,49 +256,112 @@ class HelperCommandBroker:
                     ),
                 },
                 text=True,
-                capture_output=True,
-                timeout=180,
-                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                start_new_session=True,
             )
-            response = {
-                "returncode": completed.returncode,
-                "stdout": completed.stdout,
-                "stderr": completed.stderr,
-            }
-        except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
-            response = {
-                "returncode": 1,
-                "stdout": "",
-                "stderr": f"aidast-helper: {exc}\n",
-            }
-        raw_response = json.dumps(response).encode("utf-8")
-        if len(raw_response) > _MAX_RESPONSE_BYTES:
-            raw_response = json.dumps(
-                {
-                    "returncode": 1,
-                    "stdout": "",
-                    "stderr": "aidast-helper: helper response is too large\n",
-                }
-            ).encode("utf-8")
+            self._active_process = process
         try:
-            connection.sendall(raw_response)
-        except OSError:
-            if not self._stop.is_set():
-                raise
+            stdout, stderr = process.communicate(timeout=180)
+        except subprocess.TimeoutExpired:
+            _signal_process_group(process, signal.SIGKILL)
+            stdout, stderr = process.communicate()
+            raise subprocess.TimeoutExpired(process.args, 180, stdout, stderr)
+        finally:
+            with self._process_lock:
+                if self._active_process is process:
+                    self._active_process = None
+        return subprocess.CompletedProcess(
+            process.args,
+            process.returncode,
+            stdout,
+            stderr,
+        )
 
 
-def _receive(connection: socket.socket) -> bytes:
-    chunks: list[bytes] = []
-    total = 0
-    while True:
-        chunk = connection.recv(min(8192, _MAX_MESSAGE_BYTES - total + 1))
-        if not chunk:
-            break
-        chunks.append(chunk)
-        total += len(chunk)
-        if total > _MAX_MESSAGE_BYTES:
+def _signal_process_group(process: subprocess.Popen[str], signal_number: int) -> None:
+    if hasattr(os, "killpg"):
+        try:
+            os.killpg(process.pid, signal_number)
+            return
+        except ProcessLookupError:
+            return
+    if signal_number == signal.SIGKILL:
+        process.kill()
+    else:
+        process.terminate()
+
+
+def _valid_request_name(name: str) -> bool:
+    stem, suffix = os.path.splitext(name)
+    return (
+        suffix == ".json"
+        and len(stem) == 32
+        and all(character in "0123456789abcdef" for character in stem)
+    )
+
+
+def _read_request(request_fd: int, request_name: str) -> bytes:
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(request_name, flags, dir_fd=request_fd)
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise ValueError("helper broker request is not a regular file")
+        if metadata.st_size > _MAX_MESSAGE_BYTES:
             raise ValueError("helper broker request is too large")
-    return b"".join(chunks)
+        chunks: list[bytes] = []
+        remaining = _MAX_MESSAGE_BYTES + 1
+        while remaining:
+            chunk = os.read(descriptor, min(8192, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        raw_request = b"".join(chunks)
+        if len(raw_request) > _MAX_MESSAGE_BYTES:
+            raise ValueError("helper broker request is too large")
+        return raw_request
+    finally:
+        os.close(descriptor)
+
+
+def _publish_response(response_fd: int, request_name: str, response: bytes) -> None:
+    request_stem = Path(request_name).stem
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    for _ in range(10):
+        temporary_name = f".{request_stem}.{secrets.token_hex(8)}.tmp"
+        try:
+            descriptor = os.open(
+                temporary_name,
+                flags,
+                0o600,
+                dir_fd=response_fd,
+            )
+            break
+        except FileExistsError:
+            continue
+    else:
+        raise HelperBrokerError("could not allocate helper response file")
+    try:
+        with os.fdopen(descriptor, "wb") as response_file:
+            response_file.write(response)
+        os.replace(
+            temporary_name,
+            request_name,
+            src_dir_fd=response_fd,
+            dst_dir_fd=response_fd,
+        )
+    except BaseException:
+        try:
+            os.unlink(temporary_name, dir_fd=response_fd)
+        except FileNotFoundError:
+            pass
+        raise
 
 
 def stage_helper_client(
@@ -228,30 +374,77 @@ def stage_helper_client(
     if helper not in _HELPER_MODULES:
         raise ValueError("unsupported helper")
     script = f'''"""Generated AI-Dast helper client."""
+import fcntl
 import json
-import socket
+import os
+import secrets
+import stat
 import sys
+import time
+from pathlib import Path
 
 request = {{
     "token": {broker.token!r},
     "helper": {helper!r},
     "arguments": sys.argv[1:],
 }}
-with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
-    client.connect({str(broker.socket_path)!r})
-    client.sendall(json.dumps(request).encode("utf-8"))
-    client.shutdown(socket.SHUT_WR)
-    chunks = []
-    total = 0
+request_id = secrets.token_hex(16)
+request_dir = Path({str(broker.request_path)!r})
+response_dir = Path({str(broker.response_path)!r})
+lock_path = Path({str(broker.lock_path)!r})
+request_path = request_dir / f"{{request_id}}.json"
+temporary_path = request_dir / f".{{request_id}}.tmp"
+response_path = response_dir / f"{{request_id}}.json"
+with lock_path.open("rb") as lock_file:
+    queue_deadline = time.monotonic() + {_CLIENT_TIMEOUT_SECONDS}
     while True:
-        chunk = client.recv(8192)
-        if not chunk:
+        try:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
             break
-        chunks.append(chunk)
-        total += len(chunk)
-        if total > {_MAX_RESPONSE_BYTES}:
-            raise RuntimeError("helper response is too large")
-    response = json.loads(b"".join(chunks).decode("utf-8"))
+        except BlockingIOError:
+            if time.monotonic() >= queue_deadline:
+                raise TimeoutError("helper broker queue timed out")
+            time.sleep(0.05)
+    try:
+        temporary_path.write_text(json.dumps(request), encoding="utf-8")
+        temporary_path.chmod(0o600)
+        temporary_path.replace(request_path)
+        deadline = time.monotonic() + {_CLIENT_TIMEOUT_SECONDS}
+        while not response_path.is_file():
+            if time.monotonic() >= deadline:
+                request_path.unlink(missing_ok=True)
+                raise TimeoutError("helper broker response timed out")
+            time.sleep(0.05)
+        response_flags = os.O_RDONLY
+        if hasattr(os, "O_NOFOLLOW"):
+            response_flags |= os.O_NOFOLLOW
+        response_descriptor = os.open(response_path, response_flags)
+        try:
+            metadata = os.fstat(response_descriptor)
+            if not stat.S_ISREG(metadata.st_mode):
+                raise RuntimeError("helper response is not a regular file")
+            if metadata.st_size > {_MAX_RESPONSE_BYTES}:
+                raise RuntimeError("helper response is too large")
+            response_chunks = []
+            response_remaining = {_MAX_RESPONSE_BYTES + 1}
+            while response_remaining:
+                response_chunk = os.read(
+                    response_descriptor,
+                    min(8192, response_remaining),
+                )
+                if not response_chunk:
+                    break
+                response_chunks.append(response_chunk)
+                response_remaining -= len(response_chunk)
+            raw_response = b"".join(response_chunks)
+        finally:
+            os.close(response_descriptor)
+            response_path.unlink(missing_ok=True)
+    finally:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+if len(raw_response) > {_MAX_RESPONSE_BYTES}:
+    raise RuntimeError("helper response is too large")
+response = json.loads(raw_response.decode("utf-8"))
 sys.stdout.write(response["stdout"])
 sys.stderr.write(response["stderr"])
 raise SystemExit(response["returncode"])
