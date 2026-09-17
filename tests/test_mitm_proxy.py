@@ -1,0 +1,185 @@
+from __future__ import annotations
+
+import tempfile
+import runpy
+import sys
+import types
+import unittest
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
+
+from aidast.recon.policy import TargetPolicy
+from aidast.recon.tools.mitm_proxy import start_mitmproxy, stop_mitmproxy
+from aidast.scope.models import AssetType
+
+
+class MitmAddonBudgetTests(unittest.TestCase):
+    @staticmethod
+    def _addon():
+        proxy_module = types.ModuleType("mitmproxy")
+        proxy_module.ctx = SimpleNamespace(
+            log=SimpleNamespace(warn=MagicMock())
+        )
+        proxy_module.http = SimpleNamespace(
+            Response=SimpleNamespace(
+                make=lambda status, content, headers: SimpleNamespace(
+                    status_code=status, content=content, headers=headers
+                )
+            )
+        )
+        addon_path = (
+            Path(__file__).resolve().parents[1]
+            / "src" / "aidast" / "recon" / "tools" / "mitm_addon.py"
+        )
+        with patch.dict(sys.modules, {"mitmproxy": proxy_module}):
+            namespace = runpy.run_path(str(addon_path))
+        addon = namespace["ScopeAndCaptureAddon"]()
+        addon.scope_loaded = True
+        addon.allowed_hosts = {"example.com"}
+        addon.rules = {
+            "allowed_hosts": ["example.com"],
+            "allowed_schemes": ["https"],
+            "allowed_ports": [443],
+            "allowed_path_prefixes": ["/"],
+            "excluded_path_prefixes": [],
+            "excluded_hosts": [],
+            "allowed_methods": ["GET", "HEAD", "OPTIONS"],
+            "include_subdomains": False,
+            "browser_context_token": "test-token",
+            "max_requests": 10,
+            "budget_total": 10,
+            "budget_used_before": 0,
+        }
+        return addon
+
+    @staticmethod
+    def _flow(path: str, *, headers=None, method="GET"):
+        return SimpleNamespace(
+            request=SimpleNamespace(
+                pretty_url=f"https://example.com{path}",
+                method=method,
+                headers=dict(headers or {}),
+            ),
+            metadata={},
+            response=None,
+        )
+
+    def test_blocked_low_priority_requests_do_not_spend_browser_reserve(self):
+        addon = self._addon()
+        for index in range(8):
+            flow = self._flow(f"/crawl/{index}")
+            addon.request(flow)
+            self.assertIsNone(flow.response)
+
+        blocked = self._flow("/crawl/deferred")
+        addon.request(blocked)
+        self.assertIsNotNone(blocked.response)
+        self.assertTrue(blocked.metadata["aidast_deferred_candidate"])
+        self.assertEqual(addon.request_count, 8)
+
+        browser_api = self._flow(
+            "/api/me",
+            headers={
+                "x-aidast-browser-token": "test-token",
+                "x-aidast-browser-mode": "same-origin",
+                "Sec-Fetch-Mode": "cors",
+            },
+        )
+        addon.request(browser_api)
+        self.assertIsNone(browser_api.response)
+        self.assertEqual(browser_api.metadata["aidast_priority"], 1)
+        self.assertEqual(addon.request_count, 9)
+
+    def test_tool_source_and_static_resource_priority_markers(self):
+        addon = self._addon()
+        katana = self._flow(
+            "/crawl", headers={"X-AIDAST-Source": "katana"}
+        )
+        addon.request(katana)
+        self.assertEqual(katana.metadata["aidast_priority"], 4)
+        self.assertNotIn("X-AIDAST-Source", katana.request.headers)
+
+        duplicate = self._flow(
+            "/crawl", headers={"X-AIDAST-Source": "katana"}
+        )
+        before_duplicate = addon.request_count
+        addon.request(duplicate)
+        self.assertEqual(duplicate.metadata["aidast_priority"], 6)
+        self.assertTrue(duplicate.metadata["aidast_duplicate"])
+        self.assertEqual(addon.request_count, before_duplicate)
+
+        ffuf = self._flow("/guess", headers={"X-AIDAST-Source": "ffuf"})
+        addon.request(ffuf)
+        self.assertEqual(ffuf.metadata["aidast_priority"], 5)
+        self.assertNotIn("X-AIDAST-Source", ffuf.request.headers)
+
+        static = self._flow(
+            "/assets/app.js", headers={"X-AIDAST-Source": "katana"}
+        )
+        addon.request(static)
+        self.assertEqual(static.metadata["aidast_priority"], 6)
+        self.assertTrue(static.metadata["aidast_static_resource"])
+
+
+class MitmProxyStartupTests(unittest.TestCase):
+    @staticmethod
+    def _rules() -> dict:
+        return TargetPolicy(
+            scope_id="scope", policy_id="policy", asset_type=AssetType.DOMAIN,
+            asset="example.com", allowed_hosts=["example.com"],
+        ).mitm_rules()
+
+    def test_default_start_uses_a_dynamically_selected_port(self) -> None:
+        process = MagicMock()
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            with (
+                patch("aidast.recon.tools.mitm_proxy.shutil.which", return_value="/bin/mitmdump"),
+                patch("aidast.recon.tools.mitm_proxy._find_free_port", return_value=43123),
+                patch("aidast.recon.tools.mitm_proxy.subprocess.Popen", return_value=process) as popen,
+                patch("aidast.recon.tools.mitm_proxy._wait_for_proxy_port", return_value=True) as wait,
+            ):
+                returned_process, proxy_url = start_mitmproxy(
+                    Path(temporary_dir) / "capture.jsonl"
+                )
+
+        self.assertIs(returned_process, process)
+        self.assertEqual(proxy_url, "http://127.0.0.1:43123")
+        command = popen.call_args.args[0]
+        self.assertEqual(command[command.index("-p") + 1], "43123")
+        self.assertEqual(wait.call_args.kwargs["process"], process)
+
+    def test_explicit_occupied_port_is_not_mistaken_for_started_proxy(self) -> None:
+        occupied = MagicMock()
+        occupied.__enter__.return_value = occupied
+        with (
+            patch("aidast.recon.tools.mitm_proxy.shutil.which", return_value="/bin/mitmdump"),
+            patch("aidast.recon.tools.mitm_proxy.socket.create_connection", return_value=occupied),
+            patch("aidast.recon.tools.mitm_proxy.subprocess.Popen") as popen,
+        ):
+            process, proxy_url = start_mitmproxy(Path("capture.jsonl"), port=8080)
+
+        self.assertIsNone(process)
+        self.assertIsNone(proxy_url)
+        popen.assert_not_called()
+
+    def test_temporary_scope_file_is_removed_when_proxy_stops(self) -> None:
+        process = MagicMock()
+        with (
+            patch("aidast.recon.tools.mitm_proxy.shutil.which", return_value="/bin/mitmdump"),
+            patch("aidast.recon.tools.mitm_proxy._find_free_port", return_value=43123),
+            patch("aidast.recon.tools.mitm_proxy.subprocess.Popen", return_value=process) as popen,
+            patch("aidast.recon.tools.mitm_proxy._wait_for_proxy_port", return_value=True),
+        ):
+            returned, _ = start_mitmproxy(Path("capture.jsonl"), scope_rules=self._rules())
+            command = popen.call_args.args[0]
+            scope_argument = next(item for item in command if item.startswith("scope_file="))
+            scope_path = Path(scope_argument.split("=", 1)[1])
+            self.assertTrue(scope_path.is_file())
+            stop_mitmproxy(returned)
+
+        self.assertFalse(scope_path.exists())
+
+
+if __name__ == "__main__":
+    unittest.main()
