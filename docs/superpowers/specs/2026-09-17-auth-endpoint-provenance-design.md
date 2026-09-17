@@ -78,6 +78,11 @@ containing query/fragment/userinfo,
 and unknown fields that could conceal sensitive data. Duplicate entries are
 collapsed by `(method, origin, path)`.
 
+Normalization replaces numeric, UUID, high-entropy, percent-encoded, and
+authentication-token path segments with a non-secret template marker. A
+credential-bearing raw path is never written to the bundle, diagnostics, or
+Recon database.
+
 The bundle integrity map continues to cover the browser state files. The bundle
 file itself remains protected by the existing session binding and filesystem
 controls; endpoint metadata contains no authentication material.
@@ -113,6 +118,10 @@ Import does not consume the active HTTP request budget because it sends no
 request. It also does not bypass host, port, or path scope checks. A POST endpoint
 may appear in the Recon inventory as passively observed evidence even though
 active Recon remains limited to safe methods.
+
+Passive authentication observations use a dedicated channel. They are persisted
+as evidence but never supplied as browser navigation, crawler, ffuf, API-probe,
+or other active-discovery seeds.
 
 The resulting endpoint ID is available to Attack task selection, request
 grounding, attempt persistence, and finding reproduction.

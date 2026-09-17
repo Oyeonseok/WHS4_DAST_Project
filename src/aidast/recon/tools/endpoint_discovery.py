@@ -1575,6 +1575,14 @@ def discover_endpoints(
 
     def observe_browser(phase):
         if observation_callback is not None and driver is not None:
+            passive = _filter_results_by_policy(
+                driver.drain_authentication_observations(),
+                base_url=base_url,
+                target_policy=target_policy,
+                passive_metadata=True,
+            )
+            if passive:
+                observation_callback("auth_bootstrap", passive)
             observe(phase, driver.drain_observations())
 
     driver: (

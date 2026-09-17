@@ -17,6 +17,7 @@ from aidast.auth.endpoints import (
 from aidast.auth.browser import _capture_native, collect_target_sessions, load_session
 from aidast.recon import db as recon_db
 from aidast.recon.executor import ReconExecutor
+from aidast.recon.policy import TargetPolicy
 from aidast.scope.models import AssetType, ScopeAsset
 
 
@@ -63,6 +64,18 @@ def test_request_metadata_ignores_unapproved_origin() -> None:
     )
     assert endpoint is not None
     assert endpoint.origin == "https://identity.example"
+
+
+def test_request_metadata_templates_path_embedded_authentication_secret() -> None:
+    secret = "AbCdEfGhIjKlMnOpQrStUvWxYz012345"
+    endpoint = AuthenticationEndpoint.from_request(
+        "GET",
+        f"https://example.test/magic-login/{secret}",
+        target_origin="https://example.test",
+    )
+    assert endpoint is not None
+    assert endpoint.path == "/magic-login/:secret"
+    assert secret not in json.dumps(endpoint.to_bundle_dict())
 
 
 @pytest.mark.parametrize(
@@ -316,10 +329,11 @@ def test_recon_imports_restored_login_endpoint_as_passive_evidence(
     executor, origin_id = _executor_with_origin(tmp_path)
     task = SimpleNamespace(
         task_id="origin-task",
-        target=SimpleNamespace(asset="https://example.test"),
+        target=SimpleNamespace(asset="https://example.test", asset_type=AssetType.URL),
     )
     try:
         imported = executor._import_authentication_endpoints(task, origin_id, session)
+        imported_again = executor._import_authentication_endpoints(task, origin_id, session)
         endpoint = executor.conn.execute(
             "SELECT method,normalized_path,source_tools FROM endpoints"
         ).fetchone()
@@ -330,6 +344,7 @@ def test_recon_imports_restored_login_endpoint_as_passive_evidence(
         executor.close()
 
     assert imported == 1
+    assert imported_again == 0
     assert endpoint == ("POST", "/rest/user/login", "auth_bootstrap")
     assert observation == ("passive_login_observation", "auth_bootstrap")
 
@@ -345,7 +360,7 @@ def test_recon_reports_legacy_bundle_without_inventing_endpoint(tmp_path: Path) 
     executor, origin_id = _executor_with_origin(tmp_path)
     task = SimpleNamespace(
         task_id="origin-task",
-        target=SimpleNamespace(asset="https://example.test"),
+        target=SimpleNamespace(asset="https://example.test", asset_type=AssetType.URL),
     )
     try:
         imported = executor._import_authentication_endpoints(task, origin_id, session)
@@ -357,3 +372,33 @@ def test_recon_reports_legacy_bundle_without_inventing_endpoint(tmp_path: Path) 
     assert imported == 0
     assert endpoint_count == 0
     assert any(event["event"] == "auth_endpoint_provenance_missing" for event in events)
+
+
+def test_recon_rejects_restored_authentication_endpoint_on_excluded_path(
+    tmp_path: Path,
+) -> None:
+    bundle_root = tmp_path / "session"
+    bundle_root.mkdir()
+    session = load_session(
+        _write_bundle(bundle_root, endpoints=[{
+            "method": "POST", "origin": "https://example.test",
+            "path": "/admin/login", "source": "auth_bootstrap",
+        }]),
+        scope_id="scope", asset_type="URL", asset="https://example.test",
+        identity="primary",
+    )
+    executor, origin_id = _executor_with_origin(tmp_path)
+    executor.target_policies[("URL", "https://example.test")] = TargetPolicy(
+        scope_id="scope", policy_id="policy", asset_type=AssetType.URL,
+        asset="https://example.test", allowed_hosts=["example.test"],
+        allowed_path_prefixes=["/"], excluded_path_prefixes=["/admin"],
+    )
+    task = SimpleNamespace(
+        task_id="origin-task",
+        target=SimpleNamespace(asset="https://example.test", asset_type=AssetType.URL),
+    )
+    try:
+        assert executor._import_authentication_endpoints(task, origin_id, session) == 0
+        assert executor.conn.execute("SELECT COUNT(*) FROM endpoints").fetchone()[0] == 0
+    finally:
+        executor.close()

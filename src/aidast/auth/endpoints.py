@@ -4,7 +4,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 import re
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 
 class AuthenticationEndpointError(ValueError):
@@ -13,6 +13,13 @@ class AuthenticationEndpointError(ValueError):
 
 _BUNDLE_FIELDS = frozenset({"method", "origin", "path", "source", "observed_at"})
 _METHOD = re.compile(r"^[A-Z][A-Z0-9!#$%&'*+.^_`|~-]{0,31}$")
+_UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$", re.I)
+_HEX = re.compile(r"^[0-9a-f]{8,}$", re.I)
+_TOKEN = re.compile(r"^[A-Za-z0-9_+=.-]{16,}$")
+_SENSITIVE_PREDECESSORS = frozenset({
+    "activate", "activation", "callback", "confirm", "invite", "magic",
+    "magic-link", "magic-login", "reset", "token", "verify", "verification",
+})
 
 
 def normalize_origin(value: str) -> str:
@@ -44,7 +51,28 @@ def _path(value: object) -> str:
         raise AuthenticationEndpointError("authentication endpoint path must not contain URL metadata")
     if "\\" in value or any(ord(character) < 0x20 for character in value):
         raise AuthenticationEndpointError("invalid authentication endpoint path")
-    return value
+    segments = value.split("/")
+    normalized: list[str] = []
+    for index, segment in enumerate(segments):
+        decoded = unquote(segment)
+        previous = segments[index - 1].casefold() if index else ""
+        dynamic = (
+            bool(segment)
+            and (
+                previous in _SENSITIVE_PREDECESSORS
+                or decoded.isdecimal()
+                or bool(_UUID.fullmatch(decoded))
+                or bool(_HEX.fullmatch(decoded))
+                or (
+                    bool(_TOKEN.fullmatch(decoded))
+                    and any(character.isalpha() for character in decoded)
+                    and any(character.isdigit() for character in decoded)
+                )
+                or decoded != segment
+            )
+        )
+        normalized.append(":secret" if dynamic else segment)
+    return "/".join(normalized) or "/"
 
 
 @dataclass(frozen=True, slots=True)

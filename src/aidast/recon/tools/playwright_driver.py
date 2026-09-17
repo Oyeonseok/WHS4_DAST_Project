@@ -245,6 +245,7 @@ class PlaywrightDriver:
         ) = None
 
         self.requests: list[dict] = []
+        self.authentication_observations: list[dict] = []
         self.authentication_endpoints: list[AuthenticationEndpoint] = []
         self._observation_cursor = 0
         self._interaction_visited: set[str] = set()
@@ -1223,11 +1224,10 @@ class PlaywrightDriver:
         if not any(
             item.get("method") == endpoint.method
             and item.get("path") == endpoint.path
-            and item.get("source") == "auth_bootstrap"
-            for item in self.requests
+            for item in self.authentication_observations
         ):
             from aidast.recon import db
-            self.requests.append({
+            self.authentication_observations.append({
                 "context": {
                     "context_key": "auth_bootstrap",
                     "action_type": "operator_login",
@@ -1251,8 +1251,6 @@ class PlaywrightDriver:
 
     def capture_and_start(self) -> None:
         """Log in once and keep the same Chromium context for Recon."""
-        if self.preauthenticated:
-            raise RuntimeError("target session expired; log in again before restarting Recon")
         self._phase = "login"
         self.authentication_endpoints.clear()
         try:
@@ -2843,6 +2841,11 @@ class PlaywrightDriver:
         """Unmerged requests since the last phase boundary."""
         items = self.requests[self._observation_cursor:]
         self._observation_cursor = len(self.requests)
+        return [dict(item) for item in items]
+
+    def drain_authentication_observations(self) -> list[dict]:
+        items = self.authentication_observations
+        self.authentication_observations = []
         return [dict(item) for item in items]
 
     def get_http_results(

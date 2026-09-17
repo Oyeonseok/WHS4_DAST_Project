@@ -241,7 +241,30 @@ class ReconBrowserTransportTests(unittest.TestCase):
         self.assertEqual(self.driver.authentication_endpoints[0].method, "POST")
         self.assertEqual(self.driver.authentication_endpoints[0].path, "/rest/user/login")
         self.assertEqual(len(self.driver.authentication_endpoints), 1)
+        self.assertEqual(self.driver.get_http_results(), [])
+        passive = self.driver.drain_authentication_observations()
+        self.assertEqual(passive[0]["discovery_kind"], "passive_login_observation")
         self.assertNotIn("private", json.dumps(self.driver.get_http_results()))
+
+    def test_expired_restored_session_can_enter_manual_reauthentication(self):
+        self.driver.preauthenticated = True
+        with patch.object(self.driver, "restore_runtime"), patch.object(
+            self.driver, "session_is_valid", return_value=False
+        ), patch.object(self.driver, "capture_and_start") as capture:
+            self.driver.ensure_session()
+        capture.assert_called_once_with()
+
+    def test_manual_reauthentication_accepts_previously_restored_driver(self):
+        self.driver.preauthenticated = True
+        self.driver.context = Mock(pages=[])
+        with patch.object(self.driver, "_launch_manual_browser"), patch.object(
+            self.driver, "_attach_manual_browser"
+        ), patch.object(self.driver, "_register_authentication_observer"), patch(
+            "aidast.recon.tools.playwright_driver._wait_for_manual_login"
+        ), patch.object(self.driver, "save_session", return_value=True), patch.object(
+            self.driver, "_register_context_handlers"
+        ):
+            self.driver.capture_and_start()
 
     def test_cancel_closes_direct_browser_without_session_or_runtime(self):
         with patch.object(self.driver, "_launch_manual_browser") as launch, patch.object(

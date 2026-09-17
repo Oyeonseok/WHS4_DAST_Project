@@ -31,13 +31,34 @@ $chromeProcess = $null
 $script:socket = $null
 $script:messageId = 0
 $script:authenticationEndpoints = @{}
+function ConvertTo-SafeAuthenticationPath([Uri]$RequestUri) {
+    $sensitive = @('activate','activation','callback','confirm','invite','magic','magic-link','magic-login','reset','token','verify','verification')
+    $segments = $RequestUri.AbsolutePath.Split('/')
+    $safe = New-Object Collections.Generic.List[string]
+    for ($index = 0; $index -lt $segments.Count; $index++) {
+        $segment = $segments[$index]
+        $decoded = [Uri]::UnescapeDataString($segment)
+        $previous = if ($index -gt 0) { $segments[$index - 1].ToLowerInvariant() } else { '' }
+        $dynamic = $segment -and (
+            $sensitive -contains $previous -or
+            $decoded -match '^\d+$' -or
+            $decoded -match '^[0-9a-fA-F]{8,}$' -or
+            $decoded -match '^[0-9a-fA-F]{8}-[0-9a-fA-F-]{27,}$' -or
+            ($decoded.Length -ge 16 -and $decoded -match '^[A-Za-z0-9_+=.-]+$' -and
+             $decoded -match '[A-Za-z]' -and $decoded -match '\d') -or
+            $decoded -ne $segment
+        )
+        $safe.Add($(if ($dynamic) { ':secret' } else { $segment }))
+    }
+    return ($safe -join '/')
+}
 function Save-AuthenticationRequest($Parameters) {
     if (-not $Parameters -or -not $Parameters.request) { return }
     try { $requestUri = [Uri]$Parameters.request.url } catch { return }
     if ($requestUri.GetLeftPart([UriPartial]::Authority).ToLowerInvariant() -ne $targetOrigin) { return }
     $method = ([string]$Parameters.request.method).ToUpperInvariant()
     if (-not $method -or -not $requestUri.AbsolutePath.StartsWith('/')) { return }
-    $path = $requestUri.AbsolutePath
+    $path = ConvertTo-SafeAuthenticationPath $requestUri
     $key = "$method`n$targetOrigin`n$path"
     $script:authenticationEndpoints[$key] = @{
         method = $method

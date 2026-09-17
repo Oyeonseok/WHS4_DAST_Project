@@ -372,11 +372,42 @@ class ReconExecutor:
             )
             return 0
         target_origin = origin(session.start_url)
-        items = [
-            {
+        policy = self._policy_for(task)
+        candidates = []
+        rejected = 0
+        for endpoint in session.authentication_endpoints:
+            if endpoint.origin != target_origin:
+                continue
+            endpoint_url = endpoint.origin + endpoint.path
+            if policy is not None and not policy.allows_observed_url(endpoint_url):
+                rejected += 1
+                continue
+            candidates.append((endpoint, endpoint_url))
+        if rejected:
+            self._diagnostic(
+                "auth_endpoint_provenance_rejected",
+                task_id=task.task_id,
+                target=task.target.asset,
+                endpoint_count=rejected,
+            )
+        from aidast.recon.judgment import normalize_path
+        items = []
+        for endpoint, endpoint_url in candidates:
+            exists = self.conn.execute(
+                """SELECT 1 FROM endpoints e
+                   JOIN endpoint_observations v ON v.endpoint_id=e.endpoint_id
+                   WHERE e.origin_id=? AND upper(e.method)=? AND e.normalized_path=?
+                     AND v.source_tool='auth_bootstrap'
+                     AND v.discovery_kind='passive_login_observation'
+                     AND v.association_method='session_bundle'""",
+                (origin_id, endpoint.method, normalize_path(endpoint.path)),
+            ).fetchone()
+            if exists is not None:
+                continue
+            items.append({
                 "method": endpoint.method,
                 "path": endpoint.path,
-                "url": endpoint.origin + endpoint.path,
+                "url": endpoint_url,
                 "source": "auth_bootstrap",
                 "discovery_kind": "passive_login_observation",
                 "observed_at": endpoint.observed_at or dbmod.now(),
@@ -384,10 +415,7 @@ class ReconExecutor:
                     "association_method": "session_bundle",
                     "auth_state": "authenticated",
                 },
-            }
-            for endpoint in session.authentication_endpoints
-            if endpoint.origin == target_origin
-        ]
+            })
         if not items:
             return 0
         from aidast.recon.annotations import ObservationRecorder
