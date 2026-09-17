@@ -132,12 +132,14 @@ class ReconExecutor:
         annotation_agent=None,
         auth_bootstrap: dict | None = None,
         target_sessions: dict[tuple[str, str], TargetSession] | None = None,
+        request_headers: dict[str, str] | None = None,
         diagnostic_path: Path | None = None,
         prioritize_discovered_assets_first: bool = False,
         asset_discovery_batch_size: int = 25,
         candidate_db_path: Path | None = None,
     ):
         self.target_sessions = target_sessions
+        self.request_headers = dict(request_headers or {})
         self.prioritize_discovered_assets_first = prioritize_discovered_assets_first
         self.annotation_agent = annotation_agent
         self.auth_bootstrap = auth_bootstrap or {}
@@ -353,13 +355,13 @@ class ReconExecutor:
     def _probe_headers(self, task: ReconTask) -> dict:
         session = self._session_for(task)
         if session is None:
-            return {}
+            return dict(self.request_headers)
         from aidast.recon.tools.playwright_driver import ManualSessionConfig, PlaywrightDriver
         # Header extraction reads the scoped snapshot without launching a browser.
         reader = PlaywrightDriver(self._url_for(task), ManualSessionConfig(
             login_url=self._url_for(task), session_file=str(session.runtime_path(self.scan_id)),
         ))
-        return reader.get_auth_headers()
+        return {**reader.get_auth_headers(), **self.request_headers}
 
     def _import_authentication_endpoints(
         self, task: ReconTask, origin_id: str, session: TargetSession
@@ -704,6 +706,7 @@ class ReconExecutor:
                 session_file=str(session.runtime_path(self.scan_id)) if session else None,
                 identity_id=session.identity if session else None,
                 preauthenticated=session is not None,
+                request_headers=self.request_headers,
                 browser_context_token=browser_context_token,
                 diagnostic_callback=self._diagnostic,
                 authentication_endpoint_callback=(

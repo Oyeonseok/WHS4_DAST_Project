@@ -181,6 +181,14 @@ def _parser() -> argparse.ArgumentParser:
     recon.add_argument("--max-depth", type=_bounded_depth)
     recon.add_argument("--max-concurrency", type=_positive_int)
     recon.add_argument("--timeout-seconds", type=_positive_int)
+    recon.add_argument(
+        "--intigriti-username",
+        type=_intigriti_username,
+        help=(
+            "Intigriti handle injected into X-Intigriti-Username and the "
+            "required User-Agent suffix for every Recon HTTP request"
+        ),
+    )
     recon.add_argument("--auth-host", action="append", default=[], help="host allowed only during manual login bootstrap")
     recon.add_argument("--auth-path", action="append", default=[], help="path prefix allowed on --auth-host during login bootstrap")
     recon.add_argument("--db-path", type=Path, default=RESULT_ROOT / "Recon.db")
@@ -231,6 +239,14 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--max-depth", type=_bounded_depth)
     run.add_argument("--max-concurrency", type=_positive_int)
     run.add_argument("--timeout-seconds", type=_positive_int)
+    run.add_argument(
+        "--intigriti-username",
+        type=_intigriti_username,
+        help=(
+            "Intigriti handle injected into X-Intigriti-Username and the "
+            "required User-Agent suffix for every Recon HTTP request"
+        ),
+    )
     run.add_argument("--auth-host", action="append", default=[])
     run.add_argument("--auth-path", action="append", default=[])
     run.add_argument("--ffuf-wordlist")
@@ -391,6 +407,15 @@ def _positive_float(value: str) -> float:
     if parsed <= 0:
         raise argparse.ArgumentTypeError("must be greater than zero")
     return parsed
+
+
+def _intigriti_username(value: str) -> str:
+    candidate = value.strip()
+    if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", candidate) is None:
+        raise argparse.ArgumentTypeError(
+            "must be a 1-64 character Intigriti handle using letters, digits, ., _, or -"
+        )
+    return candidate
 
 
 def _positive_int(value: str) -> int:
@@ -658,6 +683,25 @@ def _run_recon(
         scope_document, scope_markdown = scope_coordinator.load_approved_scope()
         print(f"Approved Scope saved: {program_dir / 'Scope.md'}")
 
+    intigriti_username = getattr(args, "intigriti_username", None)
+    if (
+        args.execute
+        and "X-Intigriti-Username" in scope_markdown
+        and not intigriti_username
+    ):
+        raise ReconCoordinatorError(
+            "approved Scope requires X-Intigriti-Username; "
+            "supply --intigriti-username"
+        )
+    request_headers = (
+        {
+            "X-Intigriti-Username": intigriti_username,
+            "User-Agent": f"aidast-recon/0.1 <intigriti:{intigriti_username}>",
+        }
+        if intigriti_username
+        else {}
+    )
+
     selected_targets = _select_recon_targets(
         scope_document,
         requested_targets=args.target,
@@ -813,6 +857,7 @@ def _run_recon(
             execution_start_urls=start_urls,
             annotation_agent=main_agent,
             target_sessions=target_sessions,
+            request_headers=request_headers,
             auth_bootstrap=(
                 {"hosts": args.auth_host, "paths": args.auth_path}
                 if args.auth_host or args.auth_path else None

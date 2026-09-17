@@ -1494,6 +1494,7 @@ def discover_endpoints(
     base_url: str,
     *,
     ffuf_wordlist: str | None = None,
+    request_headers: dict[str, str] | None = None,
 
     # None이면 base_url을 Browser에 표시
     login_url: str | None = None,
@@ -1677,6 +1678,7 @@ def discover_endpoints(
                 target_policy=target_policy,
                 auth_bootstrap=auth_bootstrap,
                 preauthenticated=preauthenticated,
+                request_headers=request_headers,
                 browser_context_token=browser_context_token,
             )
         )

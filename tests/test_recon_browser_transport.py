@@ -514,6 +514,51 @@ class ReconBrowserTransportTests(unittest.TestCase):
                 )
                 driver.return_value.close.assert_called_once_with()
 
+    def test_endpoint_discovery_passes_intigriti_headers_to_browser(self):
+        headers = {
+            "X-Intigriti-Username": "baekggum",
+            "User-Agent": "aidast-recon/0.1 <intigriti:baekggum>",
+        }
+        with patch(
+            "aidast.recon.tools.endpoint_discovery.PlaywrightDriver"
+        ) as driver:
+            driver.return_value.capture_and_start.side_effect = RuntimeError("stop")
+            with self.assertRaisesRegex(RuntimeError, "stop"):
+                discover_endpoints(
+                    self.policy.asset,
+                    target_policy=self.policy,
+                    mitm_proxy_url="http://127.0.0.1:8080",
+                    request_headers=headers,
+                )
+        self.assertEqual(driver.call_args.kwargs["request_headers"], headers)
+
+    def test_route_guard_injects_identity_only_into_target_requests(self):
+        self.driver.request_headers = {
+            "X-Intigriti-Username": "baekggum",
+            "User-Agent": "aidast-recon/0.1 <intigriti:baekggum>",
+        }
+        self.driver.browser_context_token = "browser-token-with-enough-length"
+
+        def request(url, resource_type, *, frame_url=None):
+            return SimpleNamespace(
+                url=url, method="GET", resource_type=resource_type,
+                all_headers=lambda: {"accept": "*/*"},
+                frame=SimpleNamespace(url=frame_url or self.policy.asset),
+                is_navigation_request=lambda: False,
+            )
+
+        target = Mock(request=request("https://example.com/api/users", "xhr"))
+        self.driver._guard_request(target)
+        target_headers = target.continue_.call_args.kwargs["headers"]
+        self.assertEqual(target_headers["X-Intigriti-Username"], "baekggum")
+        self.assertIn("<intigriti:baekggum>", target_headers["User-Agent"])
+
+        third_party = Mock(request=request("https://cdn.example.net/app.js", "script"))
+        self.driver._guard_request(third_party)
+        third_party_headers = third_party.continue_.call_args.kwargs["headers"]
+        self.assertNotIn("X-Intigriti-Username", third_party_headers)
+        self.assertNotIn("User-Agent", third_party_headers)
+
     def test_route_guard_blocks_scope_methods_and_url_credentials(self):
         for url, method, allowed in [
             ("https://example.com/api/users", "GET", True),

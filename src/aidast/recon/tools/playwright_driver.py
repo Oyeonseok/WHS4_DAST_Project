@@ -202,12 +202,14 @@ class PlaywrightDriver:
         target_policy: TargetPolicy | None = None,
         auth_bootstrap: dict | None = None,
         preauthenticated: bool = False,
+        request_headers: dict[str, str] | None = None,
         browser_context_token: str | None = None,
     ):
 
         if target_policy is not None and not proxy_url:
             raise ValueError("policy-enforced browser requires a proxy")
         self.preauthenticated = preauthenticated
+        self.request_headers = dict(request_headers or {})
         self.target_policy = target_policy
         self.auth_bootstrap = auth_bootstrap or {}
         self.base_url = (
@@ -829,13 +831,20 @@ class PlaywrightDriver:
             support_mode = None
         try:
             if strictly_allowed:
-                route.continue_()
+                if self.request_headers:
+                    headers = dict(request.all_headers())
+                    headers.update(self.request_headers)
+                    route.continue_(headers=headers)
+                else:
+                    route.continue_()
             elif support_mode and self.browser_context_token:
                 # A request can still be delivered to this callback while a
                 # CDP target is shutting down. Reading headers in that window
                 # raises TargetClosedError; never turn browser shutdown into a
                 # Recon failure or attempt to bypass the policy.
                 headers = dict(request.all_headers())
+                if support_mode == "same-origin":
+                    headers.update(self.request_headers)
                 headers[BROWSER_TOKEN_HEADER] = self.browser_context_token
                 headers[BROWSER_MODE_HEADER] = support_mode
                 route.continue_(headers=headers)
@@ -2260,6 +2269,7 @@ class PlaywrightDriver:
                     + candidates[0]
                 )
 
+        headers.update(self.request_headers)
         return headers
 
     # =====================================================
