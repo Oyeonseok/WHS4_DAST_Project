@@ -95,10 +95,10 @@ class GrpcReproductionPort:
         runtime = GrpcRuntimeContract.model_validate(blind_case.runtime_contract)
         attempt = runtime.for_attempt(attempt_kind)
         url = f"{attempt.endpoint}/{attempt.service}/{attempt.method}"
-        policy_url = blind_case.endpoint
         # Trusted local resources are not consulted for out-of-policy targets.
         # Reserve below repeats the authorization alongside atomic budget checks.
-        if not policy.allows_validation_url(policy_url, method="POST"):
+        if (not policy.allows_validation_url(blind_case.endpoint, method="POST")
+                or not policy.allows_validation_url(url, method="POST")):
             return self._blocked(blind_case, "current_policy_rejected", policy_allowed=False)
         started = self.clock()
         deadline = started + min(attempt.deadline_seconds, policy.limits.timeout_seconds)
@@ -152,7 +152,7 @@ class GrpcReproductionPort:
         )
         spec = TransportOperationSpec(
             runtime_kind="grpc", operation_kind="unary", destination=url,
-            policy_url=policy_url, method="POST",
+            policy_url=url, method="POST",
             request_bytes=len(loaded.request_bytes), max_response_bytes=attempt.max_response_bytes,
             concurrency_units=1, metadata={"request_sha256": hashlib.sha256(loaded.request_bytes).hexdigest(),
                 "descriptor_sha256": attempt.descriptor.sha256, "descriptor_length": attempt.descriptor.length},

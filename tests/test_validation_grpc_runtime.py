@@ -271,14 +271,63 @@ class GrpcAdapterTests(unittest.TestCase):
             captured.append(endpoint)
             return channel
 
+        policy = self.policy.model_copy(update={
+            "allowed_schemes": ["http"], "allowed_hosts": ["127.0.0.1"],
+            "allowed_ports": [80], "allowed_methods": ["POST"],
+            "attack_allowed_methods": ["POST"],
+            "attack_authorization_mode": "active_non_destructive",
+            "attack_authorization_evidence": "Inert loopback validation only.",
+            "allowed_path_prefixes": ["/items", "/fixture.Echo/Unary"],
+            "limits": PolicyLimits(requests_per_second=50),
+        })
         result = self.execute(
             source_endpoint="http://127.0.0.1/items",
-            channel_factory=channel_factory,
+            channel_factory=channel_factory, policy=policy,
         )
 
         self.assertTrue(result.signal_observed)
         self.assertEqual(captured, ["http://127.0.0.1"])
         self.assertEqual(self.rows()[0]["destination"], "http://127.0.0.1/fixture.Echo/Unary")
+
+    def test_source_path_never_authorizes_disallowed_excluded_or_non_post_rpc_path(self):
+        base_policy = self.policy.model_copy(update={
+            "allowed_schemes": ["http"], "allowed_hosts": ["127.0.0.1"],
+            "allowed_ports": [80], "allowed_methods": ["POST"],
+            "attack_allowed_methods": ["POST"],
+            "attack_authorization_mode": "active_non_destructive",
+            "attack_authorization_evidence": "Inert loopback validation only.",
+            "allowed_path_prefixes": ["/items"],
+            "limits": PolicyLimits(requests_per_second=50),
+        })
+        cases = (
+            base_policy,
+            base_policy.model_copy(update={
+                "allowed_path_prefixes": ["/items", "/fixture.Echo/Unary"],
+                "excluded_path_prefixes": ["/fixture.Echo/Unary"],
+            }),
+            base_policy.model_copy(update={
+                "allowed_path_prefixes": ["/items", "/fixture.Echo/Unary"],
+                "attack_allowed_methods": ["GET"],
+            }),
+        )
+        for policy in cases:
+            for attempt_kind in ("target", "positive_control", "negative_control"):
+                with self.subTest(
+                    policy=policy.model_dump(mode="json"), attempt_kind=attempt_kind,
+                ):
+                    channel = ScriptedChannel()
+                    resource_calls = []
+                    result = self.execute(
+                        channel, source_endpoint="http://127.0.0.1/items", policy=policy,
+                        attempt_kind=attempt_kind, credentials=("opaque",),
+                        credential_resolver=lambda reference: resource_calls.append(reference),
+                    )
+                    self.assertEqual(result.outcome, "blocked")
+                    self.assertEqual(result.details, {"reason": "current_policy_rejected"})
+                    self.assertFalse(result.policy_allowed)
+                    self.assertEqual(resource_calls, [])
+                    self.assertFalse(channel.calls)
+                    self.assertEqual(self.rows(), [])
 
     def test_grpc_source_bridge_rejects_different_authority(self):
         doc = runtime_document()
@@ -402,6 +451,31 @@ class GrpcAdapterTests(unittest.TestCase):
         self.assertEqual(result.details, {"reason": "current_policy_rejected"})
         self.assertEqual(self.rows(), [])
         self.assertFalse(channel.calls)
+
+    def test_broker_rechecks_actual_rpc_path_after_resource_resolution(self):
+        policy = self.policy.model_copy(update={
+            "allowed_schemes": ["http"], "allowed_hosts": ["127.0.0.1"],
+            "allowed_ports": [80], "allowed_methods": ["POST"],
+            "attack_allowed_methods": ["POST"],
+            "attack_authorization_mode": "active_non_destructive",
+            "attack_authorization_evidence": "Inert loopback validation only.",
+            "allowed_path_prefixes": ["/items", "/fixture.Echo/Unary"],
+        })
+
+        def credential(reference):
+            policy.excluded_path_prefixes[:] = ["/fixture.Echo/Unary"]
+            return {"authorization": "inert"}
+
+        channel = ScriptedChannel()
+        result = self.execute(
+            channel, source_endpoint="http://127.0.0.1/items", policy=policy,
+            credentials=("opaque",), credential_resolver=credential,
+        )
+
+        self.assertEqual(result.details, {"reason": "current_policy_rejected"})
+        self.assertFalse(result.policy_allowed)
+        self.assertFalse(channel.calls)
+        self.assertEqual(self.rows(), [])
 
     def test_completed_non_ok_statuses_are_evaluable_without_status_allowlist(self):
         doc = runtime_document()

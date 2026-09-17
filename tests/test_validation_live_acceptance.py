@@ -249,7 +249,8 @@ class ValidationLiveAcceptanceTests(unittest.TestCase):
         policy = TargetPolicy(
             asset_type=AssetType.URL, asset=f"{base_url}/items",
             allowed_schemes=["http"], allowed_hosts=["127.0.0.1"],
-            allowed_ports=[port], allowed_path_prefixes=["/items"],
+            allowed_ports=[port],
+            allowed_path_prefixes=["/items", "/fixture.Echo/Unary"],
             allowed_methods=["POST"], attack_allowed_methods=["POST"],
             attack_authorization_mode="active_non_destructive",
             attack_authorization_evidence="Bounded loopback unary fixture.",
