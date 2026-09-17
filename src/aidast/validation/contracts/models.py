@@ -152,6 +152,14 @@ class DevelopmentCapability(StrictContract):
     contract_sha256: Digest
 
 
+class ImpactDevelopmentCapability(StrictContract):
+    contract_id: Identifier
+    path_id: Identifier
+    endpoint_template: str
+    method: Literal["GET", "HEAD", "OPTIONS"]
+    contract_sha256: Digest
+
+
 class BlindCase(StrictContract):
     case_id: Identifier
     target_kind: Literal["finding", "chain"]
@@ -166,6 +174,7 @@ class BlindCase(StrictContract):
     controls: dict[str, Any]
     runtime_contract: dict[str, Any] | None = None
     development_capabilities: tuple[DevelopmentCapability, ...] = ()
+    impact_development_capabilities: tuple[ImpactDevelopmentCapability, ...] = ()
     attack_skill_name: Identifier
     attack_skill_sha256: Digest
     validation_skill_sha256: Digest

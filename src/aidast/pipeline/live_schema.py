@@ -390,10 +390,16 @@ CREATE TABLE IF NOT EXISTS finding_reproduction_specs (
         development_contract_json IS NULL OR json_valid(development_contract_json)),
     development_contract_sha256 TEXT CHECK(
         development_contract_sha256 IS NULL OR length(development_contract_sha256)=64),
+    impact_development_contract_json TEXT CHECK(
+        impact_development_contract_json IS NULL OR json_valid(impact_development_contract_json)),
+    impact_development_contract_sha256 TEXT CHECK(
+        impact_development_contract_sha256 IS NULL OR length(impact_development_contract_sha256)=64),
     spec_sha256 TEXT NOT NULL CHECK(length(spec_sha256)=64),
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CHECK((runtime_contract_json IS NULL) = (runtime_contract_sha256 IS NULL)),
-    CHECK((development_contract_json IS NULL) = (development_contract_sha256 IS NULL))
+    CHECK((development_contract_json IS NULL) = (development_contract_sha256 IS NULL)),
+    CHECK((impact_development_contract_json IS NULL) =
+          (impact_development_contract_sha256 IS NULL))
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_active_validation_stage
@@ -502,6 +508,14 @@ def _add_live_columns(conn: sqlite3.Connection) -> None:
         (
             "development_contract_sha256",
             "TEXT CHECK(development_contract_sha256 IS NULL OR length(development_contract_sha256)=64)",
+        ),
+        (
+            "impact_development_contract_json",
+            "TEXT CHECK(impact_development_contract_json IS NULL OR json_valid(impact_development_contract_json))",
+        ),
+        (
+            "impact_development_contract_sha256",
+            "TEXT CHECK(impact_development_contract_sha256 IS NULL OR length(impact_development_contract_sha256)=64)",
         ),
     ):
         if name not in reproduction_columns:

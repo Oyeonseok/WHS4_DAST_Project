@@ -47,6 +47,8 @@ class ValidationSchemaTests(unittest.TestCase):
         }
         self.assertTrue({
             "development_contract_json", "development_contract_sha256",
+            "impact_development_contract_json",
+            "impact_development_contract_sha256",
         }.issubset(reproduction_columns))
 
     def test_target_and_active_stage_uniqueness(self):

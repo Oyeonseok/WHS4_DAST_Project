@@ -14,6 +14,7 @@ from .contracts.models import (
     BlindCase,
     BlindDisclosureError,
     DevelopmentCapability,
+    ImpactDevelopmentCapability,
     StagedBlindCase,
 )
 from .execution.browser_adapter import BrowserExecutor, BrowserReproductionPort
@@ -40,6 +41,7 @@ from .orchestration.coordinator import (
     ValidationCoordinatorError,
 )
 from .orchestration.codex_runner import CodexBlindValidationRunner
+from .orchestration.impact_runner import CodexImpactDevelopmentRunner
 from .execution.credentials import KeyringCredentialBackend, PipelineCredentialResolver
 from .core.decision import DecisionEngine, DecisionInput
 from .contracts.development import (
@@ -47,8 +49,22 @@ from .contracts.development import (
     DevelopmentRuntimeContract,
     NativePrerequisiteResolver,
 )
+from .contracts.impact_development import (
+    ImpactDevelopmentActionContract,
+    ImpactDevelopmentRuntimeContract,
+)
 from .core.decision import ImpactGapAnalyzer
 from .execution.http_adapter import HttpReproductionPort
+from .execution.impact_development import (
+    ImpactDevelopmentError,
+    ImpactDevelopmentObservation,
+    ImpactDevelopmentPlan,
+    ImpactDevelopmentPlanner,
+    ImpactDevelopmentPort,
+    ImpactDevelopmentRequest,
+    ImpactHypothesisExecutor,
+)
+from .execution.native_impact import NativeImpactDevelopmentPort
 from .execution.http_oob_observer import HttpJsonOobObserver, HttpOobObserverConfig
 from .core.decision import ImpactResult, evaluate_impact
 from .core.integrity import (
@@ -153,6 +169,7 @@ __all__ = [
     "ChainStepContract",
     "ClaimComparison",
     "CodexBlindValidationRunner",
+    "CodexImpactDevelopmentRunner",
     "ConcurrentValidationUpdate",
     "DecisionEngine",
     "DecisionInput",
@@ -167,12 +184,23 @@ __all__ = [
     "HttpRequestTemplate",
     "HttpRuntimeContract",
     "ImpactGapAnalyzer",
+    "ImpactDevelopmentError",
+    "ImpactDevelopmentActionContract",
+    "ImpactDevelopmentCapability",
+    "ImpactDevelopmentObservation",
+    "ImpactDevelopmentPlan",
+    "ImpactDevelopmentPlanner",
+    "ImpactDevelopmentPort",
+    "ImpactDevelopmentRequest",
+    "ImpactDevelopmentRuntimeContract",
+    "ImpactHypothesisExecutor",
     "ImpactResult",
     "KeyringCredentialBackend",
     "KnownCandidate",
     "KnownMatch",
     "KnownMatcher",
     "NativePrerequisiteResolver",
+    "NativeImpactDevelopmentPort",
     "OobAttemptContract",
     "OobEvent",
     "OobObservationSnapshot",

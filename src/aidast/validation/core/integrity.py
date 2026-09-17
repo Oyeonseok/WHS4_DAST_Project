@@ -9,12 +9,18 @@ from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urljoin, urlsplit
 
-from ..contracts.models import AttackClaim, BlindCase, DevelopmentCapability, StagedBlindCase
+from ..contracts.models import (
+    AttackClaim, BlindCase, DevelopmentCapability, ImpactDevelopmentCapability,
+    StagedBlindCase,
+)
 from .matching import canonical_payload, payload_structure_sha256
 from ..contracts.models import canonical_sha256
 from .profiles import ResolvedValidationProfile, SkillProfileResolver, ValidationProfileError
 from ..contracts.runtime_contract import validate_runtime_contract
 from ..contracts.development import DevelopmentActionContract, DevelopmentRuntimeContract
+from ..contracts.impact_development import (
+    ImpactDevelopmentActionContract, ImpactDevelopmentRuntimeContract,
+)
 
 
 class CandidateIntegrityError(ValueError):
@@ -36,6 +42,7 @@ class ValidatedCandidate:
     profile: ResolvedValidationProfile
     staged: StagedBlindCase
     development_actions: tuple[DevelopmentActionContract, ...] = ()
+    impact_development_actions: tuple[ImpactDevelopmentActionContract, ...] = ()
 
 
 SPEC_DIGEST_FIELDS = (
@@ -105,6 +112,21 @@ class CandidateIntegrityGate:
             if canonical_sha256(development.model_dump(mode="json")) != development_sha256:
                 raise CandidateIntegrityError("development_contract_sha256")
             development_actions = development.actions
+        impact_json = spec.pop("impact_development_contract_json", None)
+        impact_sha256 = spec.pop("impact_development_contract_sha256", None)
+        if (impact_json is None) != (impact_sha256 is None):
+            raise CandidateIntegrityError("impact_development_contract_binding")
+        impact_actions: tuple[ImpactDevelopmentActionContract, ...] = ()
+        if impact_json is not None:
+            try:
+                impact_contract = ImpactDevelopmentRuntimeContract.model_validate_json(
+                    impact_json
+                )
+            except (ValueError, TypeError):
+                raise CandidateIntegrityError("impact_development_contract_schema") from None
+            if canonical_sha256(impact_contract.model_dump(mode="json")) != impact_sha256:
+                raise CandidateIntegrityError("impact_development_contract_sha256")
+            impact_actions = impact_contract.actions
         if reproduction_spec_digest(spec) != spec["spec_sha256"]:
             raise CandidateIntegrityError("spec_sha256")
         if payload_structure_sha256(spec["payload_template"]) != spec["payload_structure_sha256"]:
@@ -151,6 +173,22 @@ class CandidateIntegrityGate:
             for action in development_actions for role in action.credential_roles
         ):
             raise CandidateIntegrityError("development_identity_roles")
+        impact_paths = {
+            path.path_id for path in profile.profile.impact_expansion_paths
+            if path.execution_owner == "validation"
+        }
+        if any(
+            action.path_id not in impact_paths
+            or action.endpoint_template != spec["endpoint_template"]
+            or action.method != spec["method"].upper()
+            for action in impact_actions
+        ):
+            raise CandidateIntegrityError("impact_development_profile_scope")
+        if any(
+            role not in roles
+            for action in impact_actions for role in action.credential_roles
+        ):
+            raise CandidateIntegrityError("impact_development_identity_roles")
         references = []
         for role in roles:
             row = self.conn.execute(
@@ -194,6 +232,16 @@ class CandidateIntegrityGate:
                 )
                 for action in development_actions
             ),
+            impact_development_capabilities=tuple(
+                ImpactDevelopmentCapability(
+                    contract_id=action.contract_id,
+                    path_id=action.path_id,
+                    endpoint_template=action.endpoint_template,
+                    method=action.method,
+                    contract_sha256=canonical_sha256(action.model_dump(mode="json")),
+                )
+                for action in impact_actions
+            ),
             attack_skill_name=spec["attack_skill_name"],
             attack_skill_sha256=profile.attack_skill_sha256,
             validation_skill_sha256=profile.validation_skill_sha256,
@@ -207,7 +255,7 @@ class CandidateIntegrityGate:
         return ValidatedCandidate(
             case_id, scan_id, finding_id, finding["vuln_type"], spec["endpoint_template"],
             spec["parameter_name"], spec["payload_template"], spec["source_policy_sha256"],
-            profile, StagedBlindCase(blind, claim), development_actions,
+            profile, StagedBlindCase(blind, claim), development_actions, impact_actions,
         )
 
     def validate_chain(self, *, case_id: str, scan_id: str, chain_id: str) -> ValidatedCandidate:
