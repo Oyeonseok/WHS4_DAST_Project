@@ -46,5 +46,26 @@
       "blocker_axis": "state_setup"
     }
   ],
-  "impact_expansion_paths": []
+  "impact_expansion_paths": [
+    {
+      "path_id": "bounded-impact-confirmation",
+      "gap_axis": "boundary",
+      "hypothesis_kind": "bounded_authorization_boundary",
+      "required_preconditions": [
+        "An exact same-origin safe-method request already captured by Attack",
+        "A declared test identity or resource proving the stronger authorization boundary"
+      ],
+      "expected_signal": {
+        "kind": "hunt_auth_bypass_bounded_impact_observed"
+      },
+      "recommended_actions": [
+        "Evaluate only the immutable request and its declared non-status authorization assertion"
+      ],
+      "execution_owner": "validation",
+      "feasibility": "medium",
+      "potential_impact": {
+        "boundary": 2
+      }
+    }
+  ]
 }

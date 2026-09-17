@@ -56,6 +56,10 @@ class ValidationProfileTests(unittest.TestCase):
             self.assertEqual(profile.control_negative.payload_template,
                              {"mode": "inert_same_shape_control"})
             self.assertLessEqual(len(profile.allowed_development_actions), 2)
+            self.assertGreaterEqual(len(profile.impact_expansion_paths), 1)
+            for path in profile.impact_expansion_paths:
+                self.assertIn(path.execution_owner, {"validation", "chaining", "manual"})
+                self.assertEqual(set(path.potential_impact), {path.gap_axis})
         self.assertEqual(len(criteria), 58)
 
     def test_profile_rejects_unknown_fields_and_timing_without_baseline(self):
