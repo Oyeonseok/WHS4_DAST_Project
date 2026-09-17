@@ -240,6 +240,9 @@ class ValidationCoordinator:
         self._impact_development_records = []
         version = case["state_version"]
         if case.get("blind_case_sha256") is not None:
+            repo.quarantine_running_impact_hypotheses(
+                case_id=case["case_id"], stage_run_id=stage_run_id,
+            )
             unknown = self._unknown_execution_counts(
                 conn, case["case_id"], stage_run_id,
             )
@@ -535,9 +538,16 @@ class ValidationCoordinator:
                WHERE case_id=? AND stage_run_id=? AND status='outcome_unknown'""",
             (case_id, stage_run_id),
         ).fetchone()[0]
+        impact_count = conn.execute(
+            """SELECT count(*) FROM validation_impact_hypotheses
+               WHERE case_id=? AND stage_run_id=?
+               AND status IN ('running','outcome_unknown')""",
+            (case_id, stage_run_id),
+        ).fetchone()[0]
         return {
             "attempts": attempt_count, "requests": request_count,
             "development_actions": action_count,
+            "impact_hypotheses": impact_count,
         }
 
     def _execute_batch(self, repo: ValidationRepository, candidate: ValidatedCandidate,
@@ -935,7 +945,10 @@ class ValidationCoordinator:
         observations: tuple[dict[str, Any], ...], evidence_ids: list[str],
     ) -> BlindAssessment:
         from ..core.decision import evaluate_impact
-        from ..execution.impact_development import ImpactHypothesisExecutor
+        from ..execution.impact_development import (
+            ImpactDevelopmentObservation, ImpactDevelopmentPlan,
+            ImpactHypothesisExecutor,
+        )
         from .impact_runner import CodexImpactDevelopmentRunner
 
         initial = evaluate_impact(
@@ -955,19 +968,12 @@ class ValidationCoordinator:
             ),
         })
         executor = ImpactHypothesisExecutor()
-        if not executor.requests(
+        requests = executor.requests(
             profile=bounded_profile, impact=initial,
             evidence_ids=assessment.evidence_ids,
-        ):
-            return assessment
-        factory = self.impact_agent_factory or (
-            lambda skill_name: CodexImpactDevelopmentRunner(
-                attack_skill_name=skill_name,
-            )
         )
-        runner = factory(candidate.profile.profile.attack_skill_name)
-        self._impact_agents.append(runner)
-        plans = []
+        if not requests:
+            return assessment
         planning_context = (*observations, {
             "context_kind": "immutable_impact_execution_capabilities",
             "capabilities": [
@@ -989,13 +995,9 @@ class ValidationCoordinator:
                 for action in candidate.impact_development_actions
             ],
         })
+        runner = None
 
-        def planner(request):
-            plan = runner.plan(request, evidence=planning_context)
-            plans.append(plan)
-            return plan
-
-        def port(request):
+        def port(request, hypothesis_id):
             perform = getattr(self.impact_development_port, "perform", None)
             if callable(perform):
                 contracts = {
@@ -1006,40 +1008,116 @@ class ValidationCoordinator:
                     contract=contracts.get(request.path_id),
                     db_path=self.db_path, scan_id=candidate.scan_id,
                     stage_run_id=stage_run_id, case_id=candidate.case_id,
+                    impact_hypothesis_id=hypothesis_id,
                 )
             return self.impact_development_port(request)
 
         def known_evidence():
-            return tuple(row[0] for row in repo.conn.execute(
+            return {row[0] for row in repo.conn.execute(
                 "SELECT evidence_id FROM validation_evidence WHERE case_id=? AND stage_run_id=?",
                 (candidate.case_id, stage_run_id),
-            ))
+            )}
 
-        developed, results = executor.execute(
-            profile=bounded_profile, impact=initial,
-            evidence_ids=assessment.evidence_ids, planner=planner, port=port,
-            known_evidence_ids=known_evidence,
-        )
+        developed = initial
+        results = []
+        paths = {path.path_id: path for path in bounded_profile.impact_expansion_paths}
+        for ordinal, request in enumerate(requests, 1):
+            proposal = request.model_dump(mode="json")
+            proposal.pop("proposal_sha256")
+            hypothesis_id = repo.add_impact_hypothesis(
+                case_id=candidate.case_id, stage_run_id=stage_run_id,
+                ordinal=ordinal, proposal=proposal,
+                skill_sha256=candidate.profile.attack_skill_sha256,
+                validation_profile_sha256=candidate.profile.profile_sha256,
+            )
+            stored = repo.read_impact_hypothesis(hypothesis_id)
+            agent_id = stored.get("agent_id") or "persisted_impact_development"
+            if stored["status"] == "succeeded":
+                observation = ImpactDevelopmentObservation.model_validate(
+                    stored["observation"]
+                )
+                executor._validate_observation(
+                    request, paths[request.path_id], observation, known_evidence(),
+                )
+                plan_data = stored.get("plan")
+            elif stored["status"] in {"skipped", "failed", "outcome_unknown", "running"}:
+                self._impact_development_records.append({
+                    "hypothesis_id": hypothesis_id,
+                    "agent_id": agent_id,
+                    "status": stored["status"],
+                    "plan": stored.get("plan"),
+                })
+                continue
+            else:
+                plan_data = stored.get("plan")
+                if plan_data is None:
+                    if runner is None:
+                        factory = self.impact_agent_factory or (
+                            lambda skill_name: CodexImpactDevelopmentRunner(
+                                attack_skill_name=skill_name,
+                            )
+                        )
+                        runner = factory(candidate.profile.profile.attack_skill_name)
+                        self._impact_agents.append(runner)
+                    try:
+                        raw_plan = runner.plan(request, evidence=planning_context)
+                        plan = (
+                            raw_plan if isinstance(raw_plan, ImpactDevelopmentPlan)
+                            else ImpactDevelopmentPlan.model_validate(raw_plan)
+                        )
+                        executor._validate_plan(request, plan, known_evidence())
+                    except Exception:
+                        repo.fail_impact_hypothesis(hypothesis_id)
+                        raise
+                    plan_data = plan.model_dump(mode="json")
+                    agent_id = getattr(
+                        runner, "agent_id", "injected_impact_development_agent"
+                    )
+                    repo.record_impact_plan(
+                        hypothesis_id, agent_id=agent_id, plan=plan_data,
+                    )
+                else:
+                    plan = ImpactDevelopmentPlan.model_validate(plan_data)
+                    executor._validate_plan(request, plan, known_evidence())
+                if plan_data["disposition"] == "skip":
+                    self._impact_development_records.append({
+                        "hypothesis_id": hypothesis_id, "agent_id": agent_id,
+                        "status": "skipped", "plan": plan_data,
+                    })
+                    continue
+                repo.start_impact_hypothesis(hypothesis_id)
+                try:
+                    raw = port(request, hypothesis_id)
+                except Exception:
+                    repo.mark_impact_hypothesis_outcome_unknown(hypothesis_id)
+                    raise
+                observation = (
+                    raw if isinstance(raw, ImpactDevelopmentObservation)
+                    else ImpactDevelopmentObservation.model_validate(raw)
+                )
+                executor._validate_observation(
+                    request, paths[request.path_id], observation, known_evidence(),
+                )
+                repo.finish_impact_hypothesis(
+                    hypothesis_id, observation=observation.model_dump(mode="json"),
+                )
+            results.append(observation)
+            self._impact_development_records.append({
+                "hypothesis_id": hypothesis_id, "agent_id": agent_id,
+                "status": "succeeded", "plan": plan_data,
+                "observation": observation.model_dump(mode="json"),
+            })
+            if observation.signal_observed:
+                developed = executor._apply_path(developed, paths[request.path_id])
+                if not developed.underpowered:
+                    break
+        results = tuple(results)
         if getattr(self.impact_development_port, "requires_request_ledger", False):
             for result in results:
                 self._validate_impact_development_ledger(
                     repo.conn, candidate=candidate, stage_run_id=stage_run_id,
                     result=result,
                 )
-        self._impact_development_records.extend({
-            "agent_id": getattr(runner, "agent_id", "injected_impact_development_agent"),
-            "plan": (
-                plan.model_dump(mode="json")
-                if hasattr(plan, "model_dump") else dict(plan)
-            ),
-            "observation": result.model_dump(mode="json"),
-        } for plan, result in zip(
-            (plan for plan in plans if (
-                getattr(plan, "disposition", None)
-                if not isinstance(plan, dict) else plan.get("disposition")
-            ) == "execute"),
-            results,
-        ))
         if developed == initial:
             return assessment
         supporting = tuple(dict.fromkeys(

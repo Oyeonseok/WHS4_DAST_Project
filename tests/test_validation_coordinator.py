@@ -971,13 +971,24 @@ class ValidationCoordinatorTests(unittest.TestCase):
                 "cross-role-object-access",
             )
             impact_request = conn.execute(
-                """SELECT method,status,attempt_id,development_action_id
-                   FROM validation_http_requests
+                """SELECT r.method,r.status,r.attempt_id,r.development_action_id,
+                          a.impact_hypothesis_id
+                   FROM validation_http_requests r
+                   JOIN validation_attempts a ON a.attempt_id=r.attempt_id
                    WHERE url LIKE '%/objects/2'"""
             ).fetchone()
             self.assertEqual(impact_request[:2], ("GET", "completed"))
             self.assertIsNotNone(impact_request[2])
             self.assertIsNone(impact_request[3])
+            hypothesis = conn.execute(
+                """SELECT hypothesis_id,status,plan_json,observation_json
+                   FROM validation_impact_hypotheses
+                   WHERE path_id='cross-role-object-access'"""
+            ).fetchone()
+            self.assertEqual(hypothesis[1], "succeeded")
+            self.assertEqual(impact_request[4], hypothesis[0])
+            self.assertEqual(json.loads(hypothesis[2])["disposition"], "execute")
+            self.assertTrue(json.loads(hypothesis[3])["signal_observed"])
 
     def test_demonstrated_chain_replays_end_to_end_after_node_gate(self):
         from aidast.validation import canonical_sha256

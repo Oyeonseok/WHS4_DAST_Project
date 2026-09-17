@@ -34,6 +34,7 @@ class NativeImpactDevelopmentPort:
         self, request: ImpactDevelopmentRequest, *, blind_case: BlindCase,
         contract: ImpactDevelopmentActionContract | None, db_path: Path,
         scan_id: str, stage_run_id: str, case_id: str,
+        impact_hypothesis_id: str,
     ) -> dict:
         if contract is None or contract.path_id != request.path_id:
             raise ValueError("impact development contract is missing or mismatched")
@@ -66,6 +67,7 @@ class NativeImpactDevelopmentPort:
                 case_id=case_id, stage_run_id=stage_run_id, batch_no=batch_no,
                 attempt_kind="target", ordinal=1, signal_type=blind_case.signal_types[0],
                 outcome="outcome_unknown", finished=False,
+                impact_hypothesis_id=impact_hypothesis_id,
             )
             broker = ValidationRequestBroker(
                 db_path=db_path, scan_id=scan_id, stage_run_id=stage_run_id,
@@ -119,6 +121,7 @@ class NativeImpactDevelopmentPort:
                     attempt_id, outcome="outcome_unknown", signal_observed=None,
                     blocker_axis=None, observation={"request_ids": broker.request_ids},
                 )
+                repo.mark_impact_hypothesis_outcome_unknown(impact_hypothesis_id)
                 raise
             repo.complete_attempt(
                 attempt_id, outcome=outcome, signal_observed=observed,
@@ -129,16 +132,20 @@ class NativeImpactDevelopmentPort:
                 evidence_kind="impact_development_observation", details=details,
                 content_sha256=content_sha, content_length=content_length,
             )
-        return {
-            "path_id": request.path_id,
-            "proposal_sha256": request.proposal_sha256,
-            "outcome": outcome,
-            "signal_observed": observed,
-            "signal": request.expected_signal if observed else {},
-            "evidence_ids": [evidence_id],
-            "details": {
-                "contract_id": contract.contract_id,
-                "contract_sha256": contract_sha,
-                "request_ids": details["request_ids"],
-            },
-        }
+            result = {
+                "path_id": request.path_id,
+                "proposal_sha256": request.proposal_sha256,
+                "outcome": outcome,
+                "signal_observed": observed,
+                "signal": request.expected_signal if observed else {},
+                "evidence_ids": [evidence_id],
+                "details": {
+                    "contract_id": contract.contract_id,
+                    "contract_sha256": contract_sha,
+                    "request_ids": details["request_ids"],
+                },
+            }
+            repo.finish_impact_hypothesis(
+                impact_hypothesis_id, observation=result,
+            )
+        return result

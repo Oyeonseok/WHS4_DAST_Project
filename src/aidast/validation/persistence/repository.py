@@ -77,18 +77,26 @@ class ValidationRepository:
                     attempt_kind: str, ordinal: int, signal_type: str, outcome: str,
                     observation: dict[str, Any] | None = None, finished: bool = True,
                     signal_observed: bool | None = None, blocker_axis: str | None = None,
-                    attempt_id: str | None = None) -> str:
+                    attempt_id: str | None = None,
+                    impact_hypothesis_id: str | None = None) -> str:
         identifier = attempt_id or new_id("vattempt")
         with self.conn:
             self._assert_current_case(case_id, stage_run_id)
+            if impact_hypothesis_id is not None and self.conn.execute(
+                """SELECT 1 FROM validation_impact_hypotheses
+                   WHERE hypothesis_id=? AND case_id=? AND stage_run_id=?""",
+                (impact_hypothesis_id, case_id, stage_run_id),
+            ).fetchone() is None:
+                raise ValidationRepositoryError("impact attempt cites a foreign hypothesis")
             self.conn.execute(
                 """INSERT INTO validation_attempts
                 (attempt_id,case_id,stage_run_id,batch_no,attempt_kind,ordinal,signal_type,outcome,
-                 signal_observed,blocker_axis,observation_json,finished_at)
-                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                 signal_observed,blocker_axis,observation_json,finished_at,impact_hypothesis_id)
+                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (identifier, case_id, stage_run_id, batch_no, attempt_kind, ordinal, signal_type,
                  outcome, signal_observed, blocker_axis,
-                 canonical_json(sanitize_metadata(observation or {})), now() if finished else None),
+                 canonical_json(sanitize_metadata(observation or {})), now() if finished else None,
+                 impact_hypothesis_id),
             )
         return identifier
 
@@ -286,6 +294,8 @@ class ValidationRepository:
         evidence_ids = proposal["supporting_evidence_ids"]
         if not isinstance(evidence_ids, (list, tuple)) or not evidence_ids:
             raise ValidationRepositoryError("impact hypothesis requires current-stage evidence")
+        digest_input = {key: proposal[key] for key in sorted(proposal)}
+        proposal_sha256 = canonical_sha256(digest_input)
         with self.conn:
             self._assert_current_case(case_id, stage_run_id)
             placeholders = ",".join("?" for _ in evidence_ids)
@@ -295,7 +305,15 @@ class ValidationRepository:
             ).fetchone()[0]
             if count != len(set(evidence_ids)):
                 raise ValidationRepositoryError("impact hypothesis cites foreign evidence")
-            digest_input = {key: proposal[key] for key in sorted(proposal)}
+            existing = self.conn.execute(
+                """SELECT hypothesis_id,proposal_sha256 FROM validation_impact_hypotheses
+                   WHERE case_id=? AND stage_run_id=? AND path_id=?""",
+                (case_id, stage_run_id, proposal["path_id"]),
+            ).fetchone()
+            if existing is not None:
+                if existing[1] != proposal_sha256:
+                    raise ValidationRepositoryError("stored impact hypothesis changed")
+                return existing[0]
             self.conn.execute(
                 """INSERT INTO validation_impact_hypotheses
                 (hypothesis_id,case_id,stage_run_id,ordinal,gap_axis,path_id,hypothesis_kind,
@@ -311,9 +329,101 @@ class ValidationRepository:
                  canonical_json(sanitize_metadata(proposal["expected_signal"])),
                  canonical_json(list(evidence_ids)), proposal["execution_owner"],
                  proposal["feasibility"], canonical_json(sanitize_metadata(proposal["potential_impact"])),
-                 skill_sha256, validation_profile_sha256, canonical_sha256(digest_input)),
+                 skill_sha256, validation_profile_sha256, proposal_sha256),
             )
         return identifier
+
+    def read_impact_hypothesis(self, hypothesis_id: str) -> dict[str, Any]:
+        self.conn.row_factory = sqlite3.Row
+        row = self.conn.execute(
+            "SELECT * FROM validation_impact_hypotheses WHERE hypothesis_id=?",
+            (hypothesis_id,),
+        ).fetchone()
+        if row is None:
+            raise ValidationRepositoryError("unknown impact hypothesis")
+        result = dict(row)
+        for source, target in (
+            ("plan_json", "plan"), ("observation_json", "observation"),
+        ):
+            if result.get(source) is not None:
+                value = json.loads(result[source])
+                digest = result[source.replace("_json", "_sha256")]
+                if canonical_sha256(value) != digest:
+                    raise ValidationRepositoryError("impact execution digest mismatch")
+                result[target] = value
+        return result
+
+    def record_impact_plan(self, hypothesis_id: str, *, agent_id: str,
+                           plan: dict[str, Any]) -> None:
+        encoded = canonical_json(plan)
+        status = "skipped" if plan.get("disposition") == "skip" else "planned"
+        with self.conn:
+            cursor = self.conn.execute(
+                """UPDATE validation_impact_hypotheses
+                   SET agent_id=?,plan_json=?,plan_sha256=?,status=?,
+                       finished_at=CASE WHEN ?='skipped' THEN ? ELSE finished_at END
+                   WHERE hypothesis_id=? AND status='planned' AND plan_json IS NULL""",
+                (agent_id, encoded, canonical_sha256(plan), status, status, now(), hypothesis_id),
+            )
+            if cursor.rowcount != 1:
+                raise ValidationRepositoryError("impact hypothesis is not available for planning")
+
+    def start_impact_hypothesis(self, hypothesis_id: str) -> None:
+        with self.conn:
+            cursor = self.conn.execute(
+                """UPDATE validation_impact_hypotheses SET status='running',started_at=?
+                   WHERE hypothesis_id=? AND status='planned' AND plan_json IS NOT NULL""",
+                (now(), hypothesis_id),
+            )
+            if cursor.rowcount != 1:
+                raise ValidationRepositoryError("impact hypothesis is not ready to execute")
+
+    def finish_impact_hypothesis(self, hypothesis_id: str, *,
+                                 observation: dict[str, Any]) -> None:
+        encoded = canonical_json(observation)
+        with self.conn:
+            cursor = self.conn.execute(
+                """UPDATE validation_impact_hypotheses
+                   SET status='succeeded',observation_json=?,observation_sha256=?,finished_at=?
+                   WHERE hypothesis_id=? AND status='running'""",
+                (encoded, canonical_sha256(observation), now(), hypothesis_id),
+            )
+            if cursor.rowcount != 1:
+                row = self.conn.execute(
+                    """SELECT status,observation_sha256 FROM validation_impact_hypotheses
+                       WHERE hypothesis_id=?""", (hypothesis_id,),
+                ).fetchone()
+                if row is None or row[0] != "succeeded" or row[1] != canonical_sha256(observation):
+                    raise ValidationRepositoryError("impact hypothesis cannot be completed")
+
+    def mark_impact_hypothesis_outcome_unknown(self, hypothesis_id: str) -> None:
+        with self.conn:
+            self.conn.execute(
+                """UPDATE validation_impact_hypotheses
+                   SET status='outcome_unknown',finished_at=?
+                   WHERE hypothesis_id=? AND status='running'""",
+                (now(), hypothesis_id),
+            )
+
+    def fail_impact_hypothesis(self, hypothesis_id: str) -> None:
+        with self.conn:
+            self.conn.execute(
+                """UPDATE validation_impact_hypotheses
+                   SET status='failed',finished_at=?
+                   WHERE hypothesis_id=? AND status='planned'""",
+                (now(), hypothesis_id),
+            )
+
+    def quarantine_running_impact_hypotheses(self, *, case_id: str,
+                                             stage_run_id: str) -> int:
+        with self.conn:
+            cursor = self.conn.execute(
+                """UPDATE validation_impact_hypotheses
+                   SET status='outcome_unknown',finished_at=?
+                   WHERE case_id=? AND stage_run_id=? AND status='running'""",
+                (now(), case_id, stage_run_id),
+            )
+        return cursor.rowcount
 
     def finalize(self, case_id: str, *, stage_run_id: str, expected_version: int,
                  status: TerminalStatus, decision: dict[str, Any], evidence_ids: Iterable[str],
