@@ -9,8 +9,8 @@ from uuid import uuid4
 
 from aidast.agents.main import CodexMainAgent
 
-from .models import BlindAssessment, ClaimComparison, canonical_sha256
-from .profiles import SkillProfileResolver
+from ..contracts.models import BlindAssessment, ClaimComparison, canonical_sha256
+from ..core.profiles import SkillProfileResolver
 
 
 class CodexBlindValidationRunner:

@@ -13,9 +13,9 @@ from pydantic import Field, field_validator, model_validator
 
 from aidast.recon.policy import TargetPolicy
 
-from .blind import BlindCase
+from .models import BlindCase
 from .models import Identifier, StrictContract, canonical_sha256
-from .request_broker import (
+from ..execution.request_broker import (
     ValidationCredentialError,
     ValidationPolicyRejection,
     ValidationRequestBroker,

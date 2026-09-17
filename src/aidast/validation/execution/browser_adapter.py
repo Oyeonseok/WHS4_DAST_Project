@@ -8,11 +8,11 @@ from typing import Callable, Mapping, Protocol
 
 from aidast.recon.policy import TargetPolicy
 
-from .blind import BlindCase
-from .browser_contract import (BrowserObservationSnapshot, BrowserRuntimeContract,
+from ..contracts.models import BlindCase
+from ..contracts.browser_contract import (BrowserObservationSnapshot, BrowserRuntimeContract,
                                evaluate_browser_observation)
-from .reproduction import ReproductionObservation
-from .runtime_contract import render_http_request
+from ..contracts.models import ReproductionObservation
+from ..contracts.runtime_contract import render_http_request
 
 
 class BrowserExecutor(Protocol):

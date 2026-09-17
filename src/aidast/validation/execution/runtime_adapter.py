@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from .blind import BlindCase
+from ..contracts.models import BlindCase
 
 
 class RuntimeReproductionRouter:

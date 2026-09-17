@@ -12,16 +12,8 @@ from typing import Any
 from aidast.attack.runtime import _require_standalone_database
 from aidast.attack.store import _redact, _verify_handoff
 
-from .models import ValidationError
 from .evidence_policy import redact_text, sanitize_metadata
-
-
-def canonical(value: Any) -> str:
-    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
-
-
-def digest(value: Any) -> str:
-    return hashlib.sha256(canonical(value).encode()).hexdigest()
+from ..contracts.models import ValidationError, canonical_json as canonical, canonical_sha256 as digest
 
 
 def file_digest(path: Path) -> str:

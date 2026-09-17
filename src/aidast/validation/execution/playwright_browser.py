@@ -8,8 +8,8 @@ from typing import Mapping
 
 from aidast.recon.policy import TargetPolicy
 
-from .blind import BlindCase
-from .browser_contract import BrowserObservationSnapshot
+from ..contracts.models import BlindCase
+from ..contracts.browser_contract import BrowserObservationSnapshot
 from .request_broker import (ValidationPolicyRejection,
                              ValidationRequestBroker)
 

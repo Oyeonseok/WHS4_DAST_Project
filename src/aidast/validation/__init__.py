@@ -1,6 +1,6 @@
 """Shared live Validation with explicit legacy database compatibility."""
 
-from .agent import (
+from .legacy.agent import (
     EvidenceOnlyReviewer,
     ValidationAgent,
     ValidationReviewer,
@@ -9,15 +9,15 @@ from .agent import (
     record_validation,
     validate_assessment,
 )
-from .blind import (
+from .contracts.models import (
     AttackClaim,
     BlindCase,
     BlindDisclosureError,
     DevelopmentCapability,
     StagedBlindCase,
 )
-from .browser_adapter import BrowserExecutor, BrowserReproductionPort
-from .browser_contract import (
+from .execution.browser_adapter import BrowserExecutor, BrowserReproductionPort
+from .contracts.browser_contract import (
     BrowserAssertion,
     BrowserAttemptContract,
     BrowserElementSnapshot,
@@ -25,33 +25,33 @@ from .browser_contract import (
     BrowserRuntimeContract,
     evaluate_browser_observation,
 )
-from .chain_adapter import ChainReproductionPort
-from .chain_contract import (
+from .execution.chain_adapter import ChainReproductionPort
+from .contracts.chain_contract import (
     ChainBindingContract,
     ChainRuntimeContract,
     ChainStepContract,
     extract_chain_value,
     inject_chain_value,
 )
-from .coordinator import (
+from .orchestration.coordinator import (
     PolicyProvider,
     ValidationAgentRunner,
     ValidationCoordinator,
     ValidationCoordinatorError,
 )
-from .codex_runner import CodexBlindValidationRunner
-from .credentials import KeyringCredentialBackend, PipelineCredentialResolver
-from .decision import DecisionEngine, DecisionInput
-from .development import (
+from .orchestration.codex_runner import CodexBlindValidationRunner
+from .execution.credentials import KeyringCredentialBackend, PipelineCredentialResolver
+from .core.decision import DecisionEngine, DecisionInput
+from .contracts.development import (
     DevelopmentActionContract,
     DevelopmentRuntimeContract,
     NativePrerequisiteResolver,
 )
-from .gaps import ImpactGapAnalyzer
-from .http_adapter import HttpReproductionPort
-from .http_oob_observer import HttpJsonOobObserver, HttpOobObserverConfig
-from .impact import ImpactResult, evaluate_impact
-from .integrity import (
+from .core.decision import ImpactGapAnalyzer
+from .execution.http_adapter import HttpReproductionPort
+from .execution.http_oob_observer import HttpJsonOobObserver, HttpOobObserverConfig
+from .core.decision import ImpactResult, evaluate_impact
+from .core.integrity import (
     CandidateIntegrityError,
     CandidateIntegrityGate,
     ValidatedCandidate,
@@ -64,14 +64,14 @@ from .legacy.models import (
     ValidationAssessment,
     ValidationError,
 )
-from .matching import (
+from .core.matching import (
     KnownCandidate,
     KnownMatch,
     KnownMatcher,
     canonical_payload,
     payload_structure_sha256,
 )
-from .models import (
+from .contracts.models import (
     BlindAssessment,
     ClaimComparison,
     ValidationCaseSnapshot,
@@ -79,44 +79,44 @@ from .models import (
     canonical_json,
     canonical_sha256,
 )
-from .native import build_native_validation_coordinator
-from .oob_adapter import OobObserver, OobReproductionPort
-from .oob_contract import (
+from .orchestration.native import build_native_validation_coordinator
+from .execution.oob_adapter import OobObserver, OobReproductionPort
+from .contracts.oob_contract import (
     OobAttemptContract,
     OobEvent,
     OobObservationSnapshot,
     OobRuntimeContract,
     evaluate_oob_observation,
 )
-from .playwright_browser import (
+from .execution.playwright_browser import (
     BrowserExecutionError,
     BrowserPolicyRejection,
     PlaywrightBrowserExecutor,
 )
-from .policy import TargetPolicyProvider
-from .profiles import (
+from .core.policy import TargetPolicyProvider
+from .core.profiles import (
     ResolvedValidationProfile,
     SkillProfileResolver,
     ValidationProfile,
     ValidationProfileError,
 )
-from .repository import (
+from .persistence.repository import (
     ConcurrentValidationUpdate,
     ValidationRepository,
     ValidationRepositoryError,
 )
-from .reproduction import (
+from .contracts.models import (
     PrerequisiteResolverPort,
     ReproductionObservation,
     ReproductionPort,
 )
-from .request_broker import (
+from .execution.request_broker import (
     ValidationPolicyRejection,
     ValidationRequestBroker,
     ValidationRequestError,
 )
-from .runtime_adapter import RuntimeReproductionRouter
-from .runtime_contract import (
+from .execution.runtime_adapter import RuntimeReproductionRouter
+from .contracts.runtime_contract import (
     HttpAttemptContract,
     HttpRequestTemplate,
     HttpRuntimeContract,
@@ -125,9 +125,9 @@ from .runtime_contract import (
     render_http_request,
     validate_runtime_contract,
 )
-from .runtime_semantics import RuntimeSemanticError, validate_runtime_semantics
-from .status import shared_validation_status
-from .store import read_verified_validation, validation_status
+from .contracts.runtime_semantics import RuntimeSemanticError, validate_runtime_semantics
+from .persistence.repository import shared_validation_status
+from .legacy.store import read_verified_validation, validation_status
 
 SharedValidationError = ValidationCoordinatorError
 
@@ -236,3 +236,50 @@ __all__ = [
     "validate_runtime_semantics",
     "validation_status",
 ]
+
+# Preserve established module paths while implementations live in responsibility packages.
+import sys as _sys
+from importlib import import_module as _import_module
+
+_COMPAT_MODULES = {
+    "agent": "legacy.agent",
+    "blind": "contracts.models",
+    "browser_adapter": "execution.browser_adapter",
+    "browser_contract": "contracts.browser_contract",
+    "chain_adapter": "execution.chain_adapter",
+    "chain_contract": "contracts.chain_contract",
+    "codex_runner": "orchestration.codex_runner",
+    "coordinator": "orchestration.coordinator",
+    "credentials": "execution.credentials",
+    "decision": "core.decision",
+    "development": "contracts.development",
+    "evidence_policy": "persistence.evidence_policy",
+    "gaps": "core.decision",
+    "http_adapter": "execution.http_adapter",
+    "http_oob_observer": "execution.http_oob_observer",
+    "impact": "core.decision",
+    "integrity": "core.integrity",
+    "matching": "core.matching",
+    "models": "contracts.models",
+    "native": "orchestration.native",
+    "oob_adapter": "execution.oob_adapter",
+    "oob_contract": "contracts.oob_contract",
+    "playwright_browser": "execution.playwright_browser",
+    "policy": "core.policy",
+    "profiles": "core.profiles",
+    "repository": "persistence.repository",
+    "reproduction": "contracts.models",
+    "request_broker": "execution.request_broker",
+    "runtime_adapter": "execution.runtime_adapter",
+    "runtime_contract": "contracts.runtime_contract",
+    "runtime_semantics": "contracts.runtime_semantics",
+    "source": "persistence.source",
+    "status": "persistence.repository",
+    "store": "legacy.store",
+}
+for _old_name, _new_name in _COMPAT_MODULES.items():
+    _module = _import_module(f".{_new_name}", __name__)
+    _sys.modules[f"{__name__}.{_old_name}"] = _module
+    globals()[_old_name] = _module
+
+del _COMPAT_MODULES, _import_module, _module, _new_name, _old_name, _sys

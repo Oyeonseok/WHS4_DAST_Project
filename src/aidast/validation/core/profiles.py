@@ -11,7 +11,7 @@ from pydantic import Field, model_validator
 
 from aidast.attack.catalog import load_catalog
 
-from .models import Digest, Identifier, SignalType, StrictContract, canonical_json
+from ..contracts.models import Digest, Identifier, SignalType, StrictContract, canonical_json
 
 
 class ValidationProfileError(ValueError):

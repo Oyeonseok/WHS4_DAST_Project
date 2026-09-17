@@ -8,7 +8,7 @@ from typing import Any
 
 from aidast.attack.store import _redact
 
-from .models import ValidationError
+from ..contracts.models import ValidationError
 
 _HEADER = re.compile(
     r"(?im)\b(?:authorization|proxy-authorization|cookie|set-cookie)\s*[:=]\s*[^\r\n]+"

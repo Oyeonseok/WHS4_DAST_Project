@@ -7,7 +7,7 @@ from typing import Any, Iterable
 from .browser_contract import BrowserRuntimeContract
 from .models import canonical_json, canonical_sha256
 from .oob_contract import OobRuntimeContract
-from .profiles import ValidationProfile
+from ..core.profiles import ValidationProfile
 from .runtime_contract import HttpRuntimeContract
 
 

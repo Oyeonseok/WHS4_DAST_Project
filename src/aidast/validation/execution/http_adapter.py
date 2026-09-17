@@ -9,11 +9,11 @@ from typing import Callable, Mapping
 
 from aidast.recon.policy import TargetPolicy
 
-from .blind import BlindCase
-from .reproduction import ReproductionObservation
+from ..contracts.models import BlindCase
+from ..contracts.models import ReproductionObservation
 from .request_broker import (ValidationCredentialError, ValidationPolicyRejection,
                              ValidationRequestBroker)
-from .runtime_contract import (HttpRuntimeContract, evaluate_http_response,
+from ..contracts.runtime_contract import (HttpRuntimeContract, evaluate_http_response,
                                render_http_request)
 
 
