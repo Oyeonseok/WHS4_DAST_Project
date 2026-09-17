@@ -344,6 +344,9 @@ class CandidateIntegrityGate:
         combined_profile_sha = canonical_sha256(
             [item.profile.profile_sha256 for item in candidates]
         )
+        combined_validation_skill_sha = canonical_sha256(
+            [item.profile.validation_skill_sha256 for item in candidates]
+        )
         profile = terminal.profile.model_copy(update={
             "attack_skill_sha256": combined_skill_sha,
             "profile_sha256": combined_profile_sha,
@@ -378,7 +381,7 @@ class CandidateIntegrityGate:
                 terminal.staged._blind_case.development_capabilities
             ),
             attack_skill_name="chain", attack_skill_sha256=combined_skill_sha,
-            validation_skill_sha256=terminal.profile.validation_skill_sha256,
+            validation_skill_sha256=combined_validation_skill_sha,
             validation_profile_sha256=combined_profile_sha,
         )
         claim = AttackClaim(

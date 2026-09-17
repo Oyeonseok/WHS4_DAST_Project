@@ -14,7 +14,7 @@ actions, or infer a credential value from its opaque reference.
 native runtime can execute for this case. Use the observations to identify an
 objective blocker axis; do not claim that a capability ran or succeeded merely
 because it is listed. Python selects only capabilities whose blocker axis also
-matches the Validation profile, executes their exact request through the
+matches the Validation contract, executes their exact request through the
 policy broker, and evaluates their assertions. You never execute or rewrite a
 development capability.
 
