@@ -1254,6 +1254,7 @@ class PlaywrightDriver:
         if self.preauthenticated:
             raise RuntimeError("target session expired; log in again before restarting Recon")
         self._phase = "login"
+        self.authentication_endpoints.clear()
         try:
             # Keep login direct. Attach CDP only for passive endpoint metadata;
             # routing and policy interception remain disabled until login ends.
@@ -1270,8 +1271,8 @@ class PlaywrightDriver:
                 )
             # Do not restart Chromium here. Shopify and other identity-aware
             # services can bind authorization to the live browser context.
-            # Policy enforcement/observation is attached only after login, so
-            # the login flow itself remains outside Recon collection.
+            # Active policy enforcement is attached only after login; the login
+            # flow contributes only secret-free passive endpoint coordinates.
             self._phase = "runtime"
             self._register_context_handlers()
             for page in self.context.pages:
@@ -1312,12 +1313,18 @@ class PlaywrightDriver:
                 print(f"  [Playwright] 복사된 세션 복원 실패: {exc}")
                 print("  [Playwright] Phase 2 Chromium 창에서 직접 로그인한 뒤 Enter를 눌러주세요.")
                 self._phase = "login"
+                self.authentication_endpoints.clear()
                 self._launch_manual_browser(manual_login=True)
                 try:
                     self._attach_manual_browser()
+                    self._register_authentication_observer()
                     _wait_for_manual_login()
                     if not self.save_session():
                         raise RuntimeError("could not save the Chromium login session")
+                    if self.session_config.authentication_endpoint_callback is not None:
+                        self.session_config.authentication_endpoint_callback(
+                            tuple(self.authentication_endpoints)
+                        )
                 finally:
                     self._shutdown_runtime()
                     self._phase = "runtime"

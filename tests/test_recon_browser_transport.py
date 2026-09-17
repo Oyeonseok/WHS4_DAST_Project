@@ -312,6 +312,8 @@ class ReconBrowserTransportTests(unittest.TestCase):
     def test_invalid_restored_session_falls_back_to_manual_login(self):
         for url, status in [("https://sso.example.net/login", 200), (self.policy.asset, 403)]:
             with self.subTest(url=url, status=status):
+                endpoint_callback = Mock()
+                self.driver.session_config.authentication_endpoint_callback = endpoint_callback
                 failed_page = Mock(url=url)
                 failed_page.goto.return_value = SimpleNamespace(status=status)
                 restored_page = Mock(url=self.policy.asset)
@@ -321,6 +323,7 @@ class ReconBrowserTransportTests(unittest.TestCase):
                     self.driver.session_path.write_text("{}")
                     with patch.object(self.driver, "_launch_manual_browser") as launch, patch.object(
                     self.driver, "_attach_manual_browser"
+                    ), patch.object(self.driver, "_register_authentication_observer"
                     ), patch.object(self.driver, "_restore_target_session"), patch.object(
                     self.driver, "_ensure_page", side_effect=[failed_page, restored_page]
                     ), patch("aidast.recon.tools.playwright_driver._wait_for_manual_login", return_value=False), patch.object(
@@ -335,6 +338,7 @@ class ReconBrowserTransportTests(unittest.TestCase):
                 )
                 self.assertEqual(save.call_count, 2)
                 self.assertEqual(close.call_count, 2)
+                endpoint_callback.assert_called_once_with(tuple())
 
     def test_browser_support_allows_only_marked_non_navigation_requests(self):
         self.driver.browser_context_token = "browser-token-with-enough-length"

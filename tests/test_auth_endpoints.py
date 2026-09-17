@@ -70,6 +70,7 @@ def test_request_metadata_ignores_unapproved_origin() -> None:
     [
         [{"method": "POST", "origin": "https://example.test", "path": "/login?x=1", "source": "auth_bootstrap"}],
         [{"method": "POST", "origin": "https://user@example.test", "path": "/login", "source": "auth_bootstrap"}],
+        [{"method": "POST", "origin": "https://example.test?token=secret", "path": "/login", "source": "auth_bootstrap"}],
         [{"method": "POST", "origin": "file://example.test", "path": "/login", "source": "auth_bootstrap"}],
         [{"method": "POST", "origin": "https://evil.test", "path": "/login", "source": "auth_bootstrap"}],
         [{"method": "POST", "origin": "https://example.test", "path": "/login", "source": "auth_bootstrap", "body": "secret"}],

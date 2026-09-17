@@ -65,8 +65,15 @@ class AuthenticationEndpoint:
             not isinstance(self.observed_at, str) or not self.observed_at or len(self.observed_at) > 64
         ):
             raise AuthenticationEndpointError("invalid authentication endpoint timestamp")
+        if not isinstance(self.origin, str):
+            raise AuthenticationEndpointError("invalid authentication endpoint origin")
+        normalized_origin = normalize_origin(self.origin)
+        if self.origin != normalized_origin:
+            raise AuthenticationEndpointError(
+                "authentication endpoint origin must not contain URL metadata"
+            )
         object.__setattr__(self, "method", method)
-        object.__setattr__(self, "origin", normalize_origin(self.origin))
+        object.__setattr__(self, "origin", normalized_origin)
         object.__setattr__(self, "path", _path(self.path))
 
     @classmethod

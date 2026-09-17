@@ -73,8 +73,8 @@ contains only:
 - `observed_at`: capture timestamp when available.
 
 The array is optional for backward compatibility. Loading rejects malformed
-entries, unsupported schemes, origins outside the selected target or configured
-authentication bootstrap boundary, paths containing query/fragment/userinfo,
+entries, unsupported schemes, origins outside the selected target, paths
+containing query/fragment/userinfo,
 and unknown fields that could conceal sensitive data. Duplicate entries are
 collapsed by `(method, origin, path)`.
 
@@ -88,9 +88,10 @@ The operator login browser remains outside active Recon policy enforcement. A
 dedicated authentication observer records request metadata only. It does not
 retain headers, bodies, query values, response bodies, or credentials.
 
-Only requests within the selected target origin or an explicitly configured
-authentication bootstrap boundary are eligible. Redirects and identity-provider
-traffic outside those boundaries are not imported as target endpoints.
+Only requests within the selected target origin are eligible. External
+identity-provider and authentication-bootstrap traffic is not stored as a
+target endpoint because it belongs to a different origin and cannot ground a
+finding against the selected target.
 
 After successful session export, the sanitized, deduplicated observations are
 written into the new bundle field. A failed or cancelled login produces no
