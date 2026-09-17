@@ -1,5 +1,6 @@
 """Durable transport authorization, accounting, and interruption boundaries."""
 
+import json
 import sqlite3
 import unittest
 from concurrent.futures import ThreadPoolExecutor
@@ -152,6 +153,41 @@ class ValidationTransportBrokerTests(unittest.TestCase):
         self.assertNotIn("private", str(rows))
         self.assertEqual(rows[0][1], rows[1][1])
         self.assertAlmostEqual(second.scheduled_at - first.scheduled_at, 0.02)
+
+    def test_reservation_metadata_preserves_utf8_at_byte_boundary(self):
+        metadata = {"preview": "🙂" * 2044 + "x"}
+        self.broker().reserve(self.spec(metadata=metadata))
+        encoded = self.conn.execute(
+            "SELECT result_json FROM validation_transport_operations"
+        ).fetchone()[0]
+        self.assertLessEqual(len(encoded.encode("utf-8")), 8192)
+        self.assertEqual(json.loads(encoded), metadata)
+
+    def test_completion_metadata_preserves_utf8_at_byte_boundary(self):
+        metadata = {"preview": "🙂" * 2044 + "x"}
+        self.broker().dispatch(self.spec(), lambda timeout: TransportDispatchResult("ok", 0, metadata))
+        status, encoded = self.conn.execute(
+            "SELECT status,result_json FROM validation_transport_operations"
+        ).fetchone()
+        self.assertEqual(status, "completed")
+        self.assertLessEqual(len(encoded.encode("utf-8")), 8192)
+        self.assertEqual(json.loads(encoded), metadata)
+
+    def test_reservation_rejects_metadata_over_utf8_byte_budget(self):
+        with self.assertRaisesRegex(ValidationTransportError, "metadata"):
+            self.broker().reserve(self.spec(metadata={"preview": "🙂" * 2045}))
+        self.assertEqual(self.rows(), [])
+
+    def test_completion_rejects_metadata_over_utf8_byte_budget(self):
+        with self.assertRaisesRegex(ValidationTransportError, "metadata"):
+            self.broker().dispatch(self.spec(), lambda timeout: TransportDispatchResult(
+                "ok", 0, {"preview": "🙂" * 2045},
+            ))
+        status, encoded = self.conn.execute(
+            "SELECT status,result_json FROM validation_transport_operations"
+        ).fetchone()
+        self.assertEqual(status, "failed")
+        self.assertEqual(json.loads(encoded), {})
 
     def test_invalid_owner_and_completed_attempt_cannot_reserve(self):
         broker = self.broker()

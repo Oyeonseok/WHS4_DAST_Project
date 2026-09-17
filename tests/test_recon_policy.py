@@ -4,6 +4,7 @@ import unittest
 from unittest.mock import patch
 
 from aidast.agents.main import CodexMainAgent, _codex_output_schema
+from aidast.agents.native_pipeline import CodexMainAgent as NativeCodexMainAgent
 from aidast.recon.models import ReconPlan, ReconPlanTarget, ReconStep
 from aidast.recon.policy import (
     PolicyLimits,
@@ -114,6 +115,89 @@ class TargetPolicyTests(unittest.TestCase):
         )
 
         self.assertEqual(result.limits.timeout_seconds, 20)
+
+    def test_policy_normalizers_reset_ungrounded_validation_byte_limits(self) -> None:
+        for agent in (CodexMainAgent, NativeCodexMainAgent):
+            for value in (1_000_000, 100_000_000):
+                with self.subTest(agent=agent.__module__, value=value):
+                    item = TargetPolicyProposal(
+                        asset_type=AssetType.DOMAIN, asset="example.com",
+                        allowed_hosts=["example.com"],
+                        limits=PolicyLimits(max_validation_bytes=value),
+                    )
+                    result = agent._normalize_grounded_execution_controls(
+                        item, "No execution controls are specified.",
+                    )
+                    self.assertEqual(result.limits.max_validation_bytes, 10_000_000)
+                    self.assertIn("max_validation_bytes", result.policy_notes[-1])
+
+    def test_policy_normalizers_accept_grounded_validation_byte_restrictions(self) -> None:
+        quote = "Validation traffic must not exceed 1000000 bytes."
+        item = TargetPolicyProposal(
+            asset_type=AssetType.DOMAIN, asset="example.com",
+            allowed_hosts=["example.com"],
+            limits=PolicyLimits(max_validation_bytes=1_000_000),
+            restriction_evidence=[RestrictionEvidence(
+                field="max_validation_bytes", source_quote=quote,
+            )],
+        )
+        for agent in (CodexMainAgent, NativeCodexMainAgent):
+            with self.subTest(agent=agent.__module__):
+                result = agent._normalize_grounded_execution_controls(item, f"Rules: {quote}")
+                self.assertEqual(result.limits.max_validation_bytes, 1_000_000)
+                self.assertEqual(result.policy_notes, [])
+
+    def test_policy_normalizers_reset_invalid_validation_byte_evidence(self) -> None:
+        quote = "Validation traffic must not exceed 1000000 bytes."
+        for agent in (CodexMainAgent, NativeCodexMainAgent):
+            for field, scope in (("max_validation_bytes", "No execution controls are specified."),
+                                 ("max_requests", quote)):
+                with self.subTest(agent=agent.__module__, field=field):
+                    item = TargetPolicyProposal(
+                        asset_type=AssetType.DOMAIN, asset="example.com",
+                        allowed_hosts=["example.com"],
+                        limits=PolicyLimits(max_validation_bytes=1_000_000),
+                        restriction_evidence=[RestrictionEvidence(field=field, source_quote=quote)],
+                    )
+                    result = agent._normalize_grounded_execution_controls(item, scope)
+                    self.assertEqual(result.limits.max_validation_bytes, 10_000_000)
+                    self.assertIn("max_validation_bytes", result.policy_notes[-1])
+
+    def test_policy_normalizers_keep_existing_rules_for_grounded_byte_increases(self) -> None:
+        quote = "Validation traffic may use up to 100000000 bytes."
+        item = TargetPolicyProposal(
+            asset_type=AssetType.DOMAIN, asset="example.com",
+            allowed_hosts=["example.com"],
+            limits=PolicyLimits(max_validation_bytes=100_000_000),
+            restriction_evidence=[RestrictionEvidence(
+                field="max_validation_bytes", source_quote=quote,
+            )],
+        )
+        for agent, expected in ((CodexMainAgent, 100_000_000),
+                                (NativeCodexMainAgent, 10_000_000)):
+            with self.subTest(agent=agent.__module__):
+                result = agent._normalize_grounded_execution_controls(item, quote)
+                self.assertEqual(result.limits.max_validation_bytes, expected)
+
+    def test_policy_normalizers_preserve_default_validation_byte_hash_shape(self) -> None:
+        from aidast.validation.contracts.models import canonical_sha256
+
+        item = TargetPolicyProposal(
+            asset_type=AssetType.DOMAIN, asset="example.com", allowed_hosts=["example.com"],
+        )
+        for agent in (CodexMainAgent, NativeCodexMainAgent):
+            with self.subTest(agent=agent.__module__):
+                result = agent._normalize_grounded_execution_controls(
+                    item, "No execution controls are specified.",
+                )
+                self.assertEqual(result.limits.max_validation_bytes, 10_000_000)
+                self.assertEqual(result.policy_notes, [])
+                self.assertEqual(result.model_dump()["limits"], {
+                    "requests_per_second": 1.0, "concurrency": 3, "timeout_seconds": 20,
+                    "max_depth": 3, "max_requests": 2000,
+                })
+                self.assertEqual(canonical_sha256(result.model_dump()["limits"]),
+                                 "9b194a2d32307ac84e89c48bb1f4892fccb1bfd7e64846a6f030149e679c9b81")
 
     def test_main_agent_accepts_only_exactly_grounded_restriction(self) -> None:
         quote = "Crawling is prohibited."

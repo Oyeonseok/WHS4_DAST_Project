@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import sqlite3
 import time
 from contextlib import closing
@@ -14,7 +13,7 @@ from uuid import uuid4
 
 from aidast.recon.policy import TargetPolicy
 
-from ..contracts.models import BlindCase, canonical_sha256
+from ..contracts.models import BlindCase, canonical_json, canonical_sha256
 from ..persistence.evidence_policy import sanitize_metadata
 from .request_broker import _safe_url
 
@@ -126,7 +125,7 @@ class ValidationTransportBroker:
             "destination": destination, "method": spec.method.upper(),
             "request_bytes": spec.request_bytes, "metadata_sha256": canonical_sha256(metadata),
         })
-        return destination, fingerprint, json.dumps(metadata, sort_keys=True, separators=(",", ":"))
+        return destination, fingerprint, canonical_json(metadata)
 
     def reserve(self, spec: TransportOperationSpec) -> TransportReservation:
         return self._reserve_group((spec,), None)[0]
@@ -243,7 +242,7 @@ class ValidationTransportBroker:
             self._finish(reservation.operation_id, "failed", error_message="InvalidTransportResult")
             raise
         self._finish(reservation.operation_id, "completed", response_bytes=result.response_bytes,
-                     result_json=json.dumps(metadata, sort_keys=True, separators=(",", ":")))
+                     result_json=canonical_json(metadata))
         return reservation.operation_id, result.value
 
     def dispatch(self, spec: TransportOperationSpec,
