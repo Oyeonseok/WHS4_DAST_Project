@@ -50,6 +50,7 @@ from aidast.reporting import (
 from aidast.scope.paths import ScopePathError, resolve_scope_directory
 from aidast.scope.reader import PlaywrightProgramPageReader, ProgramPageError
 from aidast.scope.models import AssetType, ScopeAsset, ScopeDocument
+from aidast.updater import UpdateError, update_aidast
 from aidast.validation import (
     ValidationAgent,
     ValidationCoordinatorError,
@@ -85,6 +86,10 @@ def _parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest="command", required=True)
 
     commands.add_parser("login", help="sign in to Codex")
+    commands.add_parser(
+        "update",
+        help="update AI DAST without removing the current installation",
+    )
     tag = commands.add_parser("tag", help="tag unannotated Recon observations")
     tag.add_argument("database", type=Path)
     tag.add_argument("--scan-id")
@@ -456,6 +461,9 @@ def main(
     try:
         if args.command == "login":
             return _run_login()
+        if args.command == "update":
+            print(update_aidast().message)
+            return 0
         if args.command == "tag":
             return _run_tag(args)
         if args.command == "scope":
@@ -498,6 +506,7 @@ def main(
         CaseReportError,
         ReportError,
         ScopePathError,
+        UpdateError,
         ValidationError,
         ValidationCoordinatorError,
         FileNotFoundError,
