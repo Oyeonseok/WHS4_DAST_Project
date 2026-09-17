@@ -23,6 +23,7 @@ from aidast.recon.policy import (
     TargetPolicy,
     TargetPolicySetProposal,
     ToolPolicy,
+    canonical_host_for_asset,
     validate_policy_for_target,
 )
 from aidast.scope.models import (
@@ -339,7 +340,13 @@ class CodexMainAgent:
             item = self._normalize_grounded_execution_controls(item, scope_markdown)
             if item.asset_type is AssetType.WILDCARD:
                 wildcard = item.asset.lower().rstrip(".")
-                canonical_root = item.asset.removeprefix("*.").rstrip(".")
+                # A scope may write a wildcard as a full URL prefix (e.g.
+                # "https://*.motel6.com"); canonical_host_for_asset strips
+                # that scheme before removing the "*." marker, so the root
+                # host list below never retains a stray "https://".
+                canonical_root = (
+                    canonical_host_for_asset(item.asset_type, item.asset) or ""
+                ).rstrip(".")
                 item = item.model_copy(
                     update={
                         "allowed_hosts": [
@@ -373,7 +380,9 @@ class CodexMainAgent:
             # every target. Keep only exclusions that are descendants of this
             # policy's canonical wildcard; exact-domain policies have no child
             # host exclusions to inherit.
-            canonical_host = item.asset.lower().rstrip(".").removeprefix("*.")
+            canonical_host = (
+                canonical_host_for_asset(item.asset_type, item.asset) or ""
+            ).lower().rstrip(".")
             relevant_exclusions = (
                 sorted({
                     host.lower().rstrip(".")
