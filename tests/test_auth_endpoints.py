@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import hashlib
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -12,7 +14,9 @@ from aidast.auth.endpoints import (
     parse_authentication_endpoints,
     serialize_authentication_endpoints,
 )
-from aidast.auth.browser import collect_target_sessions, load_session
+from aidast.auth.browser import _capture_native, collect_target_sessions, load_session
+from aidast.recon import db as recon_db
+from aidast.recon.executor import ReconExecutor
 from aidast.scope.models import AssetType, ScopeAsset
 
 
@@ -206,3 +210,149 @@ def test_reauthentication_replaces_bundle_endpoint_set(tmp_path: Path) -> None:
     assert [item.path for item in reloaded.authentication_endpoints] == [
         "/rest/user/login"
     ]
+
+
+def test_native_capture_observes_and_sanitizes_login_request_before_confirmation(
+    tmp_path: Path,
+) -> None:
+    callback = None
+    context = MagicMock()
+    context.storage_state.return_value = {
+        "cookies": [],
+        "origins": [{"origin": "https://example.test", "localStorage": []}],
+    }
+    page = MagicMock(url="https://example.test/dashboard")
+    page.evaluate.return_value = {}
+    context.pages = [page]
+
+    def register(_event: str, handler) -> None:
+        nonlocal callback
+        callback = handler
+
+    context.on.side_effect = register
+    browser = MagicMock(contexts=[context])
+    playwright = MagicMock()
+    playwright.chromium.connect_over_cdp.return_value = browser
+    manager = MagicMock()
+    manager.__enter__.return_value = playwright
+    listener = MagicMock()
+    listener.__enter__.return_value = listener
+    listener.getsockname.return_value = ("127.0.0.1", 43123)
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    process = MagicMock()
+    process.poll.return_value = None
+
+    def confirm(_prompt: str) -> str:
+        assert callback is not None
+        callback(SimpleNamespace(
+            method="POST",
+            url="https://example.test/rest/user/login?password=private#ignored",
+        ))
+        return ""
+
+    with (
+        patch("aidast.auth.browser.shutil.which", return_value="/test/chrome"),
+        patch("aidast.auth.browser.socket.socket", return_value=listener),
+        patch("aidast.auth.browser.socket.create_connection", return_value=connection),
+        patch("aidast.auth.browser.subprocess.Popen", return_value=process),
+        patch("playwright.sync_api.sync_playwright", return_value=manager),
+        patch("builtins.input", side_effect=confirm),
+    ):
+        raw = _capture_native(
+            "https://example.test", tmp_path / "login-export.json"
+        )
+
+    assert raw["authentication_endpoints"] == [{
+        "method": "POST",
+        "origin": "https://example.test",
+        "path": "/rest/user/login",
+        "source": "auth_bootstrap",
+    }]
+    assert "private" not in json.dumps(raw["authentication_endpoints"])
+
+
+def _executor_with_origin(tmp_path: Path) -> tuple[ReconExecutor, str]:
+    executor = ReconExecutor(
+        scan_id="scan",
+        scope_type="test",
+        scope_value="scope",
+        db_path=tmp_path / "Recon.db",
+        diagnostic_path=tmp_path / "recon.jsonl",
+    )
+    asset_id = recon_db.insert_asset(
+        executor.conn,
+        scan_id="scan",
+        identifier="https://example.test",
+        asset_type="URL",
+    )
+    origin_id = recon_db.upsert_origin(
+        executor.conn,
+        asset_id=asset_id,
+        scheme="https",
+        host="example.test",
+        port=443,
+        base_url="https://example.test",
+    )
+    return executor, origin_id
+
+
+def test_recon_imports_restored_login_endpoint_as_passive_evidence(
+    tmp_path: Path,
+) -> None:
+    bundle_root = tmp_path / "session"
+    bundle_root.mkdir()
+    bundle = _write_bundle(bundle_root, endpoints=[{
+        "method": "POST",
+        "origin": "https://example.test",
+        "path": "/rest/user/login",
+        "source": "auth_bootstrap",
+    }])
+    session = load_session(
+        bundle, scope_id="scope", asset_type="URL",
+        asset="https://example.test", identity="primary",
+    )
+    executor, origin_id = _executor_with_origin(tmp_path)
+    task = SimpleNamespace(
+        task_id="origin-task",
+        target=SimpleNamespace(asset="https://example.test"),
+    )
+    try:
+        imported = executor._import_authentication_endpoints(task, origin_id, session)
+        endpoint = executor.conn.execute(
+            "SELECT method,normalized_path,source_tools FROM endpoints"
+        ).fetchone()
+        observation = executor.conn.execute(
+            "SELECT discovery_kind,source_tool FROM endpoint_observations"
+        ).fetchone()
+    finally:
+        executor.close()
+
+    assert imported == 1
+    assert endpoint == ("POST", "/rest/user/login", "auth_bootstrap")
+    assert observation == ("passive_login_observation", "auth_bootstrap")
+
+
+def test_recon_reports_legacy_bundle_without_inventing_endpoint(tmp_path: Path) -> None:
+    bundle_root = tmp_path / "session"
+    bundle_root.mkdir()
+    bundle = _write_bundle(bundle_root, include_field=False)
+    session = load_session(
+        bundle, scope_id="scope", asset_type="URL",
+        asset="https://example.test", identity="primary",
+    )
+    executor, origin_id = _executor_with_origin(tmp_path)
+    task = SimpleNamespace(
+        task_id="origin-task",
+        target=SimpleNamespace(asset="https://example.test"),
+    )
+    try:
+        imported = executor._import_authentication_endpoints(task, origin_id, session)
+        endpoint_count = executor.conn.execute("SELECT COUNT(*) FROM endpoints").fetchone()[0]
+    finally:
+        executor.close()
+
+    events = [json.loads(line) for line in (tmp_path / "recon.jsonl").read_text().splitlines()]
+    assert imported == 0
+    assert endpoint_count == 0
+    assert any(event["event"] == "auth_endpoint_provenance_missing" for event in events)

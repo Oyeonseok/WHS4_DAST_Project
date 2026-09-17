@@ -26,6 +26,7 @@ import time
 import urllib.request
 
 from dataclasses import dataclass, field
+from collections.abc import Callable
 from pathlib import Path
 from urllib.parse import urljoin, urlparse
 
@@ -38,6 +39,7 @@ from playwright.sync_api import (
 )
 
 from aidast.recon.policy import TargetPolicy
+from aidast.auth.endpoints import AuthenticationEndpoint, normalize_origin
 from aidast.core.http_safety import BROWSER_MODE_HEADER, BROWSER_TOKEN_HEADER
 from aidast.recon.tools.api_secondary_discovery import _http_request
 
@@ -98,6 +100,10 @@ class ManualSessionConfig:
     invalid_auth_statuses: tuple[int, ...] = (
         401,
     )
+
+    authentication_endpoint_callback: Callable[
+        [tuple[AuthenticationEndpoint, ...]], None
+    ] | None = None
 
     # Storage 값을 HTTP Header로 변환
     #
@@ -239,6 +245,7 @@ class PlaywrightDriver:
         ) = None
 
         self.requests: list[dict] = []
+        self.authentication_endpoints: list[AuthenticationEndpoint] = []
         self._observation_cursor = 0
         self._interaction_visited: set[str] = set()
         self._interaction_page_count = 0
@@ -1199,19 +1206,68 @@ class PlaywrightDriver:
     # Manual Authentication
     # =====================================================
 
+    def _observe_authentication_request(self, request) -> None:
+        if self._phase != "login":
+            return
+        endpoint = AuthenticationEndpoint.from_request(
+            request.method, request.url, target_origin=normalize_origin(self.base_url)
+        )
+        if endpoint is None:
+            return
+        key = (endpoint.method, endpoint.origin, endpoint.path)
+        if not any(
+            (item.method, item.origin, item.path) == key
+            for item in self.authentication_endpoints
+        ):
+            self.authentication_endpoints.append(endpoint)
+        if not any(
+            item.get("method") == endpoint.method
+            and item.get("path") == endpoint.path
+            and item.get("source") == "auth_bootstrap"
+            for item in self.requests
+        ):
+            from aidast.recon import db
+            self.requests.append({
+                "context": {
+                    "context_key": "auth_bootstrap",
+                    "action_type": "operator_login",
+                    "association_method": "passive_request",
+                    "auth_state": "authenticating",
+                },
+                "observed_at": db.now(),
+                "url": endpoint.origin + endpoint.path,
+                "discovery_kind": "passive_login_observation",
+                "method": endpoint.method,
+                "path": endpoint.path,
+                "content_type": None,
+                "source": "auth_bootstrap",
+                "browser_supporting_request": True,
+                "traffic_class": "browser_observation",
+            })
+
+    def _register_authentication_observer(self) -> None:
+        if self.context is not None:
+            self.context.on("request", self._observe_authentication_request)
+
     def capture_and_start(self) -> None:
         """Log in once and keep the same Chromium context for Recon."""
         if self.preauthenticated:
             raise RuntimeError("target session expired; log in again before restarting Recon")
         self._phase = "login"
         try:
-            # No proxy, routing hooks, or CDP client while the operator logs in.
+            # Keep login direct. Attach CDP only for passive endpoint metadata;
+            # routing and policy interception remain disabled until login ends.
             self._launch_manual_browser(manual_login=True)
+            self._attach_manual_browser()
+            self._register_authentication_observer()
             print("  [Playwright] 직접 연결 로그인 창을 열었습니다. 브라우저에서 로그인해주세요.")
             _wait_for_manual_login()
-            self._attach_manual_browser()
             if not self.save_session():
                 raise RuntimeError("could not save the target session after manual login")
+            if self.session_config.authentication_endpoint_callback is not None:
+                self.session_config.authentication_endpoint_callback(
+                    tuple(self.authentication_endpoints)
+                )
             # Do not restart Chromium here. Shopify and other identity-aware
             # services can bind authorization to the live browser context.
             # Policy enforcement/observation is attached only after login, so

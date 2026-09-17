@@ -184,9 +184,6 @@ def _capture_native(url: str, output: Path) -> dict:
                                 "--no-first-run", "--no-default-browser-check", "--no-proxy-server", url],
                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
-        input("로그인 후 타깃 페이지를 연 상태에서 Enter > ")
-        if process.poll() is not None:
-            raise BrowserLoginError("login browser was closed before session export")
         deadline = time.monotonic() + 10
         while True:
             try:
@@ -199,6 +196,25 @@ def _capture_native(url: str, output: Path) -> dict:
         with sync_playwright() as playwright:
             browser = playwright.chromium.connect_over_cdp(f"http://127.0.0.1:{port}")
             context = browser.contexts[0]
+            authentication_endpoints: dict[
+                tuple[str, str, str], AuthenticationEndpoint
+            ] = {}
+
+            def observe_authentication_request(request) -> None:
+                endpoint = AuthenticationEndpoint.from_request(
+                    request.method, request.url, target_origin=origin(url)
+                )
+                if endpoint is not None:
+                    authentication_endpoints.setdefault(
+                        (endpoint.method, endpoint.origin, endpoint.path), endpoint
+                    )
+
+            # Observe coordinates only.  Login remains direct: no proxy, route,
+            # request mutation, headers, or bodies are attached here.
+            context.on("request", observe_authentication_request)
+            input("로그인 후 타깃 페이지를 연 상태에서 Enter > ")
+            if process.poll() is not None:
+                raise BrowserLoginError("login browser was closed before session export")
             # IndexedDB may contain an authentication token (for example in
             # Shopify's embedded/admin flows).  Older Playwright versions do
             # not accept indexed_db, so retain a compatible fallback.
@@ -212,6 +228,9 @@ def _capture_native(url: str, output: Path) -> dict:
                 raise BrowserLoginError("finish login and return to the target origin before exporting")
             for page in target_pages:
                 raw["session_storage"][origin(url)] = page.evaluate("() => Object.fromEntries(Object.entries(sessionStorage))")
+            raw["authentication_endpoints"] = serialize_authentication_endpoints(
+                authentication_endpoints.values()
+            )
             return raw
     finally:
         if process.poll() is None:
@@ -269,10 +288,18 @@ def collect_target_sessions(targets, *, scope_id: str, run_id: str, identity: st
             for item in raw.get("authentication_endpoints", []):
                 if not isinstance(item, dict):
                     continue
-                endpoint = AuthenticationEndpoint.from_request(
-                    item.get("method", ""), item.get("url", ""),
-                    target_origin=origin(url), observed_at=item.get("observed_at"),
-                )
+                if "url" in item:
+                    endpoint = AuthenticationEndpoint.from_request(
+                        item.get("method", ""), item.get("url", ""),
+                        target_origin=origin(url), observed_at=item.get("observed_at"),
+                    )
+                else:
+                    try:
+                        endpoint = parse_authentication_endpoints(
+                            [item], target_origin=origin(url)
+                        )[0]
+                    except (AuthenticationEndpointError, IndexError):
+                        endpoint = None
                 if endpoint is not None:
                     endpoints.append(endpoint)
             endpoints = list(parse_authentication_endpoints(

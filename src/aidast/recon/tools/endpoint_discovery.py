@@ -1541,6 +1541,7 @@ def discover_endpoints(
     preauthenticated: bool = False,
     browser_context_token: str | None = None,
     diagnostic_callback=None,
+    authentication_endpoint_callback=None,
 ) -> list[dict]:
 
     if target_policy is not None and not mitm_proxy_url:
@@ -1636,6 +1637,7 @@ def discover_endpoints(
                     storage_header_map
                     or {}
                 ),
+                authentication_endpoint_callback=authentication_endpoint_callback,
             )
         )
 

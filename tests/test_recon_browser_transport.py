@@ -214,6 +214,7 @@ class ReconBrowserTransportTests(unittest.TestCase):
             self.driver.session_path.write_text("{}")
             with patch.object(self.driver, "_launch_manual_browser", side_effect=lambda **kwargs: events.append(("launch", kwargs.get("manual_login", False)))), patch.object(
             self.driver, "_attach_manual_browser", side_effect=lambda: events.append(("attach",))
+            ), patch.object(self.driver, "_register_authentication_observer", side_effect=lambda: events.append(("auth-observer",))
             ), patch("aidast.recon.tools.playwright_driver._wait_for_manual_login", side_effect=lambda: events.append(("input",))), patch.object(
             self.driver, "save_session", side_effect=lambda: events.append(("save", self.driver._phase)) or True
             ), patch.object(self.driver, "_register_context_handlers", side_effect=lambda: events.append(("policy",))), patch.object(
@@ -221,10 +222,26 @@ class ReconBrowserTransportTests(unittest.TestCase):
             ):
                 self.driver.capture_and_start()
         self.assertEqual(events, [
-            ("launch", True), ("input",), ("attach",), ("save", "login"),
+            ("launch", True), ("attach",), ("auth-observer",), ("input",), ("save", "login"),
             ("policy",), ("page", True),
         ])
         self.assertIs(self.driver.context.pages[0], page)
+
+    def test_authentication_observer_keeps_only_secret_free_same_origin_coordinates(self):
+        self.driver._phase = "login"
+        self.driver._observe_authentication_request(SimpleNamespace(
+            method="POST",
+            url="https://example.com/rest/user/login?password=private#fragment",
+        ))
+        self.driver._observe_authentication_request(SimpleNamespace(
+            method="POST",
+            url="https://identity.example/login?token=private",
+        ))
+
+        self.assertEqual(self.driver.authentication_endpoints[0].method, "POST")
+        self.assertEqual(self.driver.authentication_endpoints[0].path, "/rest/user/login")
+        self.assertEqual(len(self.driver.authentication_endpoints), 1)
+        self.assertNotIn("private", json.dumps(self.driver.get_http_results()))
 
     def test_cancel_closes_direct_browser_without_session_or_runtime(self):
         with patch.object(self.driver, "_launch_manual_browser") as launch, patch.object(
@@ -235,7 +252,7 @@ class ReconBrowserTransportTests(unittest.TestCase):
             with self.assertRaises(KeyboardInterrupt):
                 self.driver.capture_and_start()
         launch.assert_called_once_with(manual_login=True)
-        attach.assert_not_called()
+        attach.assert_called_once_with()
         save.assert_not_called()
         close.assert_called_once_with()
         self.assertEqual(self.driver._phase, "runtime")
@@ -437,6 +454,7 @@ class ReconBrowserTransportTests(unittest.TestCase):
         for options in ({}, {"auth_bootstrap": {
             "hosts": ["login.example.com"], "paths": ["/authorize"],
         }}):
+            endpoint_callback = Mock()
             with self.subTest(options=options), patch(
                 "aidast.recon.tools.endpoint_discovery.PlaywrightDriver"
             ) as driver:
@@ -444,10 +462,16 @@ class ReconBrowserTransportTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "stop before browser launch"):
                     discover_endpoints(
                         self.policy.asset, target_policy=self.policy,
-                        mitm_proxy_url="http://127.0.0.1:8080", **options,
+                        mitm_proxy_url="http://127.0.0.1:8080",
+                        authentication_endpoint_callback=endpoint_callback,
+                        **options,
                     )
                 self.assertEqual(driver.call_args.kwargs["auth_bootstrap"], options.get("auth_bootstrap"))
                 self.assertIs(driver.call_args.kwargs["target_policy"], self.policy)
+                self.assertIs(
+                    driver.call_args.args[1].authentication_endpoint_callback,
+                    endpoint_callback,
+                )
                 driver.return_value.close.assert_called_once_with()
 
     def test_route_guard_blocks_scope_methods_and_url_credentials(self):

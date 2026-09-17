@@ -30,6 +30,22 @@ $chromeArgs = @("--remote-debugging-port=$debugPort", '--remote-debugging-addres
 $chromeProcess = $null
 $script:socket = $null
 $script:messageId = 0
+$script:authenticationEndpoints = @{}
+function Save-AuthenticationRequest($Parameters) {
+    if (-not $Parameters -or -not $Parameters.request) { return }
+    try { $requestUri = [Uri]$Parameters.request.url } catch { return }
+    if ($requestUri.GetLeftPart([UriPartial]::Authority).ToLowerInvariant() -ne $targetOrigin) { return }
+    $method = ([string]$Parameters.request.method).ToUpperInvariant()
+    if (-not $method -or -not $requestUri.AbsolutePath.StartsWith('/')) { return }
+    $path = $requestUri.AbsolutePath
+    $key = "$method`n$targetOrigin`n$path"
+    $script:authenticationEndpoints[$key] = @{
+        method = $method
+        origin = $targetOrigin
+        path = $path
+        source = 'auth_bootstrap'
+    }
+}
 function Invoke-Cdp([string]$Method, [hashtable]$Parameters = @{}, [string]$SessionId = '') {
     $script:messageId++
     $id = $script:messageId
@@ -53,6 +69,10 @@ function Invoke-Cdp([string]$Method, [hashtable]$Parameters = @{}, [string]$Sess
                 } while (-not $chunk.EndOfMessage)
                 $reply = [Text.Encoding]::UTF8.GetString($stream.ToArray()) | ConvertFrom-Json
             } finally { $stream.Dispose() }
+            if ($reply.method -eq 'Network.requestWillBeSent') {
+                Save-AuthenticationRequest $reply.params
+                continue
+            }
             if ($reply.id -eq $id) {
                 if ($reply.error) { throw "Chrome session export command failed: $Method" }
                 return $reply.result
@@ -62,8 +82,6 @@ function Invoke-Cdp([string]$Method, [hashtable]$Parameters = @{}, [string]$Sess
 }
 try {
     $chromeProcess = Start-Process -FilePath $chromePath -ArgumentList $chromeArgs -PassThru
-    Write-Host 'Log in using the Windows Chrome window. Keep the target page open when finished.'
-    $null = Read-Host 'After completing login, press Enter to export the target session'
     $deadline = [DateTime]::UtcNow.AddSeconds(10)
     $version = $null
     while (-not $version) {
@@ -85,6 +103,17 @@ try {
     try {
         $script:socket.ConnectAsync($browserSocket, $connectCancel.Token).GetAwaiter().GetResult()
     } finally { $connectCancel.Dispose() }
+    # Attach passive Network observers before operator interaction. No request
+    # headers, post data, response bodies, routing, or proxying are enabled.
+    foreach ($tab in (Invoke-Cdp 'Target.getTargets').targetInfos) {
+        if ($tab.type -ne 'page') { continue }
+        $networkSession = (Invoke-Cdp 'Target.attachToTarget' @{targetId=$tab.targetId; flatten=$true}).sessionId
+        $null = Invoke-Cdp 'Network.enable' @{
+            maxTotalBufferSize=0; maxResourceBufferSize=0; maxPostDataSize=0
+        } $networkSession
+    }
+    Write-Host 'Log in using the Windows Chrome window. Keep the target page open when finished.'
+    $null = Read-Host 'After completing login, press Enter to export the target session'
     $cookies = @()
     foreach ($cookie in (Invoke-Cdp 'Storage.getCookies').cookies) {
         $domain = $cookie.domain.ToLowerInvariant()
@@ -113,7 +142,12 @@ try {
         } finally { $null = Invoke-Cdp 'Target.detachFromTarget' @{sessionId=$session} }
     }
     if ($origins.Count -eq 0) { throw 'Finish login and return to the target origin before exporting' }
-    $document = @{cookies=$cookies; origins=$origins; session_storage=$sessionStorage}
+    $document = @{
+        cookies=$cookies
+        origins=$origins
+        session_storage=$sessionStorage
+        authentication_endpoints=@($script:authenticationEndpoints.Values)
+    }
     [IO.File]::WriteAllText($OutputPath, ($document | ConvertTo-Json -Depth 50), [Text.UTF8Encoding]::new($false))
     Write-Host 'Target session exported. Returning to AI-DAST.'
 } finally {
