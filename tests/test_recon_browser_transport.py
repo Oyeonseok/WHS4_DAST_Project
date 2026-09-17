@@ -172,12 +172,38 @@ class ReconBrowserTransportTests(unittest.TestCase):
                 self.assertFalse(any(arg.startswith("--proxy-server=") for arg in command))
                 self.assertEqual(command[-1], self.config.login_url)
                 attach.assert_not_called()
-                self.driver._launch_manual_browser()
-                command = launch.call_args.args[0]
-                self.assertIn("--proxy-server=http://127.0.0.1:8080", command)
-                self.assertNotIn("--no-proxy-server", command)
-                self.assertEqual(command[-1], "about:blank")
-                attach.assert_called_once_with()
+
+    def test_runtime_launch_uses_managed_headless_browser_with_proxy(self):
+        playwright = Mock()
+        browser = Mock()
+        context = Mock()
+        page = Mock()
+        playwright.chromium.launch.return_value = browser
+        browser.new_context.return_value = context
+        context.new_page.return_value = page
+        self.driver.playwright = playwright
+
+        with patch.object(self.driver, "_ensure_playwright"), patch.object(
+            self.driver, "_shutdown_runtime"
+        ), patch.object(self.driver, "_register_context_handlers"), patch.object(
+            self.driver, "_register_page_handlers"
+        ) as register_page:
+            self.driver._launch_manual_browser()
+
+        playwright.chromium.launch.assert_called_once_with(
+            headless=True,
+            args=[
+                "--disable-dev-shm-usage",
+                "--disable-blink-features=AutomationControlled",
+                "--proxy-bypass-list=<-loopback>",
+            ],
+            proxy={"server": "http://127.0.0.1:8080"},
+        )
+        browser.new_context.assert_called_once_with(ignore_https_errors=True)
+        self.assertEqual(self.driver._browser_kind, "managed")
+        self.assertIs(self.driver.context, context)
+        self.assertIs(self.driver.page, page)
+        register_page.assert_called_once_with(page)
 
     def test_manual_session_applies_policy_to_same_chromium_context(self):
         events = []
@@ -188,6 +214,7 @@ class ReconBrowserTransportTests(unittest.TestCase):
             self.driver.session_path.write_text("{}")
             with patch.object(self.driver, "_launch_manual_browser", side_effect=lambda **kwargs: events.append(("launch", kwargs.get("manual_login", False)))), patch.object(
             self.driver, "_attach_manual_browser", side_effect=lambda: events.append(("attach",))
+            ), patch.object(self.driver, "_register_authentication_observer", side_effect=lambda: events.append(("auth-observer",))
             ), patch("aidast.recon.tools.playwright_driver._wait_for_manual_login", side_effect=lambda: events.append(("input",))), patch.object(
             self.driver, "save_session", side_effect=lambda: events.append(("save", self.driver._phase)) or True
             ), patch.object(self.driver, "_register_context_handlers", side_effect=lambda: events.append(("policy",))), patch.object(
@@ -195,10 +222,62 @@ class ReconBrowserTransportTests(unittest.TestCase):
             ):
                 self.driver.capture_and_start()
         self.assertEqual(events, [
-            ("launch", True), ("input",), ("attach",), ("save", "login"),
+            ("launch", True), ("attach",), ("auth-observer",), ("input",), ("save", "login"),
             ("policy",), ("page", True),
         ])
         self.assertIs(self.driver.context.pages[0], page)
+
+    def test_authentication_observer_keeps_only_secret_free_same_origin_coordinates(self):
+        self.driver._phase = "login"
+        self.driver._observe_authentication_request(SimpleNamespace(
+            method="POST",
+            url="https://example.com/rest/user/login?password=private#fragment",
+        ))
+        self.driver._observe_authentication_request(SimpleNamespace(
+            method="POST",
+            url="https://identity.example/login?token=private",
+        ))
+
+        self.assertEqual(self.driver.authentication_endpoints[0].method, "POST")
+        self.assertEqual(self.driver.authentication_endpoints[0].path, "/rest/user/login")
+        self.assertEqual(len(self.driver.authentication_endpoints), 1)
+        self.assertEqual(self.driver.get_http_results(), [])
+        passive = self.driver.drain_authentication_observations()
+        self.assertEqual(passive[0]["discovery_kind"], "passive_login_observation")
+        self.assertNotIn("private", json.dumps(self.driver.get_http_results()))
+
+    def test_passive_authentication_observation_cannot_use_browser_support_path_bypass(self):
+        item = {
+            "method": "POST", "path": "/admin/login",
+            "url": "https://example.com/admin/login",
+            "source": "auth_bootstrap",
+            "discovery_kind": "passive_login_observation",
+            "browser_supporting_request": True,
+        }
+        self.assertEqual(_filter_results_by_policy(
+            [item], base_url=self.policy.asset, target_policy=self.policy,
+            passive_metadata=True,
+        ), [])
+
+    def test_expired_restored_session_can_enter_manual_reauthentication(self):
+        self.driver.preauthenticated = True
+        with patch.object(self.driver, "restore_runtime"), patch.object(
+            self.driver, "session_is_valid", return_value=False
+        ), patch.object(self.driver, "capture_and_start") as capture:
+            self.driver.ensure_session()
+        capture.assert_called_once_with()
+
+    def test_manual_reauthentication_accepts_previously_restored_driver(self):
+        self.driver.preauthenticated = True
+        self.driver.context = Mock(pages=[])
+        with patch.object(self.driver, "_launch_manual_browser"), patch.object(
+            self.driver, "_attach_manual_browser"
+        ), patch.object(self.driver, "_register_authentication_observer"), patch(
+            "aidast.recon.tools.playwright_driver._wait_for_manual_login"
+        ), patch.object(self.driver, "save_session", return_value=True), patch.object(
+            self.driver, "_register_context_handlers"
+        ):
+            self.driver.capture_and_start()
 
     def test_cancel_closes_direct_browser_without_session_or_runtime(self):
         with patch.object(self.driver, "_launch_manual_browser") as launch, patch.object(
@@ -209,10 +288,51 @@ class ReconBrowserTransportTests(unittest.TestCase):
             with self.assertRaises(KeyboardInterrupt):
                 self.driver.capture_and_start()
         launch.assert_called_once_with(manual_login=True)
-        attach.assert_not_called()
+        attach.assert_called_once_with()
         save.assert_not_called()
         close.assert_called_once_with()
         self.assertEqual(self.driver._phase, "runtime")
+
+    def test_runtime_shutdown_does_not_wait_for_route_callbacks(self):
+        context = Mock()
+        context.unroute_all.side_effect = AssertionError(
+            "route cleanup must not block complete runtime shutdown"
+        )
+        process = Mock()
+        process.poll.return_value = None
+        self.driver.context = context
+        self.driver._browser_kind = "cdp"
+        self.driver._chrome_process = process
+
+        self.driver._shutdown_runtime()
+
+        context.unroute_all.assert_not_called()
+        process.terminate.assert_called_once_with()
+        process.wait.assert_called_once_with(timeout=3)
+        self.assertIsNone(self.driver.context)
+        self.assertIsNone(self.driver._chrome_process)
+
+    def test_browser_launch_removes_stale_run_profile_singletons(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self.driver.session_config.session_file = str(Path(directory) / "session.json")
+            self.driver.profile_path.mkdir()
+            for name in ("SingletonLock", "SingletonSocket", "SingletonCookie"):
+                (self.driver.profile_path / name).symlink_to("stale-target")
+
+            playwright = Mock()
+            playwright.chromium.executable_path = "/test/chromium"
+            self.driver.playwright = playwright
+
+            with patch.object(self.driver, "_ensure_playwright"), patch.object(
+                self.driver, "_shutdown_runtime"
+            ), patch.object(self.driver, "_find_free_port", return_value=43210), patch(
+                "aidast.recon.tools.playwright_driver.subprocess.Popen"
+            ) as popen, patch.object(self.driver, "_attach_manual_browser"):
+                self.driver._launch_manual_browser(manual_login=True)
+
+            popen.assert_called_once()
+            for name in ("SingletonLock", "SingletonSocket", "SingletonCookie"):
+                self.assertFalse((self.driver.profile_path / name).exists())
 
     def test_failed_session_save_prevents_runtime_launch(self):
         with patch.object(self.driver, "_launch_manual_browser") as launch, patch.object(
@@ -228,6 +348,8 @@ class ReconBrowserTransportTests(unittest.TestCase):
     def test_invalid_restored_session_falls_back_to_manual_login(self):
         for url, status in [("https://sso.example.net/login", 200), (self.policy.asset, 403)]:
             with self.subTest(url=url, status=status):
+                endpoint_callback = Mock()
+                self.driver.session_config.authentication_endpoint_callback = endpoint_callback
                 failed_page = Mock(url=url)
                 failed_page.goto.return_value = SimpleNamespace(status=status)
                 restored_page = Mock(url=self.policy.asset)
@@ -237,6 +359,7 @@ class ReconBrowserTransportTests(unittest.TestCase):
                     self.driver.session_path.write_text("{}")
                     with patch.object(self.driver, "_launch_manual_browser") as launch, patch.object(
                     self.driver, "_attach_manual_browser"
+                    ), patch.object(self.driver, "_register_authentication_observer"
                     ), patch.object(self.driver, "_restore_target_session"), patch.object(
                     self.driver, "_ensure_page", side_effect=[failed_page, restored_page]
                     ), patch("aidast.recon.tools.playwright_driver._wait_for_manual_login", return_value=False), patch.object(
@@ -251,6 +374,7 @@ class ReconBrowserTransportTests(unittest.TestCase):
                 )
                 self.assertEqual(save.call_count, 2)
                 self.assertEqual(close.call_count, 2)
+                endpoint_callback.assert_called_once_with(tuple())
 
     def test_browser_support_allows_only_marked_non_navigation_requests(self):
         self.driver.browser_context_token = "browser-token-with-enough-length"
@@ -316,6 +440,24 @@ class ReconBrowserTransportTests(unittest.TestCase):
         launch.assert_called_once_with()
         restore.assert_called_once_with()
 
+    def test_restore_runtime_retries_one_transient_cdp_launch_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self.driver.session_config.session_file = str(Path(directory) / "session.json")
+            self.driver.session_path.write_text("{}")
+            with patch.object(
+                self.driver, "_launch_manual_browser",
+                side_effect=[RuntimeError("CDP refused"), None],
+            ) as launch, patch.object(
+                self.driver, "_restore_target_session"
+            ) as restore, patch.object(
+                self.driver, "_shutdown_runtime"
+            ) as shutdown:
+                self.driver.restore_runtime(force=True)
+
+        self.assertEqual(launch.call_count, 2)
+        shutdown.assert_called_once_with()
+        restore.assert_called_once_with()
+
     def test_restore_session_filters_external_cookies_and_storage(self):
         with tempfile.TemporaryDirectory() as directory:
             self.config.session_file = str(Path(directory) / "session.json")
@@ -352,6 +494,7 @@ class ReconBrowserTransportTests(unittest.TestCase):
         for options in ({}, {"auth_bootstrap": {
             "hosts": ["login.example.com"], "paths": ["/authorize"],
         }}):
+            endpoint_callback = Mock()
             with self.subTest(options=options), patch(
                 "aidast.recon.tools.endpoint_discovery.PlaywrightDriver"
             ) as driver:
@@ -359,11 +502,62 @@ class ReconBrowserTransportTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "stop before browser launch"):
                     discover_endpoints(
                         self.policy.asset, target_policy=self.policy,
-                        mitm_proxy_url="http://127.0.0.1:8080", **options,
+                        mitm_proxy_url="http://127.0.0.1:8080",
+                        authentication_endpoint_callback=endpoint_callback,
+                        **options,
                     )
                 self.assertEqual(driver.call_args.kwargs["auth_bootstrap"], options.get("auth_bootstrap"))
                 self.assertIs(driver.call_args.kwargs["target_policy"], self.policy)
+                self.assertIs(
+                    driver.call_args.args[1].authentication_endpoint_callback,
+                    endpoint_callback,
+                )
                 driver.return_value.close.assert_called_once_with()
+
+    def test_endpoint_discovery_passes_intigriti_headers_to_browser(self):
+        headers = {
+            "X-Intigriti-Username": "baekggum",
+            "User-Agent": "aidast-recon/0.1 <intigriti:baekggum>",
+        }
+        with patch(
+            "aidast.recon.tools.endpoint_discovery.PlaywrightDriver"
+        ) as driver:
+            driver.return_value.capture_and_start.side_effect = RuntimeError("stop")
+            with self.assertRaisesRegex(RuntimeError, "stop"):
+                discover_endpoints(
+                    self.policy.asset,
+                    target_policy=self.policy,
+                    mitm_proxy_url="http://127.0.0.1:8080",
+                    request_headers=headers,
+                )
+        self.assertEqual(driver.call_args.kwargs["request_headers"], headers)
+
+    def test_route_guard_injects_identity_only_into_target_requests(self):
+        self.driver.request_headers = {
+            "X-Intigriti-Username": "baekggum",
+            "User-Agent": "aidast-recon/0.1 <intigriti:baekggum>",
+        }
+        self.driver.browser_context_token = "browser-token-with-enough-length"
+
+        def request(url, resource_type, *, frame_url=None):
+            return SimpleNamespace(
+                url=url, method="GET", resource_type=resource_type,
+                all_headers=lambda: {"accept": "*/*"},
+                frame=SimpleNamespace(url=frame_url or self.policy.asset),
+                is_navigation_request=lambda: False,
+            )
+
+        target = Mock(request=request("https://example.com/api/users", "xhr"))
+        self.driver._guard_request(target)
+        target_headers = target.continue_.call_args.kwargs["headers"]
+        self.assertEqual(target_headers["X-Intigriti-Username"], "baekggum")
+        self.assertIn("<intigriti:baekggum>", target_headers["User-Agent"])
+
+        third_party = Mock(request=request("https://cdn.example.net/app.js", "script"))
+        self.driver._guard_request(third_party)
+        third_party_headers = third_party.continue_.call_args.kwargs["headers"]
+        self.assertNotIn("X-Intigriti-Username", third_party_headers)
+        self.assertNotIn("User-Agent", third_party_headers)
 
     def test_route_guard_blocks_scope_methods_and_url_credentials(self):
         for url, method, allowed in [
@@ -393,9 +587,10 @@ class ReconBrowserTransportTests(unittest.TestCase):
         self.driver.context = Mock()
         self.driver._register_context_handlers()
         self.driver.context.route.assert_called_once_with("**/*", self.driver._guard_request)
-        websocket = Mock()
-        self.driver.context.route_web_socket.call_args.args[1](websocket)
-        websocket.close.assert_called_once_with()
+        self.driver.context.route_web_socket.assert_not_called()
+        websocket_guard = self.driver.context.add_init_script.call_args.args[0]
+        self.assertIn("PolicyBlockedWebSocket", websocket_guard)
+        self.assertIn("WebSocket blocked by target policy", websocket_guard)
 
     def test_auth_check_uses_policy_transport(self):
         self.config.auth_check_url = "me"

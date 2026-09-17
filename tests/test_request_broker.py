@@ -39,6 +39,17 @@ def response(status=200, headers=None, body=b"ok"):
 
 
 class RequestBrokerTests(unittest.TestCase):
+    def test_intigriti_identity_is_redacted_from_persisted_headers(self):
+        result = sanitize_headers({
+            "X-Intigriti-Username": "baekggum",
+            "User-Agent": "aidast-recon/0.1 <intigriti:baekggum>",
+        })
+        self.assertEqual(result["X-Intigriti-Username"], "[REDACTED]")
+        self.assertEqual(
+            result["User-Agent"],
+            "aidast-recon/0.1 <intigriti:[REDACTED]>",
+        )
+
     def test_missing_policy_fails_before_transport(self):
         transport = MagicMock()
         with self.assertRaises(RequestPolicyError):

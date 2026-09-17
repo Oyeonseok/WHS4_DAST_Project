@@ -51,6 +51,7 @@ class ScopeCoordinator:
         program_url: str,
         *,
         main_agent: ScopeCollector,
+        primary_reader: ProgramPageReader | None = None,
         fallback_reader: ProgramPageReader | None = None,
         approved_by: str,
         review: Callable[[Path], bool],
@@ -64,7 +65,12 @@ class ScopeCoordinator:
         if not approved_by:
             raise CoordinatorError("approved_by must not be blank")
 
-        page, analysis = main_agent.collect_scope(program_url)
+        if primary_reader is not None:
+            page = primary_reader.read(program_url)
+            self._require_complete_capture(page)
+            analysis = main_agent.interpret_captured_scope(page)
+        else:
+            page, analysis = main_agent.collect_scope(program_url)
         if (
             page.capture_reason is CaptureReason.JAVASCRIPT_RENDER_INCOMPLETE
             and fallback_reader is not None
@@ -79,15 +85,7 @@ class ScopeCoordinator:
             ):
                 page = fallback_page
                 analysis = main_agent.interpret_captured_scope(page)
-        if page.capture_status is CaptureStatus.BLOCKED:
-            raise CoordinatorError(
-                "program page access was blocked; no Scope.md was generated"
-            )
-        if page.capture_status is not CaptureStatus.COMPLETE:
-            raise CoordinatorError(
-                f"program page capture is incomplete "
-                f"({page.capture_reason.value}); no Scope.md was generated"
-            )
+        self._require_complete_capture(page)
         document = ScopeDocument(
             scope_id=f"scope_{uuid4().hex}",
             created_at=datetime.now(timezone.utc),
@@ -102,6 +100,19 @@ class ScopeCoordinator:
             return document
         finally:
             shutil.rmtree(staging, ignore_errors=True)
+
+    @staticmethod
+    def _require_complete_capture(page: ProgramPage) -> None:
+        if page.capture_status is CaptureStatus.BLOCKED:
+            raise CoordinatorError(
+                "program page access was blocked "
+                f"({page.capture_reason.value}); no Scope.md was generated"
+            )
+        if page.capture_status is not CaptureStatus.COMPLETE:
+            raise CoordinatorError(
+                f"program page capture is incomplete "
+                f"({page.capture_reason.value}); no Scope.md was generated"
+            )
 
     def verify_approval(self) -> ScopeApproval:
         approval, _, _ = self._load_verified_snapshot()

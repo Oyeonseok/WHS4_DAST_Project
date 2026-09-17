@@ -48,7 +48,11 @@ from aidast.reporting import (
     report_status,
 )
 from aidast.scope.paths import ScopePathError, resolve_scope_directory
-from aidast.scope.reader import PlaywrightProgramPageReader, ProgramPageError
+from aidast.scope.reader import (
+    PlaywrightProgramPageReader,
+    ProgramPageError,
+    RuntimeBrowserProgramPageReader,
+)
 from aidast.scope.models import AssetType, ScopeAsset, ScopeDocument
 from aidast.updater import UpdateError, update_aidast
 from aidast.validation import (
@@ -78,7 +82,7 @@ EXECUTION_PROFILES = {
 }
 EXECUTION_PROFILES["focused-recon"] = EXECUTION_PROFILES["focused-discovery"]
 
-RESULT_ROOT = Path("result")
+RESULT_ROOT = Path(os.environ.get("AIDAST_RESULT_ROOT", "result").strip() or "result").expanduser()
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -107,6 +111,22 @@ def _parser() -> argparse.ArgumentParser:
         help="program URL for the status operation",
     )
     _add_workflow_options(scope)
+    scope.add_argument(
+        "--login-mode",
+        dest="scope_login_mode",
+        choices=("native", "runtime-browser"),
+        default="native",
+        help=(
+            "native uses the isolated Codex browser; runtime-browser opens an "
+            "operator-controlled persistent browser for program-platform login"
+        ),
+    )
+    scope.add_argument(
+        "--identity",
+        dest="scope_identity",
+        default="primary",
+        help="account label for the isolated program-platform browser session",
+    )
 
     recon = commands.add_parser(
         "recon",
@@ -161,6 +181,14 @@ def _parser() -> argparse.ArgumentParser:
     recon.add_argument("--max-depth", type=_bounded_depth)
     recon.add_argument("--max-concurrency", type=_positive_int)
     recon.add_argument("--timeout-seconds", type=_positive_int)
+    recon.add_argument(
+        "--intigriti-username",
+        type=_intigriti_username,
+        help=(
+            "Intigriti handle injected into X-Intigriti-Username and the "
+            "required User-Agent suffix for every Recon HTTP request"
+        ),
+    )
     recon.add_argument("--auth-host", action="append", default=[], help="host allowed only during manual login bootstrap")
     recon.add_argument("--auth-path", action="append", default=[], help="path prefix allowed on --auth-host during login bootstrap")
     recon.add_argument("--db-path", type=Path, default=RESULT_ROOT / "Recon.db")
@@ -173,6 +201,10 @@ def _parser() -> argparse.ArgumentParser:
     recon.add_argument(
         "--tag-after", action="store_true",
         help="run the deferred observation-tagging worker after Recon completes",
+    )
+    recon.add_argument(
+        "--tag-batch-size", type=_positive_int, default=200,
+        help="maximum observations per deferred tagging request (default: 200)",
     )
     recon.add_argument(
         "--asset-discovery-batch-size", type=_positive_int, default=25,
@@ -207,6 +239,14 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--max-depth", type=_bounded_depth)
     run.add_argument("--max-concurrency", type=_positive_int)
     run.add_argument("--timeout-seconds", type=_positive_int)
+    run.add_argument(
+        "--intigriti-username",
+        type=_intigriti_username,
+        help=(
+            "Intigriti handle injected into X-Intigriti-Username and the "
+            "required User-Agent suffix for every Recon HTTP request"
+        ),
+    )
     run.add_argument("--auth-host", action="append", default=[])
     run.add_argument("--auth-path", action="append", default=[])
     run.add_argument("--ffuf-wordlist")
@@ -221,6 +261,10 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument(
         "--tag-after", action="store_true",
         help="run the deferred observation-tagging worker after Recon completes",
+    )
+    run.add_argument(
+        "--tag-batch-size", type=_positive_int, default=200,
+        help="maximum observations per deferred tagging request (default: 200)",
     )
     _add_session_options(run)
     run.add_argument(
@@ -365,6 +409,15 @@ def _positive_float(value: str) -> float:
     return parsed
 
 
+def _intigriti_username(value: str) -> str:
+    candidate = value.strip()
+    if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", candidate) is None:
+        raise argparse.ArgumentTypeError(
+            "must be a 1-64 character Intigriti handle using letters, digits, ., _, or -"
+        )
+    return candidate
+
+
 def _positive_int(value: str) -> int:
     try:
         parsed = int(value)
@@ -390,7 +443,10 @@ def _add_workflow_options(command: argparse.ArgumentParser) -> None:
         "--output-dir",
         type=Path,
         default=RESULT_ROOT / "Scope",
-        help="root directory for program scope artifacts (default: result/Scope)",
+        help=(
+            "root directory for program scope artifacts "
+            f"(default: {RESULT_ROOT / 'Scope'})"
+        ),
     )
     command.add_argument(
         "--by",
@@ -561,6 +617,8 @@ def _run_scope(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int
     if args.subject == "status":
         if args.approved_by:
             parser.error("--by is only valid when collecting a new Scope")
+        if args.scope_login_mode != "native" or args.scope_identity != "primary":
+            parser.error("--login-mode and --identity are only valid when collecting")
         approval = coordinator.verify_approval()
         print(
             f"Scope approval valid: {approval.scope_id} "
@@ -624,6 +682,25 @@ def _run_recon(
             return 1
         scope_document, scope_markdown = scope_coordinator.load_approved_scope()
         print(f"Approved Scope saved: {program_dir / 'Scope.md'}")
+
+    intigriti_username = getattr(args, "intigriti_username", None)
+    if (
+        args.execute
+        and "X-Intigriti-Username" in scope_markdown
+        and not intigriti_username
+    ):
+        raise ReconCoordinatorError(
+            "approved Scope requires X-Intigriti-Username; "
+            "supply --intigriti-username"
+        )
+    request_headers = (
+        {
+            "X-Intigriti-Username": intigriti_username,
+            "User-Agent": f"aidast-recon/0.1 <intigriti:{intigriti_username}>",
+        }
+        if intigriti_username
+        else {}
+    )
 
     selected_targets = _select_recon_targets(
         scope_document,
@@ -780,6 +857,7 @@ def _run_recon(
             execution_start_urls=start_urls,
             annotation_agent=main_agent,
             target_sessions=target_sessions,
+            request_headers=request_headers,
             auth_bootstrap=(
                 {"hosts": args.auth_host, "paths": args.auth_path}
                 if args.auth_host or args.auth_path else None
@@ -810,7 +888,7 @@ def _run_recon(
                     executor.conn,
                     scan_id=scan_id,
                     agent=main_agent,
-                    batch_size=200,
+                    batch_size=args.tag_batch_size,
                     progress=lambda n, total, done, failed: print(
                         f"Tagging batch {n}/{total}: processed={done}, failed={failed}",
                         flush=True,
@@ -1418,9 +1496,16 @@ def _collect_scope(
     coordinator: ScopeCoordinator,
     main_agent: CodexMainAgent,
 ):
+    primary_reader = None
+    if getattr(args, "scope_login_mode", "native") == "runtime-browser":
+        primary_reader = RuntimeBrowserProgramPageReader(
+            identity=args.scope_identity,
+            timeout_seconds=args.page_timeout,
+        )
     return coordinator.collect(
         program_url,
         main_agent=main_agent,
+        primary_reader=primary_reader,
         fallback_reader=PlaywrightProgramPageReader(
             timeout_seconds=args.page_timeout
         ),

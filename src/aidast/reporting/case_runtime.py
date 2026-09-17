@@ -19,17 +19,24 @@ from .models import ReportDraft, validate_draft
 from .render import render_report
 
 
-def _references(value: Any, *, key: str = "") -> set[str]:
+_VALIDATION_EVIDENCE_REFERENCE_KEYS = frozenset({
+    "evidence_ids",
+    "validation_evidence_ids",
+})
+
+
+def _references(value: Any) -> set[str]:
     result: set[str] = set()
     if isinstance(value, dict):
         for name, child in value.items():
-            if name.endswith("evidence_ids") and isinstance(child, list):
-                result.update(item for item in child if isinstance(item, str))
-            else:
-                result.update(_references(child, key=name))
+            if name.endswith("evidence_ids"):
+                if name in _VALIDATION_EVIDENCE_REFERENCE_KEYS and isinstance(child, list):
+                    result.update(item for item in child if isinstance(item, str))
+                continue
+            result.update(_references(child))
     elif isinstance(value, list):
         for child in value:
-            result.update(_references(child, key=key))
+            result.update(_references(child))
     return result
 
 

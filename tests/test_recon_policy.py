@@ -12,6 +12,8 @@ from aidast.recon.policy import (
     TargetPolicy,
     TargetPolicyProposal,
     ToolPolicy,
+    canonical_host_for_asset,
+    validate_start_url_for_target,
     validate_policy_for_target,
 )
 from aidast.recon.policy import TargetPolicySetProposal
@@ -230,9 +232,13 @@ class TargetPolicyTests(unittest.TestCase):
         grounded = CodexMainAgent._normalize_grounded_execution_controls(item, quote)
         policy = TargetPolicy(scope_id="scope", policy_id="policy", **grounded.model_dump())
         for command in ("run", "recon"):
-            args = _parser().parse_args([command, "https://example.com/program", "--target", "example.com"])
+            args = _parser().parse_args([
+                command, "https://example.com/program", "--target", "example.com",
+                "--intigriti-username", "baekggum",
+            ])
             self.assertIsNone(args.profile)
             self.assertEqual(args.login_mode, _default_login_mode())
+            self.assertEqual(args.intigriti_username, "baekggum")
             result = _apply_policy_caps(
                 {("DOMAIN", "example.com"): policy}, profile=args.profile,
                 max_rps=None, max_requests=None, max_depth=None,
@@ -240,6 +246,15 @@ class TargetPolicyTests(unittest.TestCase):
             )
             self.assertEqual(result[("DOMAIN", "example.com")].limits, grounded.limits)
             self.assertEqual(grounded.limits.requests_per_second, 10)
+
+    def test_intigriti_username_rejects_header_injection(self) -> None:
+        from aidast.cli import _parser
+
+        with self.assertRaises(SystemExit):
+            _parser().parse_args([
+                "recon", "https://example.com/program", "--target", "example.com",
+                "--intigriti-username", "alice\r\nInjected: yes",
+            ])
 
     def test_fractional_tool_rates_are_converted_without_rounding_up(self) -> None:
         self.assertEqual(_tool_rate_args("katana", 0.2), ["-delay", "5"])
@@ -523,6 +538,44 @@ class TargetPolicyTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "broaden"):
             validate_policy_for_target(
                 proposal, asset_type=AssetType.URL, asset="https://example.com/app"
+            )
+
+    def test_bare_hostname_url_asset_defaults_to_https(self) -> None:
+        asset = "stock.adobe.com"
+        proposal = TargetPolicyProposal(
+            asset_type=AssetType.URL,
+            asset=asset,
+            allowed_schemes=["https"],
+            allowed_hosts=[asset],
+            allowed_ports=[443],
+            allowed_path_prefixes=["/"],
+        )
+
+        self.assertEqual(canonical_host_for_asset(AssetType.URL, asset), asset)
+        validate_policy_for_target(
+            proposal, asset_type=AssetType.URL, asset=asset
+        )
+        validate_start_url_for_target(
+            f"https://{asset}/", asset_type=AssetType.URL, asset=asset
+        )
+
+    def test_bare_hostname_url_asset_does_not_allow_http(self) -> None:
+        asset = "stock.adobe.com"
+        proposal = TargetPolicyProposal(
+            asset_type=AssetType.URL,
+            asset=asset,
+            allowed_schemes=["http"],
+            allowed_hosts=[asset],
+            allowed_ports=[80],
+        )
+
+        with self.assertRaisesRegex(ValueError, "scheme"):
+            validate_policy_for_target(
+                proposal, asset_type=AssetType.URL, asset=asset
+            )
+        with self.assertRaisesRegex(ValueError, "scheme or port"):
+            validate_start_url_for_target(
+                f"http://{asset}/", asset_type=AssetType.URL, asset=asset
             )
 
 

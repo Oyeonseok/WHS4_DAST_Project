@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from fnmatch import fnmatchcase
 from typing import Annotated, Literal
-from urllib.parse import urlsplit
+from urllib.parse import SplitResult, urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -266,9 +266,37 @@ def _host_matches(host: str, pattern: str) -> bool:
     )
 
 
+def _normalized_web_asset_url(
+    asset_type: AssetType, asset: str
+) -> SplitResult | None:
+    """Parse executable URL/API scope assets with a fail-closed HTTPS default.
+
+    Some bounty platforms label a bare hostname such as ``stock.adobe.com`` as
+    a URL.  Treat only scheme-less URL/API assets as HTTPS; explicit URLs keep
+    their original scheme, port, and path restrictions.
+    """
+    if asset_type not in {AssetType.URL, AssetType.API}:
+        return None
+    value = asset.strip()
+    if not value or value.startswith("//"):
+        return None
+    candidate = value if re.match(r"^[A-Za-z][A-Za-z0-9+.-]*://", value) else (
+        f"https://{value}"
+    )
+    try:
+        parsed = urlsplit(candidate)
+        parsed.port
+    except ValueError:
+        return None
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
+        return None
+    return parsed
+
+
 def canonical_host_for_asset(asset_type: AssetType, asset: str) -> str | None:
     if asset_type in {AssetType.URL, AssetType.API}:
-        return urlsplit(asset).hostname
+        parsed = _normalized_web_asset_url(asset_type, asset)
+        return parsed.hostname if parsed is not None else None
     if asset_type is AssetType.WILDCARD:
         return asset.removeprefix("*.")
     if asset_type in {AssetType.DOMAIN, AssetType.IP_ADDRESS}:
@@ -306,7 +334,11 @@ def validate_start_url_for_target(
         raise ValueError("start URL host does not match the approved target")
 
     if asset_type in {AssetType.URL, AssetType.API}:
-        approved = urlsplit(asset)
+        approved = _normalized_web_asset_url(asset_type, asset)
+        if approved is None:
+            raise ValueError(
+                f"asset type cannot have a web start URL: {asset_type.value}"
+            )
         approved_port = approved.port or (443 if approved.scheme == "https" else 80)
         start_port = parsed.port or (443 if parsed.scheme == "https" else 80)
         if parsed.scheme != approved.scheme or start_port != approved_port:
@@ -366,7 +398,11 @@ def validate_policy_for_target(
     ):
         raise ValueError("policy excludes its executable target host")
     if asset_type in {AssetType.URL, AssetType.API}:
-        parsed = urlsplit(asset)
+        parsed = _normalized_web_asset_url(asset_type, asset)
+        if parsed is None:
+            raise ValueError(
+                f"asset type cannot be executed as a web target: {asset_type}"
+            )
         approved_scheme = parsed.scheme.lower()
         approved_port = parsed.port or (443 if approved_scheme == "https" else 80)
         approved_path = parsed.path or "/"

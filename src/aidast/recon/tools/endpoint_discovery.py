@@ -602,6 +602,7 @@ def _filter_results_by_policy(
         )
         if (
             not allowed
+            and not passive_metadata
             and result.get("browser_supporting_request") is True
             and target_policy.allows_browser_support_url(candidate, method=method)
         ):
@@ -1493,6 +1494,7 @@ def discover_endpoints(
     base_url: str,
     *,
     ffuf_wordlist: str | None = None,
+    request_headers: dict[str, str] | None = None,
 
     # None이면 base_url을 Browser에 표시
     login_url: str | None = None,
@@ -1541,6 +1543,7 @@ def discover_endpoints(
     preauthenticated: bool = False,
     browser_context_token: str | None = None,
     diagnostic_callback=None,
+    authentication_endpoint_callback=None,
 ) -> list[dict]:
 
     if target_policy is not None and not mitm_proxy_url:
@@ -1574,6 +1577,14 @@ def discover_endpoints(
 
     def observe_browser(phase):
         if observation_callback is not None and driver is not None:
+            passive = _filter_results_by_policy(
+                driver.drain_authentication_observations(),
+                base_url=base_url,
+                target_policy=target_policy,
+                passive_metadata=True,
+            )
+            if passive:
+                observation_callback("auth_bootstrap", passive)
             observe(phase, driver.drain_observations())
 
     driver: (
@@ -1636,6 +1647,7 @@ def discover_endpoints(
                     storage_header_map
                     or {}
                 ),
+                authentication_endpoint_callback=authentication_endpoint_callback,
             )
         )
 
@@ -1666,6 +1678,7 @@ def discover_endpoints(
                 target_policy=target_policy,
                 auth_bootstrap=auth_bootstrap,
                 preauthenticated=preauthenticated,
+                request_headers=request_headers,
                 browser_context_token=browser_context_token,
             )
         )

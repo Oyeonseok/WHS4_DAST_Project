@@ -26,6 +26,7 @@ import time
 import urllib.request
 
 from dataclasses import dataclass, field
+from collections.abc import Callable
 from pathlib import Path
 from urllib.parse import urljoin, urlparse
 
@@ -38,6 +39,7 @@ from playwright.sync_api import (
 )
 
 from aidast.recon.policy import TargetPolicy
+from aidast.auth.endpoints import AuthenticationEndpoint, normalize_origin
 from aidast.core.http_safety import BROWSER_MODE_HEADER, BROWSER_TOKEN_HEADER
 from aidast.recon.tools.api_secondary_discovery import _http_request
 
@@ -98,6 +100,10 @@ class ManualSessionConfig:
     invalid_auth_statuses: tuple[int, ...] = (
         401,
     )
+
+    authentication_endpoint_callback: Callable[
+        [tuple[AuthenticationEndpoint, ...]], None
+    ] | None = None
 
     # Storage 값을 HTTP Header로 변환
     #
@@ -196,12 +202,14 @@ class PlaywrightDriver:
         target_policy: TargetPolicy | None = None,
         auth_bootstrap: dict | None = None,
         preauthenticated: bool = False,
+        request_headers: dict[str, str] | None = None,
         browser_context_token: str | None = None,
     ):
 
         if target_policy is not None and not proxy_url:
             raise ValueError("policy-enforced browser requires a proxy")
         self.preauthenticated = preauthenticated
+        self.request_headers = dict(request_headers or {})
         self.target_policy = target_policy
         self.auth_bootstrap = auth_bootstrap or {}
         self.base_url = (
@@ -239,6 +247,8 @@ class PlaywrightDriver:
         ) = None
 
         self.requests: list[dict] = []
+        self.authentication_observations: list[dict] = []
+        self.authentication_endpoints: list[AuthenticationEndpoint] = []
         self._observation_cursor = 0
         self._interaction_visited: set[str] = set()
         self._interaction_page_count = 0
@@ -464,7 +474,11 @@ class PlaywrightDriver:
         self,
         port: int,
         *,
-        timeout_seconds: float = 10.0,
+        # A cold Chrome-for-Testing launch on macOS can take well over ten
+        # seconds while component caches are initialized.  Keep this above
+        # the observed cold-start time so a healthy browser is not mistaken
+        # for a refused CDP connection.
+        timeout_seconds: float = 30.0,
     ) -> str:
 
         endpoint = (
@@ -525,11 +539,11 @@ class PlaywrightDriver:
         self,
     ) -> None:
 
-        if self.context is not None:
-            try:
-                self.context.unroute_all(behavior="ignoreErrors")
-            except Exception:
-                pass
+        # Do not call BrowserContext.unroute_all() while tearing down the
+        # complete runtime. Playwright can wait forever for an in-flight route
+        # callback even with ``ignoreErrors``. The managed browser close or
+        # external Chromium process termination below releases every route
+        # together with the context.
 
         # -------------------------------------------------
         # Playwright가 직접 실행한 Browser
@@ -604,6 +618,15 @@ class PlaywrightDriver:
 
         assert self.playwright is not None
 
+        # The operator-facing login flow needs a visible, directly connected
+        # Chromium.  Once a session snapshot exists, use Playwright's managed
+        # runtime instead of starting a GUI process and attaching over CDP.
+        # On macOS the latter can remain alive without ever opening its CDP
+        # port; managed headless launch avoids that GUI bootstrap dependency.
+        if not manual_login:
+            self._launch_managed_runtime()
+            return
+
         # 기존 Runtime 종료
         self._shutdown_runtime()
 
@@ -613,6 +636,19 @@ class PlaywrightDriver:
             parents=True,
             exist_ok=True,
         )
+
+        # Chromium can leave these profile-local symlinks behind when a CDP
+        # process is terminated during session restore.  A retry with the
+        # same run-scoped profile then exits before opening its debugging
+        # port.  This profile belongs exclusively to this driver/run, and the
+        # tracked process has already been stopped by _shutdown_runtime().
+        for name in ("SingletonLock", "SingletonSocket", "SingletonCookie"):
+            lock = self.profile_path / name
+            try:
+                if lock.is_symlink() or lock.exists():
+                    lock.unlink()
+            except OSError:
+                pass
 
         self.session_path.parent.mkdir(
             parents=True,
@@ -680,8 +716,33 @@ class PlaywrightDriver:
             )
         )
 
-        if not manual_login:
-            self._attach_manual_browser()
+    def _launch_managed_runtime(self) -> None:
+        self._ensure_playwright()
+        assert self.playwright is not None
+
+        self._shutdown_runtime()
+
+        launch_options: dict = {
+            "headless": True,
+            "args": [
+                "--disable-dev-shm-usage",
+                "--disable-blink-features=AutomationControlled",
+                # Chromium otherwise bypasses configured proxies for loopback.
+                "--proxy-bypass-list=<-loopback>",
+            ],
+        }
+        if self.proxy_url:
+            launch_options["proxy"] = {"server": self.proxy_url}
+
+        self.browser = self.playwright.chromium.launch(**launch_options)
+        self._browser_kind = "managed"
+        self.context = self.browser.new_context(ignore_https_errors=True)
+        self.context.add_init_script(
+            "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
+        )
+        self._register_context_handlers()
+        self.page = self.context.new_page()
+        self._register_page_handlers(self.page)
 
     def _attach_manual_browser(self) -> None:
         """Attach only after manual login, or to the policy-enforced runtime."""
@@ -770,13 +831,20 @@ class PlaywrightDriver:
             support_mode = None
         try:
             if strictly_allowed:
-                route.continue_()
+                if self.request_headers:
+                    headers = dict(request.all_headers())
+                    headers.update(self.request_headers)
+                    route.continue_(headers=headers)
+                else:
+                    route.continue_()
             elif support_mode and self.browser_context_token:
                 # A request can still be delivered to this callback while a
                 # CDP target is shutting down. Reading headers in that window
                 # raises TargetClosedError; never turn browser shutdown into a
                 # Recon failure or attempt to bypass the policy.
                 headers = dict(request.all_headers())
+                if support_mode == "same-origin":
+                    headers.update(self.request_headers)
                 headers[BROWSER_TOKEN_HEADER] = self.browser_context_token
                 headers[BROWSER_MODE_HEADER] = support_mode
                 route.continue_(headers=headers)
@@ -838,8 +906,35 @@ class PlaywrightDriver:
 
         if self.target_policy is not None:
             self.context.route("**/*", self._guard_request)
-            # WebSocket messages are outside the HTTP policy contract.
-            self.context.route_web_socket("**/*", lambda route: route.close())
+            # WebSocket messages are outside the HTTP policy contract.  Do
+            # not call WebSocketRoute.close() from its synchronous callback:
+            # recent Playwright versions can deadlock by re-entering the sync
+            # dispatcher.  Blocking construction before application scripts
+            # run keeps the channel closed and lets Socket.IO fall back to
+            # proxy-observable HTTP polling.
+            self.context.add_init_script(
+                """
+                (() => {
+                    class PolicyBlockedWebSocket {
+                        static CONNECTING = 0;
+                        static OPEN = 1;
+                        static CLOSING = 2;
+                        static CLOSED = 3;
+                        constructor() {
+                            throw new DOMException(
+                                'WebSocket blocked by target policy',
+                                'SecurityError'
+                            );
+                        }
+                    }
+                    Object.defineProperty(globalThis, 'WebSocket', {
+                        value: PolicyBlockedWebSocket,
+                        configurable: false,
+                        writable: false
+                    });
+                })();
+                """
+            )
 
         def on_request(
             request,
@@ -1121,23 +1216,69 @@ class PlaywrightDriver:
     # Manual Authentication
     # =====================================================
 
+    def _observe_authentication_request(self, request) -> None:
+        if self._phase != "login":
+            return
+        endpoint = AuthenticationEndpoint.from_request(
+            request.method, request.url, target_origin=normalize_origin(self.base_url)
+        )
+        if endpoint is None:
+            return
+        key = (endpoint.method, endpoint.origin, endpoint.path)
+        if not any(
+            (item.method, item.origin, item.path) == key
+            for item in self.authentication_endpoints
+        ):
+            self.authentication_endpoints.append(endpoint)
+        if not any(
+            item.get("method") == endpoint.method
+            and item.get("path") == endpoint.path
+            for item in self.authentication_observations
+        ):
+            from aidast.recon import db
+            self.authentication_observations.append({
+                "context": {
+                    "context_key": "auth_bootstrap",
+                    "action_type": "operator_login",
+                    "association_method": "passive_request",
+                    "auth_state": "authenticating",
+                },
+                "observed_at": db.now(),
+                "url": endpoint.origin + endpoint.path,
+                "discovery_kind": "passive_login_observation",
+                "method": endpoint.method,
+                "path": endpoint.path,
+                "content_type": None,
+                "source": "auth_bootstrap",
+                "traffic_class": "browser_observation",
+            })
+
+    def _register_authentication_observer(self) -> None:
+        if self.context is not None:
+            self.context.on("request", self._observe_authentication_request)
+
     def capture_and_start(self) -> None:
         """Log in once and keep the same Chromium context for Recon."""
-        if self.preauthenticated:
-            raise RuntimeError("target session expired; log in again before restarting Recon")
         self._phase = "login"
+        self.authentication_endpoints.clear()
         try:
-            # No proxy, routing hooks, or CDP client while the operator logs in.
+            # Keep login direct. Attach CDP only for passive endpoint metadata;
+            # routing and policy interception remain disabled until login ends.
             self._launch_manual_browser(manual_login=True)
+            self._attach_manual_browser()
+            self._register_authentication_observer()
             print("  [Playwright] 직접 연결 로그인 창을 열었습니다. 브라우저에서 로그인해주세요.")
             _wait_for_manual_login()
-            self._attach_manual_browser()
             if not self.save_session():
                 raise RuntimeError("could not save the target session after manual login")
+            if self.session_config.authentication_endpoint_callback is not None:
+                self.session_config.authentication_endpoint_callback(
+                    tuple(self.authentication_endpoints)
+                )
             # Do not restart Chromium here. Shopify and other identity-aware
             # services can bind authorization to the live browser context.
-            # Policy enforcement/observation is attached only after login, so
-            # the login flow itself remains outside Recon collection.
+            # Active policy enforcement is attached only after login; the login
+            # flow contributes only secret-free passive endpoint coordinates.
             self._phase = "runtime"
             self._register_context_handlers()
             for page in self.context.pages:
@@ -1171,19 +1312,25 @@ class PlaywrightDriver:
                 if not self.save_session():
                     raise RuntimeError("could not save the target session after return")
                 break
-            except RuntimeError:
+            except RuntimeError as exc:
                 self._shutdown_runtime()
                 if attempt != 0:
                     raise
-                print("  [Playwright] 복사된 세션이 Shopify에서 거부되었습니다.")
+                print(f"  [Playwright] 복사된 세션 복원 실패: {exc}")
                 print("  [Playwright] Phase 2 Chromium 창에서 직접 로그인한 뒤 Enter를 눌러주세요.")
                 self._phase = "login"
+                self.authentication_endpoints.clear()
                 self._launch_manual_browser(manual_login=True)
                 try:
                     self._attach_manual_browser()
+                    self._register_authentication_observer()
                     _wait_for_manual_login()
                     if not self.save_session():
                         raise RuntimeError("could not save the Chromium login session")
+                    if self.session_config.authentication_endpoint_callback is not None:
+                        self.session_config.authentication_endpoint_callback(
+                            tuple(self.authentication_endpoints)
+                        )
                 finally:
                     self._shutdown_runtime()
                     self._phase = "runtime"
@@ -1593,8 +1740,20 @@ class PlaywrightDriver:
         # Keep the browser kind, profile, and launch mode stable across phases.
         # Switching to a managed headless browser causes some sites to require
         # connection verification again even when cookies were restored.
-        self._launch_manual_browser()
-        self._restore_target_session()
+        # A crawler's CDP hand-off can occasionally leave Chromium unable to
+        # open its replacement debugging port on the first launch.  Retry once
+        # after the normal runtime cleanup; _launch_manual_browser also removes
+        # run-scoped profile singleton files before starting the replacement.
+        for attempt in range(2):
+            try:
+                self._launch_manual_browser()
+                self._restore_target_session()
+                break
+            except RuntimeError as exc:
+                self._shutdown_runtime()
+                if attempt != 0:
+                    raise
+                print(f"  [Playwright] Runtime 복구 1차 실패, 정리 후 재시도: {exc}")
         self._auth_expired = False
 
     # =====================================================
@@ -2110,6 +2269,7 @@ class PlaywrightDriver:
                     + candidates[0]
                 )
 
+        headers.update(self.request_headers)
         return headers
 
     # =====================================================
@@ -2690,6 +2850,11 @@ class PlaywrightDriver:
         """Unmerged requests since the last phase boundary."""
         items = self.requests[self._observation_cursor:]
         self._observation_cursor = len(self.requests)
+        return [dict(item) for item in items]
+
+    def drain_authentication_observations(self) -> list[dict]:
+        items = self.authentication_observations
+        self.authentication_observations = []
         return [dict(item) for item in items]
 
     def get_http_results(

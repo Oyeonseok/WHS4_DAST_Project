@@ -154,7 +154,9 @@ def _observed_mutation_endpoint(
                  AND EXISTS (
                      SELECT 1 FROM endpoint_observations v
                      WHERE v.endpoint_id=e.endpoint_id
-                       AND v.discovery_kind IN ('http_request','http_response')
+                       AND v.discovery_kind IN (
+                           'http_request','http_response','passive_login_observation'
+                       )
                  )""",
             (scan_id, method, host, parsed.scheme, port),
         ).fetchall()

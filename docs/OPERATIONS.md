@@ -36,6 +36,17 @@
   범용적으로 보장하지 않습니다.
 - Report는 로컬 초안만 생성하며 플랫폼에 자동 제출하지 않습니다.
 
+모든 기본 결과를 하나의 저장소 밖 디렉터리에 모으려면 실행 셸에서 다음 환경변수를
+설정합니다.
+
+```bash
+export AIDAST_RESULT_ROOT="/path/to/dast_result"
+```
+
+설정하지 않으면 기존과 같이 현재 작업 디렉터리의 `result/`를 사용합니다.
+`--output-dir`, `--db-path`, `--surface-path`, `--run-root` 등 명시적 CLI 경로는
+환경변수 기반 기본값보다 우선합니다.
+
 ## Scope 수집과 정책
 
 ### 수집과 승인
@@ -64,6 +75,29 @@ aidast scope status "<PROGRAM_URL>"
 
 승인 후 `Scope.md` 또는 `Scope.json`이 변경되면 무결성 검사가 실패합니다.
 기존 프로그램 산출물은 자동으로 덮어쓰지 않습니다.
+
+### 인증이 필요한 프로그램 페이지
+
+Intigriti researcher URL처럼 플랫폼 로그인이 필요한 프로그램 페이지는
+Scope 전용 runtime browser로 수집합니다.
+
+```bash
+aidast scope "<PROGRAM_URL>" \
+  --login-mode runtime-browser \
+  --identity "<ACCOUNT_LABEL>"
+```
+
+`aidast`가 저장소 밖의 격리된 persistent Chromium 프로필을 엽니다. 로그인과
+MFA를 직접 완료하고, 명령에 입력한 정확한 프로그램 페이지로 돌아와 Scope
+화면을 연 뒤 터미널에서 Enter를 누르세요. 다른 origin 또는 다른 path에 있는
+탭은 캡처 대상으로 인정하지 않습니다.
+
+프로필은 기본적으로
+`~/.local/share/aidast/scope-sessions/<binding-hash>/browser-profile/`에
+저장되어 같은 platform origin과 identity 조합에서 재사용됩니다. 실제 쿠키와
+토큰이 포함되므로 공유·백업·커밋하지 마세요. Scope 캡처는 완전성 검사를 통과한
+뒤에만 Codex가 해석하며, partial 또는 blocked 캡처는 승인 단계로 넘어가지
+않습니다.
 
 ```text
 result/Scope/<platform>/<program>/
@@ -113,6 +147,22 @@ aidast recon "<PROGRAM_URL>" \
   --surface-path result/Surface.json \
   --ffuf-wordlist /path/to/wordlist.txt
 ```
+
+Intigriti 프로그램이 연구자 식별 헤더를 요구하면 사용자명을 명시합니다.
+이 값은 HTTP Probe, Playwright, Katana, ffuf, API 2차 탐색의 승인된 타깃 요청에
+동일하게 적용되며 외부 정적 리소스에는 전달되지 않습니다.
+
+```bash
+aidast recon "<PROGRAM_URL>" \
+  --all-targets \
+  --intigriti-username "<INTIGRITI_USERNAME>" \
+  --execute
+```
+
+이 옵션은 `X-Intigriti-Username`과
+`User-Agent: aidast-recon/0.1 <intigriti:USERNAME>`을 설정합니다. 저장되는 증거와
+진단 데이터에서는 사용자명과 User-Agent 식별 접미사를 가립니다. 승인된 Scope가
+해당 헤더를 요구하는 경우 능동 실행에서 옵션을 생략하면 fail-closed됩니다.
 
 `--all-targets`는 선택 가능한 canonical 타깃을 모두 Plan에 포함합니다.
 Exact web 타깃에는 DNS, HTTP Probe, Origin, Endpoint Discovery를 수행합니다.

@@ -68,6 +68,13 @@ _WEB_STEP_ORDER = (
 )
 
 
+def _bind_pipeline_database_reference(result: ModelT, database: Path) -> ModelT:
+    """Resolve only the broker's opaque DB token at the trusted host boundary."""
+    if getattr(result, "db_path", None) != PIPELINE_DATABASE_TOKEN:
+        return result
+    return result.model_copy(update={"db_path": str(database.resolve(strict=True))})
+
+
 def _codex_output_schema(model_type: type[BaseModel]) -> dict:
     """Make a Pydantic schema compatible with Codex strict structured output.
 
@@ -1001,8 +1008,11 @@ another codex exec process. Return only the required structured result.
             if not result_path.is_file() or result_path.stat().st_size > self._max_result_bytes:
                 raise MainAgentError("native Attack Agent returned no bounded result")
             try:
-                return AttackStageResult.model_validate_json(
-                    result_path.read_text(encoding="utf-8")
+                return _bind_pipeline_database_reference(
+                    AttackStageResult.model_validate_json(
+                        result_path.read_text(encoding="utf-8")
+                    ),
+                    db_path,
                 )
             except (OSError, ValidationError, ValueError) as exc:
                 raise MainAgentError(f"native Attack Agent returned invalid JSON: {exc}") from exc
@@ -1180,8 +1190,11 @@ another codex exec process. Return only the required structured result.
             if not result_path.is_file() or result_path.stat().st_size > self._max_result_bytes:
                 raise MainAgentError("native Chaining Agent returned no bounded result")
             try:
-                return ChainingStageResult.model_validate_json(
-                    result_path.read_text(encoding="utf-8")
+                return _bind_pipeline_database_reference(
+                    ChainingStageResult.model_validate_json(
+                        result_path.read_text(encoding="utf-8")
+                    ),
+                    db_path,
                 )
             except (OSError, ValidationError, ValueError) as exc:
                 raise MainAgentError(
