@@ -5,7 +5,35 @@ import unittest
 from aidast.core.request_broker import BrokerResponse
 from aidast.validation import (HttpRequestTemplate, HttpRuntimeContract,
                                ResponseAssertion, evaluate_http_response,
-                               render_http_request)
+                               canonical_sha256, render_http_request,
+                               validate_runtime_contract)
+
+
+def legacy_contract_document() -> dict[str, object]:
+    request = {
+        "request": {
+            "path_parameters": {},
+            "query_parameters": {},
+            "headers": {},
+            "json_body": None,
+            "text_body": None,
+        },
+        "assertions": [
+            {
+                "assertion_id": "status",
+                "kind": "status_equals",
+                "expected": 200,
+                "path": [],
+                "header": None,
+            },
+        ],
+    }
+    return {
+        "schema_version": 1,
+        "target": request,
+        "positive_control": request,
+        "negative_control": request,
+    }
 
 
 class ValidationRuntimeContractTests(unittest.TestCase):
@@ -75,6 +103,20 @@ class ValidationRuntimeContractTests(unittest.TestCase):
             contract.for_attempt("negative_control").assertions[0].assertion_id,
             "status",
         )
+
+    def test_legacy_http_contract_hash_and_shape_remain_unchanged(self):
+        raw = legacy_contract_document()
+        validated = validate_runtime_contract(raw)
+        self.assertIsInstance(validated, HttpRuntimeContract)
+        self.assertNotIn("runtime_kind", validated.model_dump(mode="json"))
+        self.assertEqual(
+            canonical_sha256(validated.model_dump(mode="json")),
+            canonical_sha256(raw),
+        )
+
+    def test_unknown_explicit_runtime_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "unsupported runtime kind"):
+            validate_runtime_contract({"runtime_kind": "raw", "schema_version": 1})
 
 
 if __name__ == "__main__":

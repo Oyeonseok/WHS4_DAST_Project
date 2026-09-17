@@ -18,6 +18,23 @@ from aidast.validation import (ImpactGapAnalyzer, SkillProfileResolver,
                                ClaimComparison)
 
 
+def valid_profile_document(*, signal: str, runtime: str) -> dict[str, object]:
+    """Return a valid profile fixture for one runtime signal capability."""
+    document = SkillProfileResolver().resolve("hunt-file-upload").profile.model_dump()
+    document["runtime_kinds"] = (runtime,)
+    document["signal_types"] = (signal,)
+    document["control_positive"]["signal_type"] = signal
+    document["control_positive"]["expected_signal"]["kind"] = (
+        f"{signal}_channel_operational"
+    )
+    document["control_negative"]["expected_signal"]["kind"] = (
+        f"no_{signal}_target_effect"
+    )
+    if signal == "timing":
+        document["baseline_samples"] = 3
+    return document
+
+
 class ValidationProfileTests(unittest.TestCase):
     def test_every_packaged_hunt_skill_has_exactly_one_bound_profile(self):
         expected = tuple(entry.skill_id for entry in load_catalog() if entry.skill_id != "chain")
@@ -107,7 +124,26 @@ class ValidationProfileTests(unittest.TestCase):
             },
             "allowed_development_actions": (), "impact_expansion_paths": (),
         }
-        with self.assertRaisesRegex(PydanticValidationError, "runtime kinds must match"):
+        with self.assertRaisesRegex(PydanticValidationError, "cannot establish"):
+            ValidationProfile.model_validate(document)
+
+    def test_runtime_capabilities_accept_protocol_specific_signals(self):
+        for kind, signal in (
+            ("multipart", "state_change"),
+            ("websocket", "state_change"),
+            ("grpc", "error_signature"),
+            ("concurrent", "timing"),
+        ):
+            with self.subTest(runtime_kind=kind, signal_type=signal):
+                document = valid_profile_document(signal=signal, runtime=kind)
+                self.assertEqual(
+                    ValidationProfile.model_validate(document).runtime_kinds,
+                    (kind,),
+                )
+
+    def test_runtime_capabilities_reject_dom_effect_over_grpc(self):
+        document = valid_profile_document(signal="dom_effect", runtime="grpc")
+        with self.assertRaisesRegex(PydanticValidationError, "cannot establish"):
             ValidationProfile.model_validate(document)
 
     def test_impact_gap_uses_only_profile_paths_and_current_evidence(self):
