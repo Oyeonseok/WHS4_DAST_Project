@@ -36,3 +36,9 @@ scope_rules_*.json
 
 # Local pre-migration database backups
 .aidast_db_backups/
+
+# 프로젝트 이해 및 정리 문서
+
+docs/PROJECT_OVERVIEW.md
+docs/PROJECT_STACKS.md
+docs/design/AGENT_ORCHESTRATION_REFACTOR.md
