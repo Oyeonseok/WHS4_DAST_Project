@@ -9,16 +9,16 @@ from typing import Callable, Mapping
 
 from aidast.recon.policy import TargetPolicy
 
-from .blind import BlindCase
-from .chain_contract import (ChainRuntimeContract, chain_attempt_request,
+from ..contracts.models import BlindCase
+from ..contracts.chain_contract import (ChainRuntimeContract, chain_attempt_request,
                              chain_runtime_kind, extract_chain_value,
                              inject_chain_value, replace_chain_attempt_request)
-from .runtime_contract import HttpRuntimeContract
-from .models import canonical_sha256
-from .reproduction import ReproductionObservation
+from ..contracts.runtime_contract import HttpRuntimeContract
+from ..contracts.models import canonical_sha256
+from ..contracts.models import ReproductionObservation
 from .request_broker import (ValidationCredentialError, ValidationPolicyRejection,
                              ValidationRequestBroker)
-from .runtime_contract import evaluate_http_response, render_http_request
+from ..contracts.runtime_contract import evaluate_http_response, render_http_request
 
 
 class ChainReproductionPort:

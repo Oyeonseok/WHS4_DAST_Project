@@ -6,15 +6,13 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, model_validator
 
+from ..contracts.models import ValidationError
+
 
 Digest = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
 Identifier = Annotated[str, Field(min_length=1, max_length=256)]
 Explanation = Annotated[str, Field(min_length=1, max_length=4000)]
 QUESTIONS = ("Q1", "Q2", "Q3", "Q4", "Q5", "Q6", "Q7")
-
-
-class ValidationError(ValueError):
-    """Local evidence, assessment, or persisted provenance is inconsistent."""
 
 
 class Contract(BaseModel):

@@ -9,12 +9,12 @@ from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urljoin, urlsplit
 
-from .blind import AttackClaim, BlindCase, DevelopmentCapability, StagedBlindCase
+from ..contracts.models import AttackClaim, BlindCase, DevelopmentCapability, StagedBlindCase
 from .matching import canonical_payload, payload_structure_sha256
-from .models import canonical_sha256
+from ..contracts.models import canonical_sha256
 from .profiles import ResolvedValidationProfile, SkillProfileResolver, ValidationProfileError
-from .runtime_contract import validate_runtime_contract
-from .development import DevelopmentActionContract, DevelopmentRuntimeContract
+from ..contracts.runtime_contract import validate_runtime_contract
+from ..contracts.development import DevelopmentActionContract, DevelopmentRuntimeContract
 
 
 class CandidateIntegrityError(ValueError):
@@ -128,7 +128,7 @@ class CandidateIntegrityGate:
             runtime_kind = runtime_contract.get("runtime_kind", "http")
             if runtime_kind not in profile.profile.runtime_kinds:
                 raise CandidateIntegrityError("runtime_profile_compatibility")
-            from .runtime_semantics import RuntimeSemanticError, validate_runtime_semantics
+            from ..contracts.runtime_semantics import RuntimeSemanticError, validate_runtime_semantics
             try:
                 validate_runtime_semantics(runtime, profile.profile)
             except RuntimeSemanticError:
@@ -316,7 +316,7 @@ class CandidateIntegrityGate:
             and binding["target_kind"] is not None and binding["target_path_json"] is not None
             for binding in binding_rows
         ) and all(item.runtime_contract is not None for item in node_blinds):
-            from .chain_contract import ChainRuntimeContract
+            from ..contracts.chain_contract import ChainRuntimeContract
             try:
                 chain_runtime = ChainRuntimeContract.model_validate({
                     "runtime_kind": "chain", "schema_version": 1,

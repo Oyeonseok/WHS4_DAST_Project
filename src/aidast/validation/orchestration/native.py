@@ -6,17 +6,17 @@ from pathlib import Path
 from typing import Callable, Mapping
 
 from .coordinator import ValidationCoordinator, ValidationCoordinatorError
-from .browser_adapter import BrowserExecutor, BrowserReproductionPort
-from .chain_adapter import ChainReproductionPort
-from .credentials import PipelineCredentialResolver
-from .http_adapter import HttpReproductionPort
-from .http_oob_observer import HttpJsonOobObserver
-from .oob_adapter import OobObserver, OobReproductionPort
-from .policy import TargetPolicyProvider
-from .playwright_browser import PlaywrightBrowserExecutor
-from .reproduction import PrerequisiteResolverPort
-from .runtime_adapter import RuntimeReproductionRouter
-from .development import NativePrerequisiteResolver
+from ..execution.browser_adapter import BrowserExecutor, BrowserReproductionPort
+from ..execution.chain_adapter import ChainReproductionPort
+from ..execution.credentials import PipelineCredentialResolver
+from ..execution.http_adapter import HttpReproductionPort
+from ..execution.http_oob_observer import HttpJsonOobObserver
+from ..execution.oob_adapter import OobObserver, OobReproductionPort
+from ..core.policy import TargetPolicyProvider
+from ..execution.playwright_browser import PlaywrightBrowserExecutor
+from ..contracts.models import PrerequisiteResolverPort
+from ..execution.runtime_adapter import RuntimeReproductionRouter
+from ..contracts.development import NativePrerequisiteResolver
 
 
 def build_native_validation_coordinator(

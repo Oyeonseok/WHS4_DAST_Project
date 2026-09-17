@@ -13,7 +13,7 @@ from uuid import uuid4
 from aidast.attack.runtime import _require_standalone_database
 
 from .models import ValidationError
-from .source import canonical, digest, file_digest, read_source, regular_file
+from ..persistence.source import canonical, digest, file_digest, read_source, regular_file
 
 
 APPLICATION_ID = 0x56414C31

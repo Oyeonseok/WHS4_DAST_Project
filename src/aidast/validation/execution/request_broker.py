@@ -19,8 +19,8 @@ from aidast.core.http_safety import sanitize_headers
 from aidast.core.request_broker import BrokerResponse, RequestBroker, RequestPolicyError
 from aidast.recon.policy import TargetPolicy
 
-from .blind import BlindCase
-from .models import canonical_sha256
+from ..contracts.models import BlindCase
+from ..contracts.models import canonical_sha256
 
 
 class ValidationRequestError(ValueError):

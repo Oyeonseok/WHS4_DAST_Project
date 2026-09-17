@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Protocol
 
 from .models import QUESTIONS, ValidationAssessment, ValidationError
-from .source import canonical, digest, read_source, safe_text
+from ..persistence.source import canonical, digest, read_source, safe_text
 from .store import initialize_store, persist_decision
 
 

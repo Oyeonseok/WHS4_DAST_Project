@@ -2,23 +2,24 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from contextlib import closing
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Iterable, Protocol
 
 from pydantic import ValidationError as PydanticValidationError
 
 from aidast.pipeline.lifecycle import finish_stage_run, resume_validation_stage_run, start_stage_run
 from aidast.recon.policy import TargetPolicy
 
-from .decision import DecisionEngine, DecisionInput
-from .integrity import CandidateIntegrityError, CandidateIntegrityGate, ValidatedCandidate
-from .matching import KnownCandidate, KnownMatcher, MATCHER_VERSION
-from .models import (BlindAssessment, ClaimComparison, ValidationStageResult,
+from ..core.decision import DecisionEngine, DecisionInput
+from ..core.integrity import CandidateIntegrityError, CandidateIntegrityGate, ValidatedCandidate
+from ..core.matching import KnownCandidate, KnownMatcher, MATCHER_VERSION
+from ..contracts.models import (BlindAssessment, ClaimComparison, ValidationStageResult,
                      canonical_json, canonical_sha256)
-from .repository import ValidationRepository
-from .reproduction import PrerequisiteResolverPort, ReproductionObservation, ReproductionPort
+from ..persistence.repository import ValidationRepository
+from ..contracts.models import PrerequisiteResolverPort, ReproductionObservation, ReproductionPort
 
 
 class ValidationCoordinatorError(RuntimeError):
@@ -70,14 +71,8 @@ class ValidationCoordinator:
                 conn, repo, scan_id=scan_id, stage_run_id=stage_run_id,
                 finding_id=finding_id, chain_id=chain_id,
             )
-            agent_used = False
             try:
-                for case_id in case_ids:
-                    case = repo.read_case(case_id)
-                    if case["target_kind"] == "chain":
-                        agent_used |= self._run_chain(conn, repo, case, stage_run_id)
-                    else:
-                        agent_used |= self._run_finding(conn, repo, case, stage_run_id)
+                agent_used = self._run_cases(conn, repo, case_ids, stage_run_id)
                 finish_stage_run(conn, stage_run_id, status="completed")
                 statuses = [repo.read_case(case_id)["current_status"] for case_id in case_ids]
                 return ValidationStageResult(
@@ -113,18 +108,11 @@ class ValidationCoordinator:
                 AND processing_phase IN ('queued','interrupted') ORDER BY created_at,case_id""",
                 (stage_run_id,),
             ).fetchall()
-            agent_used = False
             try:
-                for row in cases:
-                    case = repo.read_case(row[0])
-                    if case["processing_phase"] == "interrupted":
-                        conn.execute("UPDATE validation_cases SET processing_phase='queued' WHERE case_id=?", (row[0],))
-                        conn.commit()
-                        case["processing_phase"] = "queued"
-                    if case["target_kind"] == "chain":
-                        agent_used |= self._run_chain(conn, repo, case, stage_run_id)
-                    else:
-                        agent_used |= self._run_finding(conn, repo, case, stage_run_id)
+                agent_used = self._run_cases(
+                    conn, repo, (row[0] for row in cases), stage_run_id,
+                    resume_interrupted=True,
+                )
                 finish_stage_run(conn, stage_run_id, status="completed")
             except Exception as exc:
                 finish_stage_run(conn, stage_run_id, status="failed", error_message=type(exc).__name__)
@@ -142,6 +130,23 @@ class ValidationCoordinator:
             )
             self._close_owned_agent()
             return result
+
+    def _run_cases(self, conn: sqlite3.Connection, repo: ValidationRepository,
+                   case_ids: Iterable[str], stage_run_id: str, *,
+                   resume_interrupted: bool = False) -> bool:
+        agent_used = False
+        for case_id in case_ids:
+            case = repo.read_case(case_id)
+            if resume_interrupted and case["processing_phase"] == "interrupted":
+                conn.execute(
+                    "UPDATE validation_cases SET processing_phase='queued' WHERE case_id=?",
+                    (case_id,),
+                )
+                conn.commit()
+                case["processing_phase"] = "queued"
+            handler = self._run_chain if case["target_kind"] == "chain" else self._run_finding
+            agent_used |= handler(conn, repo, case, stage_run_id)
+        return agent_used
 
     @staticmethod
     def _require_scan_ready(conn: sqlite3.Connection, scan_id: str) -> None:
@@ -449,7 +454,7 @@ class ValidationCoordinator:
             assessment.impact_boundary.score, assessment.impact_sensitivity.score,
             assessment.impact_actor_requirements.score,
         )
-        from .impact import evaluate_impact
+        from ..core.decision import evaluate_impact
         impact_result = evaluate_impact(*impact_tuple)
         status = self.engine.decide(DecisionInput(
             policy_allowed=all(item["policy_allowed"] for item in observations),
@@ -479,7 +484,7 @@ class ValidationCoordinator:
             "evidence_ids": evidence_ids,
         }
         if status == "UNDERPOWERED" and allow_impact_hypotheses:
-            from .gaps import ImpactGapAnalyzer
+            from ..core.decision import ImpactGapAnalyzer
             for ordinal, proposal in enumerate(ImpactGapAnalyzer().analyze(
                 profile=candidate.profile.profile, impact=impact_result,
                 evidence_ids=assessment.evidence_ids,
@@ -574,14 +579,10 @@ class ValidationCoordinator:
         observation: ReproductionObservation,
     ) -> None:
         """Bind adapter-reported request IDs to the current attempt before evidence storage."""
-        raw_ids = observation.details.get("request_ids", ())
-        if not isinstance(raw_ids, (list, tuple)) or any(
-            not isinstance(item, str) or not item for item in raw_ids
-        ) or len(raw_ids) != len(set(raw_ids)):
-            raise ValidationCoordinatorError(
-                "ReproductionPort returned invalid Validation request ledger IDs"
-            )
-        request_ids = tuple(raw_ids)
+        request_ids = self._request_ids(
+            observation.details,
+            "ReproductionPort returned invalid Validation request ledger IDs",
+        )
         if (
             getattr(self.reproduction, "requires_request_ledger", False)
             and observation.outcome in {"observed", "not_observed"}
@@ -602,14 +603,30 @@ class ValidationCoordinator:
                 *request_ids,
             ),
         ).fetchall()
+        self._validate_ledger_rows(
+            rows, request_ids,
+            foreign="Validation request ledger IDs do not belong to the current attempt",
+            unfinished="Validation observation cites an unfinished request ledger row",
+        )
+
+    @staticmethod
+    def _request_ids(result: dict[str, Any], error: str) -> tuple[str, ...]:
+        raw = result.get("request_ids", ())
+        if (
+            not isinstance(raw, (list, tuple))
+            or any(not isinstance(item, str) or not item for item in raw)
+            or len(raw) != len(set(raw))
+        ):
+            raise ValidationCoordinatorError(error)
+        return tuple(raw)
+
+    @staticmethod
+    def _validate_ledger_rows(rows, request_ids: tuple[str, ...], *,
+                              foreign: str, unfinished: str) -> None:
         if {row["request_id"] for row in rows} != set(request_ids):
-            raise ValidationCoordinatorError(
-                "Validation request ledger IDs do not belong to the current attempt"
-            )
+            raise ValidationCoordinatorError(foreign)
         if any(row["status"] != "completed" for row in rows):
-            raise ValidationCoordinatorError(
-                "Validation observation cites an unfinished request ledger row"
-            )
+            raise ValidationCoordinatorError(unfinished)
 
     @staticmethod
     def _completed_batch(conn: sqlite3.Connection, case_id: str,
@@ -622,7 +639,7 @@ class ValidationCoordinator:
                     ("target", 1), ("target", 2), ("target", 3)}
         for batch in batches:
             rows = conn.execute(
-                """SELECT a.attempt_id,a.attempt_kind,a.ordinal,a.signal_type,a.outcome,
+                """SELECT a.attempt_id,a.attempt_kind,a.ordinal,a.batch_no,a.signal_type,a.outcome,
                 a.signal_observed,a.blocker_axis,a.observation_json,e.evidence_id,
                 e.content_sha256,e.content_length FROM validation_attempts a
                 JOIN validation_evidence e ON e.attempt_id=a.attempt_id
@@ -632,25 +649,30 @@ class ValidationCoordinator:
             ).fetchall()
             if not required <= {(row["attempt_kind"], row["ordinal"]) for row in rows}:
                 continue
-            observations, evidence_ids = [], []
-            for row in rows:
-                import json
-                details = json.loads(row["observation_json"])
-                runtime = details.pop("validation_runtime", {})
-                observations.append({
-                    "attempt_id": row["attempt_id"], "evidence_id": row["evidence_id"],
-                    "attempt_kind": row["attempt_kind"], "batch_no": batch,
-                    "outcome": row["outcome"],
-                    "signal_type": row["signal_type"],
-                    "signal_observed": bool(row["signal_observed"]) if row["signal_observed"] is not None else None,
-                    "blocker_axis": row["blocker_axis"], "details": details,
-                    "content_sha256": row["content_sha256"], "content_length": row["content_length"],
-                    "explicit_non_exploit": bool(runtime.get("explicit_non_exploit", False)),
-                    "policy_allowed": bool(runtime.get("policy_allowed", True)),
-                })
-                evidence_ids.append(row["evidence_id"])
-            return observations, evidence_ids
+            return ValidationCoordinator._restore_observations(rows)
         return None
+
+    @staticmethod
+    def _restore_observations(rows) -> tuple[list[dict], list[str]]:
+        observations = []
+        for row in rows:
+            details = json.loads(row["observation_json"])
+            runtime = details.pop("validation_runtime", {})
+            observations.append({
+                "attempt_id": row["attempt_id"], "evidence_id": row["evidence_id"],
+                "attempt_kind": row["attempt_kind"], "batch_no": row["batch_no"],
+                "outcome": row["outcome"], "signal_type": row["signal_type"],
+                "signal_observed": (
+                    bool(row["signal_observed"])
+                    if row["signal_observed"] is not None else None
+                ),
+                "blocker_axis": row["blocker_axis"], "details": details,
+                "content_sha256": row["content_sha256"],
+                "content_length": row["content_length"],
+                "explicit_non_exploit": bool(runtime.get("explicit_non_exploit", False)),
+                "policy_allowed": bool(runtime.get("policy_allowed", True)),
+            })
+        return observations, [row["evidence_id"] for row in rows]
 
     @staticmethod
     def _load_frozen_assessment(conn: sqlite3.Connection, case_id: str,
@@ -693,24 +715,7 @@ class ValidationCoordinator:
         ).fetchall()
         if len(rows) != len(attempt_ids) or len({row["attempt_id"] for row in rows}) != len(attempt_ids):
             raise ValidationCoordinatorError("frozen BlindAssessment attempt evidence is incomplete or ambiguous")
-        observations, evidence_ids = [], []
-        for row in rows:
-            import json
-            details = json.loads(row["observation_json"])
-            runtime = details.pop("validation_runtime", {})
-            observations.append({
-                "attempt_id": row["attempt_id"], "evidence_id": row["evidence_id"],
-                "attempt_kind": row["attempt_kind"], "batch_no": row["batch_no"],
-                "outcome": row["outcome"], "signal_type": row["signal_type"],
-                "signal_observed": bool(row["signal_observed"])
-                if row["signal_observed"] is not None else None,
-                "blocker_axis": row["blocker_axis"], "details": details,
-                "content_sha256": row["content_sha256"],
-                "content_length": row["content_length"],
-                "explicit_non_exploit": bool(runtime.get("explicit_non_exploit", False)),
-                "policy_allowed": bool(runtime.get("policy_allowed", True)),
-            })
-            evidence_ids.append(row["evidence_id"])
+        observations, evidence_ids = cls._restore_observations(rows)
         cls._validate_assessment_refs(assessment, case_id, evidence_ids, observations)
         return observations, evidence_ids
 
@@ -861,14 +866,9 @@ class ValidationCoordinator:
         self, conn: sqlite3.Connection, *, candidate: ValidatedCandidate,
         stage_run_id: str, action_id: str, result: dict[str, Any],
     ) -> None:
-        raw_ids = result.get("request_ids", ())
-        if not isinstance(raw_ids, (list, tuple)) or any(
-            not isinstance(item, str) or not item for item in raw_ids
-        ) or len(raw_ids) != len(set(raw_ids)):
-            raise ValidationCoordinatorError(
-                "prerequisite resolver returned invalid request ledger IDs"
-            )
-        request_ids = tuple(raw_ids)
+        request_ids = self._request_ids(
+            result, "prerequisite resolver returned invalid request ledger IDs"
+        )
         if (
             getattr(self.prerequisite_resolver, "requires_request_ledger", False)
             and result.get("succeeded") is True and not request_ids
@@ -889,14 +889,11 @@ class ValidationCoordinator:
                 *request_ids,
             ),
         ).fetchall()
-        if {row["request_id"] for row in rows} != set(request_ids):
-            raise ValidationCoordinatorError(
-                "development request ledger IDs do not belong to the current action"
-            )
-        if any(row["status"] != "completed" for row in rows):
-            raise ValidationCoordinatorError(
-                "development result cites an unfinished request ledger row"
-            )
+        self._validate_ledger_rows(
+            rows, request_ids,
+            foreign="development request ledger IDs do not belong to the current action",
+            unfinished="development result cites an unfinished request ledger row",
+        )
 
     def _assessment(self, blind: dict[str, Any], observations: tuple[dict[str, Any], ...]) -> BlindAssessment:
         return self._agent_call("assess", blind, observations, model=BlindAssessment)

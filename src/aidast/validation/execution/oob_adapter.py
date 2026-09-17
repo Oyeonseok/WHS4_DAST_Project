@@ -8,13 +8,13 @@ from typing import Any, Callable, Mapping, Protocol
 
 from aidast.recon.policy import TargetPolicy
 
-from .blind import BlindCase
-from .oob_contract import (OobObservationSnapshot, OobRuntimeContract,
+from ..contracts.models import BlindCase
+from ..contracts.oob_contract import (OobObservationSnapshot, OobRuntimeContract,
                            evaluate_oob_observation)
-from .reproduction import ReproductionObservation
+from ..contracts.models import ReproductionObservation
 from .request_broker import (ValidationCredentialError, ValidationPolicyRejection,
                              ValidationRequestBroker)
-from .runtime_contract import HttpRequestTemplate, render_http_request
+from ..contracts.runtime_contract import HttpRequestTemplate, render_http_request
 
 
 class OobObserver(Protocol):

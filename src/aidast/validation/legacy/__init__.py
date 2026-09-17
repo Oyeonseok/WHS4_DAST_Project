@@ -1,5 +1,9 @@
 """Persisted offline Validation.db compatibility contracts."""
 
+import sys as _sys
+
+from ..persistence import source as _source
+
 from .agent import (
     EvidenceOnlyReviewer,
     ValidationAgent,
@@ -32,3 +36,7 @@ __all__ = [
     "validate_assessment",
     "validation_status",
 ]
+
+_sys.modules[f"{__name__}.source"] = _source
+source = _source
+del _source, _sys

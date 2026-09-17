@@ -8,7 +8,7 @@ import unicodedata
 from dataclasses import dataclass
 from typing import Any, Iterable
 
-from .models import canonical_json, canonical_sha256
+from ..contracts.models import canonical_json, canonical_sha256
 
 MATCHER_VERSION = 2
 NORMALIZER_VERSION = 1
