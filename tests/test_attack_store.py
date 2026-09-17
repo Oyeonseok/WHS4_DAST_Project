@@ -285,6 +285,90 @@ class AttackStoreTests(unittest.TestCase):
             row = resumed.conn.execute("SELECT raw_result_json FROM model_iterations").fetchone()
             self.assertNotIn("model-secret", row[0])
 
+    def test_attempt_is_idempotently_reserved_before_completion(self):
+        store = self.store()
+        self.plan(store)
+        inserted = store.record_attempt(
+            attempt_id="attempt",
+            task_id="task",
+            endpoint_id="scan",
+            skill_name="hunt-idor",
+            test_id="test",
+            hypothesis_id="hypothesis",
+        )
+        duplicate = store.record_attempt(
+            attempt_id="attempt",
+            task_id="task",
+            endpoint_id="scan",
+            skill_name="hunt-idor",
+            test_id="test",
+            hypothesis_id="hypothesis",
+        )
+        self.assertEqual((inserted.status, duplicate.status), ("inserted", "duplicate"))
+        completed = store.complete_attempt(
+            "attempt", outcome="confirmed", response_status=200
+        )
+        self.assertEqual(completed.status, "updated")
+        row = store.conn.execute(
+            """SELECT run_id,plan_task_id,plan_revision,logical_check_id,
+            execution_id,outcome,response_status FROM attack_attempts
+            WHERE attempt_id='attempt'"""
+        ).fetchone()
+        self.assertEqual(
+            tuple(row),
+            ("run", "task", 1, "test", "hypothesis", "confirmed", 200),
+        )
+        self.assertEqual(
+            store.record_attempt(
+                attempt_id="attempt",
+                task_id="task",
+                endpoint_id="scan",
+                skill_name="hunt-idor",
+                test_id="different",
+                hypothesis_id="hypothesis",
+            ).status,
+            "invalid",
+        )
+
+    def test_activation_and_external_revocation_are_ordered(self):
+        store = self.store()
+        self.plan(store)
+        now = datetime.now(timezone.utc)
+        document = {
+            "authorization_id": "auth",
+            "run_id": "run",
+            "scan_id": "scan",
+            "plan_revision": 1,
+            "plan_digest": store.get_plan()["plan_digest"],
+            "scope_digest": "",
+            "policy_digest": "",
+            "catalog_digest": "",
+            "revocation_generation": 0,
+            "issuer": "issuer",
+            "approver": "reviewer",
+            "issued_at": now.isoformat(),
+            "not_before": now.isoformat(),
+            "expires_at": (now + timedelta(hours=1)).isoformat(),
+        }
+        self.assertEqual(store.save_authorization(document).status, "inserted")
+        store.activate_authorization("auth")
+        self.assertEqual(store.get_run()["authorization_id"], "auth")
+
+        def failed_revoker(identifier):
+            self.assertEqual(identifier, "auth")
+            raise RuntimeError("external ledger unavailable")
+
+        with self.assertRaisesRegex(RuntimeError, "external ledger unavailable"):
+            store.revoke_run("operator cancelled", revoke_authorization=failed_revoker)
+        self.assertEqual(store.get_run()["revocation_generation"], 0)
+        events = []
+        generation = store.revoke_run(
+            "operator cancelled", revoke_authorization=events.append
+        )
+        self.assertEqual(events, ["auth"])
+        self.assertEqual(generation, 1)
+        self.assertIsNone(store.get_run()["authorization_id"])
+
     def test_lease_fencing_persists_and_rejects_stale_workers(self):
         store = self.store()
         first = store.acquire_lease("review", "worker1")

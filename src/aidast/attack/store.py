@@ -341,6 +341,121 @@ class AttackStore:
 
         return self._write(identifier, "iteration", operation)
 
+    def record_attempt(
+        self,
+        *,
+        attempt_id: str,
+        task_id: str,
+        endpoint_id: str,
+        skill_name: str,
+        test_id: str,
+        hypothesis_id: str,
+        status: str = "started",
+    ) -> WriteResult:
+        """Persist an idempotent, run-bound attempt before dispatch."""
+
+        def operation() -> str:
+            for value in (
+                attempt_id,
+                task_id,
+                endpoint_id,
+                skill_name,
+                test_id,
+                hypothesis_id,
+            ):
+                _identifier(value)
+            self._endpoint(endpoint_id)
+            if status != "started":
+                raise AttackStoreError("attempt must be recorded before dispatch")
+            revision = self.get_run()["plan_revision"]
+            if not self.conn.execute(
+                """SELECT 1 FROM attack_plan_tasks
+                WHERE run_id=? AND scan_id=? AND plan_revision=? AND task_id=?
+                AND endpoint_id=?""",
+                (self.run_id, self.scan_id, revision, task_id, endpoint_id),
+            ).fetchone():
+                raise AttackStoreError("task does not belong to the bound run")
+            fingerprint = _sha(
+                _json({"test_id": test_id, "hypothesis_id": hypothesis_id})
+            )
+            values = (
+                attempt_id,
+                self.scan_id,
+                self.run_id,
+                skill_name,
+                endpoint_id,
+                fingerprint,
+                task_id,
+                revision,
+                test_id,
+                hypothesis_id,
+                "unknown",
+                test_id,
+                status,
+            )
+            row = self.conn.execute(
+                """SELECT attempt_id,scan_id,run_id,skill_name,endpoint_id,
+                request_fingerprint,plan_task_id,plan_revision,logical_check_id,
+                execution_id,identity_role,payload_variant,outcome
+                FROM attack_attempts WHERE attempt_id=?""",
+                (attempt_id,),
+            ).fetchone()
+            if row is not None:
+                if tuple(row) != values:
+                    raise AttackStoreError(
+                        "attempt identifier already contains different data"
+                    )
+                return "duplicate"
+            self.conn.execute(
+                """INSERT INTO attack_attempts
+                (attempt_id,scan_id,run_id,skill_name,endpoint_id,
+                 request_fingerprint,plan_task_id,plan_revision,logical_check_id,
+                 execution_id,identity_role,payload_variant,outcome)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                values,
+            )
+            return "inserted"
+
+        return self._write(attempt_id, "attempt", operation)
+
+    def complete_attempt(
+        self,
+        attempt_id: str,
+        *,
+        outcome: str,
+        response_status: int | None = None,
+    ) -> WriteResult:
+        """Close a previously reserved attempt in the bound run."""
+
+        def operation() -> str:
+            _identifier(attempt_id)
+            _identifier(outcome)
+            row = self.conn.execute(
+                """SELECT outcome FROM attack_attempts
+                WHERE attempt_id=? AND run_id=? AND scan_id=?""",
+                (attempt_id, self.run_id, self.scan_id),
+            ).fetchone()
+            if row is None:
+                raise AttackStoreError("attempt does not belong to the bound run")
+            if row[0] != "started":
+                raise AttackStoreError("attempt is already completed")
+            if response_status is not None and not 100 <= response_status <= 599:
+                raise AttackStoreError("invalid response status")
+            self.conn.execute(
+                """UPDATE attack_attempts SET outcome=?,response_status=?
+                WHERE attempt_id=? AND run_id=? AND scan_id=?""",
+                (
+                    outcome,
+                    response_status,
+                    attempt_id,
+                    self.run_id,
+                    self.scan_id,
+                ),
+            )
+            return "updated"
+
+        return self._write(attempt_id, "attempt", operation)
+
     def record_evidence(self, *, evidence_id: str | None = None, task_id: str | None = None,
                         attempt_id: str | None = None, kind: str = "observation",
                         body: bytes | str = b"", metadata: Mapping | None = None) -> WriteResult:
@@ -426,7 +541,47 @@ class AttackStore:
 
         return self._write(identifier, "authorization", operation)
 
-    def revoke_run(self, reason: str = "operator revoked") -> int:
+    def activate_authorization(self, authorization_id: str) -> None:
+        """Activate only a current, non-revoked authorization for this run."""
+        _identifier(authorization_id)
+        with self.conn:
+            row = self.conn.execute(
+                """SELECT 1 FROM run_authorizations
+                WHERE authorization_id=? AND run_id=? AND scan_id=?
+                AND plan_revision=? AND revocation_generation=?
+                AND revoked_at IS NULL""",
+                (
+                    authorization_id,
+                    self.run_id,
+                    self.scan_id,
+                    self.get_run()["plan_revision"],
+                    self.get_run()["revocation_generation"],
+                ),
+            ).fetchone()
+            if row is None:
+                raise AttackStoreError(
+                    "authorization is not current for the bound run"
+                )
+            self.conn.execute(
+                """UPDATE attack_runs SET authorization_id=?,status='ready',updated_at=?
+                WHERE run_id=? AND scan_id=?""",
+                (authorization_id, _now(), self.run_id, self.scan_id),
+            )
+            self._audit(
+                "authorization.activated",
+                {"authorization_id": authorization_id},
+            )
+
+    def revoke_run(
+        self,
+        reason: str = "operator revoked",
+        *,
+        revoke_authorization: Callable[[str], None] | None = None,
+    ) -> int:
+        current = self.get_run()
+        authorization_id = current.get("authorization_id")
+        if revoke_authorization is not None and authorization_id:
+            revoke_authorization(authorization_id)
         with self.conn:
             self.conn.execute("""UPDATE attack_runs SET revocation_generation=revocation_generation+1,
                 authorization_id=NULL,status=CASE WHEN status IN ('completed','failed','cancelled')
