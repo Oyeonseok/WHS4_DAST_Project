@@ -556,7 +556,7 @@ class AttackStore:
                 if response_status is not None and not 100 <= response_status <= 599:
                     raise AttackStoreError("invalid finding response status")
                 attempt = self.conn.execute(
-                    """SELECT outcome FROM attack_attempts
+                    """SELECT outcome,response_status FROM attack_attempts
                     WHERE attempt_id=? AND run_id=? AND scan_id=?
                     AND plan_task_id=? AND plan_revision=? AND endpoint_id=?
                     AND logical_check_id=? AND execution_id=?""",
@@ -571,12 +571,17 @@ class AttackStore:
                         hypothesis_id,
                     ),
                 ).fetchone()
-                if attempt is None or attempt[0] != "supports":
+                if (
+                    attempt is None
+                    or attempt[0] != "supports"
+                    or attempt[1] != response_status
+                ):
                     raise AttackStoreError(
                         "finding request requires a completed supporting attempt"
                     )
-                if not self.conn.execute(
-                    """SELECT 1 FROM attack_evidence
+                evidence = self.conn.execute(
+                    """SELECT body_sha256,body_length,metadata_json
+                    FROM attack_evidence
                     WHERE evidence_id=? AND attempt_id=? AND run_id=? AND scan_id=?
                     AND task_id=? AND plan_revision=?""",
                     (
@@ -587,11 +592,42 @@ class AttackStore:
                         task_id,
                         revision,
                     ),
-                ).fetchone():
+                ).fetchone()
+                if evidence is None:
                     raise AttackStoreError(
                         "finding request requires bound persisted evidence"
                     )
                 safe_url = _redact({"url": raw_url})["url"]
+                body = request.get("response_body", b"")
+                if isinstance(body, str):
+                    body = body.encode("utf-8")
+                if not isinstance(body, bytes) or len(body) > 200_000:
+                    raise AttackStoreError("finding response body is invalid")
+                evidence_metadata = json.loads(evidence[2])
+                expected_evidence = {
+                    "hypothesis_id": hypothesis_id,
+                    "test_id": test_id,
+                    "outcome": "supports",
+                    "response_status": response_status,
+                    "method": method,
+                    "url": safe_url,
+                    "identity_role": str(
+                        request.get("identity_role") or "unknown"
+                    )[:128],
+                    "response_body_sha256": _sha(body),
+                    "response_body_length": len(body),
+                }
+                if (
+                    any(
+                        evidence_metadata.get(key) != value
+                        for key, value in expected_evidence.items()
+                    )
+                    or evidence[0] != _sha(body)
+                    or evidence[1] != len(body)
+                ):
+                    raise AttackStoreError(
+                        "finding request does not match persisted evidence"
+                    )
                 request_id = "request_" + _sha(
                     _json([self.run_id, finding_id, test_id])
                 )
@@ -771,19 +807,20 @@ class AttackStore:
         *,
         revoke_authorization: Callable[[str], None] | None = None,
     ) -> int:
-        current = self.get_run()
-        authorization_id = current.get("authorization_id")
-        already_revoked = self.conn.execute(
-            """SELECT 1 FROM audit_events
-            WHERE scan_id=? AND event_type='run.revoked'
-            AND json_extract(details_json,'$.run_id')=? LIMIT 1""",
-            (self.scan_id, self.run_id),
-        ).fetchone()
-        if already_revoked is not None:
-            return current["revocation_generation"]
-        if revoke_authorization is not None and authorization_id:
-            revoke_authorization(authorization_id)
+        self.conn.execute("BEGIN IMMEDIATE")
         with self.conn:
+            current = self.get_run()
+            authorization_id = current.get("authorization_id")
+            already_revoked = self.conn.execute(
+                """SELECT 1 FROM audit_events
+                WHERE scan_id=? AND event_type='run.revoked'
+                AND json_extract(details_json,'$.run_id')=? LIMIT 1""",
+                (self.scan_id, self.run_id),
+            ).fetchone()
+            if already_revoked is not None:
+                return current["revocation_generation"]
+            if revoke_authorization is not None and authorization_id:
+                revoke_authorization(authorization_id)
             self.conn.execute("""UPDATE attack_runs SET revocation_generation=revocation_generation+1,
                 authorization_id=NULL,status=CASE WHEN status IN ('completed','failed','cancelled')
                 THEN status ELSE 'paused' END,updated_at=? WHERE run_id=? AND scan_id=?""",

@@ -7,9 +7,11 @@ import json
 import sqlite3
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from contextlib import closing
 from pathlib import Path
+from threading import Barrier
 from unittest.mock import patch
 
 from aidast.attack.store import AttackStore, AttackStoreError, materialize_attack_database
@@ -365,6 +367,17 @@ class AttackStoreTests(unittest.TestCase):
                 task_id="task",
                 attempt_id="attempt",
                 body=b'{"id":1}',
+                metadata={
+                    "hypothesis_id": "hypothesis",
+                    "test_id": "test",
+                    "outcome": "supports",
+                    "response_status": 200,
+                    "method": "GET",
+                    "url": "https://user:secret@example.test/?token=secret#proof",
+                    "identity_role": "identity_b",
+                    "response_body_sha256": hashlib.sha256(b'{"id":1}').hexdigest(),
+                    "response_body_length": len(b'{"id":1}'),
+                },
             ).status,
             "inserted",
         )
@@ -415,8 +428,8 @@ class AttackStoreTests(unittest.TestCase):
                 "attempt_id": "attempt",
                 "evidence_id": "evidence",
                 "method": "GET",
-                "url": "https://example.test/",
-                "response_status": 201,
+                "url": "https://example.test/fabricated",
+                "response_status": 200,
             }],
         )
         self.assertEqual(conflicting.status, "invalid")
@@ -493,6 +506,46 @@ class AttackStoreTests(unittest.TestCase):
         self.assertEqual(store.get_run()["status"], "completed")
         self.assertEqual(store.revoke_run("terminal revocation"), 1)
         self.assertEqual(store.get_run()["revocation_generation"], 1)
+
+    def test_concurrent_revocation_is_serialized_and_idempotent(self):
+        store = self.store()
+        self.plan(store)
+        now = datetime.now(timezone.utc)
+        document = {
+            "authorization_id": "auth",
+            "run_id": "run",
+            "scan_id": "scan",
+            "plan_revision": 1,
+            "plan_digest": store.get_plan()["plan_digest"],
+            "scope_digest": "",
+            "policy_digest": "",
+            "catalog_digest": "",
+            "revocation_generation": 0,
+            "issuer": "issuer",
+            "approver": "reviewer",
+            "issued_at": now.isoformat(),
+            "not_before": now.isoformat(),
+            "expires_at": (now + timedelta(hours=1)).isoformat(),
+        }
+        self.assertEqual(store.save_authorization(document).status, "inserted")
+        store.activate_authorization("auth")
+        path = store.path
+        store.close()
+        gate = Barrier(2)
+        revoked = []
+
+        def revoke(_worker):
+            with AttackStore.open(path) as opened:
+                gate.wait(timeout=2)
+                return opened.revoke_run(
+                    "concurrent revocation", revoke_authorization=revoked.append
+                )
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            generations = list(pool.map(revoke, range(2)))
+
+        self.assertEqual(generations, [1, 1])
+        self.assertEqual(revoked, ["auth"])
 
     def test_lease_fencing_persists_and_rejects_stale_workers(self):
         store = self.store()

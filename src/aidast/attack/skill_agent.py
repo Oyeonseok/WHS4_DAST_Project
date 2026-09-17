@@ -305,7 +305,13 @@ class SkillAttackAgent:
                         kind="attack_test", body=result.response_body,
                         metadata={"hypothesis_id": hypothesis_id, "test_id": test.test_id,
                                   "outcome": result.outcome, "summary": result.evidence_summary,
-                                  "response_status": result.response_status},
+                                  "response_status": result.response_status,
+                                  "method": result.method, "url": result.url,
+                                  "identity_role": result.identity_role,
+                                  "response_body_sha256": hashlib.sha256(
+                                      result.response_body
+                                  ).hexdigest(),
+                                  "response_body_length": len(result.response_body)},
                     ))
                     results.append((test, result, attempt_id, evidence_id))
                     used_tests += 1
