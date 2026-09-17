@@ -246,6 +246,19 @@ class ReconBrowserTransportTests(unittest.TestCase):
         self.assertEqual(passive[0]["discovery_kind"], "passive_login_observation")
         self.assertNotIn("private", json.dumps(self.driver.get_http_results()))
 
+    def test_passive_authentication_observation_cannot_use_browser_support_path_bypass(self):
+        item = {
+            "method": "POST", "path": "/admin/login",
+            "url": "https://example.com/admin/login",
+            "source": "auth_bootstrap",
+            "discovery_kind": "passive_login_observation",
+            "browser_supporting_request": True,
+        }
+        self.assertEqual(_filter_results_by_policy(
+            [item], base_url=self.policy.asset, target_policy=self.policy,
+            passive_metadata=True,
+        ), [])
+
     def test_expired_restored_session_can_enter_manual_reauthentication(self):
         self.driver.preauthenticated = True
         with patch.object(self.driver, "restore_runtime"), patch.object(

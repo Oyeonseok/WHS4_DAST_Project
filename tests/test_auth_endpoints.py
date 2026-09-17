@@ -67,15 +67,44 @@ def test_request_metadata_ignores_unapproved_origin() -> None:
 
 
 def test_request_metadata_templates_path_embedded_authentication_secret() -> None:
-    secret = "AbCdEfGhIjKlMnOpQrStUvWxYz012345"
-    endpoint = AuthenticationEndpoint.from_request(
-        "GET",
-        f"https://example.test/magic-login/{secret}",
+    for route, secret in (
+        ("magic-login", "AbCdEfGhIjKlMnOpQrStUvWxYz012345"),
+        ("auth", "abcdefghijklmnop"),
+        ("session", "shortSecret"),
+        ("oauth", "purealphabetictokenvalue"),
+    ):
+        endpoint = AuthenticationEndpoint.from_request(
+            "GET", f"https://example.test/{route}/{secret}",
+            target_origin="https://example.test",
+        )
+        assert endpoint is not None
+        assert endpoint.path == f"/{route}/:secret"
+        assert secret not in json.dumps(endpoint.to_bundle_dict())
+
+    assert AuthenticationEndpoint.from_request(
+        "GET", "https://example.test/unexpected-route/unsafeCredential",
+        target_origin="https://example.test",
+    ) is None
+
+
+def test_request_metadata_preserves_distinct_known_routes_after_auth_prefix() -> None:
+    endpoints = [
+        AuthenticationEndpoint.from_request(
+            "POST", f"https://example.test{path}",
+            target_origin="https://example.test",
+        )
+        for path in ("/auth/login", "/auth/callback", "/oauth/token", "/session/refresh")
+    ]
+
+    assert [endpoint.path for endpoint in endpoints if endpoint is not None] == [
+        "/auth/login", "/auth/callback", "/oauth/token", "/session/refresh",
+    ]
+    secret = AuthenticationEndpoint.from_request(
+        "GET", "https://example.test/auth/shortSecret",
         target_origin="https://example.test",
     )
-    assert endpoint is not None
-    assert endpoint.path == "/magic-login/:secret"
-    assert secret not in json.dumps(endpoint.to_bundle_dict())
+    assert secret is not None
+    assert secret.path == "/auth/:secret"
 
 
 @pytest.mark.parametrize(
@@ -200,7 +229,7 @@ def test_empty_endpoint_array_has_known_provenance(tmp_path: Path) -> None:
 def test_reauthentication_replaces_bundle_endpoint_set(tmp_path: Path) -> None:
     bundle = _write_bundle(tmp_path, endpoints=[{
         "method": "POST", "origin": "https://example.test",
-        "path": "/old-login", "source": "auth_bootstrap",
+        "path": "/login", "source": "auth_bootstrap",
     }])
     session = load_session(
         bundle,

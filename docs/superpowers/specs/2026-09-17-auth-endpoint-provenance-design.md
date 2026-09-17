@@ -79,9 +79,10 @@ and unknown fields that could conceal sensitive data. Duplicate entries are
 collapsed by `(method, origin, path)`.
 
 Normalization replaces numeric, UUID, high-entropy, percent-encoded, and
-authentication-token path segments with a non-secret template marker. A
-credential-bearing raw path is never written to the bundle, diagnostics, or
-Recon database.
+authentication-token path segments with a non-secret template marker and
+retains only explicitly classified static route segments. If every segment
+cannot be classified safely, the observation is discarded. A credential-bearing
+raw path is never written to the bundle, diagnostics, or Recon database.
 
 The bundle integrity map continues to cover the browser state files. The bundle
 file itself remains protected by the existing session binding and filesystem
@@ -115,7 +116,8 @@ endpoint upsert path with `source_tool=auth_bootstrap` and a passive observation
 record.
 
 Import does not consume the active HTTP request budget because it sends no
-request. It also does not bypass host, port, or path scope checks. A POST endpoint
+request. It also does not use browser-support exceptions to bypass host, port,
+or path scope checks. A POST endpoint
 may appear in the Recon inventory as passively observed evidence even though
 active Recon remains limited to safe methods.
 

@@ -1241,7 +1241,6 @@ class PlaywrightDriver:
                 "path": endpoint.path,
                 "content_type": None,
                 "source": "auth_bootstrap",
-                "browser_supporting_request": True,
                 "traffic_class": "browser_observation",
             })
 

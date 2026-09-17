@@ -602,6 +602,7 @@ def _filter_results_by_policy(
         )
         if (
             not allowed
+            and not passive_metadata
             and result.get("browser_supporting_request") is True
             and target_policy.allows_browser_support_url(candidate, method=method)
         ):

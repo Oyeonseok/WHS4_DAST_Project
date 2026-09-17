@@ -302,7 +302,7 @@ git commit -m "feat(auth): observe login endpoint metadata"
 **Interfaces:**
 - Consumes: `TargetSession.authentication_endpoints` and provenance boolean from Task 2.
 - Produces: `ReconExecutor._import_authentication_endpoints(task, origin_id, session) -> int`.
-- Produces: Playwright result rows with `source="auth_bootstrap"`, `discovery_kind="passive_login_observation"`, and `browser_supporting_request=True`.
+- Produces: Playwright result rows with `source="auth_bootstrap"` and `discovery_kind="passive_login_observation"`; passive rows do not receive browser-support path exceptions.
 - Changes: runtime reauthentication passes observed rows back to `TargetSession.replace_authentication_endpoints()` after successful session save.
 
 - [ ] **Step 1: Write failing restored-session import tests**

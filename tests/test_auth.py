@@ -77,6 +77,19 @@ class LoginCliTests(unittest.TestCase):
         self.assertIn("--remote-debugging-port=$debugPort", script)
         self.assertIn("--remote-debugging-address=127.0.0.1", script)
 
+    def test_windows_login_observes_new_tabs_during_operator_login(self) -> None:
+        script = files("aidast.auth").joinpath("browser_login_windows.ps1").read_text()
+        self.assertIn("Target.setAutoAttach", script)
+        self.assertIn("Target.attachedToTarget", script)
+        self.assertIn("Receive-CdpDuringLogin", script)
+        self.assertIn("waitForDebuggerOnStart=$true", script)
+        self.assertIn("Runtime.runIfWaitingForDebugger", script)
+        self.assertNotIn("CancelAfter(100)", script)
+        self.assertLess(
+            script.index("$null = Invoke-Cdp 'Target.setAutoAttach'"),
+            script.index("\n    Receive-CdpDuringLogin\n"),
+        )
+
     def test_aidast_login_invokes_codex_auth(self) -> None:
         output = io.StringIO()
         with (

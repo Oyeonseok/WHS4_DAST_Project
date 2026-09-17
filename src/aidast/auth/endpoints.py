@@ -17,8 +17,16 @@ _UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}
 _HEX = re.compile(r"^[0-9a-f]{8,}$", re.I)
 _TOKEN = re.compile(r"^[A-Za-z0-9_+=.-]{16,}$")
 _SENSITIVE_PREDECESSORS = frozenset({
-    "activate", "activation", "callback", "confirm", "invite", "magic",
-    "magic-link", "magic-login", "reset", "token", "verify", "verification",
+    "activate", "activation", "auth", "callback", "confirm", "invite", "magic",
+    "magic-link", "magic-login", "oauth", "reset", "session", "token", "verify",
+    "verification",
+})
+_SAFE_ROUTE_SEGMENTS = frozenset({
+    "account", "accounts", "activate", "activation", "admin", "api", "auth", "authenticate",
+    "callback", "confirm", "identity", "invite", "login", "logout", "magic",
+    "magic-link", "magic-login", "oauth", "password", "refresh", "reset", "rest",
+    "session", "sessions", "sign-in", "signin", "token", "user", "users", "v1",
+    "v2", "v3", "verify", "verification",
 })
 
 
@@ -54,24 +62,32 @@ def _path(value: object) -> str:
     segments = value.split("/")
     normalized: list[str] = []
     for index, segment in enumerate(segments):
+        if not segment:
+            normalized.append(segment)
+            continue
         decoded = unquote(segment)
         previous = segments[index - 1].casefold() if index else ""
+        if decoded == segment and segment.casefold() in _SAFE_ROUTE_SEGMENTS:
+            normalized.append(segment)
+            continue
         dynamic = (
-            bool(segment)
-            and (
-                previous in _SENSITIVE_PREDECESSORS
-                or decoded.isdecimal()
-                or bool(_UUID.fullmatch(decoded))
-                or bool(_HEX.fullmatch(decoded))
-                or (
-                    bool(_TOKEN.fullmatch(decoded))
-                    and any(character.isalpha() for character in decoded)
-                    and any(character.isdigit() for character in decoded)
-                )
-                or decoded != segment
+            previous in _SENSITIVE_PREDECESSORS
+            or decoded.isdecimal()
+            or bool(_UUID.fullmatch(decoded))
+            or bool(_HEX.fullmatch(decoded))
+            or (
+                bool(_TOKEN.fullmatch(decoded))
+                and any(character.isalpha() for character in decoded)
+                and any(character.isdigit() for character in decoded)
             )
+            or decoded != segment
         )
-        normalized.append(":secret" if dynamic else segment)
+        if dynamic:
+            normalized.append(":secret")
+        else:
+            raise AuthenticationEndpointError(
+                "authentication endpoint path contains an unclassified segment"
+            )
     return "/".join(normalized) or "/"
 
 
