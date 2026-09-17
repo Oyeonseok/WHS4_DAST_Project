@@ -1,5 +1,6 @@
 """Shared Pipeline.db Validation status and report v2 source binding."""
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -14,6 +15,7 @@ from aidast.reporting import (
     record_case_report as record_report,
 )
 from aidast.validation import ValidationRepository, shared_validation_status
+from aidast.validation.models import canonical_json, canonical_sha256
 
 
 class SharedValidationReportingTests(unittest.TestCase):
@@ -81,6 +83,73 @@ class SharedValidationReportingTests(unittest.TestCase):
         self.conn.execute("CREATE TABLE unrelated_after_report(value TEXT)")
         self.conn.commit()
         self.assertFalse(report_status(Path(result["report_db"]))["stale"])
+
+    def test_report_uses_only_validation_evidence_from_mixed_decision_namespaces(self):
+        evidence = self.complete()
+        decision = {
+            "evidence_ids": [evidence],
+            "claim_comparison": {
+                "validation_evidence_ids": [evidence],
+                "attack_evidence_ids": ["areq_attack"],
+            },
+        }
+        self.conn.execute(
+            "UPDATE validation_cases SET decision_json=?,decision_sha256=? WHERE case_id='case'",
+            (canonical_json(decision), canonical_sha256(decision)),
+        )
+        self.conn.commit()
+
+        result = ReportAgent().run(
+            self.path, self.output, platform="hackerone", case_id="case",
+        )
+
+        context = json.loads(Path(result["context_path"]).read_text(encoding="utf-8"))
+        self.assertEqual(result["status"], "prepared")
+        self.assertEqual(context["allowed_evidence_ids"], [evidence])
+
+    def test_report_rejects_foreign_validation_evidence_in_mixed_namespaces(self):
+        evidence = self.complete()
+        decision = {
+            "evidence_ids": [evidence],
+            "claim_comparison": {
+                "validation_evidence_ids": ["foreign_validation_evidence"],
+                "attack_evidence_ids": ["areq_attack"],
+            },
+        }
+        self.conn.execute(
+            "UPDATE validation_cases SET decision_json=?,decision_sha256=? WHERE case_id='case'",
+            (canonical_json(decision), canonical_sha256(decision)),
+        )
+        self.conn.commit()
+
+        with self.assertRaisesRegex(ReportError, "missing or foreign evidence"):
+            ReportAgent().run(
+                self.path, self.output, platform="hackerone", case_id="case",
+            )
+
+    def test_report_does_not_traverse_attack_evidence_namespace(self):
+        evidence = self.complete()
+        decision = {
+            "evidence_ids": [evidence],
+            "claim_comparison": {
+                "attack_evidence_ids": [{
+                    "evidence_ids": ["foreign_nested_attack_evidence"],
+                }],
+            },
+        }
+        self.conn.execute(
+            "UPDATE validation_cases SET decision_json=?,decision_sha256=? WHERE case_id='case'",
+            (canonical_json(decision), canonical_sha256(decision)),
+        )
+        self.conn.commit()
+
+        result = ReportAgent().run(
+            self.path, self.output, platform="hackerone", case_id="case",
+        )
+
+        context = json.loads(Path(result["context_path"]).read_text(encoding="utf-8"))
+        self.assertEqual(result["status"], "prepared")
+        self.assertEqual(context["allowed_evidence_ids"], [evidence])
 
     def test_changed_decision_marks_existing_report_stale(self):
         evidence = self.complete()
