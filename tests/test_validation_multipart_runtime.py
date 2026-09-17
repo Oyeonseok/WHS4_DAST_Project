@@ -7,7 +7,10 @@ import hashlib
 import json
 import threading
 import unittest
+from http.client import HTTPResponse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from io import BytesIO
+from urllib.error import HTTPError
 
 from aidast.recon.policy import PolicyLimits
 from aidast.pipeline.lifecycle import finish_stage_run
@@ -243,6 +246,42 @@ class _ScriptedResponse:
         self.closed = True
 
 
+class _MemorySocket:
+    def __init__(self, wire: bytes):
+        self.wire = wire
+
+    def makefile(self, mode):
+        return BytesIO(self.wire)
+
+
+class _ParsedHttpResponse:
+    def __init__(self, wire: bytes, url: str = "https://test/items"):
+        self.url = url
+        self.raw = HTTPResponse(_MemorySocket(wire))
+        self.raw.begin()
+
+    @property
+    def status(self):
+        return self.raw.status
+
+    @property
+    def headers(self):
+        return self.raw.headers
+
+    @property
+    def length(self):
+        return self.raw.length
+
+    def read(self, maximum):
+        return self.raw.read(maximum)
+
+    def geturl(self):
+        return self.url
+
+    def close(self):
+        self.raw.close()
+
+
 class MultipartAdapterSafetyTests(unittest.TestCase):
     setUp = request_fixture.ValidationRequestBrokerTests.setUp
 
@@ -272,6 +311,10 @@ class MultipartAdapterSafetyTests(unittest.TestCase):
             attempt_id="attempt", db_path=self.path, scan_id="scan", stage_run_id="stage",
             case_id="case", policy=self.policy,
         )
+
+    @staticmethod
+    def parsed_response(headers: bytes, body: bytes) -> _ParsedHttpResponse:
+        return _ParsedHttpResponse(b"HTTP/1.1 200 OK\r\n" + headers + b"\r\n" + body)
 
     def test_contract_rejects_mixed_case_transport_framing_headers(self):
         for name in ("tRaNsFeR-eNcOdInG", "TRAILER", "cOnTeNt-LeNgTh"):
@@ -330,6 +373,40 @@ class MultipartAdapterSafetyTests(unittest.TestCase):
         response = _ScriptedResponse("https://test/items", [ConnectionError("inert interruption")])
         with self.assertRaises(ConnectionError):
             self.execute(self.runtime(), lambda request, timeout: response)
+        self.assertEqual(self.conn.execute(
+            "SELECT status FROM validation_transport_operations"
+        ).fetchone()[0], "outcome_unknown")
+
+    def test_premature_content_length_eof_is_indeterminate_with_real_parser(self):
+        for body, declared in ((b"uploaded", 20), (b"up", 8)):
+            with self.subTest(body=body, declared=declared):
+                response = self.parsed_response(
+                    f"Content-Length: {declared}\r\n".encode("ascii"), body,
+                )
+                with self.assertRaises(MultipartResponseIncompleteError):
+                    self.execute(self.runtime(), lambda request, timeout: response)
+                self.assertEqual(self.conn.execute(
+                    "SELECT status FROM validation_transport_operations ORDER BY scheduled_at DESC LIMIT 1"
+                ).fetchone()[0], "outcome_unknown")
+
+    def test_complete_content_length_and_other_complete_framing_are_accepted(self):
+        complete = self.parsed_response(b"Content-Length: 8\r\n", b"uploaded")
+        self.assertEqual(self.execute(self.runtime(), lambda request, timeout: complete).outcome, "observed")
+        for headers, body in (
+            (b"Content-Length: 0\r\n", b""),
+            (b"Transfer-Encoding: chunked\r\n", b"8\r\nuploaded\r\n0\r\n\r\n"),
+            (b"", b"uploaded"),
+        ):
+            with self.subTest(headers=headers):
+                response = self.parsed_response(headers, body)
+                self.assertEqual(MultipartReproductionPort._read_complete_response(response),
+                                 b"" if headers == b"Content-Length: 0\r\n" else b"uploaded")
+
+    def test_http_error_wrapping_preserves_content_length_completeness_check(self):
+        response = self.parsed_response(b"Content-Length: 20\r\n", b"uploaded")
+        error = HTTPError("https://test/items", 404, "inert", response.headers, response)
+        with self.assertRaises(MultipartResponseIncompleteError):
+            self.execute(self.runtime(), lambda request, timeout: error)
         self.assertEqual(self.conn.execute(
             "SELECT status FROM validation_transport_operations"
         ).fetchone()[0], "outcome_unknown")

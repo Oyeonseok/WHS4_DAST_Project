@@ -79,6 +79,27 @@ class MultipartReproductionPort:
         )
 
     @staticmethod
+    def _content_length_is_incomplete(response, received_bytes: int) -> bool:
+        """Recognize declared-length EOF truncation, including HTTPError wrappers."""
+        candidates = (response, getattr(response, "fp", None))
+        for candidate in candidates:
+            if candidate is None:
+                continue
+            remaining = getattr(candidate, "length", None)
+            if type(remaining) is int and remaining > 0:
+                return True
+        headers = getattr(response, "headers", None)
+        transfer_encoding = headers.get("Transfer-Encoding") if headers is not None else None
+        content_length = headers.get("Content-Length") if headers is not None else None
+        if transfer_encoding is not None or content_length is None:
+            return False
+        try:
+            declared = int(content_length)
+        except (TypeError, ValueError):
+            return False
+        return declared >= 0 and received_bytes < declared
+
+    @staticmethod
     def _read_complete_response(response) -> bytes:
         """Read complete data below the capture limit, never a byte beyond it."""
         content = bytearray()
@@ -88,6 +109,10 @@ class MultipartReproductionPort:
             if type(chunk) is not bytes:
                 raise ValidationTransportError("multipart response reader returned invalid bytes")
             if not chunk:
+                if MultipartReproductionPort._content_length_is_incomplete(response, len(content)):
+                    raise MultipartResponseIncompleteError(
+                        "multipart response ended before its declared content length"
+                    )
                 return bytes(content)
             content.extend(chunk)
         # Reading even one lookahead byte would exceed the durable response-byte reservation.
