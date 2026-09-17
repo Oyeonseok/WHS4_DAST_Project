@@ -107,11 +107,20 @@ Multipart supports the six HTTP assertion kinds listed above. Each attempt has
 at most 32 path values, 64 query values, 32 non-sensitive headers, 64 text
 fields, 32 files, and 16 assertions; at least one file and one assertion are
 required. Names are bounded to 128 characters for form parts, 256 for filenames
-and request keys, and 256 for content types and header names. Text field values
-are at most 100,000 characters, header and path/query scalar values at most
-16,384 characters, assertion JSON paths at most 16
-components, and assertion IDs at most 128 characters. Each binary value and the
-fully framed multipart body are at most 1,000,000 bytes.
+and request keys, 3--256 for content types, and 256 for header names. Text field
+values are at most 100,000 characters, while header and path/query scalar values
+are at most 16,384 characters. Shared HTTP assertion IDs are at most 128
+characters and expected strings at most 16,384 characters. Assertion JSON paths
+have at most 16 components; string components are nonempty and at most 256
+characters, and integer components are nonnegative. `status_equals` accepts only
+integer status values 100--599, and duration expectations must be finite
+nonnegative numbers. Each binary value and the fully framed multipart body are
+at most 1,000,000 bytes.
+
+Multipart assertion evidence requires a complete response body strictly below
+200,000 bytes. Reaching exactly 200,000 captured bytes makes response
+completeness unknown rather than complete; after dispatch this produces
+`outcome_unknown` and is not retried automatically.
 
 For WebSocket effects, use `runtime_kind: "websocket"` with a `ws` or `wss`
 endpoint and an ordered frame exchange:
@@ -131,9 +140,12 @@ characters, 1--32 outbound frames, and 1--16 assertions. A frame, all outbound
 frames together, received bytes, and a JSON value are each capped at 1,000,000
 bytes; ping data is capped at 125 bytes. Capture is capped at 64 frames,
 assertion frame indexes at 63, assertion paths at 16 components of at most 128
-characters, and a frame-kind sequence at 64 entries. Connection and receive
-waits must be positive and no more than 120 seconds, and cannot exceed policy.
-Outbound close codes are 1000--1003, 1007--1014, or 3000--4999.
+characters, assertion IDs at most 128 characters, and a frame-kind sequence at
+64 entries. The complete sanitized WebSocket evidence envelope is independently
+capped at 8,192 encoded bytes; satisfying the individual frame and assertion
+limits does not override that aggregate ceiling. Connection and receive waits
+must be positive and no more than 120 seconds, and cannot exceed policy. Outbound
+close codes are 1000--1003, 1007--1014, or 3000--4999.
 
 For unary gRPC effects, use `runtime_kind: "grpc"`. Supply a packaged protobuf
 descriptor-set reference; reflection and inferred descriptors are not allowed:
@@ -156,7 +168,11 @@ references, 1--16 assertions, and a positive deadline no greater than 120
 seconds. Assertion IDs are at most 128 characters, expected strings at most
 16,384 characters, captured error details at most 16,384 bytes, paths at most
 16 components of at most 128 characters, trailers at most 256 characters, and
-response trailers at most 32 entries/32,768 bytes.
+initial and trailing response metadata each at most 32 entries and 32,768 bytes
+total. Each initial/trailing metadata value is at most 16,384 bytes. The
+complete sanitized gRPC evidence envelope is independently capped at 8,192
+encoded bytes; the individual message, assertion, and metadata limits do not
+override it.
 
 For race effects, use `runtime_kind: "concurrent"`. It releases only HTTP or
 multipart child requests at a barrier; this minimal HTTP-child example is:
@@ -166,15 +182,25 @@ multipart child requests at a barrier; this minimal HTTP-child example is:
 ```
 
 Concurrent member and optional final HTTP assertions use the six HTTP assertion
-kinds. Aggregate kinds are exactly `success_count_equals`,
+kinds and the shared HTTP assertion bounds above. An HTTP child or final
+verification accepts either `text_body` of at most 100,000 characters or an
+encoded `json_body` of at most 100,000 bytes, never both. Aggregate kinds are
+exactly `success_count_equals`,
 `success_count_at_least`, `distinct_response_digests_at_least`, and
 `final_http_assertion_passes`; the last requires one bounded HTTP-only final
 verification. Workers are 2--20, repeat count 1--5, and their product is at most
-20. The barrier timeout is positive and at most 30 seconds. Each attempt has
-1--16 member assertions, at most 8 aggregate assertions, an optional positive
+20 and must also be no greater than the active policy concurrency limit. The
+complete member product is atomically reserved and released as one group; an
+optional final HTTP verification is reserved afterward. The barrier timeout is
+positive and at most 30 seconds. One shared absolute deadline, computed as the
+minimum of `barrier_timeout_seconds` and the policy timeout, governs reservation
+pacing, readiness/barrier waits, member I/O, and final verification. Each attempt
+has 1--16 member assertions, at most 8 aggregate assertions, an optional positive
 start-skew limit no greater than 30,000 ms, and inherited HTTP/multipart child
-bounds. Aggregate counts are 0--20. WebSocket, gRPC, and recursive concurrent
-children are rejected.
+bounds. Aggregate counts are 0--20. Each member and final verification requires
+a complete response body strictly below 200,000 bytes; reaching exactly 200,000
+captured bytes after dispatch produces `outcome_unknown` and is not retried
+automatically. WebSocket, gRPC, and recursive concurrent children are rejected.
 
 Binary content is either strict base64 or one opaque `artifact_ref`, never both.
 It always declares exact byte length and SHA-256; artifact references are 1--256
