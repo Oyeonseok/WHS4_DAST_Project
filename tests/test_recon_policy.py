@@ -276,6 +276,35 @@ class TargetPolicyTests(unittest.TestCase):
         self.assertFalse(result.allows_host("x.email.shopify.com"))
         self.assertTrue(result.allows_host("admin.shopify.com"))
 
+    def test_scope_exclusion_revalidation_preserves_grounded_active_grant(self) -> None:
+        from aidast.cli import _apply_scope_host_exclusions
+
+        authorization = "능동 취약점 테스트와 POST 요청을 허용합니다."
+        active = TargetPolicy(
+            scope_id="scope", policy_id="policy", asset_type=AssetType.URL,
+            asset="http://127.0.0.1:5001/", allowed_schemes=["http"],
+            allowed_hosts=["127.0.0.1"], allowed_ports=[5001],
+            attack_authorization_mode="active_non_destructive",
+            attack_allowed_methods=["GET", "HEAD", "OPTIONS", "POST"],
+            attack_authorization_evidence=authorization,
+        )
+        scope_markdown = (
+            "## Allowed activities\n\n"
+            f"- {authorization}\n\n"
+            "## Prohibited activities\n\n- DELETE 요청은 금지합니다.\n"
+        )
+
+        result = _apply_scope_host_exclusions(
+            {(AssetType.URL.value, active.asset): active},
+            [],
+            scope_markdown=scope_markdown,
+        )
+
+        self.assertEqual(
+            result[(AssetType.URL.value, active.asset)].attack_authorization_mode,
+            "active_non_destructive",
+        )
+
     def test_codex_schema_requires_every_nested_policy_property(self) -> None:
         schema = _codex_output_schema(TargetPolicySetProposal)
 
