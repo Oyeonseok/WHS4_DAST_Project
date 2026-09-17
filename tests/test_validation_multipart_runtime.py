@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
 import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from aidast.recon.policy import PolicyLimits
+from aidast.pipeline.lifecycle import finish_stage_run
 from aidast.validation import ResponseAssertion, SkillProfileResolver
 from aidast.validation.contracts.binary import BinaryValue
 from aidast.validation.contracts.multipart_contract import (
@@ -17,7 +19,10 @@ from aidast.validation.contracts.multipart_contract import (
 )
 from aidast.validation.contracts.runtime_contract import validate_runtime_contract
 from aidast.validation.contracts.runtime_semantics import validate_runtime_semantics
-from aidast.validation.execution.multipart_adapter import MultipartReproductionPort
+from aidast.validation.execution.multipart_adapter import (
+    MultipartReproductionPort, MultipartResponseIncompleteError,
+)
+from aidast.validation.execution.transport_broker import ValidationTransportError
 
 import test_validation_request_broker as request_fixture
 
@@ -203,6 +208,199 @@ class MultipartLoopbackTests(unittest.TestCase):
         self.assertNotIn("uploaded", str(result.details))
         self.assertEqual(len(result.details["operation_ids"]), 1)
 
+
+class _ScriptedResponse:
+    status = 200
+    headers = {"Content-Type": "text/plain"}
+
+    def __init__(self, url: str, chunks, *, on_read=None):
+        self.url = url
+        self.chunks = list(chunks)
+        self.on_read = on_read
+        self.read_sizes = []
+        self.closed = False
+
+    def read(self, maximum):
+        self.read_sizes.append(maximum)
+        if self.on_read is not None:
+            callback, self.on_read = self.on_read, None
+            callback()
+        if not self.chunks:
+            return b""
+        next_chunk = self.chunks[0]
+        if isinstance(next_chunk, BaseException):
+            self.chunks.pop(0)
+            raise next_chunk
+        if len(next_chunk) <= maximum:
+            return self.chunks.pop(0)
+        self.chunks[0] = next_chunk[maximum:]
+        return next_chunk[:maximum]
+
+    def geturl(self):
+        return self.url
+
+    def close(self):
+        self.closed = True
+
+
+class MultipartAdapterSafetyTests(unittest.TestCase):
+    setUp = request_fixture.ValidationRequestBrokerTests.setUp
+
+    def blind_with_runtime(self, runtime):
+        return self.blind.model_copy(update={
+            "endpoint": "https://test/items", "credential_references": (),
+            "runtime_contract": runtime.model_dump(mode="json"),
+        })
+
+    def runtime(self, *, field_value="inert", artifact_ref=None):
+        document = attempt("target")
+        document["request"]["fields"] = [{"name": "note", "value": field_value}]
+        document["request"]["headers"] = {"X-Inert": "yes"}
+        if artifact_ref is not None:
+            document["request"]["files"][0]["content"] = {
+                "artifact_ref": artifact_ref, "length": 6,
+                "sha256": hashlib.sha256(_INERT_GIF).hexdigest(),
+            }
+        return MultipartRuntimeContract(
+            runtime_kind="multipart", schema_version=1,
+            target=document, positive_control=attempt("baseline"), negative_control=attempt("inert"),
+        )
+
+    def execute(self, runtime, transport, **port_options):
+        return MultipartReproductionPort(transport=transport, **port_options).execute(
+            self.blind_with_runtime(runtime), attempt_kind="target", batch_no=1, ordinal=1,
+            attempt_id="attempt", db_path=self.path, scan_id="scan", stage_run_id="stage",
+            case_id="case", policy=self.policy,
+        )
+
+    def test_contract_rejects_mixed_case_transport_framing_headers(self):
+        for name in ("tRaNsFeR-eNcOdInG", "TRAILER", "cOnTeNt-LeNgTh"):
+            with self.subTest(name=name), self.assertRaises(ValueError):
+                MultipartRequestTemplate(files=(valid_file(),), headers={name: "inert"})
+
+    def test_actual_sender_receives_only_adapter_framing_headers(self):
+        captured = []
+
+        def transport(request, timeout):
+            captured.append({name.casefold(): value for name, value in request.header_items()})
+            return _ScriptedResponse(request.full_url, [b"uploaded", b""])
+
+        self.execute(self.runtime(), transport)
+        self.assertEqual(captured[0]["x-inert"], "yes")
+        self.assertIn("content-type", captured[0])
+        self.assertIn("content-length", captured[0])
+        self.assertNotIn("transfer-encoding", captured[0])
+        self.assertNotIn("trailer", captured[0])
+
+    def test_exact_bound_response_is_indeterminate_without_extra_read(self):
+        response = _ScriptedResponse("https://test/items", [b" " * 200_000, b""])
+        with self.assertRaises(MultipartResponseIncompleteError):
+            self.execute(self.runtime(), lambda request, timeout: response)
+        self.assertTrue(response.closed)
+        self.assertEqual(self.conn.execute(
+            "SELECT status FROM validation_transport_operations"
+        ).fetchone()[0], "outcome_unknown")
+        self.assertTrue(all(size <= 65_536 for size in response.read_sizes))
+
+    def test_suffix_marker_after_bound_cannot_produce_a_false_negative(self):
+        response = _ScriptedResponse("https://test/items", [b" " * 200_000, b"uploaded", b""])
+        with self.assertRaises(MultipartResponseIncompleteError):
+            self.execute(self.runtime(), lambda request, timeout: response)
+        self.assertEqual(self.conn.execute(
+            "SELECT status FROM validation_transport_operations"
+        ).fetchone()[0], "outcome_unknown")
+
+    def test_oversize_prefix_marker_cannot_produce_a_false_positive(self):
+        response = _ScriptedResponse("https://test/items", [
+            b"uploaded" + b" " * (200_000 - len(b"uploaded")), b"x", b"",
+        ])
+        with self.assertRaises(MultipartResponseIncompleteError):
+            self.execute(self.runtime(), lambda request, timeout: response)
+        self.assertEqual(self.conn.execute(
+            "SELECT status FROM validation_transport_operations"
+        ).fetchone()[0], "outcome_unknown")
+
+    def test_short_complete_reads_are_evaluated_only_after_eof(self):
+        response = _ScriptedResponse("https://test/items", [b"up", b"loaded", b""])
+        result = self.execute(self.runtime(), lambda request, timeout: response)
+        self.assertEqual(result.outcome, "observed")
+        self.assertEqual(response.read_sizes, [65_536, 65_536, 65_536])
+
+    def test_interrupted_stream_preserves_outcome_unknown(self):
+        response = _ScriptedResponse("https://test/items", [ConnectionError("inert interruption")])
+        with self.assertRaises(ConnectionError):
+            self.execute(self.runtime(), lambda request, timeout: response)
+        self.assertEqual(self.conn.execute(
+            "SELECT status FROM validation_transport_operations"
+        ).fetchone()[0], "outcome_unknown")
+
+    def test_persisted_metadata_keeps_payload_identity_and_fingerprint(self):
+        def transport(request, timeout):
+            return _ScriptedResponse(request.full_url, [b"uploaded", b""])
+
+        self.execute(self.runtime(field_value="alpha"), transport)
+        self.execute(self.runtime(field_value="bravo"), transport)
+        rows = self.conn.execute(
+            "SELECT request_fingerprint,result_json FROM validation_transport_operations ORDER BY scheduled_at"
+        ).fetchall()
+        self.assertEqual(len(rows), 2)
+        self.assertNotEqual(rows[0][0], rows[1][0])
+        for _, metadata in rows:
+            value = json.loads(metadata)
+            self.assertEqual(set(value), {
+                "request_payload_sha256", "request_payload_length",
+                "response_payload_sha256", "response_payload_length",
+            })
+            self.assertEqual(value["response_payload_length"], 8)
+
+    def test_only_reservation_policy_rejection_becomes_blocked(self):
+        calls = []
+        denied = self.policy.model_copy(update={"allowed_hosts": ["other"]})
+        blind = self.blind_with_runtime(self.runtime())
+        result = MultipartReproductionPort(transport=lambda request, timeout: calls.append(request)).execute(
+            blind, attempt_kind="target", batch_no=1, ordinal=1, attempt_id="attempt",
+            db_path=self.path, scan_id="scan", stage_run_id="stage", case_id="case", policy=denied,
+        )
+        self.assertEqual(result.outcome, "blocked")
+        self.assertFalse(calls)
+        self.assertEqual(self.conn.execute(
+            "SELECT count(*) FROM validation_transport_operations"
+        ).fetchone()[0], 0)
+
+    def test_nonpolicy_reservation_failure_propagates(self):
+        finish_stage_run(self.conn, "stage", status="failed")
+        with self.assertRaises(ValidationTransportError):
+            self.execute(self.runtime(), lambda request, timeout: self.fail("sender called"))
+
+    def test_late_completion_error_propagates_after_dispatch(self):
+        response = _ScriptedResponse(
+            "https://test/items", [b"uploaded", b""],
+            on_read=lambda: finish_stage_run(self.conn, "stage", status="failed"),
+        )
+        with self.assertRaises(ValidationTransportError):
+            self.execute(self.runtime(), lambda request, timeout: response)
+        self.assertEqual(self.conn.execute(
+            "SELECT status FROM validation_transport_operations"
+        ).fetchone()[0], "outcome_unknown")
+
+    def test_missing_artifact_is_blocked_without_reservation_or_sender(self):
+        for resolver in (
+            None,
+            lambda reference: (_ for _ in ()).throw(KeyError(reference)),
+            lambda reference: (_ for _ in ()).throw(OSError("inert resolver I/O failure")),
+        ):
+            with self.subTest(resolver=resolver):
+                calls = []
+                result = self.execute(
+                    self.runtime(artifact_ref="fixture-missing"),
+                    lambda request, timeout: calls.append(request), artifact_resolver=resolver,
+                )
+                self.assertEqual(result.outcome, "blocked")
+                self.assertEqual(result.details, {"reason": "artifact_unavailable"})
+                self.assertFalse(calls)
+                self.assertEqual(self.conn.execute(
+                    "SELECT count(*) FROM validation_transport_operations"
+                ).fetchone()[0], 0)
 
 if __name__ == "__main__":
     unittest.main()

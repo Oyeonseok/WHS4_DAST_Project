@@ -12,7 +12,7 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 from aidast.core.request_broker import BrokerResponse
 from aidast.recon.policy import TargetPolicy
 
-from ..contracts.binary import BinaryArtifactResolver
+from ..contracts.binary import BinaryArtifactResolver, BinaryArtifactUnavailable
 from ..contracts.models import BlindCase, ReproductionObservation
 from ..contracts.multipart_contract import MultipartRuntimeContract, encode_multipart
 from ..contracts.runtime_contract import evaluate_http_response
@@ -23,6 +23,11 @@ from .transport_broker import (
 
 
 _MAX_RESPONSE_BYTES = 200_000
+_RESPONSE_READ_CHUNK_BYTES = 65_536
+
+
+class MultipartResponseIncompleteError(ValidationTransportError):
+    """The response cannot establish bounded, complete assertion evidence."""
 
 
 class _NoRedirect(HTTPRedirectHandler):
@@ -50,16 +55,43 @@ class MultipartReproductionPort:
         if blind_case.credential_references:
             return "multipart_runtime_does_not_support_credentials"
         try:
-            runtime = MultipartRuntimeContract.model_validate(blind_case.runtime_contract)
+            MultipartRuntimeContract.model_validate(blind_case.runtime_contract)
         except ValueError:
             return "multipart_runtime_contract_invalid"
-        if self.artifact_resolver is None and any(
-            part.content.artifact_ref is not None
-            for runtime_attempt in (runtime.target, runtime.positive_control, runtime.negative_control)
-            for part in runtime_attempt.request.files
-        ):
-            return "artifact_resolver_missing"
         return None
+
+    @staticmethod
+    def _artifact_blocked(blind_case: BlindCase) -> ReproductionObservation:
+        return ReproductionObservation(
+            outcome="blocked", signal_type=blind_case.signal_types[0], signal_observed=False,
+            blocker_axis="encoding_transport", details={"reason": "artifact_unavailable"},
+            content_sha256=hashlib.sha256(b"").hexdigest(), content_length=0,
+        )
+
+    @staticmethod
+    def _is_pre_dispatch_policy_or_budget_error(error: ValidationTransportError) -> bool:
+        message = str(error)
+        return (
+            message == "transport operation is outside current TargetPolicy"
+            or message.startswith("TargetPolicy request budget exhausted")
+            or message.startswith("TargetPolicy concurrency limit reached")
+            or message.startswith("TargetPolicy validation byte budget exhausted")
+        )
+
+    @staticmethod
+    def _read_complete_response(response) -> bytes:
+        """Read complete data below the capture limit, never a byte beyond it."""
+        content = bytearray()
+        while len(content) < _MAX_RESPONSE_BYTES:
+            chunk = response.read(min(_RESPONSE_READ_CHUNK_BYTES,
+                                      _MAX_RESPONSE_BYTES - len(content)))
+            if type(chunk) is not bytes:
+                raise ValidationTransportError("multipart response reader returned invalid bytes")
+            if not chunk:
+                return bytes(content)
+            content.extend(chunk)
+        # Reading even one lookahead byte would exceed the durable response-byte reservation.
+        raise MultipartResponseIncompleteError("multipart response completeness is unknown at capture limit")
 
     def execute(self, blind_case: BlindCase, *, attempt_kind: str, batch_no: int,
                 ordinal: int, attempt_id: str, db_path: Path, scan_id: str,
@@ -69,17 +101,23 @@ class MultipartReproductionPort:
             raise ValueError(unsupported)
         runtime = MultipartRuntimeContract.model_validate(blind_case.runtime_contract)
         attempt = runtime.for_attempt(attempt_kind)
-        url, headers, body = encode_multipart(attempt, blind_case.endpoint, self.artifact_resolver)
+        try:
+            url, headers, body = encode_multipart(attempt, blind_case.endpoint, self.artifact_resolver)
+        except BinaryArtifactUnavailable:
+            return self._artifact_blocked(blind_case)
         broker = ValidationTransportBroker(
             db_path=db_path, scan_id=scan_id, stage_run_id=stage_run_id, case_id=case_id,
             attempt_id=attempt_id, blind_case=blind_case, policy=policy,
         )
+        request_metadata = {
+            "request_payload_sha256": hashlib.sha256(body).hexdigest(),
+            "request_payload_length": len(body),
+        }
         spec = TransportOperationSpec(
             runtime_kind="multipart", operation_kind="request", destination=url,
             policy_url=url, method=blind_case.method, request_bytes=len(body),
             max_response_bytes=_MAX_RESPONSE_BYTES,
-            metadata={"request_body_sha256": hashlib.sha256(body).hexdigest(),
-                      "request_body_length": len(body)},
+            metadata=request_metadata,
         )
 
         def sender(timeout: float) -> TransportDispatchResult[BrokerResponse]:
@@ -89,7 +127,7 @@ class MultipartReproductionPort:
             except HTTPError as error:
                 response = error
             try:
-                response_body = response.read(_MAX_RESPONSE_BYTES)
+                response_body = self._read_complete_response(response)
                 response_headers = dict(getattr(response, "headers", {}) or {})
                 response_url = response.geturl()
                 status = int(getattr(response, "status", getattr(response, "code", 0)))
@@ -98,20 +136,25 @@ class MultipartReproductionPort:
             broker_response = BrokerResponse(status, response_url, response_headers, response_body)
             return TransportDispatchResult(
                 broker_response, len(response_body),
-                {"response_body_sha256": hashlib.sha256(response_body).hexdigest(),
-                 "response_body_length": len(response_body)},
+                request_metadata | {
+                    "response_payload_sha256": hashlib.sha256(response_body).hexdigest(),
+                    "response_payload_length": len(response_body),
+                },
             )
 
         try:
-            started = self.clock()
-            operation_id, response = broker.dispatch(spec, sender)
-        except ValidationTransportError:
+            reservation = broker.reserve(spec)
+        except ValidationTransportError as exc:
+            if not self._is_pre_dispatch_policy_or_budget_error(exc):
+                raise
             return ReproductionObservation(
                 outcome="blocked", signal_type=blind_case.signal_types[0], signal_observed=False,
                 details={"reason": "current_policy_rejected"},
                 content_sha256=hashlib.sha256(b"").hexdigest(), content_length=0,
                 policy_allowed=False,
             )
+        started = self.clock()
+        operation_id, response = broker.dispatch_reserved(reservation, sender)
         duration_ms = max(0.0, (self.clock() - started) * 1000)
         evaluation = evaluate_http_response(response, attempt.assertions, duration_ms=duration_ms)
         observed = evaluation["signal_observed"]

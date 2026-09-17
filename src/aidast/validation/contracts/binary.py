@@ -18,6 +18,10 @@ _ARTIFACT_REFERENCE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$")
 _MAX_BINARY_BYTES = 1_000_000
 
 
+class BinaryArtifactUnavailable(ValueError):
+    """A trusted resolver cannot currently provide an otherwise valid artifact."""
+
+
 class BinaryValue(StrictContract):
     """One verified inline value or one opaque resolver-backed artifact."""
 
@@ -55,9 +59,9 @@ class BinaryValue(StrictContract):
             # Validation in the model constructor already proved this decode is safe.
             return self._verify(base64.b64decode(self.inline_base64.encode("ascii"), validate=True))
         if resolver is None:
-            raise ValueError("binary artifact resolver is required")
+            raise BinaryArtifactUnavailable("binary artifact resolver is unavailable")
         try:
             value = resolver(self.artifact_ref)
         except (OSError, ValueError, KeyError) as exc:
-            raise ValueError("binary artifact resolution failed") from exc
+            raise BinaryArtifactUnavailable("binary artifact resolution failed") from exc
         return self._verify(value)

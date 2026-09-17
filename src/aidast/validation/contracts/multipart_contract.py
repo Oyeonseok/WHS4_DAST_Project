@@ -21,6 +21,11 @@ _PART_TOKEN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 _FILENAME_TOKEN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,255}$")
 _CONTENT_TYPE = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]+/[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
 _MAX_BODY_BYTES = 1_000_000
+_ADAPTER_OWNED_HEADERS = frozenset({
+    "content-type", "content-length", "content-disposition", "transfer-encoding",
+    "trailer", "host", "connection", "keep-alive", "upgrade", "te", "expect",
+    "proxy-connection",
+})
 
 
 def _safe_part_name(value: str, *, filename: bool = False) -> bool:
@@ -75,7 +80,7 @@ class MultipartRequestTemplate(StrictContract):
         if any(_HEADER_NAME.fullmatch(name) is None or is_sensitive_header(name)
                for name in self.headers):
             raise ValueError("multipart request template contains an invalid header name")
-        if any(name.casefold() in {"content-type", "content-length", "content-disposition"}
+        if any(name.casefold() in _ADAPTER_OWNED_HEADERS
                for name in self.headers):
             raise ValueError("multipart framing headers are adapter controlled")
         if any(len(value) > 16_384 or "\r" in value or "\n" in value
