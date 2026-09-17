@@ -7,7 +7,7 @@ import json
 from typing import Annotated, Any, Literal
 from urllib.parse import parse_qsl, urlsplit, urlunsplit
 
-from pydantic import ConfigDict, Field, field_validator, model_serializer, model_validator
+from pydantic import ConfigDict, Field, TypeAdapter, field_validator, model_serializer, model_validator
 
 from aidast.core.http_safety import is_sensitive_header
 from aidast.attack.store import _SECRET_KEY
@@ -20,6 +20,10 @@ from .runtime_contract import _HEADER_NAME, _MISSING, _json_path
 MAX_BYTES = 1_000_000
 _OWNED_HEADERS = frozenset({"host", "connection", "upgrade", "origin", "content-length",
                             "transfer-encoding", "trailer", "proxy-connection"})
+HeaderName = Annotated[str, Field(min_length=1, max_length=256)]
+HeaderValue = Annotated[str, Field(max_length=16_384)]
+HandshakeHeaders = Annotated[dict[HeaderName, HeaderValue], Field(max_length=32)]
+_HANDSHAKE_HEADERS = TypeAdapter(HandshakeHeaders, config=ConfigDict(strict=True, hide_input_in_errors=True))
 
 
 class _WebSocketContract(StrictContract):
@@ -28,6 +32,16 @@ class _WebSocketContract(StrictContract):
 
 def adapter_owned_header(name: str) -> bool:
     return name.casefold() in _OWNED_HEADERS or name.casefold().startswith("sec-websocket-")
+
+
+def bounded_handshake_headers(value: object) -> dict[str, str]:
+    """Validate bounded transport-safe headers, including resolver-supplied auth."""
+    headers = _HANDSHAKE_HEADERS.validate_python(value)
+    if (len({name.casefold() for name in headers}) != len(headers)
+            or any(_HEADER_NAME.fullmatch(name) is None or adapter_owned_header(name)
+                   or "\r" in content or "\n" in content for name, content in headers.items())):
+        raise ValueError("WebSocket handshake headers invalid")
+    return headers
 
 
 def json_bytes(value: Any) -> bytes:
@@ -165,7 +179,7 @@ class WebSocketAssertion(_WebSocketContract):
 class WebSocketAttemptContract(_WebSocketContract):
     endpoint: str = Field(min_length=1, max_length=2048)
     origin: str | None = Field(default=None, max_length=2048)
-    headers: dict[str, str] = Field(default_factory=dict, max_length=32)
+    headers: HandshakeHeaders = Field(default_factory=dict)
     subprotocols: tuple[str, ...] = Field(default=(), max_length=16)
     frames: tuple[OutboundFrame, ...] = Field(min_length=1, max_length=32)
     assertions: tuple[WebSocketAssertion, ...] = Field(min_length=1, max_length=16)
@@ -189,9 +203,8 @@ class WebSocketAttemptContract(_WebSocketContract):
                     or origin.query or origin.fragment or origin.username or origin.password
                     or any(ord(c) < 33 for c in self.origin)):
                 raise ValueError("WebSocket origin must be an HTTP origin")
-        if any(_HEADER_NAME.fullmatch(k) is None or is_sensitive_header(k) or _SECRET_KEY.search(k)
-               or adapter_owned_header(k)
-               or len(v) > 16_384 or "\r" in v or "\n" in v for k, v in self.headers.items()):
+        bounded_handshake_headers(self.headers)
+        if any(is_sensitive_header(name) or _SECRET_KEY.search(name) for name in self.headers):
             raise ValueError("WebSocket headers must be safe non-sensitive handshake headers")
         if (len(set(self.subprotocols)) != len(self.subprotocols)
                 or any(len(v) > 128 or _HEADER_NAME.fullmatch(v) is None for v in self.subprotocols)):

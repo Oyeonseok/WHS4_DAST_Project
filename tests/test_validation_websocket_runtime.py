@@ -100,6 +100,16 @@ class WebSocketContractTests(unittest.TestCase):
                 cls.model_validate(doc)
             self.assertNotIn("private-marker", str(raised.exception))
 
+    def test_contract_header_names_have_an_explicit_length_bound(self):
+        cls = self.contract_module().WebSocketRuntimeContract
+        doc = runtime_document()
+        doc["target"]["headers"] = {"X" * 256: "inert"}
+        self.assertEqual(len(next(iter(cls.model_validate(doc).target.headers))), 256)
+        for length in (257, 1_000_001):
+            with self.subTest(length=length), self.assertRaises(ValueError):
+                doc["target"]["headers"] = {"X" * length: "inert"}
+                cls.model_validate(doc)
+
     def test_contract_allows_bounded_inert_query_and_rejects_sensitive_query_names(self):
         mod = self.contract_module()
         doc = runtime_document()
@@ -228,6 +238,113 @@ class WebSocketAdapterTests(unittest.TestCase):
         self.assertEqual(result.outcome, "blocked")
         self.assertFalse(calls)
         self.assertEqual(len(self.rows()), 0)
+
+    def test_unavailable_resources_are_preflight_blocked_without_operations(self):
+        def unavailable(reference):
+            raise ValueError("private-marker")
+        binary = {"artifact_ref": "fixture", "length": 5,
+                  "sha256": hashlib.sha256(b"inert").hexdigest()}
+        for resource, resolver in (("credential", None), ("credential", unavailable),
+                                   ("artifact", None), ("artifact", unavailable)):
+            with self.subTest(resource=resource, resolver=resolver is not None):
+                doc = runtime_document()
+                options = {}
+                if resource == "artifact":
+                    doc["target"]["frames"] = [{"kind": "binary", "value": binary}]
+                    options["artifact_resolver"] = resolver
+                else:
+                    options.update(credentials=("opaque",), credential_resolver=resolver)
+                calls = []
+                result = self.execute(lambda *a, **kw: calls.append("connector"), document=doc, **options)
+                self.assertEqual(result.outcome, "blocked")
+                self.assertEqual(result.details, {"reason": "artifact_unavailable" if resource == "artifact"
+                                                   else "credential_reference_unavailable"})
+                self.assertTrue(result.policy_allowed)
+                self.assertNotIn("private-marker", result.model_dump_json())
+                self.assertFalse(calls)
+                self.assertEqual(self.rows(), [])
+
+    def test_malformed_resource_values_are_hard_preflight_errors_without_operations(self):
+        binary = {"artifact_ref": "fixture", "length": 5,
+                  "sha256": hashlib.sha256(b"inert").hexdigest()}
+        for resource in ("credential", "artifact"):
+            with self.subTest(resource=resource):
+                doc = runtime_document()
+                options = {}
+                if resource == "artifact":
+                    doc["target"]["frames"] = [{"kind": "binary", "value": binary}]
+                    options["artifact_resolver"] = lambda ref: b"private-marker"
+                else:
+                    options.update(credentials=("opaque",), credential_resolver=lambda ref: {"Authorization": 123})
+                calls = []
+                with self.assertRaises(ValidationTransportError) as raised:
+                    self.execute(lambda *a, **kw: calls.append("connector"), document=doc, **options)
+                self.assertNotIn("private-marker", str(raised.exception))
+                self.assertFalse(calls)
+                self.assertEqual(self.rows(), [])
+
+    def test_resources_are_resolved_once_before_reservation_for_selected_attempt(self):
+        resolutions = []
+        binary = {"artifact_ref": "fixture", "length": 5,
+                  "sha256": hashlib.sha256(b"inert").hexdigest()}
+        doc = runtime_document()
+        doc["target"]["frames"] = [{"kind": "binary", "value": binary}]
+        doc["negative_control"]["frames"] = [{"kind": "binary", "value": {**binary, "artifact_ref": "unused"}}]
+        def credential(reference):
+            self.assertEqual(self.rows(), [])
+            resolutions.append(reference)
+            return {"Authorization": "Bearer private-marker"}
+        def artifact(reference):
+            self.assertEqual(self.rows(), [])
+            resolutions.append(reference)
+            return b"inert"
+        connection = ScriptedConnection(['{"message":"target"}'])
+        result = self.execute(lambda *a, **kw: connection, document=doc, credentials=("opaque",),
+                              credential_resolver=credential, artifact_resolver=artifact)
+        self.assertTrue(result.signal_observed)
+        self.assertEqual(resolutions, ["opaque", "fixture"])
+        self.assertEqual(connection.sent, [b"inert"])
+
+    def test_merged_credential_headers_are_bounded_and_cannot_override_contract_headers(self):
+        for headers in (
+            {"X" * 257: "inert"}, {"Authorization": "x" * 16_385},
+            {"x-inert": "override"}, {"Host": "127.0.0.1"},
+            {"Sec-WebSocket-Protocol": "inert"},
+            {f"X-{i}": "inert" for i in range(32)},
+            {"Authorization": "inert", "authorization": "override"},
+        ):
+            with self.subTest(names=[name[:30] for name in headers]):
+                doc = runtime_document()
+                doc["target"]["headers"] = {"X-Inert": "contract"}
+                calls = []
+                with self.assertRaises(ValidationTransportError) as raised:
+                    self.execute(lambda *a, **kw: calls.append("connector"), document=doc,
+                                 credentials=("opaque",), credential_resolver=lambda ref: headers)
+                self.assertNotIn("override", str(raised.exception))
+                self.assertFalse(calls)
+                self.assertEqual(self.rows(), [])
+
+    def test_distinct_credential_references_cannot_override_each_other(self):
+        calls = []
+        with self.assertRaises(ValidationTransportError):
+            self.execute(lambda *a, **kw: calls.append("connector"), credentials=("first", "second"),
+                         credential_resolver=lambda ref: {"Authorization": ref})
+        self.assertFalse(calls)
+        self.assertEqual(self.rows(), [])
+
+    def test_policy_is_rechecked_after_preflight_before_reserving(self):
+        policy = self.policy.model_copy(update={"allowed_schemes": ["http"], "allowed_hosts": ["127.0.0.1"],
+                                               "allowed_ports": [80]})
+        def credential(reference):
+            policy.allowed_hosts[:] = ["elsewhere"]
+            return {"Authorization": "inert"}
+        calls = []
+        result = self.execute(lambda *a, **kw: calls.append("connector"), policy=policy,
+                              credentials=("opaque",), credential_resolver=credential)
+        self.assertEqual(result.details, {"reason": "current_policy_rejected"})
+        self.assertFalse(result.policy_allowed)
+        self.assertFalse(calls)
+        self.assertEqual(self.rows(), [])
 
     def test_handshake_remains_running_through_send_receive_and_close(self):
         def check_running():
@@ -397,6 +514,68 @@ class WebSocketAdapterTests(unittest.TestCase):
         self.assertTrue(target.signal_observed)
         self.assertFalse(negative.signal_observed)
         self.assertTrue(all(row[1] == "completed" for row in self.rows()))
+
+    def test_loopback_explicit_close_preserves_two_buffered_messages(self):
+        from websockets.sync.client import connect
+        def handler(ws):
+            ws.recv()
+            ws.send("first")
+            ws.send("second")
+            try:
+                ws.recv()
+            except ConnectionClosed:
+                pass
+        def buffered_connector(*args, **kwargs):
+            connection = connect(*args, **kwargs)
+            original_send = connection.send
+            def send(value):
+                original_send(value)
+                deadline = time.monotonic() + 0.5
+                while connection.received_frames < 2 and time.monotonic() < deadline:
+                    time.sleep(0.001)
+                self.assertEqual(connection.received_frames, 2)
+            connection.send = send
+            return connection
+        for connector in (None, buffered_connector):
+            with self.subTest(default_connector=connector is None):
+                endpoint = self.start_server(handler)
+                doc = runtime_document()
+                doc["target"]["frames"].append({"kind": "close", "code": 1000})
+                doc["target"]["max_received_frames"] = 3
+                doc["target"]["assertions"] = [{"assertion_id": "proof", "kind": "frame_kind_sequence",
+                                                "expected": ["text", "text"]}]
+                port = int(endpoint.split(":")[-1].split("/")[0])
+                policy = self.policy.model_copy(update={"allowed_schemes": ["http"], "allowed_hosts": ["127.0.0.1"],
+                                                       "allowed_ports": [port], "limits": PolicyLimits(timeout_seconds=1, requests_per_second=5)})
+                result = self.execute(connector, endpoint=endpoint, document=doc, policy=policy)
+                self.assertTrue(result.signal_observed)
+                self.assertEqual(result.details["frame_count"], 2)
+                self.assertEqual(result.details["inbound_frame_count"], 3)
+                self.assertTrue(all(row[1] == "completed" for row in self.rows()))
+
+    def test_loopback_explicit_close_still_rejects_buffered_overflow(self):
+        def handler(ws):
+            try:
+                ws.recv()
+                for value in ("first", "second", "third", "fourth"):
+                    ws.send(value)
+                ws.recv()
+            except ConnectionClosed:
+                pass
+        for patch in ({"max_received_frames": 3}, {"max_received_bytes": 8}):
+            with self.subTest(patch=patch):
+                endpoint = self.start_server(handler)
+                doc = runtime_document()
+                doc["target"]["frames"].append({"kind": "close", "code": 1000})
+                doc["target"].update(patch)
+                port = int(endpoint.split(":")[-1].split("/")[0])
+                policy = self.policy.model_copy(update={"allowed_schemes": ["http"], "allowed_hosts": ["127.0.0.1"],
+                                                       "allowed_ports": [port], "limits": PolicyLimits(timeout_seconds=1, requests_per_second=5)})
+                with self.assertRaises(ValidationTransportError):
+                    self.execute(endpoint=endpoint, document=doc, policy=policy)
+                self.assertEqual(self.conn.execute(
+                    "SELECT status FROM validation_transport_operations WHERE operation_kind='handshake' ORDER BY scheduled_at DESC LIMIT 1"
+                ).fetchone()[0], "outcome_unknown")
 
     def test_loopback_redirect_is_never_followed(self):
         contacted = []

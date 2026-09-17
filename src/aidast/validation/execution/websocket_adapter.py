@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import sqlite3
 import time
 from functools import partial
 from pathlib import Path
@@ -19,7 +20,7 @@ from aidast.recon.policy import TargetPolicy
 from ..contracts.binary import BinaryArtifactResolver, BinaryArtifactUnavailable
 from ..contracts.models import BlindCase, ReproductionObservation, canonical_json, canonical_sha256
 from ..contracts.websocket_contract import (
-    WebSocketRuntimeContract, adapter_owned_header, evaluate_websocket_observation,
+    WebSocketRuntimeContract, bounded_handshake_headers, evaluate_websocket_observation,
     json_bytes, policy_url,
 )
 from ..persistence.evidence_policy import sanitize_metadata
@@ -95,8 +96,6 @@ class WebSocketReproductionPort:
                 return "websocket_endpoint_mismatch"
         except ValueError:
             return "websocket_runtime_contract_invalid"
-        if blind_case.credential_references and self.credential_resolver is None:
-            return "credential_reference_unavailable"
         return None
 
     @staticmethod
@@ -117,6 +116,39 @@ class WebSocketReproductionPort:
         runtime.validate_policy_timeout(policy.limits.timeout_seconds)
         attempt = runtime.for_attempt(attempt_kind)
         url = policy_url(attempt.endpoint)
+        # Resolve trusted local resources only after a non-mutating scope check.
+        # The broker still performs the authoritative atomic recheck below.
+        if not policy.allows_validation_url(url, method="GET"):
+            return self._blocked(blind_case, "current_policy_rejected", policy_allowed=False)
+        headers = dict(attempt.headers)
+        for reference in blind_case.credential_references:
+            if self.credential_resolver is None:
+                return self._blocked(blind_case, "credential_reference_unavailable")
+            try:
+                raw_headers = self.credential_resolver(reference)
+            except (ImportError, OSError, KeyError, ValueError, sqlite3.Error):
+                return self._blocked(blind_case, "credential_reference_unavailable")
+            except Exception:
+                raise WebSocketSessionError("WebSocket credential resolution failed") from None
+            try:
+                resolved = bounded_handshake_headers(PipelineCredentialResolver._headers(raw_headers))
+                if {name.casefold() for name in headers} & {name.casefold() for name in resolved}:
+                    raise ValueError("credential header collision")
+                headers = bounded_handshake_headers(headers | resolved)
+            except Exception:
+                raise WebSocketSessionError("WebSocket credential headers invalid") from None
+        try:
+            outbound = []
+            for frame in attempt.frames:
+                value = (frame.value if frame.kind == "text" else
+                         json_bytes(frame.value).decode("utf-8") if frame.kind == "json" else
+                         frame.value.resolve(self.artifact_resolver) if frame.kind in {"binary", "ping"}
+                         else frame.code)
+                outbound.append((frame.kind, value))
+        except BinaryArtifactUnavailable:
+            return self._blocked(blind_case, "artifact_unavailable")
+        except Exception:
+            raise WebSocketSessionError("WebSocket outbound resource invalid") from None
         deadline = self.clock() + policy.limits.timeout_seconds
 
         def remaining():
@@ -140,7 +172,7 @@ class WebSocketReproductionPort:
             policy_url=url, method="GET", request_bytes=0,
             max_response_bytes=attempt.max_received_bytes, concurrency_units=1,
         )
-        # Authorization precedes both trusted secret resolution and connection I/O.
+        # Recheck current policy and budgets atomically before any connection I/O.
         try:
             reservation = broker.reserve(spec)
         except ValidationTransportError as error:
@@ -162,25 +194,14 @@ class WebSocketReproductionPort:
                     pass
 
             try:
-                headers = dict(attempt.headers)
-                for reference in blind_case.credential_references:
-                    resolved = PipelineCredentialResolver._headers(self.credential_resolver(reference))
-                    if any(adapter_owned_header(name) for name in resolved):
-                        raise WebSocketSessionError("credential resolver returned transport headers")
-                    headers.update(resolved)
-                outbound = []
-                for frame in attempt.frames:
-                    value = (frame.value if frame.kind == "text" else
-                             json_bytes(frame.value).decode("utf-8") if frame.kind == "json" else
-                             frame.value.resolve(self.artifact_resolver) if frame.kind in {"binary", "ping"}
-                             else frame.code)
-                    outbound.append((frame.kind, value))
                 connection = self.connector(
                     attempt.endpoint, origin=attempt.origin, subprotocols=list(attempt.subprotocols) or None,
                     additional_headers=headers, proxy=None, compression=None, extensions=None,
                     ping_interval=None, open_timeout=min(remaining(), attempt.connection_timeout_seconds),
                     close_timeout=remaining(), max_size=min(attempt.max_frame_bytes, attempt.max_received_bytes),
-                    max_queue=1, logger=_QUIET_LOGGER, legacy=True,
+                    # The event guard rejects overflow before queue insertion;
+                    # valid buffered frames cannot pause a synchronous close.
+                    max_queue=attempt.max_received_frames, logger=_QUIET_LOGGER, legacy=True,
                     create_connection=partial(_BoundedConnection, frame_limit=attempt.max_received_frames,
                                               byte_limit=attempt.max_received_bytes),
                 )
@@ -239,8 +260,6 @@ class WebSocketReproductionPort:
                     raise WebSocketSessionError("WebSocket inbound limit exceeded")
                 if connection.subprotocol is not None and connection.subprotocol not in attempt.subprotocols:
                     raise WebSocketSessionError("WebSocket subprotocol was not offered")
-            except BinaryArtifactUnavailable:
-                raise WebSocketSessionError("WebSocket binary artifact unavailable") from None
             except Exception:
                 raise WebSocketSessionError("WebSocket session incomplete or rejected") from None
             finally:
