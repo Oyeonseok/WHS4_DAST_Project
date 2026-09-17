@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import http.client
+import ipaddress
 import queue
 import socket
 import sqlite3
@@ -15,7 +16,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 from urllib.error import HTTPError
 from urllib.parse import urlsplit
-from urllib.request import Request, build_opener
+from urllib.request import Request
 from uuid import uuid4
 
 from aidast.core.http_safety import is_sensitive_header
@@ -125,14 +126,35 @@ class ConcurrentReproductionPort:
                  artifact_resolver: BinaryArtifactResolver | None = None,
                  clock: Callable[[], float] = time.monotonic,
                  monotonic_ns: Callable[[], int] = time.monotonic_ns):
-        self.transport = transport or build_opener(_NoRedirect()).open
-        # An stdlib opener is ordinary HTTP, not a custom test seam.  Use the
-        # retained connection path so an absolute watchdog can interrupt DNS /
-        # headers / body reads instead of relying on an inactivity timeout.
-        self._ordinary_http = transport is None or type(getattr(transport, "__self__", None)).__name__ == "OpenerDirector"
+        self.transport = transport
+        # ``None`` is the only default-transport sentinel.  A supplied opener
+        # is a real configured seam (handlers, trust policy, instrumentation),
+        # and must be invoked rather than inferred away from its owner type.
+        # A plain stdlib no-redirect opener is the compatibility form used by
+        # the existing ordinary-HTTP caller; it has no caller handlers and can
+        # therefore opt into the cancellable retained-socket path.
+        self._ordinary_http = transport is None or self._is_plain_no_redirect_opener(transport)
         self.credential_resolver = credential_resolver
         self.artifact_resolver = artifact_resolver
         self.clock, self.monotonic_ns = clock, monotonic_ns
+
+    @staticmethod
+    def _is_plain_no_redirect_opener(transport: Callable | None) -> bool:
+        """Recognize only an uncustomized stdlib opener compatibility form.
+
+        This deliberately examines configured handlers, never callable class
+        names.  Any caller-provided handler makes the opener an injected
+        transport and it is invoked exactly as supplied.
+        """
+        owner = getattr(transport, "__self__", None)
+        handlers = getattr(owner, "handlers", None)
+        if not isinstance(handlers, list):
+            return False
+        return all(
+            isinstance(handler, _NoRedirect)
+            or handler.__class__.__module__.startswith("urllib.")
+            for handler in handlers
+        )
 
     def unsupported_reason(self, blind_case: BlindCase) -> str | None:
         if blind_case.target_kind != "finding":
@@ -263,13 +285,14 @@ class ConcurrentReproductionPort:
         if remaining <= 0:
             raise ConcurrentExecutionError("concurrent attempt deadline exceeded")
         request = Request(prepared.url, data=prepared.body, headers=dict(prepared.headers), method=method)
-        started, dispatch_ns = self.clock(), self.monotonic_ns()
+        started = self.clock()
         connection: http.client.HTTPConnection | None = None
         timer: threading.Timer | None = None
         response = None
+        connecting_socket: socket.socket | None = None
 
         def sockets() -> tuple[socket.socket, ...]:
-            candidates = [None if connection is None else connection.sock]
+            candidates = [connecting_socket, None if connection is None else connection.sock]
             fp = None if response is None else getattr(response, "fp", None)
             candidates.append(getattr(getattr(fp, "raw", None), "_sock", None))
             return tuple(item for item in candidates if isinstance(item, socket.socket))
@@ -286,30 +309,113 @@ class ConcurrentReproductionPort:
             except OSError:
                 pass
 
+        def ensure_remaining() -> float:
+            value = deadline - self.clock()
+            if value <= 0:
+                raise ConcurrentExecutionError("concurrent attempt deadline exceeded")
+            return value
+
+        def resolve(host: str, port: int) -> tuple[int, tuple[Any, ...]]:
+            """Resolve before connecting, failing closed when deadline passes."""
+            try:
+                ipaddress.ip_address(host)
+                numeric = True
+            except ValueError:
+                numeric = False
+
+            completed = threading.Event()
+            result: list[object] = []
+
+            def lookup() -> None:
+                try:
+                    result.append(socket.getaddrinfo(
+                        host, port, type=socket.SOCK_STREAM,
+                        flags=socket.AI_NUMERICHOST if numeric else 0,
+                    ))
+                except BaseException as error:  # passed back without a late connect
+                    result.append(error)
+                finally:
+                    completed.set()
+
+            resolver = threading.Thread(target=lookup, name="ConcurrentDNSResolution", daemon=True)
+            resolver.start()
+            if not completed.wait(ensure_remaining()):
+                raise ConcurrentExecutionError("concurrent attempt deadline exceeded")
+            ensure_remaining()
+            if not result or isinstance(result[0], BaseException):
+                raise ConcurrentExecutionError("concurrent hostname resolution failed")
+            addresses = result[0]
+            if not addresses:
+                raise ConcurrentExecutionError("concurrent hostname resolution failed")
+            family, _, _, _, sockaddr = addresses[0]
+            return family, sockaddr
+
+        def connect_with_deadline(address: tuple[str, int], connection_timeout: float, source_address=None) -> socket.socket:
+            # Installed as http.client's connection factory, retaining normal
+            # HTTP(S) framing and HTTPS verification/SNI while making DNS and
+            # acquisition separately deadline-aware.
+            del connection_timeout, source_address
+            nonlocal connecting_socket
+            host, port = address
+            family, sockaddr = resolve(host, port)
+            ensure_remaining()
+            candidate = socket.socket(family, socket.SOCK_STREAM)
+            connecting_socket = candidate
+            try:
+                candidate.settimeout(ensure_remaining())
+                candidate.connect(sockaddr)
+                ensure_remaining()
+                return candidate
+            except BaseException:
+                try:
+                    candidate.close()
+                except OSError:
+                    pass
+                raise
+
         try:
-            if self._ordinary_http:
-                parsed = urlsplit(prepared.url)
-                connection_type = http.client.HTTPSConnection if parsed.scheme == "https" else http.client.HTTPConnection
-                connection = connection_type(parsed.hostname, parsed.port, timeout=min(timeout, remaining))
-                timer = threading.Timer(max(0.0, deadline - self.clock()), abort)
-                timer.daemon = True
-                timer.start()
-                target = (parsed.path or "/") + (("?" + parsed.query) if parsed.query else "")
-                connection.request(method, target, body=prepared.body, headers=dict(prepared.headers))
-                if connection.sock is not None:
-                    connection.sock.settimeout(max(0.001, deadline - self.clock()))
-                response = connection.getresponse()
-            else:
-                response = self.transport(request, timeout=min(timeout, remaining))
-                timer = threading.Timer(max(0.0, deadline - self.clock()), response.close)
-                timer.daemon = True
-                timer.start()
-        except HTTPError as error:
-            response = error
-        try:
+            try:
+                if self._ordinary_http:
+                    parsed = urlsplit(prepared.url)
+                    connection_type = http.client.HTTPSConnection if parsed.scheme == "https" else http.client.HTTPConnection
+                    connection = connection_type(parsed.hostname, parsed.port, timeout=min(timeout, remaining))
+                    timer = threading.Timer(max(0.0, deadline - self.clock()), abort)
+                    timer.daemon = True
+                    timer.start()
+                    target = (parsed.path or "/") + (("?" + parsed.query) if parsed.query else "")
+                    # Test seams that model just request/getresponse intentionally
+                    # omit connect.  Real http.client connections acquire first so
+                    # expiry cannot turn into a later request transmission.
+                    if hasattr(connection, "connect"):
+                        connection._create_connection = connect_with_deadline
+                        connection.connect()
+                    ensure_remaining()  # immediately after socket acquisition
+                    dispatch_ns = self.monotonic_ns()  # immediately before send
+                    connection.request(method, target, body=prepared.body, headers=dict(prepared.headers))
+                    if connection.sock is not None:
+                        connection.sock.settimeout(ensure_remaining())
+                    response = connection.getresponse()
+                else:
+                    # Injected transports own cancellation of a blocking call; the
+                    # adapter still invokes them and fail-closes if they return
+                    # after the absolute deadline.
+                    timer = threading.Timer(max(0.0, deadline - self.clock()), abort)
+                    timer.daemon = True
+                    timer.start()
+                    dispatch_ns = self.monotonic_ns()  # immediately before seam invocation
+                    response = self.transport(request, timeout=min(timeout, ensure_remaining()))
+                    ensure_remaining()
+            except HTTPError as error:
+                response = error
             def before_read() -> None:
                 for item in sockets():
-                    item.settimeout(max(0.001, deadline - self.clock()))
+                    try:
+                        item.settimeout(ensure_remaining())
+                    except OSError:
+                        # http.client can detach its connection socket once the
+                        # response owns it; the response socket remains in the
+                        # candidate set and retains the current deadline.
+                        continue
             body = MultipartReproductionPort._read_complete_response(
                 response, deadline=deadline, clock=self.clock, before_read=before_read,
             )
@@ -319,9 +425,17 @@ class ConcurrentReproductionPort:
         finally:
             if timer is not None:
                 timer.cancel()
-            response.close()
+                timer.join()
+            if response is not None:
+                try:
+                    response.close()
+                except OSError:
+                    pass
             if connection is not None:
-                connection.close()
+                try:
+                    connection.close()
+                except OSError:
+                    pass
         duration = max(0.0, (self.clock() - started) * 1000)
         if self.clock() >= deadline:
             raise ConcurrentExecutionError("concurrent attempt deadline exceeded")
@@ -332,21 +446,19 @@ class ConcurrentReproductionPort:
 
     def _compact_details(self, results: tuple[ConcurrentMemberResult, ...], operation_ids: list[str],
                          aggregate: Mapping[str, Any], skew_passed: bool | None) -> dict[str, Any]:
-        assertions = [{"assertion_sha256": canonical_sha256({"kind": item["kind"], "expected": item["expected"]}),
-                       "passed": item["passed"]} for item in aggregate["assertions"]]
+        assertions = [{"h": canonical_sha256({"kind": item["kind"], "expected": item["expected"]}),
+                       "p": item["passed"]} for item in aggregate["assertions"]]
         if skew_passed is not None:
-            assertions.append({"assertion_sha256": canonical_sha256({"kind": "start_skew_at_most_ms"}),
-                               "passed": skew_passed})
+            assertions.append({"h": canonical_sha256({"kind": "start_skew_at_most_ms"}), "p": skew_passed})
         return {"operation_ids": operation_ids, "start_skew_ms": aggregate["start_skew_ms"],
-                "members": [{"ordinal": item.ordinal, "status": item.response_status,
-                             "response_sha256": item.response_sha256, "response_bytes": item.response_bytes,
-                             "duration_ms": item.duration_ms,
-                             "evaluation_sha256": None if item.evaluation is None else canonical_sha256(item.evaluation["assertions"]),
+                "members": [{"o": item.ordinal, "s": item.response_status,
+                             "h": item.response_sha256, "l": item.response_bytes,
+                             "d": None if item.duration_ms is None else round(item.duration_ms * 1000),
+                             "e": None if item.evaluation is None else canonical_sha256(item.evaluation["assertions"]),
                              "evaluation": {"signal_observed": None if item.evaluation is None else item.evaluation["signal_observed"]}}
                             for item in results],
-                "aggregate": {"success_count": aggregate["success_count"],
-                              "distinct_response_digests": aggregate["distinct_response_digests"],
-                              "assertions": assertions}}
+                "aggregate": {"s": aggregate["success_count"], "d": aggregate["distinct_response_digests"],
+                              "a": assertions}}
 
     def execute(self, blind_case: BlindCase, *, attempt_kind: str, batch_no: int,
                 ordinal: int, attempt_id: str, db_path: Path, scan_id: str,
