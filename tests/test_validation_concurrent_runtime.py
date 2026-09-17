@@ -2,18 +2,21 @@
 
 from __future__ import annotations
 
+import hashlib
 import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from pydantic import ValidationError
 
-from aidast.validation.contracts.concurrent_contract import ConcurrentRuntimeContract
+from aidast.validation.contracts.concurrent_contract import ConcurrentAggregateAssertion, ConcurrentRuntimeContract
 from aidast.validation.contracts.runtime_semantics import (
     RuntimeSemanticError, validate_runtime_semantics,
 )
 from aidast.validation.contracts.runtime_contract import ResponseAssertion
-from aidast.validation.execution.concurrent_adapter import ConcurrentReproductionPort
+from aidast.validation.execution.concurrent_adapter import (
+    ConcurrentMemberResult, ConcurrentReproductionPort, evaluate_concurrent_results,
+)
 from aidast.recon.policy import PolicyLimits
 import test_validation_request_broker as request_fixture
 from aidast.validation import SkillProfileResolver
@@ -88,6 +91,38 @@ class ConcurrentContractTests(unittest.TestCase):
         )})
         with self.assertRaisesRegex(RuntimeSemanticError, "same target proof assertions"):
             validate_runtime_semantics(mismatch, profile)
+
+    def test_count_aggregate_uses_member_assertions_to_classify_partial_success(self):
+        members = (
+            ConcurrentMemberResult(0, "vop_one", 200, "a" * 64, 0, 1.0, {"signal_observed": True}),
+            ConcurrentMemberResult(1, "vop_two", 409, "b" * 64, 0, 1.0, {"signal_observed": False}),
+        )
+        for kind in ("success_count_equals", "success_count_at_least"):
+            result = evaluate_concurrent_results(members, (
+                ConcurrentAggregateAssertion(assertion_id="count", kind=kind, expected=1),
+            ), start_skew_ms=0.1)
+            self.assertTrue(result["signal_observed"])
+
+    def test_multipart_preflight_allows_trusted_framing_and_credential_header(self):
+        digest = hashlib.sha256(b"x").hexdigest()
+        attempt = {
+            "request": {"path_parameters": {"id": "inert"}, "files": [{
+                "name": "file", "filename": "fixture.txt", "content_type": "text/plain",
+                "content": {"inline_base64": "eA==", "length": 1, "sha256": digest},
+            }]},
+            "member_assertions": [{"assertion_id": "status", "kind": "status_equals", "expected": 200}],
+        }
+        runtime = ConcurrentRuntimeContract(
+            runtime_kind="concurrent", schema_version=1, workers=2, repeat_count=1,
+            release_strategy="simultaneous", barrier_timeout_seconds=1,
+            target=attempt, positive_control=attempt, negative_control=attempt,
+        )
+        prepared = ConcurrentReproductionPort()._prepare(
+            runtime.target, "https://test/items/{id}", {"Authorization": "Bearer inert"},
+        )
+        self.assertIn("Authorization", prepared.headers)
+        self.assertTrue(prepared.headers["Content-Type"].startswith("multipart/form-data;"))
+        self.assertEqual(prepared.headers["Content-Length"], str(len(prepared.body)))
 
 
 class ConcurrentLoopbackTests(unittest.TestCase):

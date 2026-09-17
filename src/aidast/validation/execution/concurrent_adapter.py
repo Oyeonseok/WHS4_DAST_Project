@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import hashlib
+import http.client
 import queue
+import socket
 import sqlite3
 import threading
 import time
@@ -12,6 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping
 from urllib.error import HTTPError
+from urllib.parse import urlsplit
 from urllib.request import Request, build_opener
 from uuid import uuid4
 
@@ -103,7 +106,12 @@ def evaluate_concurrent_results(
             "expected": assertion.expected, "actual": actual, "passed": passed,
         })
     return {
-        "signal_observed": member_passed and all(item["passed"] for item in assertion_results),
+        # Count/distinct/final assertions intentionally aggregate classified
+        # member outcomes.  In their absence every member remains the proof.
+        "signal_observed": (
+            all(item["passed"] for item in assertion_results)
+            if assertion_results else member_passed
+        ) and len(completed) == len(results),
         "success_count": success_count, "distinct_response_digests": digest_count,
         "start_skew_ms": start_skew_ms, "assertions": assertion_results,
     }
@@ -118,6 +126,10 @@ class ConcurrentReproductionPort:
                  clock: Callable[[], float] = time.monotonic,
                  monotonic_ns: Callable[[], int] = time.monotonic_ns):
         self.transport = transport or build_opener(_NoRedirect()).open
+        # An stdlib opener is ordinary HTTP, not a custom test seam.  Use the
+        # retained connection path so an absolute watchdog can interrupt DNS /
+        # headers / body reads instead of relying on an inactivity timeout.
+        self._ordinary_http = transport is None or type(getattr(transport, "__self__", None)).__name__ == "OpenerDirector"
         self.credential_resolver = credential_resolver
         self.artifact_resolver = artifact_resolver
         self.clock, self.monotonic_ns = clock, monotonic_ns
@@ -172,7 +184,8 @@ class ConcurrentReproductionPort:
         for source in (template, credentials):
             for name, value in source.items():
                 folded = name.casefold() if isinstance(name, str) else ""
-                if (not isinstance(name, str) or _HEADER_NAME.fullmatch(name) is None
+                if (not isinstance(name, str) or not 1 <= len(name) <= 256
+                        or _HEADER_NAME.fullmatch(name) is None
                         or not isinstance(value, str) or len(value) > 16_384
                         or "\r" in value or "\n" in value):
                     raise ConcurrentExecutionError("concurrent request headers are invalid")
@@ -192,13 +205,18 @@ class ConcurrentReproductionPort:
                  credential_headers: Mapping[str, str], *, method: str = "GET") -> _PreparedRequest:
         multipart = isinstance(attempt.request, MultipartRequestTemplate)
         if multipart:
+            # Validate caller and resolver headers *before* the trusted encoder
+            # adds Content-Type/Length framing.  Those generated values are not
+            # caller-controlled transport fields and must remain admissible.
+            self._merged_headers(attempt.request.headers, credential_headers, multipart=True)
             rendered = MultipartAttemptContract(request=attempt.request, assertions=attempt.member_assertions)
             url, template_headers, body = encode_multipart(rendered, endpoint, self.artifact_resolver)
+            headers = dict(template_headers) | dict(credential_headers)
         elif isinstance(attempt.request, HttpRequestTemplate):
             url, template_headers, body = render_http_request(endpoint, attempt.request)
+            headers = self._merged_headers(template_headers, credential_headers, multipart=False)
         else:  # pragma: no cover - validated union prevents this path.
             raise ConcurrentExecutionError("concurrent child is not HTTP or multipart")
-        headers = self._merged_headers(template_headers, credential_headers, multipart=multipart)
         payload = body or b""
         components = canonical_sha256({
             "method": method.upper(), "url": url, "payload_sha256": hashlib.sha256(payload).hexdigest(),
@@ -246,20 +264,64 @@ class ConcurrentReproductionPort:
             raise ConcurrentExecutionError("concurrent attempt deadline exceeded")
         request = Request(prepared.url, data=prepared.body, headers=dict(prepared.headers), method=method)
         started, dispatch_ns = self.clock(), self.monotonic_ns()
+        connection: http.client.HTTPConnection | None = None
+        timer: threading.Timer | None = None
+        response = None
+
+        def sockets() -> tuple[socket.socket, ...]:
+            candidates = [None if connection is None else connection.sock]
+            fp = None if response is None else getattr(response, "fp", None)
+            candidates.append(getattr(getattr(fp, "raw", None), "_sock", None))
+            return tuple(item for item in candidates if isinstance(item, socket.socket))
+
+        def abort() -> None:
+            for item in sockets():
+                try:
+                    item.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+            try:
+                if connection is not None:
+                    connection.close()
+            except OSError:
+                pass
+
         try:
-            response = self.transport(request, timeout=min(timeout, remaining))
+            if self._ordinary_http:
+                parsed = urlsplit(prepared.url)
+                connection_type = http.client.HTTPSConnection if parsed.scheme == "https" else http.client.HTTPConnection
+                connection = connection_type(parsed.hostname, parsed.port, timeout=min(timeout, remaining))
+                timer = threading.Timer(max(0.0, deadline - self.clock()), abort)
+                timer.daemon = True
+                timer.start()
+                target = (parsed.path or "/") + (("?" + parsed.query) if parsed.query else "")
+                connection.request(method, target, body=prepared.body, headers=dict(prepared.headers))
+                if connection.sock is not None:
+                    connection.sock.settimeout(max(0.001, deadline - self.clock()))
+                response = connection.getresponse()
+            else:
+                response = self.transport(request, timeout=min(timeout, remaining))
+                timer = threading.Timer(max(0.0, deadline - self.clock()), response.close)
+                timer.daemon = True
+                timer.start()
         except HTTPError as error:
             response = error
-        timer = threading.Timer(max(0.0, deadline - self.clock()), response.close)
-        timer.daemon = True
-        timer.start()
         try:
-            body = MultipartReproductionPort._read_complete_response(response, deadline=deadline, clock=self.clock)
-            result = BrokerResponse(int(getattr(response, "status", getattr(response, "code", 0))), response.geturl(),
+            def before_read() -> None:
+                for item in sockets():
+                    item.settimeout(max(0.001, deadline - self.clock()))
+            body = MultipartReproductionPort._read_complete_response(
+                response, deadline=deadline, clock=self.clock, before_read=before_read,
+            )
+            result = BrokerResponse(int(getattr(response, "status", getattr(response, "code", 0))),
+                prepared.url if connection is not None else response.geturl(),
                 dict(getattr(response, "headers", {}) or {}), body)
         finally:
-            timer.cancel()
+            if timer is not None:
+                timer.cancel()
             response.close()
+            if connection is not None:
+                connection.close()
         duration = max(0.0, (self.clock() - started) * 1000)
         if self.clock() >= deadline:
             raise ConcurrentExecutionError("concurrent attempt deadline exceeded")
@@ -279,6 +341,7 @@ class ConcurrentReproductionPort:
                 "members": [{"ordinal": item.ordinal, "status": item.response_status,
                              "response_sha256": item.response_sha256, "response_bytes": item.response_bytes,
                              "duration_ms": item.duration_ms,
+                             "evaluation_sha256": None if item.evaluation is None else canonical_sha256(item.evaluation["assertions"]),
                              "evaluation": {"signal_observed": None if item.evaluation is None else item.evaluation["signal_observed"]}}
                             for item in results],
                 "aggregate": {"success_count": aggregate["success_count"],
@@ -372,8 +435,25 @@ class ConcurrentReproductionPort:
                 cancel.set()
                 return ConcurrentMemberResult(index, reservation.operation_id, None, None, 0, None, None, True)
 
-        executor = ThreadPoolExecutor(max_workers=runtime.total_members)
-        futures: list[Future[ConcurrentMemberResult]] = [executor.submit(worker, index) for index in range(runtime.total_members)]
+        executor: ThreadPoolExecutor | None = None
+        futures: list[Future[ConcurrentMemberResult]] = []
+        try:
+            executor = ThreadPoolExecutor(max_workers=runtime.total_members)
+            for index in range(runtime.total_members):
+                futures.append(executor.submit(worker, index))
+        except BaseException:
+            cancel.set()
+            ready_barrier.abort()
+            send_barrier.abort()
+            if executor is not None:
+                executor.shutdown(wait=True, cancel_futures=True)
+            try:
+                broker.abandon_reserved(reservations)
+            except ValidationTransportError:
+                pass
+            return self._observation(blind_case, outcome="outcome_unknown", observed=None,
+                details={"operation_ids": [item.operation_id for item in reservations],
+                         "reason": "executor_startup_failed"})
         released = False
         try:
             for _ in reservations:
@@ -416,6 +496,8 @@ class ConcurrentReproductionPort:
             try:
                 final_reservation = broker.reserve(final_spec)
                 operation_ids.append(final_reservation.operation_id)
+                cancel.clear()
+                wait_scheduled(final_reservation)
                 def final_sender(timeout: float) -> TransportDispatchResult[tuple[BrokerResponse, float]]:
                     response, duration, _, metadata = self._send(final, blind_case.method, deadline, timeout)
                     return TransportDispatchResult((response, duration), len(response.body), metadata)

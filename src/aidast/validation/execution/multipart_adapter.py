@@ -101,12 +101,15 @@ class MultipartReproductionPort:
 
     @staticmethod
     def _read_complete_response(response, *, deadline: float | None = None,
-                                clock: Callable[[], float] = time.monotonic) -> bytes:
+                                clock: Callable[[], float] = time.monotonic,
+                                before_read: Callable[[], None] | None = None) -> bytes:
         """Read complete data below the capture limit, never a byte beyond it."""
         content = bytearray()
         while len(content) < _MAX_RESPONSE_BYTES:
             if deadline is not None and clock() >= deadline:
                 raise MultipartResponseIncompleteError("multipart response exceeded its absolute deadline")
+            if before_read is not None:
+                before_read()
             # ``HTTPResponse.read(n)`` may wait for all ``n`` bytes while a peer
             # trickles data.  During an absolute-deadline replay, a one-byte
             # bounded read gives the clock an enforcement point between every
