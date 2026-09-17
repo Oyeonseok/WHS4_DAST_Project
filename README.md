@@ -81,6 +81,20 @@ uvx --from playwright \
   playwright install chromium
 ```
 
+### 팀 개발용 clone 설치
+
+코드를 수정하고 PR을 만드는 팀원은 저장소를 clone한 뒤 editable tool로 연결합니다.
+
+```bash
+git clone https://github.com/Oyeonseok/WHS4_DAST_Project.git
+cd WHS4_DAST_Project
+uv sync --group dev
+uv tool install --editable .
+```
+
+이후 어느 폴더에서든 `aidast`를 실행할 수 있으며, clone 폴더의 코드 수정이
+재설치 없이 바로 반영됩니다.
+
 ### 설치 확인과 로그인
 
 설치를 확인하고 Codex에 로그인합니다.
@@ -92,6 +106,19 @@ aidast login
 
 `aidast login`은 Codex CLI 로그인 화면을 열고 완료 후 상태를 확인합니다.
 인증 정보는 저장소나 AI DAST DB가 아니라 Codex CLI 사용자 설정에 저장됩니다.
+
+### 업데이트
+
+일반 사용자와 팀 개발자 모두 현재 설치를 삭제하지 않고 업데이트할 수 있습니다.
+
+```bash
+aidast update
+```
+
+GitHub에서 uv tool로 설치한 경우 패키지를 다시 내려받아 갱신합니다. editable
+설치에서는 연결된 Git 저장소가 깨끗한지 확인한 뒤 현재 브랜치를
+`git pull --ff-only`로 업데이트하고 tool 의존성을 새로 맞춥니다. 로컬 변경사항이
+있으면 작업을 덮어쓰지 않고 중단하므로 먼저 commit하거나 stash해야 합니다.
 
 ### Recon 실행 도구
 
@@ -239,6 +266,7 @@ aidast validate status \
 | 명령 | 설명 |
 | --- | --- |
 | `aidast login` | Codex CLI 로그인 및 상태 확인 |
+| `aidast update` | 설치 방식에 맞춰 AI DAST를 제자리에서 업데이트 |
 | `aidast scope` | 프로그램 Scope 수집 또는 상태 확인 |
 | `aidast recon` | Recon 계획, 정책 확인, 선택적 실행 |
 | `aidast tag` | 저장된 Recon 관측 태깅 재개 |

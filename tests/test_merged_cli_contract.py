@@ -3,6 +3,24 @@ from __future__ import annotations
 from unittest.mock import patch
 
 from aidast.cli import _parser, main
+from aidast.updater import UpdateResult
+
+
+def test_update_cli_contract() -> None:
+    parsed = _parser().parse_args(["update"])
+
+    assert parsed.command == "update"
+
+
+def test_update_cli_runs_current_installation_updater() -> None:
+    with patch(
+        "aidast.cli.update_aidast",
+        return_value=UpdateResult(message="updated"),
+    ) as update:
+        result = main(["update"])
+
+    assert result == 0
+    update.assert_called_once_with()
 
 
 def test_shared_validation_cli_contract() -> None:
