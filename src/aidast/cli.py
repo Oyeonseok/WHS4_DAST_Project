@@ -723,7 +723,9 @@ def _run_recon(
             execution_start_urls=start_urls,
         )
         policies = _apply_scope_host_exclusions(
-            policies, getattr(scope_document.analysis, "out_of_scope_assets", [])
+            policies,
+            getattr(scope_document.analysis, "out_of_scope_assets", []),
+            scope_markdown=scope_markdown,
         )
         policies = _apply_policy_caps(
             policies,
@@ -1249,6 +1251,8 @@ def _select_recon_targets(
 def _apply_scope_host_exclusions(
     policies: dict[tuple[str, str], TargetPolicy],
     out_of_scope_assets: Sequence[ScopeAsset],
+    *,
+    scope_markdown: str | None = None,
 ) -> dict[tuple[str, str], TargetPolicy]:
     """Compile hostname-shaped Scope exclusions into enforceable policies."""
     patterns: list[str] = []
@@ -1288,7 +1292,10 @@ def _apply_scope_host_exclusions(
         })
         try:
             validate_policy_for_target(
-                narrowed, asset_type=narrowed.asset_type, asset=narrowed.asset
+                narrowed,
+                asset_type=narrowed.asset_type,
+                asset=narrowed.asset,
+                scope_markdown=scope_markdown,
             )
         except ValueError as exc:
             raise ReconCoordinatorError(
