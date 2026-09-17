@@ -42,3 +42,7 @@ scope_rules_*.json
 docs/PROJECT_OVERVIEW.md
 docs/PROJECT_STACKS.md
 docs/design/AGENT_ORCHESTRATION_REFACTOR.md
+
+# superpowers
+
+docs/superpowers

@@ -195,6 +195,10 @@ def _parser() -> argparse.ArgumentParser:
         help="run the deferred observation-tagging worker after Recon completes",
     )
     recon.add_argument(
+        "--tag-batch-size", type=_positive_int, default=200,
+        help="maximum observations per deferred tagging request (default: 200)",
+    )
+    recon.add_argument(
         "--asset-discovery-batch-size", type=_positive_int, default=25,
         help=(
             "maximum wildcard-discovered hosts scheduled per wildcard in one run; "
@@ -241,6 +245,10 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument(
         "--tag-after", action="store_true",
         help="run the deferred observation-tagging worker after Recon completes",
+    )
+    run.add_argument(
+        "--tag-batch-size", type=_positive_int, default=200,
+        help="maximum observations per deferred tagging request (default: 200)",
     )
     _add_session_options(run)
     run.add_argument(
@@ -835,7 +843,7 @@ def _run_recon(
                     executor.conn,
                     scan_id=scan_id,
                     agent=main_agent,
-                    batch_size=200,
+                    batch_size=args.tag_batch_size,
                     progress=lambda n, total, done, failed: print(
                         f"Tagging batch {n}/{total}: processed={done}, failed={failed}",
                         flush=True,

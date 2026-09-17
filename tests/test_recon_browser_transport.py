@@ -172,12 +172,38 @@ class ReconBrowserTransportTests(unittest.TestCase):
                 self.assertFalse(any(arg.startswith("--proxy-server=") for arg in command))
                 self.assertEqual(command[-1], self.config.login_url)
                 attach.assert_not_called()
-                self.driver._launch_manual_browser()
-                command = launch.call_args.args[0]
-                self.assertIn("--proxy-server=http://127.0.0.1:8080", command)
-                self.assertNotIn("--no-proxy-server", command)
-                self.assertEqual(command[-1], "about:blank")
-                attach.assert_called_once_with()
+
+    def test_runtime_launch_uses_managed_headless_browser_with_proxy(self):
+        playwright = Mock()
+        browser = Mock()
+        context = Mock()
+        page = Mock()
+        playwright.chromium.launch.return_value = browser
+        browser.new_context.return_value = context
+        context.new_page.return_value = page
+        self.driver.playwright = playwright
+
+        with patch.object(self.driver, "_ensure_playwright"), patch.object(
+            self.driver, "_shutdown_runtime"
+        ), patch.object(self.driver, "_register_context_handlers"), patch.object(
+            self.driver, "_register_page_handlers"
+        ) as register_page:
+            self.driver._launch_manual_browser()
+
+        playwright.chromium.launch.assert_called_once_with(
+            headless=True,
+            args=[
+                "--disable-dev-shm-usage",
+                "--disable-blink-features=AutomationControlled",
+                "--proxy-bypass-list=<-loopback>",
+            ],
+            proxy={"server": "http://127.0.0.1:8080"},
+        )
+        browser.new_context.assert_called_once_with(ignore_https_errors=True)
+        self.assertEqual(self.driver._browser_kind, "managed")
+        self.assertIs(self.driver.context, context)
+        self.assertIs(self.driver.page, page)
+        register_page.assert_called_once_with(page)
 
     def test_manual_session_applies_policy_to_same_chromium_context(self):
         events = []
@@ -213,6 +239,47 @@ class ReconBrowserTransportTests(unittest.TestCase):
         save.assert_not_called()
         close.assert_called_once_with()
         self.assertEqual(self.driver._phase, "runtime")
+
+    def test_runtime_shutdown_does_not_wait_for_route_callbacks(self):
+        context = Mock()
+        context.unroute_all.side_effect = AssertionError(
+            "route cleanup must not block complete runtime shutdown"
+        )
+        process = Mock()
+        process.poll.return_value = None
+        self.driver.context = context
+        self.driver._browser_kind = "cdp"
+        self.driver._chrome_process = process
+
+        self.driver._shutdown_runtime()
+
+        context.unroute_all.assert_not_called()
+        process.terminate.assert_called_once_with()
+        process.wait.assert_called_once_with(timeout=3)
+        self.assertIsNone(self.driver.context)
+        self.assertIsNone(self.driver._chrome_process)
+
+    def test_browser_launch_removes_stale_run_profile_singletons(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self.driver.session_config.session_file = str(Path(directory) / "session.json")
+            self.driver.profile_path.mkdir()
+            for name in ("SingletonLock", "SingletonSocket", "SingletonCookie"):
+                (self.driver.profile_path / name).symlink_to("stale-target")
+
+            playwright = Mock()
+            playwright.chromium.executable_path = "/test/chromium"
+            self.driver.playwright = playwright
+
+            with patch.object(self.driver, "_ensure_playwright"), patch.object(
+                self.driver, "_shutdown_runtime"
+            ), patch.object(self.driver, "_find_free_port", return_value=43210), patch(
+                "aidast.recon.tools.playwright_driver.subprocess.Popen"
+            ) as popen, patch.object(self.driver, "_attach_manual_browser"):
+                self.driver._launch_manual_browser(manual_login=True)
+
+            popen.assert_called_once()
+            for name in ("SingletonLock", "SingletonSocket", "SingletonCookie"):
+                self.assertFalse((self.driver.profile_path / name).exists())
 
     def test_failed_session_save_prevents_runtime_launch(self):
         with patch.object(self.driver, "_launch_manual_browser") as launch, patch.object(
@@ -316,6 +383,24 @@ class ReconBrowserTransportTests(unittest.TestCase):
         launch.assert_called_once_with()
         restore.assert_called_once_with()
 
+    def test_restore_runtime_retries_one_transient_cdp_launch_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self.driver.session_config.session_file = str(Path(directory) / "session.json")
+            self.driver.session_path.write_text("{}")
+            with patch.object(
+                self.driver, "_launch_manual_browser",
+                side_effect=[RuntimeError("CDP refused"), None],
+            ) as launch, patch.object(
+                self.driver, "_restore_target_session"
+            ) as restore, patch.object(
+                self.driver, "_shutdown_runtime"
+            ) as shutdown:
+                self.driver.restore_runtime(force=True)
+
+        self.assertEqual(launch.call_count, 2)
+        shutdown.assert_called_once_with()
+        restore.assert_called_once_with()
+
     def test_restore_session_filters_external_cookies_and_storage(self):
         with tempfile.TemporaryDirectory() as directory:
             self.config.session_file = str(Path(directory) / "session.json")
@@ -393,9 +478,10 @@ class ReconBrowserTransportTests(unittest.TestCase):
         self.driver.context = Mock()
         self.driver._register_context_handlers()
         self.driver.context.route.assert_called_once_with("**/*", self.driver._guard_request)
-        websocket = Mock()
-        self.driver.context.route_web_socket.call_args.args[1](websocket)
-        websocket.close.assert_called_once_with()
+        self.driver.context.route_web_socket.assert_not_called()
+        websocket_guard = self.driver.context.add_init_script.call_args.args[0]
+        self.assertIn("PolicyBlockedWebSocket", websocket_guard)
+        self.assertIn("WebSocket blocked by target policy", websocket_guard)
 
     def test_auth_check_uses_policy_transport(self):
         self.config.auth_check_url = "me"
