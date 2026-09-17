@@ -177,6 +177,9 @@ def validate_runtime_contract(value: Any) -> HttpRuntimeContract | Any:
     if kind == "grpc":
         from .grpc_contract import GrpcRuntimeContract
         return GrpcRuntimeContract.model_validate(value)
+    if kind == "concurrent":
+        from .concurrent_contract import ConcurrentRuntimeContract
+        return ConcurrentRuntimeContract.model_validate(value)
     if kind == "http":
         return HttpRuntimeContract.model_validate(value)
     raise ValueError(f"runtime kind is not yet available: {kind}")
