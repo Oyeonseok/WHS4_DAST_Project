@@ -9,6 +9,7 @@ from .models import canonical_json, canonical_sha256
 from .multipart_contract import MultipartRuntimeContract
 from .oob_contract import OobRuntimeContract
 from .websocket_contract import WebSocketRuntimeContract
+from .grpc_contract import GrpcRuntimeContract
 from ..core.profiles import ValidationProfile
 from .runtime_contract import HttpRuntimeContract
 
@@ -45,7 +46,7 @@ def _same_proof_assertions(
 
 
 def validate_runtime_semantics(
-    runtime: HttpRuntimeContract | BrowserRuntimeContract | OobRuntimeContract | MultipartRuntimeContract | WebSocketRuntimeContract,
+    runtime: HttpRuntimeContract | BrowserRuntimeContract | OobRuntimeContract | MultipartRuntimeContract | WebSocketRuntimeContract | GrpcRuntimeContract,
     profile: ValidationProfile,
 ) -> None:
     """Reject controls or assertions that cannot establish the profile signal."""
@@ -138,6 +139,19 @@ def validate_runtime_semantics(
             frozenset({"text_contains", "json_equals", "binary_sha256", "close_code_equals",
                        "subprotocol_equals", "frame_kind_sequence"}),
             "WebSocket negative control must evaluate the same target proof assertions",
+        )
+        return
+
+    if isinstance(runtime, GrpcRuntimeContract):
+        _different(
+            runtime.target.message, runtime.negative_control.message,
+            "gRPC target and inert negative request messages must differ",
+        )
+        _same_proof_assertions(
+            runtime.target.assertions, runtime.negative_control.assertions,
+            frozenset({"grpc_status_equals", "protobuf_path_equals", "trailer_equals",
+                       "error_detail_contains", "duration_at_least_ms", "duration_at_most_ms"}),
+            "gRPC negative control must evaluate the same target proof assertions",
         )
         return
 

@@ -12,6 +12,8 @@ dependencies = [
   "playwright>=1.55,<2",
   "pydantic>=2.12,<3",
   "websockets>=17.1,<18",
+  "grpcio>=1.84,<2",
+  "protobuf>=7.36,<8",
 ]
 
 [dependency-groups]
