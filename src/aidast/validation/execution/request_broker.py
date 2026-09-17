@@ -46,6 +46,20 @@ def _safe_url(url: str) -> str:
     return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, query, ""))
 
 
+def _policy_usage(conn: sqlite3.Connection, scan_id: str, policy_id: str):
+    """Read the shared budget and rate history inside the caller's transaction."""
+    return conn.execute(
+        """SELECT coalesce(sum(units),0),coalesce(sum(active),0),max(scheduled_at) FROM (
+        SELECT 1 units,CASE WHEN status IN ('reserved','running') THEN 1 ELSE 0 END active,
+               scheduled_at FROM validation_http_requests WHERE scan_id=? AND policy_id=?
+        UNION ALL
+        SELECT coalesce(json_extract(result_json,'$.request_units'),1),
+               CASE WHEN status IN ('reserved','running') THEN concurrency_units ELSE 0 END,
+               scheduled_at FROM validation_transport_operations WHERE scan_id=? AND policy_id=?)""",
+        (scan_id, policy_id, scan_id, policy_id),
+    ).fetchone()
+
+
 class ValidationRequestBroker:
     """Reserve every initial/redirect hop before an injected transport sends it."""
 
@@ -223,28 +237,11 @@ class ValidationRequestBroker:
                     raise ValidationRequestError(
                         "request requires the current running case execution"
                     )
-                used = conn.execute(
-                    """SELECT
-                    (SELECT count(*) FROM validation_http_requests WHERE scan_id=? AND policy_id=?) +
-                    (SELECT count(*) FROM validation_transport_operations WHERE scan_id=? AND policy_id=?)""",
-                    (self.scan_id, self.policy.policy_id, self.scan_id, self.policy.policy_id),
-                ).fetchone()[0]
+                used, active, previous = _policy_usage(conn, self.scan_id, self.policy.policy_id)
                 if used >= self.policy.limits.max_requests:
                     raise ValidationRequestError("TargetPolicy request budget exhausted")
-                active = conn.execute(
-                    """SELECT
-                    (SELECT count(*) FROM validation_http_requests WHERE scan_id=? AND policy_id=?
-                     AND status IN ('reserved','running')) +
-                    (SELECT coalesce(sum(concurrency_units),0) FROM validation_transport_operations
-                     WHERE scan_id=? AND policy_id=? AND status IN ('reserved','running'))""",
-                    (self.scan_id, self.policy.policy_id, self.scan_id, self.policy.policy_id),
-                ).fetchone()[0]
                 if active >= self.policy.limits.concurrency:
                     raise ValidationRequestError("TargetPolicy concurrency limit reached")
-                previous = conn.execute(
-                    "SELECT max(scheduled_at) FROM validation_http_requests WHERE scan_id=? AND policy_id=?",
-                    (self.scan_id, self.policy.policy_id),
-                ).fetchone()[0]
                 scheduled = max(now_value, float(previous) + 1 / self.policy.limits.requests_per_second
                                 if previous is not None else now_value)
                 conn.execute(

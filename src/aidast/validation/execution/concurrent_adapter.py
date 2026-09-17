@@ -3,10 +3,7 @@
 from __future__ import annotations
 
 import hashlib
-import http.client
-import ipaddress
 import queue
-import socket
 import sqlite3
 import threading
 import time
@@ -14,8 +11,6 @@ from concurrent.futures import Future, ThreadPoolExecutor, TimeoutError
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping
-from urllib.error import HTTPError
-from urllib.parse import urlsplit
 from urllib.request import Request
 from uuid import uuid4
 
@@ -36,7 +31,7 @@ from ..contracts.runtime_contract import (
 )
 from ..persistence.evidence_policy import sanitize_metadata
 from .credentials import PipelineCredentialResolver
-from .multipart_adapter import MultipartReproductionPort
+from .http_deadline import DeadlineHttpTransport
 from .transport_broker import (
     TransportDispatchResult, TransportOperationSpec, TransportReservation,
     ValidationTransportBroker, ValidationTransportError,
@@ -48,50 +43,6 @@ _HTTP_TRANSPORT_HEADERS = frozenset({
     "host", "content-length", "transfer-encoding", "trailer", "connection",
     "keep-alive", "upgrade", "te", "expect", "proxy-connection",
 })
-_MAX_RESOLVER_WORK = 20
-
-
-class _BoundedResolverFacility:
-    """One owned, globally bounded home for deadline-limited hostname lookup."""
-
-    def __init__(self, capacity: int) -> None:
-        self._slots = threading.BoundedSemaphore(capacity)
-        self._executor = ThreadPoolExecutor(
-            max_workers=capacity, thread_name_prefix="ConcurrentResolver",
-        )
-
-    def resolve(self, host: str, port: int, *, deadline: float,
-                clock: Callable[[], float]) -> tuple[tuple[int, tuple[Any, ...]], ...]:
-        try:
-            literal = ipaddress.ip_address(host)
-        except ValueError:
-            literal = None
-        flags = socket.AI_NUMERICHOST if literal is not None else 0
-
-        remaining = deadline - clock()
-        if remaining <= 0 or not self._slots.acquire(timeout=remaining):
-            raise ConcurrentExecutionError("concurrent attempt deadline exceeded")
-        try:
-            future = self._executor.submit(
-                socket.getaddrinfo, host, port, 0, socket.SOCK_STREAM, 0, flags,
-            )
-        except BaseException:
-            self._slots.release()
-            raise
-        future.add_done_callback(lambda _: self._slots.release())
-        try:
-            addresses = future.result(timeout=max(0.0, deadline - clock()))
-        except TimeoutError as error:
-            future.cancel()  # releases immediately if queued; running work stays owned/bounded.
-            raise ConcurrentExecutionError("concurrent attempt deadline exceeded") from error
-        except BaseException as error:
-            raise ConcurrentExecutionError("concurrent hostname resolution failed") from error
-        if clock() >= deadline or not addresses:
-            raise ConcurrentExecutionError("concurrent hostname resolution failed")
-        return tuple((family, sockaddr) for family, _, _, _, sockaddr in addresses)
-
-
-_RESOLVER_FACILITY = _BoundedResolverFacility(_MAX_RESOLVER_WORK)
 
 
 class ConcurrentExecutionError(ValidationTransportError):
@@ -173,7 +124,6 @@ class ConcurrentReproductionPort:
         self.transport = transport
         # Only the owned default selects the native transport. Every supplied
         # callable retains its caller-owned TLS/auth/proxy/handler configuration.
-        self._ordinary_http = transport is None
         self.credential_resolver = credential_resolver
         self.artifact_resolver = artifact_resolver
         self.clock, self.monotonic_ns = clock, monotonic_ns
@@ -303,161 +253,13 @@ class ConcurrentReproductionPort:
 
     def _send(self, prepared: _PreparedRequest, method: str, deadline: float,
               timeout: float) -> tuple[BrokerResponse, float, int, dict[str, object]]:
-        remaining = deadline - self.clock()
-        if remaining <= 0:
-            raise ConcurrentExecutionError("concurrent attempt deadline exceeded")
         request = Request(prepared.url, data=prepared.body, headers=dict(prepared.headers), method=method)
-        started = self.clock()
-        connection: http.client.HTTPConnection | None = None
-        timer: threading.Timer | None = None
-        response = None
-        connecting_socket: socket.socket | None = None
-
-        def sockets() -> tuple[socket.socket, ...]:
-            candidates = [connecting_socket, None if connection is None else connection.sock]
-            fp = None if response is None else getattr(response, "fp", None)
-            candidates.append(getattr(getattr(fp, "raw", None), "_sock", None))
-            return tuple(dict.fromkeys(item for item in candidates if isinstance(item, socket.socket)))
-
-        def abort() -> None:
-            for item in sockets():
-                try:
-                    item.shutdown(socket.SHUT_RDWR)
-                except OSError:
-                    pass
-            try:
-                if connection is not None:
-                    connection.close()
-            except OSError:
-                pass
-
-        def ensure_remaining() -> float:
-            value = deadline - self.clock()
-            if value <= 0:
-                raise ConcurrentExecutionError("concurrent attempt deadline exceeded")
-            return value
-
-        def connect_with_deadline(address: tuple[str, int], connection_timeout: float, source_address=None) -> socket.socket:
-            # Installed as http.client's connection factory, retaining normal
-            # HTTP(S) framing and HTTPS verification/SNI while making DNS and
-            # acquisition separately deadline-aware.
-            del connection_timeout, source_address
-            nonlocal connecting_socket
-            host, port = address
-            candidates = _RESOLVER_FACILITY.resolve(host, port, deadline=deadline, clock=self.clock)
-            last_error: OSError | None = None
-            for family, sockaddr in candidates:
-                ensure_remaining()
-                candidate = socket.socket(family, socket.SOCK_STREAM)
-                connecting_socket = candidate
-                try:
-                    candidate.settimeout(ensure_remaining())
-                    candidate.connect(sockaddr)
-                    candidate.settimeout(ensure_remaining())
-                    return candidate
-                except BaseException as error:
-                    try:
-                        candidate.close()
-                    except OSError:
-                        pass
-                    if connecting_socket is candidate:
-                        connecting_socket = None
-                    if not isinstance(error, OSError):
-                        raise
-                    last_error = error
-            if last_error is not None:
-                raise last_error
-            raise ConcurrentExecutionError("concurrent hostname resolution failed")
-
-        try:
-            try:
-                if self._ordinary_http:
-                    parsed = urlsplit(prepared.url)
-                    connection_type = http.client.HTTPSConnection if parsed.scheme == "https" else http.client.HTTPConnection
-                    connection = connection_type(parsed.hostname, parsed.port, timeout=min(timeout, remaining))
-                    timer = threading.Timer(max(0.0, deadline - self.clock()), abort)
-                    timer.daemon = True
-                    timer.start()
-                    target = (parsed.path or "/") + (("?" + parsed.query) if parsed.query else "")
-                    # Test seams that model just request/getresponse intentionally
-                    # omit connect.  Real http.client connections acquire first so
-                    # expiry cannot turn into a later request transmission.
-                    if hasattr(connection, "connect"):
-                        connection._create_connection = connect_with_deadline
-                        if parsed.scheme == "https":
-                            # Acquire TCP with the absolute deadline, then take
-                            # ownership of the TLS socket before its handshake
-                            # blocks. Implicit wrapping detaches the raw socket
-                            # before the watchdog can see the handshaking socket.
-                            http.client.HTTPConnection.connect(connection)
-                            connecting_socket = connection._context.wrap_socket(
-                                connection.sock, server_hostname=connection.host,
-                                do_handshake_on_connect=False,
-                            )
-                            connection.sock = connecting_socket
-                            connecting_socket.settimeout(ensure_remaining())
-                            connecting_socket.do_handshake()
-                            connecting_socket.settimeout(ensure_remaining())
-                        else:
-                            connection.connect()
-                    ensure_remaining()  # immediately after socket acquisition
-                    dispatch_ns = self.monotonic_ns()  # immediately before send
-                    connection.request(method, target, body=prepared.body, headers=dict(prepared.headers))
-                    if connection.sock is not None:
-                        connection.sock.settimeout(ensure_remaining())
-                    response = connection.getresponse()
-                else:
-                    # Injected transports own cancellation of a blocking call; the
-                    # adapter still invokes them and fail-closes if they return
-                    # after the absolute deadline.
-                    timer = threading.Timer(max(0.0, deadline - self.clock()), abort)
-                    timer.daemon = True
-                    timer.start()
-                    dispatch_ns = self.monotonic_ns()  # immediately before seam invocation
-                    response = self.transport(request, timeout=min(timeout, ensure_remaining()))
-                    ensure_remaining()
-            except HTTPError as error:
-                response = error
-            def before_read() -> None:
-                for item in sockets():
-                    try:
-                        item.settimeout(ensure_remaining())
-                    except OSError:
-                        # http.client can detach its connection socket once the
-                        # response owns it; the response socket remains in the
-                        # candidate set and retains the current deadline.
-                        continue
-            body = MultipartReproductionPort._read_complete_response(
-                response, deadline=deadline, clock=self.clock, before_read=before_read,
-            )
-            result = BrokerResponse(int(getattr(response, "status", getattr(response, "code", 0))),
-                prepared.url if connection is not None else response.geturl(),
-                dict(getattr(response, "headers", {}) or {}), body)
-        finally:
-            if timer is not None:
-                timer.cancel()
-                timer.join()
-            if response is not None:
-                try:
-                    response.close()
-                except OSError:
-                    pass
-            if connection is not None:
-                try:
-                    connection.close()
-                except OSError:
-                    pass
-            if connecting_socket is not None:
-                try:
-                    connecting_socket.close()
-                except OSError:
-                    pass
-        duration = max(0.0, (self.clock() - started) * 1000)
-        if self.clock() >= deadline:
-            raise ConcurrentExecutionError("concurrent attempt deadline exceeded")
+        result, duration, dispatch_ns = DeadlineHttpTransport(
+            transport=self.transport, clock=self.clock, monotonic_ns=self.monotonic_ns,
+        ).send(request, deadline=deadline, timeout=timeout)
         return result, duration, dispatch_ns, self._metadata(prepared) | {
-            "response_payload_sha256": hashlib.sha256(body).hexdigest(),
-            "response_payload_length": len(body), "response_status": result.status_code,
+            "response_payload_sha256": hashlib.sha256(result.body).hexdigest(),
+            "response_payload_length": len(result.body), "response_status": result.status_code,
         }
 
     def _compact_details(self, results: tuple[ConcurrentMemberResult, ...], operation_ids: list[str],

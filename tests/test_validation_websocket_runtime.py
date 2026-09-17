@@ -400,8 +400,8 @@ class WebSocketAdapterTests(unittest.TestCase):
         self.assertTrue(result.signal_observed)
         self.assertTrue(conn.closed)
         self.assertEqual([tuple(row[:3]) for row in self.rows()],
-                         [("handshake", "completed", 1), ("frame", "completed", 0)])
-        self.assertEqual(len(result.details["operation_ids"]), 2)
+                         [("handshake", "completed", 1), ("controls", "completed", 0), ("frame", "completed", 0)])
+        self.assertEqual(len(result.details["operation_ids"]), 3)
 
     def test_send_failure_is_unknown_without_retry_and_error_has_no_value(self):
         conn = ScriptedConnection(on_send=lambda: (_ for _ in ()).throw(OSError("private-marker")))
@@ -409,7 +409,7 @@ class WebSocketAdapterTests(unittest.TestCase):
             self.execute(lambda *a, **kw: conn)
         self.assertNotIn("private-marker", str(raised.exception))
         self.assertEqual(len(conn.sent), 1)
-        self.assertEqual([row[1] for row in self.rows()], ["outcome_unknown", "outcome_unknown"])
+        self.assertEqual([row[1] for row in self.rows()], ["outcome_unknown"] * 3)
         self.assertNotIn("private-marker", str([tuple(row) for row in self.rows()]))
 
     def test_incomplete_or_overbound_input_never_evaluates_prefix(self):
@@ -432,8 +432,11 @@ class WebSocketAdapterTests(unittest.TestCase):
         conn = ScriptedConnection(["one", "two"], on_recv=lambda: now.__setitem__(0, now[0] + 0.6))
         policy = self.policy.model_copy(update={"allowed_schemes": ["http"], "allowed_hosts": ["127.0.0.1"],
                                                "allowed_ports": [80], "limits": PolicyLimits(timeout_seconds=1, requests_per_second=50)})
+        doc = runtime_document()
+        for part in ("target", "positive_control", "negative_control"):
+            doc[part]["max_received_frames"] = 2
         with self.assertRaises(ValidationTransportError):
-            self.execute(lambda *a, **kw: conn, policy=policy, clock=lambda: now[0])
+            self.execute(lambda *a, **kw: conn, document=doc, policy=policy, clock=lambda: now[0])
         self.assertEqual(len(conn.timeouts), 2)
         self.assertLessEqual(conn.timeouts[1], 0.4)
 
@@ -466,7 +469,7 @@ class WebSocketAdapterTests(unittest.TestCase):
         with self.assertRaises(ValidationTransportError):
             self.execute(lambda *a, **kw: conn)
         self.assertEqual(len(conn.sent), 1)
-        self.assertEqual([row[1] for row in self.rows()], ["outcome_unknown", "outcome_unknown"])
+        self.assertEqual([row[1] for row in self.rows()], ["outcome_unknown"] * 3)
 
     def test_policy_wait_limit_rejects_before_connection(self):
         doc = runtime_document()
@@ -487,7 +490,7 @@ class WebSocketAdapterTests(unittest.TestCase):
         result = self.execute(lambda *a, **kw: conn, document=doc)
         self.assertTrue(result.signal_observed)
         self.assertEqual(conn.sent, [b"inert", b"inert"])
-        self.assertEqual([row[1] for row in self.rows()], ["completed"] * 4)
+        self.assertEqual([row[1] for row in self.rows()], ["completed"] * 5)
 
     def test_evidence_over_repository_byte_budget_fails_before_handshake_completion(self):
         doc = runtime_document()
@@ -587,7 +590,7 @@ class WebSocketAdapterTests(unittest.TestCase):
                                                 "expected": ["text", "text"]}]
                 port = int(endpoint.split(":")[-1].split("/")[0])
                 policy = self.policy.model_copy(update={"allowed_schemes": ["http"], "allowed_hosts": ["127.0.0.1"],
-                                                       "allowed_ports": [port], "limits": PolicyLimits(timeout_seconds=1, requests_per_second=5)})
+                                                       "allowed_ports": [port], "limits": PolicyLimits(timeout_seconds=1, requests_per_second=50)})
                 result = self.execute(connector, endpoint=endpoint, document=doc, policy=policy)
                 self.assertTrue(result.signal_observed)
                 self.assertEqual(result.details["frame_count"], 2)
@@ -668,8 +671,10 @@ class WebSocketAdapterTests(unittest.TestCase):
         policy = self.policy.model_copy(update={"allowed_schemes": ["http"], "allowed_hosts": ["127.0.0.1"],
                                                "allowed_ports": [port], "limits": PolicyLimits(timeout_seconds=1, requests_per_second=50)})
         started = time.monotonic()
+        doc = runtime_document()
+        doc["target"]["max_received_frames"] = 2
         with self.assertRaises(ValidationTransportError):
-            self.execute(endpoint=endpoint, policy=policy)
+            self.execute(endpoint=endpoint, document=doc, policy=policy)
         self.assertLess(time.monotonic() - started, 2.0)
         self.assertGreater(time.monotonic() - started, 0.9)
         self.assertEqual(self.rows()[0][1], "outcome_unknown")

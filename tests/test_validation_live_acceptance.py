@@ -216,7 +216,7 @@ class ValidationLiveAcceptanceTests(unittest.TestCase):
             base_url=base_url, method="GET", runtime=runtime, policy=policy,
         )
 
-        self.assertEqual(operation_count, 10)
+        self.assertEqual(operation_count, 15)
         self.assertEqual(len(received), 5)
 
     def test_real_attack_staging_reaches_native_grpc_coordinator(self):

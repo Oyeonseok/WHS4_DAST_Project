@@ -121,6 +121,13 @@ Multipart assertion evidence requires a complete response body strictly below
 200,000 bytes. Reaching exactly 200,000 captured bytes makes response
 completeness unknown rather than complete; after dispatch this produces
 `outcome_unknown` and is not retried automatically.
+One absolute policy timeout includes pacing, connection/TLS, response headers,
+and body completion, even when the response continues making progress. Native
+I/O is closed on expiry. Trusted injected transports retain their own blocking
+I/O cancellation responsibility and cannot return proof after the deadline.
+Persisted multipart evidence contains assertion identity and expected/actual
+digests, pass flags, response status, elapsed milliseconds, and response payload
+digest/length; upload data, response data, and header values are omitted.
 
 For WebSocket effects, use `runtime_kind: "websocket"` with a `ws` or `wss`
 endpoint and an ordered frame exchange:
@@ -146,6 +153,16 @@ capped at 8,192 encoded bytes; satisfying the individual frame and assertion
 limits does not override that aggregate ceiling. Connection and receive waits
 must be positive and no more than 120 seconds, and cannot exceed policy. Outbound
 close codes are 1000--1003, 1007--1014, or 3000--4999.
+Before connecting, the adapter also reserves a `controls` operation for automatic
+Pong, peer-close replies, and cleanup/error close. For an inbound limit of N,
+this allowance consumes N+1 request units and (N+1)*131 bytes, including masking
+and control-frame overhead. The broker records `request_units` and control
+limits durably, prepays their rate slots, and retains the full charge after
+completion or failure. Parsed-frame guards enforce the inbound limit before
+automatic output and bound outgoing controls to that allowance. Explicit close
+is conservatively charged against both its declared frame and control allowance.
+Unused reservations are abandoned only if never dispatched; a potentially used
+allowance with incomplete session results remains `outcome_unknown`.
 
 For unary gRPC effects, use `runtime_kind: "grpc"`. Supply a packaged protobuf
 descriptor-set reference; reflection and inferred descriptors are not allowed:
@@ -173,6 +190,13 @@ total. Each initial/trailing metadata value is at most 16,384 bytes. The
 complete sanitized gRPC evidence envelope is independently capped at 8,192
 encoded bytes; the individual message, assertion, and metadata limits do not
 override it.
+The native adapter accepts proof only after a normally returned, fully captured
+OK call. Every `grpc.RpcError`, including genuine peer non-OK statuses, is
+`outcome_unknown` with an indeterminate signal: grpcio's public API cannot
+reliably distinguish these from local rejection or transport failure. Captured
+bodies, metadata, matching status assertions, and diagnostic text do not resolve
+that ambiguity. Non-OK status/error-detail assertions remain representable in
+contracts but cannot establish proof through this native adapter.
 
 For race effects, use `runtime_kind: "concurrent"`. It releases only HTTP or
 multipart child requests at a barrier; this minimal HTTP-child example is:
@@ -213,10 +237,13 @@ metadata. gRPC's optional per-attempt credential references are 1--128
 characters in the same opaque alphabet, unique, and limited to 16; they must
 already be present in the staged case.
 
-Every multipart request and unary gRPC call, each WebSocket handshake and
-outbound frame, every concurrent member, and any concurrent final HTTP
-verification is durably reserved before network dispatch. Evidence may cite
-only completed operation rows owned by the current attempt. A dispatched or
+Every multipart request and unary gRPC call, each WebSocket handshake, declared
+outbound frame and bounded control allowance, every concurrent member, and any
+concurrent final HTTP verification is durably reserved before network dispatch.
+HTTP and protocol operations atomically share request counts and the latest
+scheduled rate slot, including completed history. Positive or negative proof
+may cite only completed operation rows owned by the current attempt; failed or
+unknown rows may appear only in non-proof audit evidence. A dispatched or
 `running` operation with an unknowable result becomes `outcome_unknown` and is
 never retried automatically; only an undispatched reservation may be abandoned
 safely.

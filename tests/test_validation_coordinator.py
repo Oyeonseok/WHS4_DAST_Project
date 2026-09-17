@@ -1491,9 +1491,9 @@ class ValidationOperationLedgerTests(unittest.TestCase):
             ),
         )
 
-    def test_operation_ledger_accepts_completed_and_failed_terminal_rows(self):
+    def test_operation_ledger_accepts_only_completed_rows_for_proof(self):
         for runtime_kind in self.RUNTIME_KINDS:
-            for status in ("completed", "failed"):
+            for status in ("completed",):
                 with self.subTest(runtime_kind=runtime_kind, status=status):
                     operation_id = self.operation(runtime_kind, status)
                     self.validate({"operation_ids": [operation_id]})
@@ -1505,7 +1505,7 @@ class ValidationOperationLedgerTests(unittest.TestCase):
 
     def test_operation_ledger_rejects_unfinished_and_unknown_rows(self):
         for runtime_kind in self.RUNTIME_KINDS:
-            for status in ("reserved", "running", "outcome_unknown"):
+            for status in ("failed", "reserved", "running", "outcome_unknown"):
                 with self.subTest(runtime_kind=runtime_kind, status=status):
                     operation_id = self.operation(runtime_kind, status)
                     with self.assertRaisesRegex(

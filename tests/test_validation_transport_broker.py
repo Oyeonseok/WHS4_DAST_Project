@@ -191,6 +191,17 @@ class ValidationTransportBrokerTests(unittest.TestCase):
             self.broker().reserve(self.spec(metadata={"preview": "🙂" * 2045}))
         self.assertEqual(self.rows(), [])
 
+    def test_control_charge_is_included_in_the_persisted_metadata_bound(self):
+        metadata = {"preview": "🙂" * 2044 + "x"}
+        spec = self.spec(runtime_kind="websocket", operation_kind="controls", request_units=3)
+        with self.assertRaisesRegex(ValidationTransportError, "metadata"):
+            self.broker().reserve(replace(spec, metadata=metadata))
+        self.assertEqual(self.rows(), [])
+        with self.assertRaisesRegex(ValidationTransportError, "metadata"):
+            self.broker().dispatch(spec, lambda timeout: TransportDispatchResult("ok", 0, metadata))
+        self.assertEqual(self.rows()[0]["status"], "failed")
+        self.assertEqual(json.loads(self.rows()[0]["result_json"])["request_units"], 3)
+
     def test_completion_rejects_metadata_over_utf8_byte_budget(self):
         with self.assertRaisesRegex(ValidationTransportError, "metadata"):
             self.broker().dispatch(self.spec(), lambda timeout: TransportDispatchResult(

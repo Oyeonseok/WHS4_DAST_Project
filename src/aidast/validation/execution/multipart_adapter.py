@@ -7,17 +7,18 @@ import sqlite3
 import time
 from pathlib import Path
 from typing import Callable
-from urllib.error import HTTPError
-from urllib.request import HTTPRedirectHandler, Request, build_opener
+from urllib.request import Request
 
-from aidast.core.request_broker import BrokerResponse
 from aidast.recon.policy import TargetPolicy
 
 from ..contracts.binary import BinaryArtifactResolver, BinaryArtifactUnavailable
-from ..contracts.models import BlindCase, ReproductionObservation
+from ..contracts.models import BlindCase, ReproductionObservation, canonical_json, canonical_sha256
 from ..contracts.multipart_contract import MultipartRuntimeContract, encode_multipart
 from ..contracts.runtime_contract import evaluate_http_response
+from ..persistence.evidence_policy import sanitize_metadata
+from .http_deadline import DeadlineHttpTransport, MultipartResponseIncompleteError, read_complete_response
 from .credentials import PipelineCredentialResolver
+from .request_broker import _NoRedirect  # Compatibility for configured injected openers.
 from .transport_broker import (
     TransportDispatchResult, TransportOperationSpec, ValidationTransportBroker,
     ValidationTransportError,
@@ -25,21 +26,11 @@ from .transport_broker import (
 
 
 _MAX_RESPONSE_BYTES = 200_000
-_RESPONSE_READ_CHUNK_BYTES = 65_536
 _ADAPTER_OWNED_HEADERS = frozenset({
     "content-type", "content-length", "content-disposition", "transfer-encoding",
     "trailer", "host", "connection", "keep-alive", "upgrade", "te", "expect",
     "proxy-connection",
 })
-
-
-class MultipartResponseIncompleteError(ValidationTransportError):
-    """The response cannot establish bounded, complete assertion evidence."""
-
-
-class _NoRedirect(HTTPRedirectHandler):
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        return None
 
 
 class MultipartReproductionPort:
@@ -53,7 +44,7 @@ class MultipartReproductionPort:
                  clock: Callable[[], float] = time.monotonic):
         self.artifact_resolver = artifact_resolver
         self.credential_resolver = credential_resolver
-        self.transport = transport or build_opener(_NoRedirect()).open
+        self.transport = transport
         self.clock = clock
 
     def unsupported_reason(self, blind_case: BlindCase) -> str | None:
@@ -110,58 +101,7 @@ class MultipartReproductionPort:
             or message.startswith("TargetPolicy validation byte budget exhausted")
         )
 
-    @staticmethod
-    def _content_length_is_incomplete(response, received_bytes: int) -> bool:
-        """Recognize declared-length EOF truncation, including HTTPError wrappers."""
-        candidates = (response, getattr(response, "fp", None))
-        for candidate in candidates:
-            if candidate is None:
-                continue
-            remaining = getattr(candidate, "length", None)
-            if type(remaining) is int and remaining >= 0:
-                return remaining > 0
-        headers = getattr(response, "headers", None)
-        transfer_encoding = headers.get("Transfer-Encoding") if headers is not None else None
-        content_length = headers.get("Content-Length") if headers is not None else None
-        if transfer_encoding is not None or content_length is None:
-            return False
-        try:
-            declared = int(content_length)
-        except (TypeError, ValueError):
-            return False
-        return declared >= 0 and received_bytes < declared
-
-    @staticmethod
-    def _read_complete_response(response, *, deadline: float | None = None,
-                                clock: Callable[[], float] = time.monotonic,
-                                before_read: Callable[[], None] | None = None) -> bytes:
-        """Read complete data below the capture limit, never a byte beyond it."""
-        content = bytearray()
-        # read1 returns buffered/available bytes without waiting to fill a whole
-        # chunk. This leaves a deadline check between socket reads while the
-        # caller's watchdog bounds HTTP framing/header reads inside read1.
-        read_available = getattr(response, "read1", None) if deadline is not None else None
-        reader = read_available or response.read
-        maximum = _RESPONSE_READ_CHUNK_BYTES if deadline is None or read_available else 1
-        while len(content) < _MAX_RESPONSE_BYTES:
-            if deadline is not None and clock() >= deadline:
-                raise MultipartResponseIncompleteError("multipart response exceeded its absolute deadline")
-            if before_read is not None:
-                before_read()
-            chunk = reader(min(maximum, _MAX_RESPONSE_BYTES - len(content)))
-            if deadline is not None and clock() >= deadline:
-                raise MultipartResponseIncompleteError("multipart response exceeded its absolute deadline")
-            if type(chunk) is not bytes:
-                raise ValidationTransportError("multipart response reader returned invalid bytes")
-            if not chunk:
-                if MultipartReproductionPort._content_length_is_incomplete(response, len(content)):
-                    raise MultipartResponseIncompleteError(
-                        "multipart response ended before its declared content length"
-                    )
-                return bytes(content)
-            content.extend(chunk)
-        # Reading even one lookahead byte would exceed the durable response-byte reservation.
-        raise MultipartResponseIncompleteError("multipart response completeness is unknown at capture limit")
+    _read_complete_response = staticmethod(read_complete_response)
 
     def execute(self, blind_case: BlindCase, *, attempt_kind: str, batch_no: int,
                 ordinal: int, attempt_id: str, db_path: Path, scan_id: str,
@@ -169,6 +109,21 @@ class MultipartReproductionPort:
         unsupported = self.unsupported_reason(blind_case)
         if unsupported is not None:
             raise ValueError(unsupported)
+        started = self.clock()
+        deadline = started + policy.limits.timeout_seconds
+
+        def remaining():
+            value = deadline - self.clock()
+            if value <= 0:
+                raise MultipartResponseIncompleteError("multipart operation deadline exceeded")
+            return value
+
+        def paced_sleep(delay):
+            if delay >= remaining():
+                raise MultipartResponseIncompleteError("multipart pacing exceeds operation deadline")
+            time.sleep(delay)
+            remaining()
+
         runtime = MultipartRuntimeContract.model_validate(blind_case.runtime_contract)
         attempt = runtime.for_attempt(attempt_kind)
         try:
@@ -195,7 +150,7 @@ class MultipartReproductionPort:
                 raise ValidationTransportError("multipart credential resolution failed") from None
         broker = ValidationTransportBroker(
             db_path=db_path, scan_id=scan_id, stage_run_id=stage_run_id, case_id=case_id,
-            attempt_id=attempt_id, blind_case=blind_case, policy=policy,
+            attempt_id=attempt_id, blind_case=blind_case, policy=policy, sleeper=paced_sleep,
         )
         request_metadata = {
             "request_payload_sha256": hashlib.sha256(body).hexdigest(),
@@ -208,27 +163,34 @@ class MultipartReproductionPort:
             metadata=request_metadata,
         )
 
-        def sender(timeout: float) -> TransportDispatchResult[BrokerResponse]:
-            request = Request(url, data=body, headers=headers, method=blind_case.method)
-            try:
-                response = self.transport(request, timeout=timeout)
-            except HTTPError as error:
-                response = error
-            try:
-                response_body = self._read_complete_response(response)
-                response_headers = dict(getattr(response, "headers", {}) or {})
-                response_url = response.geturl()
-                status = int(getattr(response, "status", getattr(response, "code", 0)))
-            finally:
-                response.close()
-            broker_response = BrokerResponse(status, response_url, response_headers, response_body)
-            return TransportDispatchResult(
-                broker_response, len(response_body),
-                request_metadata | {
-                    "response_payload_sha256": hashlib.sha256(response_body).hexdigest(),
-                    "response_payload_length": len(response_body),
-                },
+        def sender(timeout: float):
+            remaining()
+            response, _, _ = DeadlineHttpTransport(transport=self.transport, clock=self.clock).send(
+                Request(url, data=body, headers=headers, method=blind_case.method),
+                deadline=deadline, timeout=min(timeout, remaining()),
             )
+            evaluation = evaluate_http_response(
+                response, attempt.assertions, duration_ms=max(0.0, (self.clock() - started) * 1000),
+            )
+            # IDs are untrusted labels, so retain identity without copying values.
+            evaluation["assertions"] = [
+                {"assertion_id_sha256": canonical_sha256(item["assertion_id"]),
+                 **{key: value for key, value in item.items() if key != "assertion_id"}}
+                for item in evaluation["assertions"]
+            ]
+            details = {**evaluation, "response_status": response.status_code,
+                       "response_payload_sha256": hashlib.sha256(response.body).hexdigest(),
+                       "response_payload_length": len(response.body),
+                       "operation_ids": broker.operation_ids}
+            # Validate exactly what both repositories will serialize before the
+            # operation becomes completed, including coordinator provenance.
+            persisted = sanitize_metadata({**details, "validation_runtime": {
+                "explicit_non_exploit": False, "policy_allowed": True,
+            }})
+            result_metadata = sanitize_metadata(request_metadata | details)
+            if len(canonical_json(persisted).encode("utf-8")) > 8192:
+                raise ValidationTransportError("multipart evidence exceeds metadata bounds")
+            return TransportDispatchResult((response, details), len(response.body), result_metadata)
 
         try:
             reservation = broker.reserve(spec)
@@ -238,16 +200,14 @@ class MultipartReproductionPort:
             return self._blocked(
                 blind_case, "current_policy_rejected", policy_allowed=False,
             )
-        started = self.clock()
-        operation_id, response = broker.dispatch_reserved(reservation, sender)
-        duration_ms = max(0.0, (self.clock() - started) * 1000)
-        evaluation = evaluate_http_response(response, attempt.assertions, duration_ms=duration_ms)
-        observed = evaluation["signal_observed"]
-        digest = hashlib.sha256(response.body).hexdigest()
+        try:
+            _, (response, details) = broker.dispatch_reserved(reservation, sender)
+        finally:
+            broker.abandon_reserved((reservation,))
+        observed = details["signal_observed"]
         return ReproductionObservation(
             outcome="observed" if observed else "not_observed",
             signal_type=blind_case.signal_types[0], signal_observed=observed,
-            details={"response_body_sha256": digest, "response_bytes": len(response.body),
-                     "operation_ids": [operation_id]},
-            content_sha256=digest, content_length=len(response.body),
+            details=details, content_sha256=details["response_payload_sha256"],
+            content_length=len(response.body),
         )

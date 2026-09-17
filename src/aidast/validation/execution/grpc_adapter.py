@@ -35,6 +35,10 @@ class GrpcSessionError(ValidationTransportError):
     """A unary operation cannot establish a complete bounded observation."""
 
 
+class _AmbiguousCompletion(GrpcSessionError):
+    """Public grpcio state cannot prove whether a peer completed the call."""
+
+
 def _source_origin(endpoint: str) -> str:
     """Return the immutable HTTP(S) source origin without relaxing authority equality."""
     parsed = urlsplit(endpoint)
@@ -197,10 +201,11 @@ class GrpcReproductionPort:
                 try:
                     response, call = unary.with_call(loaded.request_bytes, timeout=remaining(),
                         metadata=tuple(metadata.items()), wait_for_ready=False)
-                except grpc.RpcError as error:
-                    # grpcio deserializes valid bodies before raising for a
-                    # non-OK completion. Retain that bounded local capture.
-                    response, call = captured_response, error
+                except grpc.RpcError:
+                    # Native rejection and peer non-OK completion share the
+                    # public error interface, even after body deserialization.
+                    # Neither status, trailers nor diagnostic text proves origin.
+                    raise _AmbiguousCompletion("gRPC completion provenance unknown") from None
                 remaining()
                 code, trailers, detail = call.code(), call.trailing_metadata(), call.details()
                 if not isinstance(code, grpc.StatusCode):
@@ -208,14 +213,10 @@ class GrpcReproductionPort:
                 bounded_response_metadata(call.initial_metadata())
                 if capture_failed:
                     raise ValueError
-                if code is grpc.StatusCode.OK and (response is None or raw_response is None
-                                                   or response is not captured_response):
+                if code is not grpc.StatusCode.OK:
+                    raise _AmbiguousCompletion("gRPC completion provenance unknown")
+                if response is None or raw_response is None or response is not captured_response:
                     raise ValueError
-                # Public grpcio results do not expose rejection provenance past
-                # the native ceilings. A peer error and native rejection can
-                # have identical public state, with or without a captured body.
-                # Only delivered captures and their local consistency establish
-                # the boundary here; details/debug strings cannot prove origin.
                 evaluation = evaluate_grpc_response(
                     status=code.name, response=response, trailers=trailers, error_detail=detail,
                     duration_ms=(self.clock() - started) * 1000, response_bytes=raw_response or b"",
@@ -228,6 +229,8 @@ class GrpcReproductionPort:
                 summary = {name: value for name, value in evaluation.items()
                            if name not in {"assertions", "signal_observed"}}
                 return TransportDispatchResult(evaluation, len(raw_response or b""), summary)
+            except _AmbiguousCompletion:
+                raise
             except Exception:
                 raise GrpcSessionError("gRPC response incomplete or invalid") from None
             finally:
@@ -239,7 +242,14 @@ class GrpcReproductionPort:
                         # evidence or obscure a potentially dispatched failure.
                         pass
 
-        _, evaluation = broker.dispatch_reserved(reservation, dispatch)
+        try:
+            _, evaluation = broker.dispatch_reserved(reservation, dispatch)
+        except _AmbiguousCompletion:
+            return ReproductionObservation(
+                outcome="outcome_unknown", signal_type=blind_case.signal_types[0], signal_observed=None,
+                details={"reason": "grpc_completion_unknown", "operation_ids": broker.operation_ids},
+                content_sha256=hashlib.sha256(b"").hexdigest(), content_length=0,
+            )
         observed = evaluation["signal_observed"]
         content = {key: value for key, value in evaluation.items() if key != "assertions"}
         return ReproductionObservation(

@@ -10,9 +10,10 @@ from functools import partial
 from pathlib import Path
 from threading import Timer
 from typing import Callable
+from uuid import uuid4
 
-from websockets.exceptions import ConnectionClosed
-from websockets.frames import DATA_OPCODES, Frame
+from websockets.exceptions import ConnectionClosed, ProtocolError
+from websockets.frames import CLOSE, PONG, DATA_OPCODES
 from websockets.sync.client import ClientConnection, connect
 
 from aidast.recon.policy import TargetPolicy
@@ -38,12 +39,39 @@ class WebSocketSessionError(ValidationTransportError):
 class _BoundedConnection(ClientConnection):
     """Keep library framing, but reject redirects and bound its receive queue input."""
 
-    def __init__(self, *args, frame_limit: int, byte_limit: int, **kwargs):
+    def __init__(self, socket, protocol, *, frame_limit: int, byte_limit: int, **kwargs):
         self.frame_limit, self.byte_limit = frame_limit, byte_limit
         self.received_frames = self.received_bytes = 0
         self.limit_exceeded = False
         self.message_incomplete = False
-        super().__init__(*args, **kwargs)
+        self.control_frames = self.control_bytes = 0
+        receive_frame, send_frame = protocol.recv_frame, protocol.send_frame
+
+        def bounded_receive(frame):
+            # The library may generate output before process_event. Enforce the
+            # input bound in its parsed-frame hook, before automatic responses.
+            self.received_frames += 1
+            self.received_bytes += len(frame.data)
+            if self.received_frames > self.frame_limit or self.received_bytes > self.byte_limit:
+                self.limit_exceeded = True
+                raise ProtocolError("WebSocket inbound limit exceeded")
+            if frame.opcode in DATA_OPCODES:
+                self.message_incomplete = not frame.fin
+            receive_frame(frame)
+
+        def bounded_send(frame):
+            if frame.opcode in (PONG, CLOSE):
+                # A control is at most 125 payload bytes plus six masking/framing
+                # bytes. Explicit close is also charged here conservatively.
+                if self.control_frames >= frame_limit + 1 or len(frame.data) > 125:
+                    self.limit_exceeded = True
+                    raise ProtocolError("WebSocket control allowance exceeded")
+                self.control_frames += 1
+                self.control_bytes += len(frame.data) + 6
+            send_frame(frame)
+
+        protocol.recv_frame, protocol.send_frame = bounded_receive, bounded_send
+        super().__init__(socket, protocol, **kwargs)
 
     def handshake(self, *args, **kwargs):
         try:
@@ -56,15 +84,6 @@ class _BoundedConnection(ClientConnection):
     def process_event(self, event):
         if self.limit_exceeded:
             return
-        if isinstance(event, Frame):
-            self.received_frames += 1
-            self.received_bytes += len(event.data)
-            if self.received_frames > self.frame_limit or self.received_bytes > self.byte_limit:
-                self.limit_exceeded = True
-                self.close_socket()
-                return
-            if event.opcode in DATA_OPCODES:
-                self.message_incomplete = not event.fin
         super().process_event(event)
 
 
@@ -172,9 +191,16 @@ class WebSocketReproductionPort:
             policy_url=url, method="GET", request_bytes=0,
             max_response_bytes=attempt.max_received_bytes, concurrency_units=1,
         )
+        controls = TransportOperationSpec(
+            runtime_kind="websocket", operation_kind="controls", destination=attempt.endpoint,
+            policy_url=url, method="GET", request_bytes=(attempt.max_received_frames + 1) * 131,
+            max_response_bytes=0, concurrency_units=0, request_units=attempt.max_received_frames + 1,
+            metadata={"control_frame_limit": attempt.max_received_frames + 1,
+                      "control_frame_max_bytes": 131},
+        )
         # Recheck current policy and budgets atomically before any connection I/O.
         try:
-            reservation = broker.reserve(spec)
+            reservation, control_reservation = broker.reserve_group((spec, controls), "vgrp_" + uuid4().hex)
         except ValidationTransportError as error:
             if str(error) == "transport operation is outside current TargetPolicy" or str(error).startswith((
                 "TargetPolicy request budget exhausted", "TargetPolicy concurrency limit reached",
@@ -299,6 +325,8 @@ class WebSocketReproductionPort:
                        "inbound_bytes": wire_bytes, "inbound_frame_count": wire_frames,
                        "content_sha256": canonical_sha256(evaluation["frames"]),
                        "close_code": connection.close_code, "subprotocol": connection.subprotocol}
+            summary.update(control_frame_count=getattr(connection, "control_frames", None),
+                           control_bytes=getattr(connection, "control_bytes", None))
             evaluation.update(inbound_bytes=wire_bytes, inbound_frame_count=wire_frames)
             try:
                 # Validate the exact representation the repository persists,
@@ -313,7 +341,22 @@ class WebSocketReproductionPort:
                 raise WebSocketSessionError("WebSocket evidence exceeds metadata bounds") from None
             return TransportDispatchResult(evaluation, wire_bytes, summary)
 
-        _, evaluation = broker.dispatch_reserved(reservation, session)
+        def control_sender(timeout):
+            result = session(timeout)
+            return TransportDispatchResult(result, 0, {
+                **controls.metadata, "control_frame_count": result.metadata["control_frame_count"],
+                "control_bytes": result.metadata["control_bytes"],
+            })
+
+        def reserved_session(timeout):
+            # Both rows are running before the connector can receive or send.
+            _, result = broker.dispatch_reserved(control_reservation, control_sender)
+            return result
+
+        try:
+            _, evaluation = broker.dispatch_reserved(reservation, reserved_session)
+        finally:
+            broker.abandon_reserved((reservation, control_reservation))
         observed = evaluation["signal_observed"]
         return ReproductionObservation(
             outcome="observed" if observed else "not_observed", signal_type=blind_case.signal_types[0],

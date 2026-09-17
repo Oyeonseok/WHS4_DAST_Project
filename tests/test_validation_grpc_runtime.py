@@ -477,23 +477,24 @@ class GrpcAdapterTests(unittest.TestCase):
         self.assertFalse(channel.calls)
         self.assertEqual(self.rows(), [])
 
-    def test_completed_non_ok_statuses_are_evaluable_without_status_allowlist(self):
+    def test_rpc_errors_are_unknown_without_status_allowlist(self):
         doc = runtime_document()
         doc["target"]["assertions"] = [{"assertion_id": "status", "kind": "grpc_status_equals",
                                         "expected": "PERMISSION_DENIED"}]
         result = self.execute(ScriptedChannel(error=ScriptedRpcError(grpc.StatusCode.PERMISSION_DENIED)), doc=doc)
-        self.assertTrue(result.signal_observed)
-        self.assertEqual(self.rows()[-1]["status"], "completed")
+        self.assertIsNone(result.signal_observed)
+        self.assertEqual(result.outcome, "outcome_unknown")
+        self.assertEqual(self.rows()[-1]["status"], "outcome_unknown")
         for code in (grpc.StatusCode.DEADLINE_EXCEEDED, grpc.StatusCode.UNAVAILABLE, grpc.StatusCode.CANCELLED,
                      grpc.StatusCode.INTERNAL, grpc.StatusCode.RESOURCE_EXHAUSTED):
             with self.subTest(code=code):
                 channel = ScriptedChannel(error=ScriptedRpcError(code), close_error=True)
                 doc["target"]["assertions"][0]["expected"] = code.name
                 result = self.execute(channel, doc=doc)
-                self.assertTrue(result.signal_observed)
+                self.assertIsNone(result.signal_observed)
                 self.assertTrue(channel.closed)
                 self.assertNotIn("private-marker", result.model_dump_json())
-                self.assertEqual(self.rows()[-1]["status"], "completed")
+                self.assertEqual(self.rows()[-1]["status"], "outcome_unknown")
 
     def test_inherited_credential_references_are_opaque(self):
         with self.assertRaises(ValidationTransportError):
@@ -586,22 +587,22 @@ class GrpcAdapterTests(unittest.TestCase):
                 {"assertion_id": "detail", "kind": "error_detail_contains", "expected": "private-marker"},
             ]
             result = self.execute(doc=doc, endpoint=endpoint)
-            self.assertTrue(result.signal_observed)
+            self.assertIsNone(result.signal_observed)
+            self.assertEqual(result.outcome, "outcome_unknown")
             self.assertNotIn("private-marker", result.model_dump_json())
             doc["target"]["message"]["value"] = "unavailable"
             doc["target"]["assertions"] = [
                 {"assertion_id": "status", "kind": "grpc_status_equals", "expected": "UNAVAILABLE"}]
-            self.assertTrue(self.execute(doc=doc, endpoint=endpoint).signal_observed)
+            self.assertIsNone(self.execute(doc=doc, endpoint=endpoint).signal_observed)
             doc["target"]["message"]["value"] = "large"
             doc["target"]["max_response_bytes"] = 32
-            with self.assertRaises(ValidationTransportError):
-                self.execute(doc=doc, endpoint=endpoint)
+            self.assertEqual(self.execute(doc=doc, endpoint=endpoint).outcome, "outcome_unknown")
             self.assertEqual(self.rows()[-1]["status"], "outcome_unknown")
             self.assertEqual(received, ["target", "inert", "denied", "unavailable", "large"])
         finally:
             server.stop(0).wait()
 
-    def test_loopback_local_capture_bounds_and_peer_diagnostic_text_have_distinct_outcomes(self):
+    def test_loopback_capture_bounds_and_ambiguous_peer_diagnostics_cannot_prove_completion(self):
         from aidast.validation.contracts.grpc_contract import GrpcRuntimeContract
         loaded = GrpcRuntimeContract.model_validate(runtime_document()).target.load(None)
         diagnostic = "CLIENT: Received message larger than max (40 vs. 32)"
@@ -624,8 +625,11 @@ class GrpcAdapterTests(unittest.TestCase):
                     doc["target"]["message"] = {"value": kind}
                     doc["target"]["assertions"] = [{"assertion_id": "status", "kind": "grpc_status_equals",
                                                    "expected": "RESOURCE_EXHAUSTED"}]
-                    with self.assertRaises(ValidationTransportError):
-                        self.execute(doc=doc, endpoint=endpoint)
+                    if kind == "body":
+                        self.assertEqual(self.execute(doc=doc, endpoint=endpoint).outcome, "outcome_unknown")
+                    else:
+                        with self.assertRaises(ValidationTransportError):
+                            self.execute(doc=doc, endpoint=endpoint)
                     self.assertEqual(self.rows()[-1]["status"], "outcome_unknown")
             # Beyond the native ceiling the public result cannot distinguish a
             # peer error from native rejection, even if a body was captured.
@@ -633,8 +637,9 @@ class GrpcAdapterTests(unittest.TestCase):
                 with self.subTest(kind=kind):
                     doc["target"]["message"] = {"value": kind}
                     result = self.execute(doc=doc, endpoint=endpoint)
-                    self.assertTrue(result.signal_observed)
-                    self.assertEqual(self.rows()[-1]["status"], "completed")
+                    self.assertIsNone(result.signal_observed)
+                    self.assertEqual(result.outcome, "outcome_unknown")
+                    self.assertEqual(self.rows()[-1]["status"], "outcome_unknown")
                     self.assertNotIn(diagnostic, result.model_dump_json())
 
     def test_ok_response_must_be_the_captured_response(self):
@@ -648,7 +653,7 @@ class GrpcAdapterTests(unittest.TestCase):
         self.assertTrue(channel.closed)
         self.assertEqual(self.rows()[-1]["status"], "outcome_unknown")
 
-    def test_loopback_non_ok_bodies_preserve_status_fields_details_and_optional_trailers(self):
+    def test_loopback_non_ok_bodies_and_trailers_do_not_establish_error_provenance(self):
         from aidast.validation.contracts.grpc_contract import GrpcRuntimeContract
         loaded = GrpcRuntimeContract.model_validate(runtime_document()).target.load(None)
         def handler(request, context):
@@ -672,11 +677,9 @@ class GrpcAdapterTests(unittest.TestCase):
                             doc["target"]["assertions"].append({"assertion_id": "trailer", "kind": "trailer_equals",
                                                                "trailer": "x-state", "expected": "complete"})
                         result = self.execute(doc=doc, endpoint=endpoint)
-                        self.assertTrue(result.signal_observed)
-                        self.assertEqual(result.details["grpc_status"], status)
-                        self.assertEqual(result.details["response_length"], 8)
-                        self.assertEqual(self.rows()[-1]["status"], "completed")
-                        self.assertEqual(self.rows()[-1]["response_bytes"], 8)
+                        self.assertIsNone(result.signal_observed)
+                        self.assertEqual(result.outcome, "outcome_unknown")
+                        self.assertEqual(self.rows()[-1]["status"], "outcome_unknown")
                         self.assertNotIn("bounded-private-detail", result.model_dump_json())
 
     def test_loopback_repeated_trailers_match_any_exact_occurrence_and_preserve_order(self):

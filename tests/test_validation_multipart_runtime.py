@@ -206,8 +206,9 @@ class MultipartLoopbackTests(unittest.TestCase):
         self.assertEqual(tuple(self.conn.execute(
             "SELECT runtime_kind,status FROM validation_transport_operations"
         ).fetchone()), ("multipart", "completed"))
-        self.assertEqual(set(result.details), {"response_body_sha256", "response_bytes", "operation_ids"})
-        self.assertEqual(result.details["response_bytes"], 8)
+        self.assertEqual(result.details["response_payload_length"], 8)
+        self.assertEqual(result.details["response_status"], 200)
+        self.assertTrue(result.details["assertions"][0]["passed"])
         self.assertNotIn("uploaded", str(result.details))
         self.assertEqual(len(result.details["operation_ids"]), 1)
 
@@ -424,7 +425,8 @@ class MultipartAdapterSafetyTests(unittest.TestCase):
         response = _ScriptedResponse("https://test/items", [b"up", b"loaded", b""])
         result = self.execute(self.runtime(), lambda request, timeout: response)
         self.assertEqual(result.outcome, "observed")
-        self.assertEqual(response.read_sizes, [65_536, 65_536, 65_536])
+        self.assertEqual(response.chunks, [])
+        self.assertEqual(response.read_sizes, [1] * 9)
 
     def test_interrupted_stream_preserves_outcome_unknown(self):
         response = _ScriptedResponse("https://test/items", [ConnectionError("inert interruption")])
@@ -499,7 +501,7 @@ class MultipartAdapterSafetyTests(unittest.TestCase):
         self.assertNotEqual(rows[0][0], rows[1][0])
         for _, metadata in rows:
             value = json.loads(metadata)
-            self.assertEqual(set(value), {
+            self.assertTrue(set(value) >= {
                 "request_payload_sha256", "request_payload_length",
                 "response_payload_sha256", "response_payload_length",
             })

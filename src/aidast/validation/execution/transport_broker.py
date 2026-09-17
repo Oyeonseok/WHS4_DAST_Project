@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import time
 from contextlib import closing
@@ -15,7 +16,7 @@ from aidast.recon.policy import TargetPolicy
 
 from ..contracts.models import BlindCase, canonical_json, canonical_sha256
 from ..persistence.evidence_policy import sanitize_metadata
-from .request_broker import _safe_url
+from .request_broker import _policy_usage, _safe_url
 
 T = TypeVar("T")
 
@@ -34,6 +35,7 @@ class TransportOperationSpec:
     request_bytes: int
     max_response_bytes: int
     concurrency_units: Literal[0, 1] = 1
+    request_units: int = 1
     metadata: Mapping[str, object] = field(default_factory=dict)
 
 
@@ -106,6 +108,8 @@ class ValidationTransportBroker:
             or any(type(value) is not int or value < 0 for value in
                    (spec.request_bytes, spec.max_response_bytes))
             or type(spec.concurrency_units) is not int or spec.concurrency_units not in (0, 1)
+            or type(spec.request_units) is not int or not 1 <= spec.request_units <= 65
+            or (spec.request_units != 1 and (spec.runtime_kind != "websocket" or spec.operation_kind != "controls"))
         ):
             raise ValidationTransportError("invalid transport operation specification")
         try:
@@ -120,6 +124,11 @@ class ValidationTransportBroker:
         if not allowed:
             raise ValidationTransportError("transport operation is outside current TargetPolicy")
         metadata = self._metadata(spec.metadata)
+        # Accounting is broker-owned, never adapter-supplied result metadata.
+        metadata.pop("request_units", None)
+        if spec.request_units != 1:
+            metadata["request_units"] = spec.request_units
+            metadata = self._metadata(metadata)
         fingerprint = canonical_sha256({
             "runtime_kind": spec.runtime_kind, "operation_kind": spec.operation_kind,
             "destination": destination, "method": spec.method.upper(),
@@ -149,16 +158,8 @@ class ValidationTransportBroker:
             conn.execute("BEGIN IMMEDIATE")
             try:
                 self._check_owner(conn)
-                used, active, previous = conn.execute(
-                    """SELECT count(*),coalesce(sum(active),0),max(scheduled_at) FROM (
-                    SELECT CASE WHEN status IN ('reserved','running') THEN 1 ELSE 0 END active,
-                           scheduled_at FROM validation_http_requests WHERE scan_id=? AND policy_id=?
-                    UNION ALL
-                    SELECT CASE WHEN status IN ('reserved','running') THEN concurrency_units ELSE 0 END,
-                           scheduled_at FROM validation_transport_operations WHERE scan_id=? AND policy_id=?)""",
-                    (*scope, *scope),
-                ).fetchone()
-                if used + len(specs) > limits.max_requests:
+                used, active, previous = _policy_usage(conn, *scope)
+                if used + sum(spec.request_units for spec in specs) > limits.max_requests:
                     raise ValidationTransportError("TargetPolicy request budget exhausted")
                 if active + sum(spec.concurrency_units for spec in specs) > limits.concurrency:
                     raise ValidationTransportError("TargetPolicy concurrency limit reached")
@@ -171,6 +172,8 @@ class ValidationTransportBroker:
                 for ordinal, (spec, (destination, fingerprint, metadata)) in enumerate(zip(specs, prepared)):
                     now = self.clock()
                     scheduled = max(now, previous + 1 / limits.requests_per_second if previous is not None else now)
+                    # Multi-unit control allowances prepay the full rate window.
+                    scheduled += (spec.request_units - 1) / limits.requests_per_second
                     operation_id = "vop_" + uuid4().hex
                     conn.execute(
                         """INSERT INTO validation_transport_operations
@@ -238,6 +241,11 @@ class ValidationTransportBroker:
                     or result.response_bytes > row["reserved_bytes"] - row["request_bytes"]):
                 raise ValidationTransportError("transport response byte count exceeds its reservation or is invalid")
             metadata = self._metadata(result.metadata)
+            metadata.pop("request_units", None)
+            request_units = json.loads(row["result_json"]).get("request_units", 1)
+            if request_units != 1:
+                metadata["request_units"] = request_units
+                metadata = self._metadata(metadata)
         except (ValueError, TypeError):
             self._finish(reservation.operation_id, "failed", error_message="InvalidTransportResult")
             raise
@@ -301,10 +309,14 @@ class ValidationTransportBroker:
         with closing(self._connect()) as conn:
             cursor = conn.execute(
                 """UPDATE validation_transport_operations
-                SET status=?,response_bytes=?,result_json=?,error_message=?,finished_at=?
+                SET status=?,response_bytes=?,
+                    result_json=CASE WHEN json_extract(result_json,'$.request_units') IS NOT NULL
+                        THEN json_set(?, '$.request_units', json_extract(result_json,'$.request_units'))
+                        ELSE json_remove(?, '$.request_units') END,
+                    error_message=?,finished_at=?
                 WHERE operation_id=? AND scan_id=? AND stage_run_id=? AND case_id=?
                   AND attempt_id=? AND status='running'""",
-                (status, response_bytes, result_json, error_message, self.clock(), operation_id,
+                (status, response_bytes, result_json, result_json, error_message, self.clock(), operation_id,
                  self.scan_id, self.stage_run_id, self.case_id, self.attempt_id),
             )
             if cursor.rowcount != 1:
