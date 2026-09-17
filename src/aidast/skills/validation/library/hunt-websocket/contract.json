@@ -5,7 +5,7 @@
     "state_change"
   ],
   "runtime_kinds": [
-    "http"
+    "websocket"
   ],
   "target_expected_signal": {
     "kind": "hunt-websocket_verified",

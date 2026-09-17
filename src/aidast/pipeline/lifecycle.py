@@ -175,6 +175,17 @@ def finish_stage_run(
                 (timestamp, stage_run_id),
             )
             conn.execute(
+                """UPDATE validation_transport_operations
+                SET status=CASE WHEN status='reserved' AND dispatched_at IS NULL
+                                THEN 'failed' ELSE 'outcome_unknown' END,
+                    error_message=CASE WHEN status='reserved' AND dispatched_at IS NULL
+                                       THEN 'UndispatchedReservationAbandoned'
+                                       ELSE 'InterruptedTransportOperation' END,
+                    finished_at=CAST(strftime('%s', ?) AS REAL)
+                WHERE stage_run_id=? AND status IN ('reserved','running')""",
+                (timestamp, stage_run_id),
+            )
+            conn.execute(
                 """UPDATE validation_cases
                 SET processing_phase='interrupted',updated_at=?
                 WHERE latest_stage_run_id=?

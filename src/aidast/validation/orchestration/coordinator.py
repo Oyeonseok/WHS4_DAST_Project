@@ -239,6 +239,19 @@ class ValidationCoordinator:
                        allow_impact_hypotheses: bool) -> bool:
         self._impact_development_records = []
         version = case["state_version"]
+
+        def stop_incomplete_replay(observations, evidence_ids):
+            if not any(self._nonproof_transport_observation(item) for item in observations):
+                return False
+            reason = ("outcome_unknown_requires_manual_review"
+                      if any(item["outcome"] == "outcome_unknown" for item in observations)
+                      else "transport_observation_incomplete")
+            repo.finalize(case["case_id"], stage_run_id=stage_run_id,
+                          expected_version=version, status="INCONCLUSIVE",
+                          decision={"reason": reason, "phase": "blind_replay"},
+                          evidence_ids=evidence_ids)
+            return True
+
         if case.get("blind_case_sha256") is not None:
             repo.quarantine_running_impact_hypotheses(
                 case_id=case["case_id"], stage_run_id=stage_run_id,
@@ -351,6 +364,8 @@ class ValidationCoordinator:
                 )
             else:
                 observations, evidence_ids = recovered
+            if stop_incomplete_replay(observations, evidence_ids):
+                return True
             target_values = [item["signal_observed"] for item in observations if item["attempt_kind"] == "target"]
             if len(target_values) == 3 and any(target_values) and not all(target_values):
                 extra, extra_evidence = self._execute_batch(
@@ -359,6 +374,8 @@ class ValidationCoordinator:
                 )
                 observations += extra
                 evidence_ids += extra_evidence
+                if stop_incomplete_replay(observations, evidence_ids):
+                    return True
             try:
                 assessment = self._assessment(blind_view, tuple(observations))
             except ValidationCoordinatorError:
@@ -388,6 +405,8 @@ class ValidationCoordinator:
                         repo, candidate, stage_run_id, policy=policy, batch_no=2
                     )
                     evidence_ids = development_evidence + evidence_ids
+                    if stop_incomplete_replay(observations, evidence_ids):
+                        return True
                     try:
                         assessment = self._assessment(blind_view, tuple(observations))
                     except ValidationCoordinatorError:
@@ -461,6 +480,8 @@ class ValidationCoordinator:
                 content_sha256=comparison_sha, content_length=len(comparison.model_dump_json().encode()),
             )
         evidence_ids.append(comparison_evidence)
+        if stop_incomplete_replay(observations, evidence_ids):
+            return True
         targets = tuple(bool(item["signal_observed"]) for item in observations if item["attempt_kind"] == "target")
         positive = all(bool(item["signal_observed"]) for item in observations
                        if item["attempt_kind"] == "positive_control")
@@ -533,6 +554,11 @@ class ValidationCoordinator:
                WHERE case_id=? AND stage_run_id=? AND status='outcome_unknown'""",
             (case_id, stage_run_id),
         ).fetchone()[0]
+        operation_count = conn.execute(
+            """SELECT count(*) FROM validation_transport_operations
+               WHERE case_id=? AND stage_run_id=? AND status='outcome_unknown'""",
+            (case_id, stage_run_id),
+        ).fetchone()[0]
         action_count = conn.execute(
             """SELECT count(*) FROM validation_development_actions
                WHERE case_id=? AND stage_run_id=? AND status='outcome_unknown'""",
@@ -546,6 +572,7 @@ class ValidationCoordinator:
         ).fetchone()[0]
         return {
             "attempts": attempt_count, "requests": request_count,
+            "transport_operations": operation_count,
             "development_actions": action_count,
             "impact_hypotheses": impact_count,
         }
@@ -596,26 +623,57 @@ class ValidationCoordinator:
                                  "attempt_kind": kind, "batch_no": batch_no,
                                  **observation.model_dump(mode="json")})
             evidence_ids.append(evidence)
+            if self._nonproof_transport_observation(observations[-1]):
+                break
         return observations, evidence_ids
+
+    @staticmethod
+    def _nonproof_transport_observation(observation: dict) -> bool:
+        return observation["outcome"] == "outcome_unknown" or bool(
+            observation.get("details", {}).get("operation_ids")
+            and observation["outcome"] not in {"observed", "not_observed"}
+        )
 
     def _validate_request_ledger(
         self, conn: sqlite3.Connection, *, candidate: ValidatedCandidate,
         stage_run_id: str, attempt_id: str,
         observation: ReproductionObservation,
     ) -> None:
-        """Bind adapter-reported request IDs to the current attempt before evidence storage."""
-        request_ids = self._request_ids(
-            observation.details,
+        """Bind both kinds of adapter ledger IDs before accepting evidence."""
+        request_ids = self._ledger_ids(
+            observation.details, "request_ids",
             "ReproductionPort returned invalid Validation request ledger IDs",
+        )
+        operation_ids = self._ledger_ids(
+            observation.details, "operation_ids",
+            "ReproductionPort returned invalid Validation operation ledger IDs",
         )
         if (
             getattr(self.reproduction, "requires_request_ledger", False)
             and observation.outcome in {"observed", "not_observed"}
-            and not request_ids
+            and not (request_ids or operation_ids)
         ):
             raise ValidationCoordinatorError(
-                "native reproduction completed without a Validation request ledger row"
+                "native reproduction completed without a Validation ledger row"
             )
+        if operation_ids:
+            placeholders = ",".join("?" for _ in operation_ids)
+            rows = conn.execute(
+                f"""SELECT operation_id,status FROM validation_transport_operations
+                WHERE scan_id=? AND stage_run_id=? AND case_id=? AND attempt_id=?
+                  AND operation_id IN ({placeholders})""",
+                (candidate.scan_id, stage_run_id, candidate.case_id, attempt_id, *operation_ids),
+            ).fetchall()
+            if {row["operation_id"] for row in rows} != set(operation_ids):
+                raise ValidationCoordinatorError(
+                    "Validation operation ledger IDs do not belong to the current attempt"
+                )
+            allowed = ({"completed"} if observation.outcome in {"observed", "not_observed"}
+                       else {"completed", "failed", "outcome_unknown"})
+            if any(row["status"] not in allowed for row in rows):
+                raise ValidationCoordinatorError(
+                    "Validation observation cites an unfinished operation ledger row"
+                )
         if not request_ids:
             return
         placeholders = ",".join("?" for _ in request_ids)
@@ -636,7 +694,11 @@ class ValidationCoordinator:
 
     @staticmethod
     def _request_ids(result: dict[str, Any], error: str) -> tuple[str, ...]:
-        raw = result.get("request_ids", ())
+        return ValidationCoordinator._ledger_ids(result, "request_ids", error)
+
+    @staticmethod
+    def _ledger_ids(result: dict[str, Any], key: str, error: str) -> tuple[str, ...]:
+        raw = result.get(key, ())
         if (
             not isinstance(raw, (list, tuple))
             or any(not isinstance(item, str) or not item for item in raw)

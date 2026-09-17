@@ -18,7 +18,19 @@ class ValidationProfileError(ValueError):
     pass
 
 
-RuntimeKind = Literal["http", "browser", "oob"]
+RuntimeKind = Literal[
+    "http", "browser", "oob", "multipart", "websocket", "grpc", "concurrent",
+]
+
+RUNTIME_SIGNAL_CAPABILITIES: dict[str, frozenset[str]] = {
+    "http": frozenset({"response_diff", "error_signature", "timing", "state_change", "authorization_boundary"}),
+    "browser": frozenset({"dom_effect"}),
+    "oob": frozenset({"oob_callback"}),
+    "multipart": frozenset({"response_diff", "error_signature", "state_change", "authorization_boundary"}),
+    "websocket": frozenset({"response_diff", "error_signature", "state_change", "authorization_boundary"}),
+    "grpc": frozenset({"response_diff", "error_signature", "timing", "state_change", "authorization_boundary"}),
+    "concurrent": frozenset({"timing", "state_change", "authorization_boundary"}),
+}
 
 
 class ProfileSignalCriterion(StrictContract):
@@ -93,16 +105,19 @@ class ValidationProfile(StrictContract):
             raise ValueError("profile signal types must be unique")
         if len(self.runtime_kinds) != len(set(self.runtime_kinds)):
             raise ValueError("profile runtime kinds must be unique")
-        expected_runtime_kinds = set()
-        for signal_type in self.signal_types:
-            if signal_type == "dom_effect":
-                expected_runtime_kinds.add("browser")
-            elif signal_type == "oob_callback":
-                expected_runtime_kinds.add("oob")
-            else:
-                expected_runtime_kinds.add("http")
-        if set(self.runtime_kinds) != expected_runtime_kinds:
-            raise ValueError("profile runtime kinds must match its signal types")
+        if (
+            any(
+                not any(signal_type in RUNTIME_SIGNAL_CAPABILITIES[runtime_kind]
+                        for runtime_kind in self.runtime_kinds)
+                for signal_type in self.signal_types
+            )
+            or any(
+                not any(signal_type in RUNTIME_SIGNAL_CAPABILITIES[runtime_kind]
+                        for signal_type in self.signal_types)
+                for runtime_kind in self.runtime_kinds
+            )
+        ):
+            raise ValueError("profile runtime kinds cannot establish its signal types")
         if "timing" in self.signal_types and self.baseline_samples is None:
             raise ValueError("timing profiles require baseline_samples")
         if self.control_positive.signal_type not in {None, *self.signal_types}:

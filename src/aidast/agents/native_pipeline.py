@@ -360,12 +360,13 @@ class CodexMainAgent:
 
     @staticmethod
     def _normalize_grounded_execution_controls(item, scope_markdown: str):
+        default_limits = PolicyLimits()
         defaults = {
-            **PolicyLimits().model_dump(),
+            **{name: getattr(default_limits, name) for name in PolicyLimits.model_fields},
             **ToolPolicy().model_dump(),
         }
         actual = {
-            **item.limits.model_dump(),
+            **{name: getattr(item.limits, name) for name in PolicyLimits.model_fields},
             **item.tools.model_dump(),
         }
         evidence = {entry.field: entry.source_quote for entry in item.restriction_evidence}

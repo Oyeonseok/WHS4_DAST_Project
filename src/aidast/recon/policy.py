@@ -26,6 +26,9 @@ class PolicyLimits(StrictModel):
     timeout_seconds: Annotated[int, Field(ge=1, le=120)] = 20
     max_depth: Annotated[int, Field(ge=0, le=10)] = 3
     max_requests: Annotated[int, Field(ge=1, le=100_000)] = 2000
+    max_validation_bytes: Annotated[int, Field(
+        ge=1, le=100_000_000, exclude_if=lambda value: value == 10_000_000,
+    )] = 10_000_000
 
 
 class ToolPolicy(StrictModel):
@@ -45,7 +48,7 @@ class ApiProbePolicy(StrictModel):
 
 PolicyControlledField = Literal[
     "requests_per_second", "concurrency", "timeout_seconds", "max_depth",
-    "max_requests", "playwright_interaction", "form_submission",
+    "max_requests", "max_validation_bytes", "playwright_interaction", "form_submission",
     "katana_headless", "ffuf_enabled", "ffuf_recursion",
     "mitm_capture_bodies",
 ]

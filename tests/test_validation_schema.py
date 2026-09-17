@@ -1,4 +1,4 @@
-"""Shared Pipeline.db v9 Validation storage constraints."""
+"""Shared Pipeline.db v10 Validation storage constraints."""
 
 import sqlite3
 import tempfile
@@ -26,7 +26,7 @@ class ValidationSchemaTests(unittest.TestCase):
         self.conn.commit()
 
     def test_schema_version_and_tables(self):
-        self.assertEqual(self.conn.execute("PRAGMA user_version").fetchone()[0], 9)
+        self.assertEqual(self.conn.execute("PRAGMA user_version").fetchone()[0], 10)
         columns = {row[1] for row in self.conn.execute("PRAGMA table_info(validation_cases)")}
         self.assertNotIn("known_similarity", columns)
         binding_columns = {
@@ -37,7 +37,8 @@ class ValidationSchemaTests(unittest.TestCase):
         }.issubset(binding_columns))
         expected = {"validation_cases", "validation_attempts", "validation_evidence",
                     "validation_development_actions", "validation_impact_hypotheses",
-                    "validation_http_requests", "finding_reproduction_specs"}
+                    "validation_http_requests", "validation_transport_operations",
+                    "finding_reproduction_specs"}
         names = {row[0] for row in self.conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         self.assertLessEqual(expected, names)
         reproduction_columns = {
@@ -140,7 +141,7 @@ class ValidationSchemaTests(unittest.TestCase):
                 PRAGMA user_version=8;
             """)
             migrate_live_pipeline_schema(connection)
-            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 9)
+            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 10)
             self.assertEqual(connection.execute(
                 "SELECT request_id,policy_sha256,result_json FROM attack_http_requests"
             ).fetchone(), ("request", None, "{}"))
@@ -170,5 +171,31 @@ class ValidationSchemaTests(unittest.TestCase):
         self.assertEqual(self.conn.execute(
             "SELECT attempt_id,case_id FROM validation_attempts"
         ).fetchall(), [("attempt", "case")])
-        self.assertEqual(self.conn.execute("PRAGMA user_version").fetchone()[0], 9)
+        self.assertEqual(self.conn.execute("PRAGMA user_version").fetchone()[0], 10)
         self.assertEqual(self.conn.execute("PRAGMA foreign_key_check").fetchall(), [])
+
+    def test_v9_to_v10_migration_preserves_legacy_rows_and_is_idempotent(self):
+        self.conn.execute("DROP TABLE IF EXISTS validation_transport_operations")
+        self.conn.execute("""INSERT INTO validation_cases
+            (case_id,scan_id,target_kind,finding_id,latest_stage_run_id,processing_phase)
+            VALUES ('case','scan','finding','finding','validation_run','queued')""")
+        self.conn.execute("""INSERT INTO validation_attempts
+            (attempt_id,case_id,stage_run_id,batch_no,attempt_kind,ordinal,signal_type,outcome)
+            VALUES ('attempt','case','validation_run',1,'target',1,'response_diff','error')""")
+        self.conn.execute("""INSERT INTO validation_http_requests
+            (request_id,scan_id,stage_run_id,case_id,attempt_id,policy_id,policy_sha256,
+             method,url,request_fingerprint,status,scheduled_at,result_json)
+            VALUES ('request','scan','validation_run','case','attempt','policy',?,
+                    'GET','https://test/',?,'completed',100,'{"fixture":true}')""",
+            ('a' * 64, 'b' * 64))
+        before = self.conn.execute("SELECT * FROM validation_http_requests").fetchall()
+        self.conn.execute("PRAGMA user_version=9")
+        self.conn.commit()
+        migrate_live_pipeline_schema(self.conn)
+        schema = self.conn.execute("SELECT type,name,sql FROM sqlite_master ORDER BY name").fetchall()
+        migrate_live_pipeline_schema(self.conn)
+        self.assertEqual(self.conn.execute("PRAGMA user_version").fetchone()[0], 10)
+        self.assertEqual(self.conn.execute("SELECT * FROM validation_http_requests").fetchall(), before)
+        self.assertEqual(self.conn.execute("SELECT type,name,sql FROM sqlite_master ORDER BY name").fetchall(), schema)
+        self.assertEqual(self.conn.execute("PRAGMA foreign_key_check").fetchall(), [])
+        self.assertEqual(self.conn.execute("SELECT count(*) FROM validation_transport_operations").fetchone()[0], 0)

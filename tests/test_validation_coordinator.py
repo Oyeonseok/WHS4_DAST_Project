@@ -1,10 +1,12 @@
 """End-to-end shared DB Validation coordination with deterministic fakes."""
 
 import json
+import importlib
 import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from aidast.pipeline.lifecycle import create_task, finish_stage_run, start_stage_run, transition_task
@@ -16,6 +18,7 @@ from aidast.validation import (CandidateIntegrityError, CandidateIntegrityGate,
                                ClaimComparison, HttpReproductionPort,
                                NativePrerequisiteResolver,
                                ReproductionObservation,
+                               RuntimeReproductionRouter,
                                ValidationCoordinator, ValidationCoordinatorError,
                                build_native_validation_coordinator,
                                canonical_reproduction_spec)
@@ -33,6 +36,40 @@ class FakePort:
             signal_type=blind_case.signal_types[0], signal_observed=observed,
             details={"kind": attempt_kind, "ordinal": ordinal},
             content_sha256=(str(ordinal) * 64)[:64], content_length=1,
+        )
+
+
+class RoutingPort:
+    def __init__(self):
+        self.calls = 0
+
+    def execute(self, blind_case, **kwargs):
+        self.calls += 1
+
+
+class RuntimeReproductionRouterTests(unittest.TestCase):
+    @staticmethod
+    def blind(*, runtime_kind):
+        return SimpleNamespace(runtime_contract={"runtime_kind": runtime_kind})
+
+    def test_router_selects_each_protocol_adapter(self):
+        ports = {
+            kind: RoutingPort()
+            for kind in ("multipart", "websocket", "grpc", "concurrent")
+        }
+        router = RuntimeReproductionRouter(http=RoutingPort(), **ports)
+
+        for kind, port in ports.items():
+            with self.subTest(runtime_kind=kind):
+                router.execute(self.blind(runtime_kind=kind), attempt_kind="target")
+                self.assertEqual(port.calls, 1)
+
+    def test_missing_protocol_adapter_has_stable_preflight_reason(self):
+        router = RuntimeReproductionRouter(http=RoutingPort())
+
+        self.assertEqual(
+            router.unsupported_reason(self.blind(runtime_kind="grpc")),
+            "grpc_adapter_unavailable",
         )
 
 
@@ -199,6 +236,63 @@ class InterruptedReproductionPort(FakePort):
         raise RuntimeError("transport completion is unknown")
 
 
+class InterruptedProtocolOperationsPort:
+    requires_request_ledger = True
+
+    def __init__(self):
+        self.calls = 0
+
+    def execute(self, blind_case, *, attempt_id, db_path, scan_id,
+                stage_run_id, case_id, policy, **kwargs):
+        self.calls += 1
+        with sqlite3.connect(db_path) as conn:
+            for runtime_kind in ("multipart", "websocket", "grpc", "concurrent"):
+                conn.execute(
+                    """INSERT INTO validation_transport_operations
+                       (operation_id,scan_id,stage_run_id,case_id,attempt_id,policy_id,
+                        policy_sha256,runtime_kind,operation_kind,destination,
+                        request_fingerprint,concurrency_units,reserved_bytes,status,
+                        scheduled_at,dispatched_at)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,'running',0,0)""",
+                    (
+                        f"operation-{runtime_kind}", scan_id, stage_run_id, case_id,
+                        attempt_id, policy.policy_id, "a" * 64, runtime_kind, "request",
+                        "https://test/items/1", "b" * 64, 1, 3,
+                    ),
+                )
+        raise RuntimeError("protocol transport completion is unknown")
+
+
+class FakeNativeProtocolAdapter:
+    requires_request_ledger = True
+
+    def __init__(self, runtime_kind, status="completed"):
+        self.runtime_kind = runtime_kind
+        self.status = status
+
+    def execute(self, blind_case, *, attempt_id, db_path, scan_id,
+                stage_run_id, case_id, policy, **kwargs):
+        operation_id = f"operation-{self.runtime_kind}"
+        with sqlite3.connect(db_path) as conn:
+            conn.execute(
+                """INSERT INTO validation_transport_operations
+                   (operation_id,scan_id,stage_run_id,case_id,attempt_id,policy_id,
+                    policy_sha256,runtime_kind,operation_kind,destination,
+                    request_fingerprint,concurrency_units,reserved_bytes,status,scheduled_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,0)""",
+                (
+                    operation_id, scan_id, stage_run_id, case_id, attempt_id,
+                    policy.policy_id, "a" * 64, self.runtime_kind, "request",
+                    "https://test/items/0", "b" * 64, 1, 3, self.status,
+                ),
+            )
+        return ReproductionObservation(
+            outcome="observed", signal_type="response_diff", signal_observed=True,
+            details={"operation_ids": [operation_id]},
+            content_sha256="a" * 64, content_length=1,
+        )
+
+
 class ValidationCoordinatorTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -330,6 +424,44 @@ class ValidationCoordinatorTests(unittest.TestCase):
             ):
                 CandidateIntegrityGate(conn).validate_finding(
                     case_id="case", scan_id="scan", finding_id="finding"
+                )
+
+    def test_candidate_gate_rejects_forged_runtime_contract_digest(self):
+        from aidast.validation import validate_runtime_contract
+
+        def attempt(variant):
+            return {
+                "request": {
+                    "path_parameters": {"id": 1},
+                    "query_parameters": {"variant": variant},
+                },
+                "assertions": [{
+                    "assertion_id": "proof", "kind": "body_contains",
+                    "expected": "private-record",
+                }],
+            }
+
+        runtime = validate_runtime_contract({
+            "schema_version": 1,
+            "target": attempt("target"),
+            "positive_control": attempt("baseline"),
+            "negative_control": attempt("inert"),
+        }).model_dump(mode="json")
+        with db.connect(self.path) as conn:
+            conn.execute("DROP TRIGGER finding_reproduction_specs_no_update")
+            conn.execute(
+                """UPDATE finding_reproduction_specs
+                   SET runtime_contract_json=?,runtime_contract_sha256=?
+                   WHERE finding_id='finding'""",
+                (json.dumps(runtime, sort_keys=True, separators=(",", ":")), "0" * 64),
+            )
+            conn.commit()
+
+            with self.assertRaisesRegex(
+                CandidateIntegrityError, "runtime_contract_sha256",
+            ):
+                CandidateIntegrityGate(conn).validate_finding(
+                    case_id="case", scan_id="scan", finding_id="finding",
                 )
 
     def test_candidate_gate_rejects_development_contract_hash_mismatch(self):
@@ -502,7 +634,7 @@ class ValidationCoordinatorTests(unittest.TestCase):
 
     def test_native_port_observation_requires_request_ledger(self):
         with self.assertRaisesRegex(
-            ValidationCoordinatorError, "without a Validation request ledger row"
+            ValidationCoordinatorError, "without a Validation ledger row"
         ):
             ValidationCoordinator(
                 db_path=self.path, agent=FakeAgent(), reproduction=MissingLedgerPort(),
@@ -642,6 +774,157 @@ class ValidationCoordinatorTests(unittest.TestCase):
             coordinator.impact_development_port, NativeImpactDevelopmentPort,
         )
         self.assertIsNotNone(coordinator.prerequisite_resolver.policy_provider)
+
+    def test_native_builder_wires_protocol_adapters_with_shared_resources(self):
+        from aidast.validation.execution.concurrent_adapter import ConcurrentReproductionPort
+        from aidast.validation.execution.grpc_adapter import GrpcReproductionPort
+        from aidast.validation.execution.multipart_adapter import MultipartReproductionPort
+        from aidast.validation.execution.websocket_adapter import WebSocketReproductionPort
+
+        policy_path = Path(self.temp.name) / "TargetPolicy.json"
+        policy_path.write_text(json.dumps({
+            "policies": [self.policy.model_dump(mode="json")],
+        }), encoding="utf-8")
+        resolver = lambda reference: {"X-Test-Credential": reference}
+        artifact_resolver = lambda reference: reference.encode()
+        multipart_transport = lambda request, timeout: None
+        websocket_connector = lambda *args, **kwargs: None
+        grpc_channel_factory = lambda *args, **kwargs: None
+
+        coordinator = build_native_validation_coordinator(
+            db_path=self.path,
+            policy_path=policy_path,
+            credential_resolver=resolver,
+            multipart_transport=multipart_transport,
+            websocket_connector=websocket_connector,
+            grpc_channel_factory=grpc_channel_factory,
+            artifact_resolver=artifact_resolver,
+        )
+        router = coordinator.reproduction
+
+        self.assertIsInstance(router.multipart, MultipartReproductionPort)
+        self.assertIs(router.multipart.transport, multipart_transport)
+        self.assertIs(router.multipart.credential_resolver, resolver)
+        self.assertIs(router.multipart.artifact_resolver, artifact_resolver)
+        self.assertIsInstance(router.websocket, WebSocketReproductionPort)
+        self.assertIs(router.websocket.connector, websocket_connector)
+        self.assertIs(router.websocket.credential_resolver, resolver)
+        self.assertIs(router.websocket.artifact_resolver, artifact_resolver)
+        self.assertIsInstance(router.grpc, GrpcReproductionPort)
+        self.assertIs(router.grpc.channel_factory, grpc_channel_factory)
+        self.assertIs(router.grpc.credential_resolver, resolver)
+        self.assertIs(router.grpc.artifact_resolver, artifact_resolver)
+        self.assertIsInstance(router.concurrent, ConcurrentReproductionPort)
+        self.assertIsNone(router.concurrent.transport)
+        self.assertIs(router.concurrent.credential_resolver, resolver)
+        self.assertIs(router.concurrent.artifact_resolver, artifact_resolver)
+
+    def test_protocol_runtime_contracts_ports_and_broker_are_public(self):
+        import aidast.validation as validation
+
+        expected = (
+            "BinaryArtifactResolver", "BinaryArtifactUnavailable", "BinaryValue",
+            "MultipartTextPart", "MultipartFilePart", "MultipartRequestTemplate",
+            "MultipartAttemptContract", "MultipartRuntimeContract", "encode_multipart",
+            "MultipartReproductionPort", "WebSocketAssertion", "WebSocketAttemptContract",
+            "TextFrame", "JsonFrame", "BinaryFrame", "CloseFrame",
+            "WebSocketRuntimeContract", "evaluate_websocket_observation",
+            "WebSocketReproductionPort", "GrpcAssertion", "GrpcAttemptContract",
+            "DescriptorMethod", "LoadedGrpcMethod", "GrpcRuntimeContract",
+            "evaluate_grpc_response", "GrpcReproductionPort",
+            "ConcurrentAggregateAssertion", "ConcurrentAttemptContract",
+            "ConcurrentRuntimeContract", "ConcurrentMemberResult",
+            "evaluate_concurrent_results", "ConcurrentReproductionPort",
+            "TransportDispatchResult", "TransportOperationSpec", "TransportReservation",
+            "ValidationTransportBroker", "ValidationTransportError",
+        )
+        for name in expected:
+            with self.subTest(name=name):
+                self.assertTrue(hasattr(validation, name), name)
+                self.assertIn(name, validation.__all__)
+
+        for module_name in (
+            "binary", "multipart_contract", "multipart_adapter", "websocket_contract",
+            "websocket_adapter", "grpc_contract", "grpc_adapter", "concurrent_contract",
+            "concurrent_adapter", "transport_broker",
+        ):
+            with self.subTest(module_name=module_name):
+                self.assertIs(
+                    importlib.import_module(f"aidast.validation.{module_name}"),
+                    importlib.import_module(
+                        "aidast.validation.contracts." + module_name
+                        if module_name in {"binary", "multipart_contract", "websocket_contract",
+                                           "grpc_contract", "concurrent_contract"}
+                        else "aidast.validation.execution." + module_name
+                    ),
+                )
+
+    def test_native_builder_isolates_one_unavailable_protocol_adapter(self):
+        policy_path = Path(self.temp.name) / "TargetPolicy.json"
+        policy_path.write_text(json.dumps({
+            "policies": [self.policy.model_dump(mode="json")],
+        }), encoding="utf-8")
+        real_import_module = importlib.import_module
+
+        def import_with_missing_grpc(name, package=None):
+            if name == "grpc":
+                raise ImportError("grpc runtime dependency unavailable")
+            return real_import_module(name, package)
+
+        with patch("importlib.import_module", side_effect=import_with_missing_grpc):
+            coordinator = build_native_validation_coordinator(
+                db_path=self.path, policy_path=policy_path,
+            )
+
+        router = coordinator.reproduction
+        self.assertIsNotNone(router.http)
+        self.assertIsNotNone(router.multipart)
+        self.assertIsNotNone(router.websocket)
+        self.assertIsNone(router.grpc)
+        self.assertIsNotNone(router.concurrent)
+        self.assertEqual(
+            router.unsupported_reason(SimpleNamespace(
+                runtime_contract={"runtime_kind": "grpc"},
+            )),
+            "grpc_adapter_unavailable",
+        )
+
+    def test_native_builder_rejects_missing_lazy_protobuf_component_before_advertising_grpc(self):
+        policy_path = Path(self.temp.name) / "TargetPolicy.json"
+        policy_path.write_text(json.dumps({
+            "policies": [self.policy.model_dump(mode="json")],
+        }), encoding="utf-8")
+        real_import_module = importlib.import_module
+
+        for missing in (
+            "google.protobuf.descriptor_pb2",
+            "google.protobuf.descriptor_pool",
+            "google.protobuf.json_format",
+            "google.protobuf.message_factory",
+        ):
+            with self.subTest(missing=missing):
+                def import_with_missing_component(name, package=None):
+                    if name == missing:
+                        raise ImportError("lazy protobuf component unavailable")
+                    return real_import_module(name, package)
+
+                with patch("importlib.import_module", side_effect=import_with_missing_component):
+                    coordinator = build_native_validation_coordinator(
+                        db_path=self.path, policy_path=policy_path,
+                    )
+
+                router = coordinator.reproduction
+                self.assertIsNotNone(router.http)
+                self.assertIsNotNone(router.multipart)
+                self.assertIsNotNone(router.websocket)
+                self.assertIsNone(router.grpc)
+                self.assertIsNotNone(router.concurrent)
+                self.assertEqual(
+                    router.unsupported_reason(SimpleNamespace(
+                        runtime_contract={"runtime_kind": "grpc"},
+                    )),
+                    "grpc_adapter_unavailable",
+                )
 
     def test_interrupted_native_development_is_not_redispatched_on_resume(self):
         from aidast.validation import DevelopmentRuntimeContract, canonical_sha256
@@ -809,6 +1092,49 @@ class ValidationCoordinatorTests(unittest.TestCase):
         ).resume(stage_id)
 
         self.assertEqual(result.status, "completed")
+        self.assertEqual(resumed_port.calls, [])
+        with db.connect(self.path) as conn:
+            status, decision = conn.execute(
+                "SELECT current_status,decision_json FROM validation_cases"
+            ).fetchone()
+        self.assertEqual(status, "INCONCLUSIVE")
+        self.assertEqual(
+            json.loads(decision)["reason"],
+            "outcome_unknown_requires_manual_review",
+        )
+
+    def test_resume_never_redispatches_potentially_dispatched_protocol_operations(self):
+        port = InterruptedProtocolOperationsPort()
+        with self.assertRaisesRegex(
+            ValidationCoordinatorError, "protocol transport completion is unknown",
+        ):
+            ValidationCoordinator(
+                db_path=self.path, agent=FakeAgent(), reproduction=port,
+                policy_provider=lambda endpoint, method: self.policy,
+            ).run("scan")
+        self.assertEqual(port.calls, 1)
+        with db.connect(self.path) as conn:
+            stage_id = conn.execute(
+                "SELECT stage_run_id FROM stage_runs WHERE stage='validation'"
+            ).fetchone()[0]
+            self.assertEqual(
+                set(conn.execute(
+                    "SELECT runtime_kind,status FROM validation_transport_operations"
+                )),
+                {
+                    ("multipart", "outcome_unknown"),
+                    ("websocket", "outcome_unknown"),
+                    ("grpc", "outcome_unknown"),
+                    ("concurrent", "outcome_unknown"),
+                },
+            )
+
+        resumed_port = FakePort()
+        ValidationCoordinator(
+            db_path=self.path, agent=FakeAgent(), reproduction=resumed_port,
+            policy_provider=lambda endpoint, method: self.policy,
+        ).resume(stage_id)
+
         self.assertEqual(resumed_port.calls, [])
         with db.connect(self.path) as conn:
             status, decision = conn.execute(
@@ -1130,6 +1456,105 @@ class ValidationCoordinatorTests(unittest.TestCase):
                 table: tuple(conn.execute(f"SELECT * FROM {table} ORDER BY rowid"))
                 for table in chaining_tables
             }, chaining_before)
+
+
+class ValidationOperationLedgerTests(unittest.TestCase):
+    RUNTIME_KINDS = ("multipart", "websocket", "grpc", "concurrent")
+
+    def setUp(self):
+        from test_validation_request_broker import ValidationRequestBrokerTests
+        ValidationRequestBrokerTests.setUp(self)
+        self.coordinator = ValidationCoordinator(
+            db_path=self.path, agent=FakeAgent(), reproduction=MissingLedgerPort(),
+            policy_provider=lambda endpoint, method: self.policy,
+        )
+        self.candidate = SimpleNamespace(scan_id="scan", case_id="case")
+        self.conn.commit()
+
+    def operation(self, runtime_kind="multipart", status="completed"):
+        adapter = FakeNativeProtocolAdapter(runtime_kind, status)
+        self.coordinator.reproduction = adapter
+        observation = adapter.execute(
+            self.blind, attempt_id="attempt", db_path=self.path, scan_id="scan",
+            stage_run_id="stage", case_id="case", policy=self.policy,
+        )
+        return observation.details["operation_ids"][0]
+
+    def validate(self, details, **context):
+        self.coordinator._validate_request_ledger(
+            self.conn, candidate=context.get("candidate", self.candidate),
+            stage_run_id=context.get("stage_run_id", "stage"),
+            attempt_id=context.get("attempt_id", "attempt"),
+            observation=ReproductionObservation(
+                outcome="observed", signal_type="response_diff", signal_observed=True,
+                details=details, content_sha256='a' * 64, content_length=1,
+            ),
+        )
+
+    def test_operation_ledger_accepts_only_completed_rows_for_proof(self):
+        for runtime_kind in self.RUNTIME_KINDS:
+            for status in ("completed",):
+                with self.subTest(runtime_kind=runtime_kind, status=status):
+                    operation_id = self.operation(runtime_kind, status)
+                    self.validate({"operation_ids": [operation_id]})
+                    self.conn.execute(
+                        "DELETE FROM validation_transport_operations WHERE operation_id=?",
+                        (operation_id,),
+                    )
+                    self.conn.commit()
+
+    def test_operation_ledger_rejects_unfinished_and_unknown_rows(self):
+        for runtime_kind in self.RUNTIME_KINDS:
+            for status in ("failed", "reserved", "running", "outcome_unknown"):
+                with self.subTest(runtime_kind=runtime_kind, status=status):
+                    operation_id = self.operation(runtime_kind, status)
+                    with self.assertRaisesRegex(
+                        ValidationCoordinatorError, "unfinished operation",
+                    ):
+                        self.validate({"operation_ids": [operation_id]})
+                    self.conn.execute(
+                        "DELETE FROM validation_transport_operations WHERE operation_id=?",
+                        (operation_id,),
+                    )
+                    self.conn.commit()
+
+    def test_operation_ledger_ids_must_be_unique_nonempty_strings(self):
+        self.operation()
+        for invalid in (None, "operation", [""], [1], ["operation", "operation"]):
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(ValidationCoordinatorError, "invalid Validation operation"):
+                self.validate({"operation_ids": invalid})
+
+    def test_operation_ledger_checks_all_ownership_fields(self):
+        for runtime_kind in self.RUNTIME_KINDS:
+            operation_id = self.operation(runtime_kind)
+            for context in (
+                {"candidate": SimpleNamespace(scan_id="foreign", case_id="case")},
+                {"candidate": SimpleNamespace(scan_id="scan", case_id="foreign")},
+                {"stage_run_id": "foreign"}, {"attempt_id": "foreign"},
+            ):
+                with self.subTest(runtime_kind=runtime_kind, context=context), self.assertRaisesRegex(
+                    ValidationCoordinatorError, "do not belong",
+                ):
+                    self.validate({"operation_ids": [operation_id]}, **context)
+            self.conn.execute(
+                "DELETE FROM validation_transport_operations WHERE operation_id=?",
+                (operation_id,),
+            )
+            self.conn.commit()
+        with self.assertRaisesRegex(ValidationCoordinatorError, "do not belong"):
+            self.validate({"operation_ids": ["missing"]})
+
+    def test_operation_ledger_does_not_hide_invalid_http_ids(self):
+        operation_id = self.operation()
+        with self.assertRaisesRegex(ValidationCoordinatorError, "request ledger IDs do not belong"):
+            self.validate({"operation_ids": [operation_id], "request_ids": ["missing"]})
+
+    def test_unknown_operation_is_counted_for_restart_manual_review(self):
+        for runtime_kind in self.RUNTIME_KINDS:
+            self.operation(runtime_kind, "outcome_unknown")
+        counts = self.coordinator._unknown_execution_counts(self.conn, "case", "stage")
+        self.assertEqual(counts["transport_operations"], 4)
+        self.assertEqual(self.coordinator._unknown_execution_counts(self.conn, "foreign", "stage")["transport_operations"], 0)
 
 
 if __name__ == "__main__":

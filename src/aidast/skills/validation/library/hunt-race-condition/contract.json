@@ -5,7 +5,7 @@
     "timing"
   ],
   "runtime_kinds": [
-    "http"
+    "concurrent"
   ],
   "target_expected_signal": {
     "kind": "hunt-race-condition_verified",
