@@ -136,7 +136,10 @@ def validate_request_capability(
 def is_sensitive_header(name: str) -> bool:
     normalized = name.lower().replace("_", "-")
     return (
-        normalized in {"authorization", "proxy-authorization", "cookie", "set-cookie"}
+        normalized in {
+            "authorization", "proxy-authorization", "cookie", "set-cookie",
+            "x-intigriti-username",
+        }
         or any(
             part in normalized
             for part in ("token", "secret", "api-key", "apikey", "capability")
@@ -146,10 +149,19 @@ def is_sensitive_header(name: str) -> bool:
 
 def sanitize_headers(headers: Mapping[str, str] | None) -> dict[str, str]:
     """Retain useful header names without persisting credential values."""
-    return {
-        str(name): "[REDACTED]" if is_sensitive_header(str(name)) else str(value)
-        for name, value in (headers or {}).items()
-    }
+    result: dict[str, str] = {}
+    for name, value in (headers or {}).items():
+        header_name = str(name)
+        header_value = str(value)
+        if is_sensitive_header(header_name):
+            header_value = "[REDACTED]"
+        elif header_name.lower().replace("_", "-") == "user-agent":
+            header_value = re.sub(
+                r"<intigriti:[^>]*>", "<intigriti:[REDACTED]>", header_value,
+                flags=re.IGNORECASE,
+            )
+        result[header_name] = header_value
+    return result
 
 
 def validate_scope_rules(rules: object) -> dict:

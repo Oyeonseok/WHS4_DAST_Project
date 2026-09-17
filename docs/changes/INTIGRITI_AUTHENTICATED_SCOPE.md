@@ -93,6 +93,29 @@
   않도록 `$HOME/aidast-results`를 사용한다.
 - 기존 승인 Scope는 새 결과 루트의 `Scope/` 아래로 이동한다.
 
+### 11. Intigriti Recon 요청 식별
+
+- `recon`과 통합 `run`에 `--intigriti-username`을 추가했다.
+- HTTP Probe, Playwright, Katana, ffuf, API 2차 탐색의 승인된 타깃 요청에
+  `X-Intigriti-Username`과 Intigriti User-Agent 접미사를 주입한다.
+- 외부 정적 리소스에는 연구자 식별 헤더를 전달하지 않는다.
+- Scope가 `X-Intigriti-Username`을 요구하면 사용자명 없는 능동 Recon을
+  fail-closed한다.
+- 저장 증거에서는 사용자명과 User-Agent의 Intigriti 접미사를 가린다.
+
+### 12. 스킴 없는 URL 자산의 HTTPS 정규화
+
+- 증상: Intigriti가 `stock.adobe.com`처럼 스킴 없는 값을 `URL` 타입으로 제공하면
+  Recon 정책 검증이 `asset type cannot be executed as a web target: URL`로
+  중단됐다.
+- 원인: URL 정책 검증이 모든 `URL`/`API` 자산에 `https://` 또는 `http://`가 이미
+  포함되어 있다고 가정했다.
+- 수정: 스킴 없는 `URL`/`API` 자산만 `https://<asset>`으로 해석한다. 명시적인
+  HTTP(S) URL은 기존 스킴, 포트, 경로 제한을 그대로 보존한다.
+- 보안 경계: 기본값은 HTTPS/443이며 HTTP로의 완화, 다른 호스트, 다른 포트 또는
+  승인 경로 밖으로의 확장은 계속 거부한다. 원본 `Scope.json`과 승인 무결성 파일은
+  수정하지 않는다.
+
 ## 사용법
 
 ```bash
@@ -141,11 +164,16 @@ aidast scope \
   `/private/var/folders`로 해석되는 기존 symlink 경계 때문에 61개가 실패한다.
   이번 변경 파일과 무관한 기존 테스트 환경 문제다.
 - 실제 경로인 `TMPDIR=/private/tmp`에서 전체 회귀 테스트:
-  `531 passed, 1 skipped, 170 subtests passed`, Unix socket이 금지된 샌드박스에서
+  `538 passed, 1 skipped, 170 subtests passed`, Unix socket이 금지된 샌드박스에서
   helper broker 관련 3개만 실패했다.
 - 위 helper broker 3개를 정상 권한 환경에서 재실행: `3 passed`.
 - 개발 venv와 설치된 `aidast` 환경 모두 Playwright Chromium 실행 파일 존재 확인.
 - `git diff --check`: 통과.
+- bare-host URL 정책 집중 테스트: `27 passed`.
+- Recon 정책·워크플로 회귀 테스트: `74 passed, 16 subtests passed`.
+- Adobe Scope의 스킴 없는 URL 자산 17개를 HTTPS 정책으로 검증: 모두 통과.
+- `stock.adobe.com` 실제 `aidast recon --policy-only` 검증: HTTPS, 포트 443,
+  경로 `/`로 정책 생성 완료. Recon 네트워크 도구는 실행하지 않음.
 
 ## 아직 필요한 수동 검증
 

@@ -148,6 +148,22 @@ aidast recon "<PROGRAM_URL>" \
   --ffuf-wordlist /path/to/wordlist.txt
 ```
 
+Intigriti 프로그램이 연구자 식별 헤더를 요구하면 사용자명을 명시합니다.
+이 값은 HTTP Probe, Playwright, Katana, ffuf, API 2차 탐색의 승인된 타깃 요청에
+동일하게 적용되며 외부 정적 리소스에는 전달되지 않습니다.
+
+```bash
+aidast recon "<PROGRAM_URL>" \
+  --all-targets \
+  --intigriti-username "<INTIGRITI_USERNAME>" \
+  --execute
+```
+
+이 옵션은 `X-Intigriti-Username`과
+`User-Agent: aidast-recon/0.1 <intigriti:USERNAME>`을 설정합니다. 저장되는 증거와
+진단 데이터에서는 사용자명과 User-Agent 식별 접미사를 가립니다. 승인된 Scope가
+해당 헤더를 요구하는 경우 능동 실행에서 옵션을 생략하면 fail-closed됩니다.
+
 `--all-targets`는 선택 가능한 canonical 타깃을 모두 Plan에 포함합니다.
 Exact web 타깃에는 DNS, HTTP Probe, Origin, Endpoint Discovery를 수행합니다.
 Wildcard는 먼저 승인 범위에서 자산을 발견하고, 발견한 구체 호스트에 대해
