@@ -6,7 +6,7 @@ import json
 import sqlite3
 from contextlib import closing
 from pathlib import Path
-from typing import Any, Iterable, Protocol
+from typing import Any, Callable, Iterable, Protocol
 
 from pydantic import ValidationError as PydanticValidationError
 
@@ -45,13 +45,19 @@ class ValidationCoordinator:
 
     def __init__(self, *, db_path: Path, agent: ValidationAgentRunner | None,
                  reproduction: ReproductionPort | None, policy_provider: PolicyProvider | None,
-                 prerequisite_resolver: PrerequisiteResolverPort | None = None):
+                 prerequisite_resolver: PrerequisiteResolverPort | None = None,
+                 impact_development_port: Callable | None = None,
+                 impact_agent_factory: Callable[[str], Any] | None = None):
         self.db_path = Path(db_path).expanduser().resolve()
         self.agent = agent
         self._owns_agent = False
         self.reproduction = reproduction
         self.policy_provider = policy_provider
         self.prerequisite_resolver = prerequisite_resolver
+        self.impact_development_port = impact_development_port
+        self.impact_agent_factory = impact_agent_factory
+        self._impact_agents: list[Any] = []
+        self._impact_development_records: list[dict[str, Any]] = []
         self.engine = DecisionEngine()
         self.matcher = KnownMatcher()
 
@@ -231,8 +237,12 @@ class ValidationCoordinator:
                        case: dict[str, Any], stage_run_id: str,
                        candidate: ValidatedCandidate, *,
                        allow_impact_hypotheses: bool) -> bool:
+        self._impact_development_records = []
         version = case["state_version"]
         if case.get("blind_case_sha256") is not None:
+            repo.quarantine_running_impact_hypotheses(
+                case_id=case["case_id"], stage_run_id=stage_run_id,
+            )
             unknown = self._unknown_execution_counts(
                 conn, case["case_id"], stage_run_id,
             )
@@ -391,6 +401,12 @@ class ValidationCoordinator:
                     self._validate_assessment_refs(
                         assessment, case["case_id"], evidence_ids, observations
                     )
+            if (allow_impact_hypotheses and self.impact_development_port is not None
+                    and candidate.impact_development_actions):
+                assessment = self._develop_impact(
+                    repo, candidate, stage_run_id, assessment,
+                    observations=tuple(observations), evidence_ids=evidence_ids,
+                )
             assessment_sha = candidate.staged.freeze_assessment(assessment)
             assessment_evidence = repo.add_evidence(
                 case_id=case["case_id"], stage_run_id=stage_run_id,
@@ -483,6 +499,8 @@ class ValidationCoordinator:
             "claim_comparison": comparison.model_dump(mode="json"),
             "evidence_ids": evidence_ids,
         }
+        if self._impact_development_records:
+            decision["impact_development"] = self._impact_development_records
         if status == "UNDERPOWERED" and allow_impact_hypotheses:
             from ..core.decision import ImpactGapAnalyzer
             for ordinal, proposal in enumerate(ImpactGapAnalyzer().analyze(
@@ -520,9 +538,16 @@ class ValidationCoordinator:
                WHERE case_id=? AND stage_run_id=? AND status='outcome_unknown'""",
             (case_id, stage_run_id),
         ).fetchone()[0]
+        impact_count = conn.execute(
+            """SELECT count(*) FROM validation_impact_hypotheses
+               WHERE case_id=? AND stage_run_id=?
+               AND status IN ('running','outcome_unknown')""",
+            (case_id, stage_run_id),
+        ).fetchone()[0]
         return {
             "attempts": attempt_count, "requests": request_count,
             "development_actions": action_count,
+            "impact_hypotheses": impact_count,
         }
 
     def _execute_batch(self, repo: ValidationRepository, candidate: ValidatedCandidate,
@@ -716,6 +741,22 @@ class ValidationCoordinator:
         if len(rows) != len(attempt_ids) or len({row["attempt_id"] for row in rows}) != len(attempt_ids):
             raise ValidationCoordinatorError("frozen BlindAssessment attempt evidence is incomplete or ambiguous")
         observations, evidence_ids = cls._restore_observations(rows)
+        missing_evidence = tuple(
+            item for item in assessment.evidence_ids if item not in evidence_ids
+        )
+        if missing_evidence:
+            placeholders = ",".join("?" for _ in missing_evidence)
+            external = conn.execute(
+                f"""SELECT evidence_id FROM validation_evidence
+                    WHERE case_id=? AND stage_run_id=?
+                    AND evidence_id IN ({placeholders})""",
+                (case_id, stage_run_id, *missing_evidence),
+            ).fetchall()
+            if {row[0] for row in external} != set(missing_evidence):
+                raise ValidationCoordinatorError(
+                    "frozen BlindAssessment impact evidence is incomplete"
+                )
+            evidence_ids.extend(missing_evidence)
         cls._validate_assessment_refs(assessment, case_id, evidence_ids, observations)
         return observations, evidence_ids
 
@@ -898,6 +939,244 @@ class ValidationCoordinator:
     def _assessment(self, blind: dict[str, Any], observations: tuple[dict[str, Any], ...]) -> BlindAssessment:
         return self._agent_call("assess", blind, observations, model=BlindAssessment)
 
+    def _develop_impact(
+        self, repo: ValidationRepository, candidate: ValidatedCandidate,
+        stage_run_id: str, assessment: BlindAssessment, *,
+        observations: tuple[dict[str, Any], ...], evidence_ids: list[str],
+    ) -> BlindAssessment:
+        from ..core.decision import evaluate_impact
+        from ..execution.impact_development import (
+            ImpactDevelopmentObservation, ImpactDevelopmentPlan,
+            ImpactHypothesisExecutor,
+        )
+        from .impact_runner import CodexImpactDevelopmentRunner
+
+        initial = evaluate_impact(
+            assessment.impact_boundary.score,
+            assessment.impact_sensitivity.score,
+            assessment.impact_actor_requirements.score,
+        )
+        if not initial.underpowered:
+            return assessment
+        available_paths = {
+            action.path_id for action in candidate.impact_development_actions
+        }
+        bounded_profile = candidate.profile.profile.model_copy(update={
+            "impact_expansion_paths": tuple(
+                path for path in candidate.profile.profile.impact_expansion_paths
+                if path.path_id in available_paths and path.execution_owner == "validation"
+            ),
+        })
+        executor = ImpactHypothesisExecutor()
+        requests = executor.requests(
+            profile=bounded_profile, impact=initial,
+            evidence_ids=assessment.evidence_ids,
+        )
+        if not requests:
+            return assessment
+        planning_context = (*observations, {
+            "context_kind": "immutable_impact_execution_capabilities",
+            "capabilities": [
+                {
+                    "contract_id": action.contract_id,
+                    "path_id": action.path_id,
+                    "endpoint_template": action.endpoint_template,
+                    "method": action.method,
+                    "request": action.request.model_dump(mode="json"),
+                    "assertions": [
+                        assertion.model_dump(mode="json")
+                        for assertion in action.assertions
+                    ],
+                    "credential_roles": list(action.credential_roles),
+                    "contract_sha256": canonical_sha256(
+                        action.model_dump(mode="json")
+                    ),
+                }
+                for action in candidate.impact_development_actions
+            ],
+        })
+        runner = None
+
+        def port(request, hypothesis_id):
+            perform = getattr(self.impact_development_port, "perform", None)
+            if callable(perform):
+                contracts = {
+                    item.path_id: item for item in candidate.impact_development_actions
+                }
+                return perform(
+                    request, blind_case=candidate.staged._blind_case,
+                    contract=contracts.get(request.path_id),
+                    db_path=self.db_path, scan_id=candidate.scan_id,
+                    stage_run_id=stage_run_id, case_id=candidate.case_id,
+                    impact_hypothesis_id=hypothesis_id,
+                )
+            return self.impact_development_port(request)
+
+        def known_evidence():
+            return {row[0] for row in repo.conn.execute(
+                "SELECT evidence_id FROM validation_evidence WHERE case_id=? AND stage_run_id=?",
+                (candidate.case_id, stage_run_id),
+            )}
+
+        developed = initial
+        results = []
+        paths = {path.path_id: path for path in bounded_profile.impact_expansion_paths}
+        for ordinal, request in enumerate(requests, 1):
+            proposal = request.model_dump(mode="json")
+            proposal.pop("proposal_sha256")
+            hypothesis_id = repo.add_impact_hypothesis(
+                case_id=candidate.case_id, stage_run_id=stage_run_id,
+                ordinal=ordinal, proposal=proposal,
+                skill_sha256=candidate.profile.attack_skill_sha256,
+                validation_profile_sha256=candidate.profile.profile_sha256,
+            )
+            stored = repo.read_impact_hypothesis(hypothesis_id)
+            agent_id = stored.get("agent_id") or "persisted_impact_development"
+            if stored["status"] == "succeeded":
+                observation = ImpactDevelopmentObservation.model_validate(
+                    stored["observation"]
+                )
+                executor._validate_observation(
+                    request, paths[request.path_id], observation, known_evidence(),
+                )
+                plan_data = stored.get("plan")
+            elif stored["status"] in {"skipped", "failed", "outcome_unknown", "running"}:
+                self._impact_development_records.append({
+                    "hypothesis_id": hypothesis_id,
+                    "agent_id": agent_id,
+                    "status": stored["status"],
+                    "plan": stored.get("plan"),
+                })
+                continue
+            else:
+                plan_data = stored.get("plan")
+                if plan_data is None:
+                    if runner is None:
+                        factory = self.impact_agent_factory or (
+                            lambda skill_name: CodexImpactDevelopmentRunner(
+                                attack_skill_name=skill_name,
+                            )
+                        )
+                        runner = factory(candidate.profile.profile.attack_skill_name)
+                        self._impact_agents.append(runner)
+                    try:
+                        raw_plan = runner.plan(request, evidence=planning_context)
+                        plan = (
+                            raw_plan if isinstance(raw_plan, ImpactDevelopmentPlan)
+                            else ImpactDevelopmentPlan.model_validate(raw_plan)
+                        )
+                        executor._validate_plan(request, plan, known_evidence())
+                    except Exception:
+                        repo.fail_impact_hypothesis(hypothesis_id)
+                        raise
+                    plan_data = plan.model_dump(mode="json")
+                    agent_id = getattr(
+                        runner, "agent_id", "injected_impact_development_agent"
+                    )
+                    repo.record_impact_plan(
+                        hypothesis_id, agent_id=agent_id, plan=plan_data,
+                    )
+                else:
+                    plan = ImpactDevelopmentPlan.model_validate(plan_data)
+                    executor._validate_plan(request, plan, known_evidence())
+                if plan_data["disposition"] == "skip":
+                    self._impact_development_records.append({
+                        "hypothesis_id": hypothesis_id, "agent_id": agent_id,
+                        "status": "skipped", "plan": plan_data,
+                    })
+                    continue
+                repo.start_impact_hypothesis(hypothesis_id)
+                try:
+                    raw = port(request, hypothesis_id)
+                except Exception:
+                    repo.mark_impact_hypothesis_outcome_unknown(hypothesis_id)
+                    raise
+                observation = (
+                    raw if isinstance(raw, ImpactDevelopmentObservation)
+                    else ImpactDevelopmentObservation.model_validate(raw)
+                )
+                executor._validate_observation(
+                    request, paths[request.path_id], observation, known_evidence(),
+                )
+                repo.finish_impact_hypothesis(
+                    hypothesis_id, observation=observation.model_dump(mode="json"),
+                )
+            results.append(observation)
+            self._impact_development_records.append({
+                "hypothesis_id": hypothesis_id, "agent_id": agent_id,
+                "status": "succeeded", "plan": plan_data,
+                "observation": observation.model_dump(mode="json"),
+            })
+            if observation.signal_observed:
+                developed = executor._apply_path(developed, paths[request.path_id])
+                if not developed.underpowered:
+                    break
+        results = tuple(results)
+        if getattr(self.impact_development_port, "requires_request_ledger", False):
+            for result in results:
+                self._validate_impact_development_ledger(
+                    repo.conn, candidate=candidate, stage_run_id=stage_run_id,
+                    result=result,
+                )
+        if developed == initial:
+            return assessment
+        supporting = tuple(dict.fromkeys(
+            evidence_id
+            for result in results if result.signal_observed
+            for evidence_id in result.evidence_ids
+        ))
+        for evidence_id in supporting:
+            if evidence_id not in evidence_ids:
+                evidence_ids.append(evidence_id)
+        updates: dict[str, Any] = {
+            "evidence_ids": tuple(dict.fromkeys((*assessment.evidence_ids, *supporting))),
+        }
+        for field, score in (
+            ("impact_boundary", developed.boundary),
+            ("impact_sensitivity", developed.sensitivity),
+            ("impact_actor_requirements", developed.actor_requirements),
+        ):
+            previous = getattr(assessment, field)
+            if score != previous.score:
+                updates[field] = previous.model_copy(update={
+                    "score": score,
+                    "evidence_ids": tuple(dict.fromkeys((*previous.evidence_ids, *supporting))),
+                    "reason": "A profile-bound impact development signal was observed.",
+                })
+        return assessment.model_copy(update=updates)
+
+    def _validate_impact_development_ledger(
+        self, conn: sqlite3.Connection, *, candidate: ValidatedCandidate,
+        stage_run_id: str, result,
+    ) -> None:
+        request_ids = self._request_ids(
+            result.details,
+            "impact development returned invalid request ledger IDs",
+        )
+        if result.outcome in {"observed", "not_observed"} and not request_ids:
+            raise ValidationCoordinatorError(
+                "native impact development completed without a request ledger row"
+            )
+        if not request_ids:
+            return
+        placeholders = ",".join("?" for _ in request_ids)
+        rows = conn.execute(
+            f"""SELECT r.request_id,r.status FROM validation_http_requests r
+                JOIN validation_evidence e ON e.attempt_id=r.attempt_id
+                WHERE r.scan_id=? AND r.stage_run_id=? AND r.case_id=?
+                  AND e.evidence_id IN ({','.join('?' for _ in result.evidence_ids)})
+                  AND r.request_id IN ({placeholders})""",
+            (
+                candidate.scan_id, stage_run_id, candidate.case_id,
+                *result.evidence_ids, *request_ids,
+            ),
+        ).fetchall()
+        self._validate_ledger_rows(
+            rows, request_ids,
+            foreign="impact request ledger IDs do not belong to its evidence",
+            unfinished="impact result cites an unfinished request ledger row",
+        )
+
     def _comparison(
         self, claim: dict[str, Any], assessment: dict[str, Any], *,
         blind_view: dict[str, Any],
@@ -928,6 +1207,11 @@ class ValidationCoordinator:
         raise AssertionError("unreachable")
 
     def _close_owned_agent(self) -> None:
+        for impact_agent in self._impact_agents:
+            close_impact = getattr(impact_agent, "close", None)
+            if callable(close_impact):
+                close_impact()
+        self._impact_agents.clear()
         if not self._owns_agent or self.agent is None:
             return
         close = getattr(self.agent, "close", None)

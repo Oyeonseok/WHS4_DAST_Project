@@ -127,6 +127,21 @@ in `required_identity_roles`; store no secret value. Omit the contract when the
 exact request or a target-specific success marker is unknown. Validation then
 fails the development action closed instead of asking the LLM to invent one.
 
+`reproduction` may additionally include `impact_development_contract` for an
+exact profile-declared impact path. These actions are limited to `GET`, `HEAD`,
+or `OPTIONS`, must reuse the reproduction endpoint template and method, and
+must include a non-status assertion for the expected impact signal:
+
+```json
+{"schema_version":1,"actions":[{"contract_id":"cross-role-object-7","path_id":"cross-role-object-access","endpoint_template":"/api/items/{id}","method":"GET","request":{"path_parameters":{"id":"other-test-object"}},"assertions":[{"assertion_id":"other-owner","kind":"json_equals","path":["owner_id"],"expected":"other-test-user"}],"credential_roles":["current-user"]}]}
+```
+
+The path must exist in the selected Validation Skill contract with
+`execution_owner: validation`. Omit this contract unless Attack has already
+identified the exact test resource, declared identity role, and target-specific
+assertion. The Impact Development Agent only judges prerequisites; Python sends
+the immutable request and evaluates its assertions.
+
 The native Validation runtime resolves `env://NAME` references and lazily uses
 Python keyring for `keyring://SERVICE/ACCOUNT`. Both secrets contain a JSON
 object whose keys and values are the HTTP credential headers, for example

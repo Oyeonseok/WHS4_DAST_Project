@@ -47,7 +47,22 @@ class ValidationSchemaTests(unittest.TestCase):
         }
         self.assertTrue({
             "development_contract_json", "development_contract_sha256",
+            "impact_development_contract_json",
+            "impact_development_contract_sha256",
         }.issubset(reproduction_columns))
+        attempt_columns = {
+            row[1] for row in self.conn.execute("PRAGMA table_info(validation_attempts)")
+        }
+        self.assertIn("impact_hypothesis_id", attempt_columns)
+        hypothesis_columns = {
+            row[1] for row in self.conn.execute(
+                "PRAGMA table_info(validation_impact_hypotheses)"
+            )
+        }
+        self.assertTrue({
+            "status", "agent_id", "plan_json", "plan_sha256",
+            "observation_json", "observation_sha256", "started_at", "finished_at",
+        }.issubset(hypothesis_columns))
 
     def test_target_and_active_stage_uniqueness(self):
         self.conn.execute("""INSERT INTO validation_cases

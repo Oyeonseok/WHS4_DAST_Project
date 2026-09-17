@@ -277,6 +277,7 @@ CREATE TABLE IF NOT EXISTS validation_attempts (
     observation_json TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(observation_json)),
     started_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     finished_at TEXT,
+    impact_hypothesis_id TEXT REFERENCES validation_impact_hypotheses(hypothesis_id),
     UNIQUE(case_id, stage_run_id, batch_no, attempt_kind, ordinal)
 );
 
@@ -333,7 +334,19 @@ CREATE TABLE IF NOT EXISTS validation_impact_hypotheses (
     skill_sha256 TEXT NOT NULL CHECK(length(skill_sha256)=64),
     validation_profile_sha256 TEXT NOT NULL CHECK(length(validation_profile_sha256)=64),
     proposal_sha256 TEXT NOT NULL CHECK(length(proposal_sha256)=64),
+    status TEXT NOT NULL DEFAULT 'planned' CHECK(status IN
+        ('planned','running','succeeded','failed','skipped','outcome_unknown')),
+    agent_id TEXT,
+    plan_json TEXT CHECK(plan_json IS NULL OR json_valid(plan_json)),
+    plan_sha256 TEXT CHECK(plan_sha256 IS NULL OR length(plan_sha256)=64),
+    observation_json TEXT CHECK(observation_json IS NULL OR json_valid(observation_json)),
+    observation_sha256 TEXT CHECK(
+        observation_sha256 IS NULL OR length(observation_sha256)=64),
+    started_at TEXT,
+    finished_at TEXT,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CHECK((plan_json IS NULL) = (plan_sha256 IS NULL)),
+    CHECK((observation_json IS NULL) = (observation_sha256 IS NULL)),
     UNIQUE(case_id, stage_run_id, ordinal),
     UNIQUE(case_id, stage_run_id, path_id)
 );
@@ -390,10 +403,16 @@ CREATE TABLE IF NOT EXISTS finding_reproduction_specs (
         development_contract_json IS NULL OR json_valid(development_contract_json)),
     development_contract_sha256 TEXT CHECK(
         development_contract_sha256 IS NULL OR length(development_contract_sha256)=64),
+    impact_development_contract_json TEXT CHECK(
+        impact_development_contract_json IS NULL OR json_valid(impact_development_contract_json)),
+    impact_development_contract_sha256 TEXT CHECK(
+        impact_development_contract_sha256 IS NULL OR length(impact_development_contract_sha256)=64),
     spec_sha256 TEXT NOT NULL CHECK(length(spec_sha256)=64),
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CHECK((runtime_contract_json IS NULL) = (runtime_contract_sha256 IS NULL)),
-    CHECK((development_contract_json IS NULL) = (development_contract_sha256 IS NULL))
+    CHECK((development_contract_json IS NULL) = (development_contract_sha256 IS NULL)),
+    CHECK((impact_development_contract_json IS NULL) =
+          (impact_development_contract_sha256 IS NULL))
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_active_validation_stage
@@ -503,10 +522,45 @@ def _add_live_columns(conn: sqlite3.Connection) -> None:
             "development_contract_sha256",
             "TEXT CHECK(development_contract_sha256 IS NULL OR length(development_contract_sha256)=64)",
         ),
+        (
+            "impact_development_contract_json",
+            "TEXT CHECK(impact_development_contract_json IS NULL OR json_valid(impact_development_contract_json))",
+        ),
+        (
+            "impact_development_contract_sha256",
+            "TEXT CHECK(impact_development_contract_sha256 IS NULL OR length(impact_development_contract_sha256)=64)",
+        ),
     ):
         if name not in reproduction_columns:
             conn.execute(
                 f"ALTER TABLE finding_reproduction_specs ADD COLUMN {name} {declaration}"
+            )
+
+    attempt_columns = {
+        row[1] for row in conn.execute("PRAGMA table_info(validation_attempts)")
+    }
+    if "impact_hypothesis_id" not in attempt_columns:
+        conn.execute(
+            "ALTER TABLE validation_attempts ADD COLUMN impact_hypothesis_id TEXT "
+            "REFERENCES validation_impact_hypotheses(hypothesis_id)"
+        )
+
+    hypothesis_columns = {
+        row[1] for row in conn.execute("PRAGMA table_info(validation_impact_hypotheses)")
+    }
+    for name, declaration in (
+        ("status", "TEXT NOT NULL DEFAULT 'planned'"),
+        ("agent_id", "TEXT"),
+        ("plan_json", "TEXT"),
+        ("plan_sha256", "TEXT"),
+        ("observation_json", "TEXT"),
+        ("observation_sha256", "TEXT"),
+        ("started_at", "TEXT"),
+        ("finished_at", "TEXT"),
+    ):
+        if name not in hypothesis_columns:
+            conn.execute(
+                f"ALTER TABLE validation_impact_hypotheses ADD COLUMN {name} {declaration}"
             )
 
 

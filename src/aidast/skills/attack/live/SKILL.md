@@ -73,7 +73,9 @@ Recon and Attack records.
    `development_contract`. Do not invent a generic login, resource creation,
    encoding change, or timing adjustment: omit the contract unless its exact
    same-origin request and non-status success assertion are known. A high-confidence
-   fact is useful context but is never a substitute for this promotion.
+   fact is useful context but is never a substitute for this promotion. When an
+   exact safe-method request can test a Validation profile's declared impact path,
+   include it as `impact_development_contract`; otherwise omit it.
 8. Close all leads for the task, then transition it to `completed`. Continue
    until every configured task is `completed` or `skipped`. Chaining is not part
    of this stage; a future Chaining Agent owns that work.

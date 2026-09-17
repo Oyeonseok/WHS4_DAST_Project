@@ -637,6 +637,10 @@ class ValidationCoordinatorTests(unittest.TestCase):
         self.assertIsInstance(
             coordinator.prerequisite_resolver, NativePrerequisiteResolver,
         )
+        from aidast.validation import NativeImpactDevelopmentPort
+        self.assertIsInstance(
+            coordinator.impact_development_port, NativeImpactDevelopmentPort,
+        )
         self.assertIsNotNone(coordinator.prerequisite_resolver.policy_provider)
 
     def test_interrupted_native_development_is_not_redispatched_on_resume(self):
@@ -870,6 +874,121 @@ class ValidationCoordinatorTests(unittest.TestCase):
                 """SELECT path_id,gap_axis,execution_owner FROM validation_impact_hypotheses"""
             ).fetchone()
             self.assertEqual(hypothesis, ("cross-role-object-access", "boundary", "validation"))
+
+    def test_coordinator_dispatches_bounded_impact_agent_and_recalculates_impact(self):
+        from aidast.validation import (
+            ImpactDevelopmentRuntimeContract, NativeImpactDevelopmentPort,
+            canonical_sha256,
+        )
+
+        impact_contract = ImpactDevelopmentRuntimeContract.model_validate({
+            "schema_version": 1,
+            "actions": [{
+                "contract_id": "cross-role-object-2",
+                "path_id": "cross-role-object-access",
+                "endpoint_template": "/objects/{id}", "method": "GET",
+                "request": {"path_parameters": {"id": 2}},
+                "assertions": [{
+                    "assertion_id": "other-owner",
+                    "kind": "json_equals", "path": ["owner"], "expected": "other",
+                }],
+                "credential_roles": [],
+            }],
+        }).model_dump(mode="json")
+        with db.connect(self.path) as conn:
+            conn.execute("DROP TRIGGER finding_reproduction_specs_no_update")
+            conn.execute(
+                """UPDATE finding_reproduction_specs
+                   SET impact_development_contract_json=?,
+                       impact_development_contract_sha256=?
+                   WHERE finding_id='finding'""",
+                (
+                    json.dumps(impact_contract, sort_keys=True, separators=(",", ":")),
+                    canonical_sha256(impact_contract),
+                ),
+            )
+            conn.commit()
+        planners = []
+
+        class Planner:
+            def __init__(self, skill_name):
+                self.skill_name = skill_name
+                self.closed = False
+                self.requests = []
+
+            def plan(self, request, *, evidence):
+                self.requests.append((request, evidence))
+                return {
+                    "path_id": request.path_id,
+                    "proposal_sha256": request.proposal_sha256,
+                    "disposition": "execute", "preconditions_satisfied": True,
+                    "evidence_ids": list(request.supporting_evidence_ids),
+                    "reason": "The bounded fixture evidence satisfies the prerequisites.",
+                }
+
+            def close(self):
+                self.closed = True
+
+        def factory(skill_name):
+            planner = Planner(skill_name)
+            planners.append(planner)
+            return planner
+
+        class ImpactResponse:
+            status = 200
+            headers = {"Content-Type": "application/json"}
+
+            def read(self, maximum):
+                return b'{"owner":"other"}'
+
+            def close(self):
+                pass
+
+        impact_port = NativeImpactDevelopmentPort(
+            transport=lambda request, timeout: ImpactResponse(),
+            policy_provider=lambda endpoint, method: self.policy,
+        )
+
+        result = ValidationCoordinator(
+            db_path=self.path, agent=UnderpoweredAgent(), reproduction=FakePort(),
+            policy_provider=lambda endpoint, method: self.policy,
+            impact_development_port=impact_port, impact_agent_factory=factory,
+        ).run("scan")
+
+        self.assertEqual(result.summary["statuses"], {"CONFIRMED": 1})
+        self.assertEqual(len(planners), 1)
+        self.assertEqual(planners[0].skill_name, "hunt-idor")
+        self.assertEqual(len(planners[0].requests), 1)
+        self.assertTrue(planners[0].closed)
+        with db.connect(self.path) as conn:
+            row = conn.execute(
+                "SELECT impact_boundary,decision_json FROM validation_cases"
+            ).fetchone()
+            self.assertEqual(row[0], 2)
+            decision = json.loads(row[1])
+            self.assertEqual(
+                decision["impact_development"][0]["observation"]["path_id"],
+                "cross-role-object-access",
+            )
+            impact_request = conn.execute(
+                """SELECT r.method,r.status,r.attempt_id,r.development_action_id,
+                          a.impact_hypothesis_id
+                   FROM validation_http_requests r
+                   JOIN validation_attempts a ON a.attempt_id=r.attempt_id
+                   WHERE url LIKE '%/objects/2'"""
+            ).fetchone()
+            self.assertEqual(impact_request[:2], ("GET", "completed"))
+            self.assertIsNotNone(impact_request[2])
+            self.assertIsNone(impact_request[3])
+            hypothesis = conn.execute(
+                """SELECT hypothesis_id,status,plan_json,observation_json
+                   FROM validation_impact_hypotheses
+                   WHERE path_id='cross-role-object-access'"""
+            ).fetchone()
+            self.assertEqual(hypothesis[1], "succeeded")
+            self.assertEqual(impact_request[4], hypothesis[0])
+            self.assertEqual(json.loads(hypothesis[2])["disposition"], "execute")
+            self.assertTrue(json.loads(hypothesis[3])["signal_observed"])
 
     def test_demonstrated_chain_replays_end_to_end_after_node_gate(self):
         from aidast.validation import canonical_sha256

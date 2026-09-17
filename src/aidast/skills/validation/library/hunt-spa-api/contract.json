@@ -46,5 +46,26 @@
       "blocker_axis": "state_setup"
     }
   ],
-  "impact_expansion_paths": []
+  "impact_expansion_paths": [
+    {
+      "path_id": "bounded-impact-confirmation",
+      "gap_axis": "sensitivity",
+      "hypothesis_kind": "bounded_sensitive_disclosure",
+      "required_preconditions": [
+        "An exact same-origin safe-method request already captured by Attack",
+        "A unique non-secret configuration or data marker for the stronger impact"
+      ],
+      "expected_signal": {
+        "kind": "hunt_spa_api_bounded_impact_observed"
+      },
+      "recommended_actions": [
+        "Evaluate only the immutable request for the declared non-secret disclosure marker"
+      ],
+      "execution_owner": "validation",
+      "feasibility": "medium",
+      "potential_impact": {
+        "sensitivity": 2
+      }
+    }
+  ]
 }

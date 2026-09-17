@@ -110,3 +110,51 @@ class ValidationRepositoryTests(unittest.TestCase):
                               target_id="one", case_id="case")
         with self.assertRaisesRegex(ValueError, "terminal current case"):
             finish_stage_run(self.conn, self.run)
+
+    def test_impact_execution_lifecycle_is_durable_and_idempotent(self):
+        evidence = self.case_with_evidence()
+        proposal = {
+            "gap_axis": "boundary", "path_id": "bounded-impact",
+            "hypothesis_kind": "bounded_authorization_boundary", "current_score": 0,
+            "reason": {"text": "missing boundary", "evidence_ids": [evidence]},
+            "required_preconditions": ["bounded fixture"],
+            "recommended_actions": ["check immutable request"],
+            "expected_signal": {"kind": "bounded_signal"},
+            "supporting_evidence_ids": [evidence], "execution_owner": "validation",
+            "feasibility": "high", "potential_impact": {"boundary": 2},
+        }
+        hypothesis = self.repo.add_impact_hypothesis(
+            case_id="case", stage_run_id=self.run, ordinal=1, proposal=proposal,
+            skill_sha256="b" * 64, validation_profile_sha256="c" * 64,
+        )
+        self.assertEqual(hypothesis, self.repo.add_impact_hypothesis(
+            case_id="case", stage_run_id=self.run, ordinal=1, proposal=proposal,
+            skill_sha256="b" * 64, validation_profile_sha256="c" * 64,
+        ))
+        plan = {
+            "path_id": "bounded-impact", "proposal_sha256": canonical_sha256(proposal),
+            "disposition": "execute", "preconditions_satisfied": True,
+            "evidence_ids": [evidence], "reason": "fixture is ready",
+        }
+        self.repo.record_impact_plan(hypothesis, agent_id="impact-agent", plan=plan)
+        self.repo.start_impact_hypothesis(hypothesis)
+        attempt = self.repo.add_attempt(
+            case_id="case", stage_run_id=self.run, batch_no=2,
+            attempt_kind="target", ordinal=1, signal_type="authorization_boundary",
+            outcome="observed", impact_hypothesis_id=hypothesis,
+        )
+        observation = {
+            "path_id": "bounded-impact", "proposal_sha256": canonical_sha256(proposal),
+            "outcome": "observed", "signal_observed": True,
+            "signal": {"kind": "bounded_signal"}, "evidence_ids": [evidence],
+            "details": {"attempt_id": attempt},
+        }
+        self.repo.finish_impact_hypothesis(hypothesis, observation=observation)
+        self.repo.finish_impact_hypothesis(hypothesis, observation=observation)
+        stored = self.repo.read_impact_hypothesis(hypothesis)
+        self.assertEqual(stored["status"], "succeeded")
+        self.assertEqual(stored["observation"], observation)
+        self.assertEqual(self.conn.execute(
+            "SELECT impact_hypothesis_id FROM validation_attempts WHERE attempt_id=?",
+            (attempt,),
+        ).fetchone()[0], hypothesis)

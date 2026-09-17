@@ -17,6 +17,7 @@ from ..execution.playwright_browser import PlaywrightBrowserExecutor
 from ..contracts.models import PrerequisiteResolverPort
 from ..execution.runtime_adapter import RuntimeReproductionRouter
 from ..contracts.development import NativePrerequisiteResolver
+from ..execution.native_impact import NativeImpactDevelopmentPort
 
 
 def build_native_validation_coordinator(
@@ -27,6 +28,8 @@ def build_native_validation_coordinator(
     oob_observer: OobObserver | None = None,
     prerequisite_resolver: PrerequisiteResolverPort | None = None,
     development_transport: Callable | None = None,
+    impact_development_port: Callable | None = None,
+    impact_agent_factory: Callable[[str], object] | None = None,
 ) -> ValidationCoordinator:
     """Build the default HTTP runtime; the Codex runner remains lazy per stage."""
     try:
@@ -59,6 +62,16 @@ def build_native_validation_coordinator(
         agent=None,
         reproduction=reproduction,
         policy_provider=policy_provider,
+        impact_development_port=(
+            impact_development_port
+            if impact_development_port is not None
+            else NativeImpactDevelopmentPort(
+                credential_resolver=resolver,
+                transport=development_transport,
+                policy_provider=policy_provider,
+            )
+        ),
+        impact_agent_factory=impact_agent_factory,
         prerequisite_resolver=(
             prerequisite_resolver
             if prerequisite_resolver is not None

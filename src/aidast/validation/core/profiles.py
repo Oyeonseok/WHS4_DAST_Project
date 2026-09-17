@@ -60,6 +60,19 @@ class ImpactExpansionPath(StrictContract):
     feasibility: Literal["low", "medium", "high"] = "medium"
     potential_impact: dict[str, Any] = Field(default_factory=dict)
 
+    @model_validator(mode="after")
+    def bounded_impact(self) -> "ImpactExpansionPath":
+        if set(self.expected_signal) != {"kind"} or not isinstance(
+            self.expected_signal["kind"], str
+        ) or not self.expected_signal["kind"]:
+            raise ValueError("impact expansion requires one expected signal kind")
+        if set(self.potential_impact) != {self.gap_axis}:
+            raise ValueError("impact expansion may score only its gap axis")
+        score = self.potential_impact[self.gap_axis]
+        if type(score) is not int or not 1 <= score <= 3:
+            raise ValueError("impact expansion score must be an integer from one through three")
+        return self
+
 
 class ValidationProfile(StrictContract):
     schema_version: Literal[1]
