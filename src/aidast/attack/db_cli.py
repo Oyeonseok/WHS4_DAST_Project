@@ -364,6 +364,13 @@ def commit_finding(db_path: Path, scan_id: str, payload_path: Path) -> dict:
             from aidast.validation.models import canonical_json, canonical_sha256
             from aidast.validation.runtime_semantics import validate_runtime_semantics
             validated_runtime = validate_runtime_contract(runtime_contract)
+            runtime_kind = validated_runtime.model_dump(mode="json").get(
+                "runtime_kind", "http",
+            )
+            if runtime_kind not in resolved_profile.runtime_kinds:
+                raise ValueError(
+                    "runtime contract is incompatible with the Validation profile"
+                )
             validate_runtime_semantics(
                 validated_runtime,
                 resolved_profile,

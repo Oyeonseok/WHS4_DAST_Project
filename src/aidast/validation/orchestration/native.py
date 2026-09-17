@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib
 from pathlib import Path
 from typing import Callable, Mapping
 
@@ -20,6 +21,18 @@ from ..contracts.development import NativePrerequisiteResolver
 from ..execution.native_impact import NativeImpactDevelopmentPort
 
 
+def _optional_adapter(module_name: str, class_name: str, *,
+                      dependencies: tuple[str, ...] = (), **kwargs):
+    """Keep one optional protocol failure from disabling HTTP Validation."""
+    try:
+        for dependency in dependencies:
+            importlib.import_module(dependency)
+        module = importlib.import_module(module_name)
+        return getattr(module, class_name)(**kwargs)
+    except (ImportError, OSError, ValueError):
+        return None
+
+
 def build_native_validation_coordinator(
     *, db_path: Path, policy_path: Path,
     credential_resolver: Callable[[str], Mapping[str, str]] | None = None,
@@ -30,8 +43,12 @@ def build_native_validation_coordinator(
     development_transport: Callable | None = None,
     impact_development_port: Callable | None = None,
     impact_agent_factory: Callable[[str], object] | None = None,
+    multipart_transport: Callable | None = None,
+    websocket_connector: Callable | None = None,
+    grpc_channel_factory: Callable | None = None,
+    artifact_resolver: Callable[[str], bytes] | None = None,
 ) -> ValidationCoordinator:
-    """Build the default HTTP runtime; the Codex runner remains lazy per stage."""
+    """Build native runtimes; the Codex runner remains lazy per stage."""
     try:
         policy_provider = TargetPolicyProvider(policy_path)
     except (OSError, ValueError) as exc:
@@ -55,6 +72,27 @@ def build_native_validation_coordinator(
         browser=browser_port, oob=oob_port,
         chain=ChainReproductionPort(
             credential_resolver=resolver, browser=browser_port, oob=oob_port,
+        ),
+        multipart=_optional_adapter(
+            "aidast.validation.execution.multipart_adapter", "MultipartReproductionPort",
+            artifact_resolver=artifact_resolver, transport=multipart_transport,
+        ),
+        websocket=_optional_adapter(
+            "aidast.validation.execution.websocket_adapter", "WebSocketReproductionPort",
+            dependencies=("websockets",),
+            connector=websocket_connector, credential_resolver=resolver,
+            artifact_resolver=artifact_resolver,
+        ),
+        grpc=_optional_adapter(
+            "aidast.validation.execution.grpc_adapter", "GrpcReproductionPort",
+            dependencies=("grpc", "google.protobuf"),
+            channel_factory=grpc_channel_factory, credential_resolver=resolver,
+            artifact_resolver=artifact_resolver,
+        ),
+        concurrent=_optional_adapter(
+            "aidast.validation.execution.concurrent_adapter", "ConcurrentReproductionPort",
+            transport=None, credential_resolver=resolver,
+            artifact_resolver=artifact_resolver,
         ),
     )
     return ValidationCoordinator(

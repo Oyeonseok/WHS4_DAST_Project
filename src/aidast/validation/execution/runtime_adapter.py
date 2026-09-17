@@ -8,11 +8,16 @@ from ..contracts.models import BlindCase
 class RuntimeReproductionRouter:
     requires_request_ledger = True
 
-    def __init__(self, *, http, browser=None, oob=None, chain=None):
+    def __init__(self, *, http, browser=None, oob=None, chain=None,
+                 multipart=None, websocket=None, grpc=None, concurrent=None):
         self.http = http
         self.browser = browser
         self.oob = oob
         self.chain = chain
+        self.multipart = multipart
+        self.websocket = websocket
+        self.grpc = grpc
+        self.concurrent = concurrent
 
     @staticmethod
     def _kind(blind_case: BlindCase) -> str:
@@ -28,6 +33,14 @@ class RuntimeReproductionRouter:
             return self.oob
         if kind == "chain":
             return self.chain
+        if kind == "multipart":
+            return self.multipart
+        if kind == "websocket":
+            return self.websocket
+        if kind == "grpc":
+            return self.grpc
+        if kind == "concurrent":
+            return self.concurrent
         return None
 
     def unsupported_reason(self, blind_case: BlindCase) -> str | None:
