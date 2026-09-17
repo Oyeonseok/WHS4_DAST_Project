@@ -163,6 +163,16 @@ Adobe Public 프로그램을 `aidast`로만 운영하는 명령 허용 목록과
 모든 기본 산출물을 저장소 밖의 한 디렉터리에 모으려면
 `AIDAST_RESULT_ROOT`를 지정합니다.
 
+Intigriti 프로그램에서 요청 식별 헤더를 요구하면 Recon 또는 통합 실행에
+사용자명을 전달합니다.
+
+```bash
+aidast recon "<INTIGRITI_RESEARCHER_PROGRAM_URL>" \
+  --all-targets \
+  --intigriti-username "<INTIGRITI_USERNAME>" \
+  --execute
+```
+
 ```bash
 export AIDAST_RESULT_ROOT="/path/to/dast_result"
 ```
