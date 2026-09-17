@@ -10,7 +10,6 @@
 - Playwright runtime 종료가 route callback을 무기한 기다리지 않도록 cleanup 경로를 수정했다.
 
 두 대상 모두 scan과 Recon stage가 `completed`로 끝났고, 모든 관측 태깅과 세 가지 핵심 산출물 생성을 완료했다. 따라서 **Phase B의 실행 안정성 및 정책 경계 shakedown은 통과**로 판정한다.
-
 endpoint 기준 목록은 이후 고정 소스의 GET application route로 확정해 아래에서 수집률을 계산했다. VulnBank의 ZAP OpenAPI 보조 탐색은 설치 문제가 아니라 대상의 `/static/openapi.json` 문법 오류로 결과를 만들지 못했으며, 이는 Phase B 통과와 분리된 대상 fixture 제한사항으로 남긴다.
 
 ## 실행 결과
