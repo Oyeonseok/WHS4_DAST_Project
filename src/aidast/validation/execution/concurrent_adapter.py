@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 from urllib.error import HTTPError
 from urllib.parse import urlsplit
-from urllib.request import Request
+from urllib.request import Request, build_opener
 from uuid import uuid4
 
 from aidast.core.http_safety import is_sensitive_header
@@ -48,6 +48,53 @@ _HTTP_TRANSPORT_HEADERS = frozenset({
     "host", "content-length", "transfer-encoding", "trailer", "connection",
     "keep-alive", "upgrade", "te", "expect", "proxy-connection",
 })
+_MAX_RESOLVER_WORK = 20
+_CANONICAL_NO_REDIRECT_HANDLER_TYPES = tuple(
+    type(handler) for handler in build_opener(_NoRedirect()).handlers
+)
+
+
+class _BoundedResolverFacility:
+    """One owned, globally bounded home for deadline-limited hostname lookup."""
+
+    def __init__(self, capacity: int) -> None:
+        self._slots = threading.BoundedSemaphore(capacity)
+        self._executor = ThreadPoolExecutor(
+            max_workers=capacity, thread_name_prefix="ConcurrentResolver",
+        )
+
+    def resolve(self, host: str, port: int, *, deadline: float,
+                clock: Callable[[], float]) -> tuple[tuple[int, tuple[Any, ...]], ...]:
+        try:
+            literal = ipaddress.ip_address(host)
+        except ValueError:
+            literal = None
+        flags = socket.AI_NUMERICHOST if literal is not None else 0
+
+        remaining = deadline - clock()
+        if remaining <= 0 or not self._slots.acquire(timeout=remaining):
+            raise ConcurrentExecutionError("concurrent attempt deadline exceeded")
+        try:
+            future = self._executor.submit(
+                socket.getaddrinfo, host, port, 0, socket.SOCK_STREAM, 0, flags,
+            )
+        except BaseException:
+            self._slots.release()
+            raise
+        future.add_done_callback(lambda _: self._slots.release())
+        try:
+            addresses = future.result(timeout=max(0.0, deadline - clock()))
+        except TimeoutError as error:
+            future.cancel()  # releases immediately if queued; running work stays owned/bounded.
+            raise ConcurrentExecutionError("concurrent attempt deadline exceeded") from error
+        except BaseException as error:
+            raise ConcurrentExecutionError("concurrent hostname resolution failed") from error
+        if clock() >= deadline or not addresses:
+            raise ConcurrentExecutionError("concurrent hostname resolution failed")
+        return tuple((family, sockaddr) for family, _, _, _, sockaddr in addresses)
+
+
+_RESOLVER_FACILITY = _BoundedResolverFacility(_MAX_RESOLVER_WORK)
 
 
 class ConcurrentExecutionError(ValidationTransportError):
@@ -127,34 +174,24 @@ class ConcurrentReproductionPort:
                  clock: Callable[[], float] = time.monotonic,
                  monotonic_ns: Callable[[], int] = time.monotonic_ns):
         self.transport = transport
-        # ``None`` is the only default-transport sentinel.  A supplied opener
-        # is a real configured seam (handlers, trust policy, instrumentation),
-        # and must be invoked rather than inferred away from its owner type.
-        # A plain stdlib no-redirect opener is the compatibility form used by
-        # the existing ordinary-HTTP caller; it has no caller handlers and can
-        # therefore opt into the cancellable retained-socket path.
-        self._ordinary_http = transport is None or self._is_plain_no_redirect_opener(transport)
+        # ``None`` is the default sentinel.  The exact canonical no-redirect
+        # opener remains a backward-compatible spelling of that default; any
+        # different configured callable is an injected transport, including
+        # stock urllib handlers whose TLS/auth/proxy configuration is owned by
+        # the caller.
+        self._ordinary_http = transport is None or self._is_canonical_no_redirect_opener(transport)
         self.credential_resolver = credential_resolver
         self.artifact_resolver = artifact_resolver
         self.clock, self.monotonic_ns = clock, monotonic_ns
 
     @staticmethod
-    def _is_plain_no_redirect_opener(transport: Callable | None) -> bool:
-        """Recognize only an uncustomized stdlib opener compatibility form.
-
-        This deliberately examines configured handlers, never callable class
-        names.  Any caller-provided handler makes the opener an injected
-        transport and it is invoked exactly as supplied.
-        """
+    def _is_canonical_no_redirect_opener(transport: Callable | None) -> bool:
+        """Accept only the exact standard compatibility opener, never a guess."""
         owner = getattr(transport, "__self__", None)
         handlers = getattr(owner, "handlers", None)
         if not isinstance(handlers, list):
             return False
-        return all(
-            isinstance(handler, _NoRedirect)
-            or handler.__class__.__module__.startswith("urllib.")
-            for handler in handlers
-        )
+        return tuple(type(handler) for handler in handlers) == _CANONICAL_NO_REDIRECT_HANDLER_TYPES
 
     def unsupported_reason(self, blind_case: BlindCase) -> str | None:
         if blind_case.target_kind != "finding":
@@ -315,41 +352,6 @@ class ConcurrentReproductionPort:
                 raise ConcurrentExecutionError("concurrent attempt deadline exceeded")
             return value
 
-        def resolve(host: str, port: int) -> tuple[int, tuple[Any, ...]]:
-            """Resolve before connecting, failing closed when deadline passes."""
-            try:
-                ipaddress.ip_address(host)
-                numeric = True
-            except ValueError:
-                numeric = False
-
-            completed = threading.Event()
-            result: list[object] = []
-
-            def lookup() -> None:
-                try:
-                    result.append(socket.getaddrinfo(
-                        host, port, type=socket.SOCK_STREAM,
-                        flags=socket.AI_NUMERICHOST if numeric else 0,
-                    ))
-                except BaseException as error:  # passed back without a late connect
-                    result.append(error)
-                finally:
-                    completed.set()
-
-            resolver = threading.Thread(target=lookup, name="ConcurrentDNSResolution", daemon=True)
-            resolver.start()
-            if not completed.wait(ensure_remaining()):
-                raise ConcurrentExecutionError("concurrent attempt deadline exceeded")
-            ensure_remaining()
-            if not result or isinstance(result[0], BaseException):
-                raise ConcurrentExecutionError("concurrent hostname resolution failed")
-            addresses = result[0]
-            if not addresses:
-                raise ConcurrentExecutionError("concurrent hostname resolution failed")
-            family, _, _, _, sockaddr = addresses[0]
-            return family, sockaddr
-
         def connect_with_deadline(address: tuple[str, int], connection_timeout: float, source_address=None) -> socket.socket:
             # Installed as http.client's connection factory, retaining normal
             # HTTP(S) framing and HTTPS verification/SNI while making DNS and
@@ -357,21 +359,28 @@ class ConcurrentReproductionPort:
             del connection_timeout, source_address
             nonlocal connecting_socket
             host, port = address
-            family, sockaddr = resolve(host, port)
-            ensure_remaining()
-            candidate = socket.socket(family, socket.SOCK_STREAM)
-            connecting_socket = candidate
-            try:
-                candidate.settimeout(ensure_remaining())
-                candidate.connect(sockaddr)
+            candidates = _RESOLVER_FACILITY.resolve(host, port, deadline=deadline, clock=self.clock)
+            last_error: OSError | None = None
+            for family, sockaddr in candidates:
                 ensure_remaining()
-                return candidate
-            except BaseException:
+                candidate = socket.socket(family, socket.SOCK_STREAM)
+                connecting_socket = candidate
                 try:
-                    candidate.close()
-                except OSError:
-                    pass
-                raise
+                    candidate.settimeout(ensure_remaining())
+                    candidate.connect(sockaddr)
+                    ensure_remaining()
+                    return candidate
+                except OSError as error:
+                    last_error = error
+                    try:
+                        candidate.close()
+                    except OSError:
+                        pass
+                    if connecting_socket is candidate:
+                        connecting_socket = None
+            if last_error is not None:
+                raise last_error
+            raise ConcurrentExecutionError("concurrent hostname resolution failed")
 
         try:
             try:
