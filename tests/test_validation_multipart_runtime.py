@@ -255,9 +255,9 @@ class _MemorySocket:
 
 
 class _ParsedHttpResponse:
-    def __init__(self, wire: bytes, url: str = "https://test/items"):
+    def __init__(self, wire: bytes, url: str = "https://test/items", method: str | None = None):
         self.url = url
-        self.raw = HTTPResponse(_MemorySocket(wire))
+        self.raw = HTTPResponse(_MemorySocket(wire), method=method)
         self.raw.begin()
 
     @property
@@ -313,8 +313,12 @@ class MultipartAdapterSafetyTests(unittest.TestCase):
         )
 
     @staticmethod
-    def parsed_response(headers: bytes, body: bytes) -> _ParsedHttpResponse:
-        return _ParsedHttpResponse(b"HTTP/1.1 200 OK\r\n" + headers + b"\r\n" + body)
+    def parsed_response(headers: bytes, body: bytes, *, status: str = "200 OK",
+                        method: str | None = None) -> _ParsedHttpResponse:
+        return _ParsedHttpResponse(
+            f"HTTP/1.1 {status}\r\n".encode("ascii") + headers + b"\r\n" + body,
+            method=method,
+        )
 
     def test_contract_rejects_mixed_case_transport_framing_headers(self):
         for name in ("tRaNsFeR-eNcOdInG", "TRAILER", "cOnTeNt-LeNgTh"):
@@ -410,6 +414,24 @@ class MultipartAdapterSafetyTests(unittest.TestCase):
         self.assertEqual(self.conn.execute(
             "SELECT status FROM validation_transport_operations"
         ).fetchone()[0], "outcome_unknown")
+
+    def test_head_representation_length_is_complete_with_real_parser(self):
+        response = self.parsed_response(b"Content-Length: 8\r\n", b"", method="HEAD")
+        self.assertEqual(response.length, 0)
+        self.assertEqual(self.execute(self.runtime(), lambda request, timeout: response).outcome,
+                         "not_observed")
+
+    def test_http_error_304_representation_length_is_complete_with_real_parser(self):
+        response = self.parsed_response(b"Content-Length: 8\r\n", b"", status="304 Not Modified")
+        self.assertEqual(response.length, 0)
+        error = HTTPError("https://test/items", 304, "inert", response.headers, response)
+        self.assertEqual(self.execute(self.runtime(), lambda request, timeout: error).outcome,
+                         "not_observed")
+
+    def test_204_representation_length_is_complete_with_real_parser(self):
+        response = self.parsed_response(b"Content-Length: 8\r\n", b"", status="204 No Content")
+        self.assertEqual(response.length, 0)
+        self.assertEqual(MultipartReproductionPort._read_complete_response(response), b"")
 
     def test_persisted_metadata_keeps_payload_identity_and_fingerprint(self):
         def transport(request, timeout):

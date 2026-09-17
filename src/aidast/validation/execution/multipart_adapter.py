@@ -86,8 +86,8 @@ class MultipartReproductionPort:
             if candidate is None:
                 continue
             remaining = getattr(candidate, "length", None)
-            if type(remaining) is int and remaining > 0:
-                return True
+            if type(remaining) is int and remaining >= 0:
+                return remaining > 0
         headers = getattr(response, "headers", None)
         transfer_encoding = headers.get("Transfer-Encoding") if headers is not None else None
         content_length = headers.get("Content-Length") if headers is not None else None
