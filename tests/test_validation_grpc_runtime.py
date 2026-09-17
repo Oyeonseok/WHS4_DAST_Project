@@ -511,7 +511,7 @@ class GrpcAdapterTests(unittest.TestCase):
                 context.set_trailing_metadata((("x-tag", "x" * 131_072),))
             return loaded.response_class(value="target")
         with loopback_service(handler, loaded) as endpoint:
-            for kind in ("body", "initial", "trailer", "native-trailer"):
+            for kind in ("body", "initial", "trailer"):
                 with self.subTest(kind=kind):
                     doc = runtime_document()
                     doc["target"]["message"] = {"value": kind}
@@ -520,22 +520,57 @@ class GrpcAdapterTests(unittest.TestCase):
                     with self.assertRaises(ValidationTransportError):
                         self.execute(doc=doc, endpoint=endpoint)
                     self.assertEqual(self.rows()[-1]["status"], "outcome_unknown")
-            doc["target"]["message"] = {"value": "peer"}
-            result = self.execute(doc=doc, endpoint=endpoint)
-            self.assertTrue(result.signal_observed)
-            self.assertEqual(self.rows()[-1]["status"], "completed")
-            self.assertNotIn(diagnostic, result.model_dump_json())
+            # Beyond the native ceiling the public result cannot distinguish a
+            # peer error from native rejection, even if a body was captured.
+            for kind in ("peer", "native-trailer"):
+                with self.subTest(kind=kind):
+                    doc["target"]["message"] = {"value": kind}
+                    result = self.execute(doc=doc, endpoint=endpoint)
+                    self.assertTrue(result.signal_observed)
+                    self.assertEqual(self.rows()[-1]["status"], "completed")
+                    self.assertNotIn(diagnostic, result.model_dump_json())
 
-    def test_deserialized_body_lost_by_final_error_is_incomplete_capture(self):
-        class DroppedResponse(ScriptedChannel):
+    def test_ok_response_must_be_the_captured_response(self):
+        class ReplacedResponse(ScriptedChannel):
             def with_call(self, *args, **kwargs):
-                self.deserializer(self.response)
-                raise ScriptedRpcError(grpc.StatusCode.RESOURCE_EXHAUSTED)
-        channel = DroppedResponse()
+                response = self.deserializer(self.response)
+                return type(response)(), self.call
+        channel = ReplacedResponse()
         with self.assertRaises(ValidationTransportError):
             self.execute(channel)
         self.assertTrue(channel.closed)
         self.assertEqual(self.rows()[-1]["status"], "outcome_unknown")
+
+    def test_loopback_non_ok_bodies_preserve_status_fields_details_and_optional_trailers(self):
+        from aidast.validation.contracts.grpc_contract import GrpcRuntimeContract
+        loaded = GrpcRuntimeContract.model_validate(runtime_document()).target.load(None)
+        def handler(request, context):
+            status, trailer = request.value.split(":")
+            context.set_code(getattr(grpc.StatusCode, status))
+            context.set_details("bounded-private-detail")
+            if trailer == "yes":
+                context.set_trailing_metadata((("x-state", "complete"),))
+            return loaded.response_class(value="target")
+        with loopback_service(handler, loaded) as endpoint:
+            for status in ("PERMISSION_DENIED", "RESOURCE_EXHAUSTED", "UNAVAILABLE"):
+                for trailer in ("no", "yes"):
+                    with self.subTest(status=status, trailer=trailer):
+                        doc = runtime_document()
+                        doc["target"]["message"] = {"value": status + ":" + trailer}
+                        doc["target"]["assertions"].extend([
+                            {"assertion_id": "status", "kind": "grpc_status_equals", "expected": status},
+                            {"assertion_id": "detail", "kind": "error_detail_contains", "expected": "bounded-private-detail"},
+                        ])
+                        if trailer == "yes":
+                            doc["target"]["assertions"].append({"assertion_id": "trailer", "kind": "trailer_equals",
+                                                               "trailer": "x-state", "expected": "complete"})
+                        result = self.execute(doc=doc, endpoint=endpoint)
+                        self.assertTrue(result.signal_observed)
+                        self.assertEqual(result.details["grpc_status"], status)
+                        self.assertEqual(result.details["response_length"], 8)
+                        self.assertEqual(self.rows()[-1]["status"], "completed")
+                        self.assertEqual(self.rows()[-1]["response_bytes"], 8)
+                        self.assertNotIn("bounded-private-detail", result.model_dump_json())
 
     def test_loopback_repeated_trailers_match_any_exact_occurrence_and_preserve_order(self):
         from aidast.validation.contracts.grpc_contract import GrpcRuntimeContract

@@ -187,21 +187,22 @@ class GrpcReproductionPort:
                     response, call = unary.with_call(loaded.request_bytes, timeout=remaining(),
                         metadata=tuple(metadata.items()), wait_for_ready=False)
                 except grpc.RpcError as error:
-                    response, call = None, error
+                    # grpcio deserializes valid bodies before raising for a
+                    # non-OK completion. Retain that bounded local capture.
+                    response, call = captured_response, error
                 remaining()
                 code, trailers, detail = call.code(), call.trailing_metadata(), call.details()
                 if not isinstance(code, grpc.StatusCode):
                     raise ValueError
                 bounded_response_metadata(call.initial_metadata())
-                if capture_failed or (raw_response is not None and response is not captured_response):
+                if capture_failed:
                     raise ValueError
-                if code is grpc.StatusCode.OK and (response is None or raw_response is None):
-                    raise ValueError
-                if code is not grpc.StatusCode.OK and response is not None:
+                if code is grpc.StatusCode.OK and (response is None or raw_response is None
+                                                   or response is not captured_response):
                     raise ValueError
                 # Public grpcio results do not expose rejection provenance past
-                # the native ceilings. A trailer-only peer error and a native
-                # rejection before capture can have identical public call state.
+                # the native ceilings. A peer error and native rejection can
+                # have identical public state, with or without a captured body.
                 # Only delivered captures and their local consistency establish
                 # the boundary here; details/debug strings cannot prove origin.
                 evaluation = evaluate_grpc_response(
