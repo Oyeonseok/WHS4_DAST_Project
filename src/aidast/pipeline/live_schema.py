@@ -381,6 +381,40 @@ CREATE INDEX IF NOT EXISTS idx_validation_http_budget
 CREATE INDEX IF NOT EXISTS idx_validation_http_active
     ON validation_http_requests(stage_run_id, status);
 
+CREATE TABLE IF NOT EXISTS validation_transport_operations (
+    operation_id TEXT PRIMARY KEY NOT NULL,
+    scan_id TEXT NOT NULL REFERENCES scans(scan_id),
+    stage_run_id TEXT NOT NULL REFERENCES stage_runs(stage_run_id),
+    case_id TEXT NOT NULL REFERENCES validation_cases(case_id),
+    attempt_id TEXT NOT NULL REFERENCES validation_attempts(attempt_id),
+    policy_id TEXT NOT NULL,
+    policy_sha256 TEXT NOT NULL CHECK(length(policy_sha256)=64),
+    runtime_kind TEXT NOT NULL CHECK(runtime_kind IN ('multipart','websocket','grpc','concurrent')),
+    operation_kind TEXT NOT NULL,
+    destination TEXT NOT NULL,
+    request_fingerprint TEXT NOT NULL CHECK(length(request_fingerprint)=64),
+    execution_group_id TEXT,
+    member_ordinal INTEGER,
+    concurrency_units INTEGER NOT NULL CHECK(concurrency_units IN (0,1)),
+    reserved_bytes INTEGER NOT NULL CHECK(reserved_bytes >= 0),
+    request_bytes INTEGER,
+    response_bytes INTEGER,
+    status TEXT NOT NULL CHECK(status IN ('reserved','running','completed','failed','outcome_unknown')),
+    result_json TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(result_json)),
+    error_message TEXT,
+    scheduled_at REAL NOT NULL,
+    dispatched_at REAL,
+    finished_at REAL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(execution_group_id, member_ordinal)
+);
+CREATE INDEX IF NOT EXISTS idx_validation_transport_budget
+    ON validation_transport_operations(scan_id, policy_id, scheduled_at);
+CREATE INDEX IF NOT EXISTS idx_validation_transport_active
+    ON validation_transport_operations(stage_run_id, status);
+CREATE INDEX IF NOT EXISTS idx_validation_transport_attempt
+    ON validation_transport_operations(attempt_id, runtime_kind);
+
 CREATE TABLE IF NOT EXISTS finding_reproduction_specs (
     finding_id TEXT PRIMARY KEY NOT NULL REFERENCES findings(finding_id),
     attack_skill_name TEXT NOT NULL CHECK(length(trim(attack_skill_name)) > 0),
@@ -573,7 +607,7 @@ def _remove_known_similarity(conn: sqlite3.Connection) -> None:
 
 
 def migrate_live_pipeline_schema(conn: sqlite3.Connection) -> None:
-    """Upgrade only a writable Recon snapshot copy to shared pipeline v9."""
+    """Upgrade only a writable Recon snapshot copy to shared pipeline v10."""
     from aidast.pipeline.schema import migrate_pipeline_schema
 
     migrate_pipeline_schema(conn)
@@ -581,4 +615,4 @@ def migrate_live_pipeline_schema(conn: sqlite3.Connection) -> None:
     _remove_known_similarity(conn)
     _add_attack_attempt_columns(conn)
     _add_live_columns(conn)
-    conn.execute("PRAGMA user_version=9")
+    conn.execute("PRAGMA user_version=10")

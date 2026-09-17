@@ -108,6 +108,26 @@ class ValidationRequestBrokerTests(unittest.TestCase):
             broker.request("https://test/items/7", method="POST")
         self.assertEqual(self.conn.execute("SELECT count(*) FROM validation_http_requests").fetchone()[0], 0)
 
+    def test_transport_reservations_consume_legacy_request_and_concurrency_budgets(self):
+        from aidast.validation.execution.transport_broker import (
+            TransportOperationSpec, ValidationTransportBroker,
+        )
+        transport = ValidationTransportBroker(
+            db_path=self.path, scan_id="scan", stage_run_id="stage", case_id="case",
+            attempt_id="attempt", blind_case=self.blind, policy=self.policy,
+        )
+        transport.reserve(TransportOperationSpec(
+            runtime_kind="multipart", operation_kind="request",
+            destination="https://test/items/0", policy_url="https://test/items/0",
+            method="GET", request_bytes=1, max_response_bytes=1,
+        ))
+        for limits, message in ((PolicyLimits(max_requests=1), "budget exhausted"),
+                                (PolicyLimits(concurrency=1), "concurrency")):
+            self.policy = self.policy.model_copy(update={"limits": limits})
+            with self.subTest(message=message), self.assertRaisesRegex(ValidationRequestError, message):
+                self.broker().request("https://test/items/0", method="GET")
+        self.assertEqual(self.conn.execute("SELECT count(*) FROM validation_http_requests").fetchone()[0], 0)
+
     def test_scope_authorized_mutation_uses_validation_authority(self):
         self.policy = self.policy.model_copy(update={
             "attack_allowed_methods": ["GET", "HEAD", "OPTIONS", "POST"],

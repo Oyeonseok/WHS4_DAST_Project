@@ -5,6 +5,7 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from aidast.pipeline.lifecycle import create_task, finish_stage_run, start_stage_run, transition_task
@@ -502,7 +503,7 @@ class ValidationCoordinatorTests(unittest.TestCase):
 
     def test_native_port_observation_requires_request_ledger(self):
         with self.assertRaisesRegex(
-            ValidationCoordinatorError, "without a Validation request ledger row"
+            ValidationCoordinatorError, "without a Validation ledger row"
         ):
             ValidationCoordinator(
                 db_path=self.path, agent=FakeAgent(), reproduction=MissingLedgerPort(),
@@ -1130,6 +1131,80 @@ class ValidationCoordinatorTests(unittest.TestCase):
                 table: tuple(conn.execute(f"SELECT * FROM {table} ORDER BY rowid"))
                 for table in chaining_tables
             }, chaining_before)
+
+
+class ValidationOperationLedgerTests(unittest.TestCase):
+    def setUp(self):
+        from test_validation_request_broker import ValidationRequestBrokerTests
+        ValidationRequestBrokerTests.setUp(self)
+        self.coordinator = ValidationCoordinator(
+            db_path=self.path, agent=FakeAgent(), reproduction=MissingLedgerPort(),
+            policy_provider=lambda endpoint, method: self.policy,
+        )
+        self.candidate = SimpleNamespace(scan_id="scan", case_id="case")
+
+    def operation(self, status="completed"):
+        self.conn.execute("""INSERT INTO validation_transport_operations
+            (operation_id,scan_id,stage_run_id,case_id,attempt_id,policy_id,policy_sha256,
+             runtime_kind,operation_kind,destination,request_fingerprint,
+             concurrency_units,reserved_bytes,status,scheduled_at)
+            VALUES ('operation','scan','stage','case','attempt','policy',?,
+                    'multipart','request','https://test/items/0',?,1,3,?,0)""",
+            ('a' * 64, 'b' * 64, status))
+        self.conn.commit()
+
+    def validate(self, details, **context):
+        self.coordinator._validate_request_ledger(
+            self.conn, candidate=context.get("candidate", self.candidate),
+            stage_run_id=context.get("stage_run_id", "stage"),
+            attempt_id=context.get("attempt_id", "attempt"),
+            observation=ReproductionObservation(
+                outcome="observed", signal_type="response_diff", signal_observed=True,
+                details=details, content_sha256='a' * 64, content_length=1,
+            ),
+        )
+
+    def test_operation_ledger_accepts_completed_and_failed_terminal_rows(self):
+        self.operation()
+        for status in ("completed", "failed"):
+            self.conn.execute("UPDATE validation_transport_operations SET status=?", (status,))
+            self.validate({"operation_ids": ["operation"]})
+
+    def test_operation_ledger_rejects_unfinished_and_unknown_rows(self):
+        self.operation()
+        for status in ("reserved", "running", "outcome_unknown"):
+            self.conn.execute("UPDATE validation_transport_operations SET status=?", (status,))
+            with self.subTest(status=status), self.assertRaisesRegex(ValidationCoordinatorError, "unfinished operation"):
+                self.validate({"operation_ids": ["operation"]})
+
+    def test_operation_ledger_ids_must_be_unique_nonempty_strings(self):
+        self.operation()
+        for invalid in (None, "operation", [""], [1], ["operation", "operation"]):
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(ValidationCoordinatorError, "invalid Validation operation"):
+                self.validate({"operation_ids": invalid})
+
+    def test_operation_ledger_checks_all_ownership_fields(self):
+        self.operation()
+        for context in (
+            {"candidate": SimpleNamespace(scan_id="foreign", case_id="case")},
+            {"candidate": SimpleNamespace(scan_id="scan", case_id="foreign")},
+            {"stage_run_id": "foreign"}, {"attempt_id": "foreign"},
+        ):
+            with self.subTest(context=context), self.assertRaisesRegex(ValidationCoordinatorError, "do not belong"):
+                self.validate({"operation_ids": ["operation"]}, **context)
+        with self.assertRaisesRegex(ValidationCoordinatorError, "do not belong"):
+            self.validate({"operation_ids": ["missing"]})
+
+    def test_operation_ledger_does_not_hide_invalid_http_ids(self):
+        self.operation()
+        with self.assertRaisesRegex(ValidationCoordinatorError, "request ledger IDs do not belong"):
+            self.validate({"operation_ids": ["operation"], "request_ids": ["missing"]})
+
+    def test_unknown_operation_is_counted_for_restart_manual_review(self):
+        self.operation("outcome_unknown")
+        counts = self.coordinator._unknown_execution_counts(self.conn, "case", "stage")
+        self.assertEqual(counts["transport_operations"], 1)
+        self.assertEqual(self.coordinator._unknown_execution_counts(self.conn, "foreign", "stage")["transport_operations"], 0)
 
 
 if __name__ == "__main__":

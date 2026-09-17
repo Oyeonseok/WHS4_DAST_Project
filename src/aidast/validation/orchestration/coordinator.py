@@ -533,6 +533,11 @@ class ValidationCoordinator:
                WHERE case_id=? AND stage_run_id=? AND status='outcome_unknown'""",
             (case_id, stage_run_id),
         ).fetchone()[0]
+        operation_count = conn.execute(
+            """SELECT count(*) FROM validation_transport_operations
+               WHERE case_id=? AND stage_run_id=? AND status='outcome_unknown'""",
+            (case_id, stage_run_id),
+        ).fetchone()[0]
         action_count = conn.execute(
             """SELECT count(*) FROM validation_development_actions
                WHERE case_id=? AND stage_run_id=? AND status='outcome_unknown'""",
@@ -546,6 +551,7 @@ class ValidationCoordinator:
         ).fetchone()[0]
         return {
             "attempts": attempt_count, "requests": request_count,
+            "transport_operations": operation_count,
             "development_actions": action_count,
             "impact_hypotheses": impact_count,
         }
@@ -603,19 +609,39 @@ class ValidationCoordinator:
         stage_run_id: str, attempt_id: str,
         observation: ReproductionObservation,
     ) -> None:
-        """Bind adapter-reported request IDs to the current attempt before evidence storage."""
-        request_ids = self._request_ids(
-            observation.details,
+        """Bind both kinds of adapter ledger IDs before accepting evidence."""
+        request_ids = self._ledger_ids(
+            observation.details, "request_ids",
             "ReproductionPort returned invalid Validation request ledger IDs",
+        )
+        operation_ids = self._ledger_ids(
+            observation.details, "operation_ids",
+            "ReproductionPort returned invalid Validation operation ledger IDs",
         )
         if (
             getattr(self.reproduction, "requires_request_ledger", False)
             and observation.outcome in {"observed", "not_observed"}
-            and not request_ids
+            and not (request_ids or operation_ids)
         ):
             raise ValidationCoordinatorError(
-                "native reproduction completed without a Validation request ledger row"
+                "native reproduction completed without a Validation ledger row"
             )
+        if operation_ids:
+            placeholders = ",".join("?" for _ in operation_ids)
+            rows = conn.execute(
+                f"""SELECT operation_id,status FROM validation_transport_operations
+                WHERE scan_id=? AND stage_run_id=? AND case_id=? AND attempt_id=?
+                  AND operation_id IN ({placeholders})""",
+                (candidate.scan_id, stage_run_id, candidate.case_id, attempt_id, *operation_ids),
+            ).fetchall()
+            if {row["operation_id"] for row in rows} != set(operation_ids):
+                raise ValidationCoordinatorError(
+                    "Validation operation ledger IDs do not belong to the current attempt"
+                )
+            if any(row["status"] not in {"completed", "failed"} for row in rows):
+                raise ValidationCoordinatorError(
+                    "Validation observation cites an unfinished operation ledger row"
+                )
         if not request_ids:
             return
         placeholders = ",".join("?" for _ in request_ids)
@@ -636,7 +662,11 @@ class ValidationCoordinator:
 
     @staticmethod
     def _request_ids(result: dict[str, Any], error: str) -> tuple[str, ...]:
-        raw = result.get("request_ids", ())
+        return ValidationCoordinator._ledger_ids(result, "request_ids", error)
+
+    @staticmethod
+    def _ledger_ids(result: dict[str, Any], key: str, error: str) -> tuple[str, ...]:
+        raw = result.get(key, ())
         if (
             not isinstance(raw, (list, tuple))
             or any(not isinstance(item, str) or not item for item in raw)

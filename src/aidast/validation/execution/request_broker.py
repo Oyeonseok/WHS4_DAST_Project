@@ -224,14 +224,20 @@ class ValidationRequestBroker:
                         "request requires the current running case execution"
                     )
                 used = conn.execute(
-                    "SELECT count(*) FROM validation_http_requests WHERE scan_id=? AND policy_id=?",
-                    (self.scan_id, self.policy.policy_id),
+                    """SELECT
+                    (SELECT count(*) FROM validation_http_requests WHERE scan_id=? AND policy_id=?) +
+                    (SELECT count(*) FROM validation_transport_operations WHERE scan_id=? AND policy_id=?)""",
+                    (self.scan_id, self.policy.policy_id, self.scan_id, self.policy.policy_id),
                 ).fetchone()[0]
                 if used >= self.policy.limits.max_requests:
                     raise ValidationRequestError("TargetPolicy request budget exhausted")
                 active = conn.execute(
-                    """SELECT count(*) FROM validation_http_requests WHERE scan_id=? AND policy_id=?
-                    AND status IN ('reserved','running')""", (self.scan_id, self.policy.policy_id),
+                    """SELECT
+                    (SELECT count(*) FROM validation_http_requests WHERE scan_id=? AND policy_id=?
+                     AND status IN ('reserved','running')) +
+                    (SELECT coalesce(sum(concurrency_units),0) FROM validation_transport_operations
+                     WHERE scan_id=? AND policy_id=? AND status IN ('reserved','running'))""",
+                    (self.scan_id, self.policy.policy_id, self.scan_id, self.policy.policy_id),
                 ).fetchone()[0]
                 if active >= self.policy.limits.concurrency:
                     raise ValidationRequestError("TargetPolicy concurrency limit reached")
