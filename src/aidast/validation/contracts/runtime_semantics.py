@@ -6,6 +6,7 @@ from typing import Any, Iterable
 
 from .browser_contract import BrowserRuntimeContract
 from .models import canonical_json, canonical_sha256
+from .multipart_contract import MultipartRuntimeContract
 from .oob_contract import OobRuntimeContract
 from ..core.profiles import ValidationProfile
 from .runtime_contract import HttpRuntimeContract
@@ -43,7 +44,7 @@ def _same_proof_assertions(
 
 
 def validate_runtime_semantics(
-    runtime: HttpRuntimeContract | BrowserRuntimeContract | OobRuntimeContract,
+    runtime: HttpRuntimeContract | BrowserRuntimeContract | OobRuntimeContract | MultipartRuntimeContract,
     profile: ValidationProfile,
 ) -> None:
     """Reject controls or assertions that cannot establish the profile signal."""
@@ -95,6 +96,34 @@ def validate_runtime_semantics(
             proof_kinds,
             "browser negative control must evaluate the same target proof assertions",
         )
+        return
+
+    if isinstance(runtime, MultipartRuntimeContract):
+        _different(
+            runtime.target.request.model_dump(mode="json"),
+            runtime.negative_control.request.model_dump(mode="json"),
+            "multipart target and inert negative control requests must differ",
+        )
+        assertion_kinds = {item.kind for item in runtime.target.assertions}
+        _same_proof_assertions(
+            runtime.target.assertions, runtime.negative_control.assertions,
+            _HTTP_CONTENT_ASSERTIONS,
+            "multipart negative control must evaluate the same target proof assertions",
+        )
+        _same_proof_assertions(
+            runtime.target.assertions, runtime.negative_control.assertions,
+            _HTTP_DURATION_ASSERTIONS,
+            "multipart negative control must evaluate the same target proof assertions",
+        )
+        if "timing" in profile.signal_types:
+            if not assertion_kinds & _HTTP_DURATION_ASSERTIONS:
+                raise RuntimeSemanticError(
+                    "multipart timing profiles require a target duration assertion"
+                )
+        elif not assertion_kinds & _HTTP_CONTENT_ASSERTIONS:
+            raise RuntimeSemanticError(
+                "multipart target proof requires a header, body, or JSON assertion"
+            )
         return
 
     if isinstance(runtime, OobRuntimeContract):

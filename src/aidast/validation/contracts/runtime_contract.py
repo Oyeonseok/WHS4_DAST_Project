@@ -168,6 +168,9 @@ def validate_runtime_contract(value: Any) -> HttpRuntimeContract | Any:
     if kind == "chain":
         from .chain_contract import ChainRuntimeContract
         return ChainRuntimeContract.model_validate(value)
+    if kind == "multipart":
+        from .multipart_contract import MultipartRuntimeContract
+        return MultipartRuntimeContract.model_validate(value)
     if kind == "http":
         return HttpRuntimeContract.model_validate(value)
     raise ValueError(f"runtime kind is not yet available: {kind}")
