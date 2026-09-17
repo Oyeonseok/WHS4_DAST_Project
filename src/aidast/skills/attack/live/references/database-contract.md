@@ -96,6 +96,110 @@ must appear exactly once in the trigger. Validation derives a new nonce from
 every attempt ID, arms the observer before sending the policy-checked trigger,
 and ignores callbacks with stale tokens or undeclared protocols.
 
+For file-upload effects, use `runtime_kind: "multipart"`. The adapter, not the
+contract, generates the boundary and framing headers. A minimal contract is:
+
+```json
+{"runtime_kind":"multipart","schema_version":1,"target":{"request":{"query_parameters":{"variant":"target"},"files":[{"name":"file","filename":"fixture.gif","content_type":"image/gif","content":{"artifact_ref":"fixture-gif-v1","length":6,"sha256":"610f5ae4d76e332636a17bd357fd6ce99029316a99d320280d4d77a746bf29e8"}}]},"assertions":[{"assertion_id":"proof","kind":"body_contains","expected":"uploaded"}]},"positive_control":{"request":{"query_parameters":{"variant":"baseline"},"files":[{"name":"file","filename":"fixture.gif","content_type":"image/gif","content":{"artifact_ref":"fixture-gif-v1","length":6,"sha256":"610f5ae4d76e332636a17bd357fd6ce99029316a99d320280d4d77a746bf29e8"}}]},"assertions":[{"assertion_id":"healthy","kind":"status_equals","expected":200}]},"negative_control":{"request":{"query_parameters":{"variant":"inert"},"files":[{"name":"file","filename":"fixture.gif","content_type":"image/gif","content":{"artifact_ref":"fixture-gif-v1","length":6,"sha256":"610f5ae4d76e332636a17bd357fd6ce99029316a99d320280d4d77a746bf29e8"}}]},"assertions":[{"assertion_id":"proof","kind":"body_contains","expected":"uploaded"}]}}
+```
+
+Multipart supports the six HTTP assertion kinds listed above. Each attempt has
+at most 32 path values, 64 query values, 32 non-sensitive headers, 64 text
+fields, 32 files, and 16 assertions; at least one file and one assertion are
+required. Names are bounded to 128 characters for form parts, 256 for filenames
+and request keys, and 256 for content types and header names. Text field values
+are at most 100,000 characters, header and path/query scalar values at most
+16,384 characters, assertion JSON paths at most 16
+components, and assertion IDs at most 128 characters. Each binary value and the
+fully framed multipart body are at most 1,000,000 bytes.
+
+For WebSocket effects, use `runtime_kind: "websocket"` with a `ws` or `wss`
+endpoint and an ordered frame exchange:
+
+```json
+{"runtime_kind":"websocket","schema_version":1,"target":{"endpoint":"ws://127.0.0.1/items","frames":[{"kind":"json","value":{"message":"target"}}],"assertions":[{"assertion_id":"proof","kind":"json_equals","frame_index":0,"path":["message"],"expected":"target"}]},"positive_control":{"endpoint":"ws://127.0.0.1/items","frames":[{"kind":"json","value":{"message":"baseline"}}],"assertions":[{"assertion_id":"healthy","kind":"json_equals","frame_index":0,"path":["message"],"expected":"baseline"}]},"negative_control":{"endpoint":"ws://127.0.0.1/items","frames":[{"kind":"json","value":{"message":"inert"}}],"assertions":[{"assertion_id":"proof","kind":"json_equals","frame_index":0,"path":["message"],"expected":"target"}]}}
+```
+
+Outbound frame kinds are `text`, `json`, `binary`, `ping`, and final `close`.
+Assertion kinds are exactly `text_contains`, `json_equals`, `binary_sha256`,
+`close_code_equals`, `subprotocol_equals`, and `frame_kind_sequence`. Endpoints
+and origins are at most 2,048 characters; endpoints may have at most 32
+non-sensitive query fields (128-character names and 1,024-character values).
+Each attempt has at most 32 non-sensitive handshake headers (256-character
+names, 16,384-character values), 16 unique subprotocols of at most 128
+characters, 1--32 outbound frames, and 1--16 assertions. A frame, all outbound
+frames together, received bytes, and a JSON value are each capped at 1,000,000
+bytes; ping data is capped at 125 bytes. Capture is capped at 64 frames,
+assertion frame indexes at 63, assertion paths at 16 components of at most 128
+characters, and a frame-kind sequence at 64 entries. Connection and receive
+waits must be positive and no more than 120 seconds, and cannot exceed policy.
+Outbound close codes are 1000--1003, 1007--1014, or 3000--4999.
+
+For unary gRPC effects, use `runtime_kind: "grpc"`. Supply a packaged protobuf
+descriptor-set reference; reflection and inferred descriptors are not allowed:
+
+```json
+{"runtime_kind":"grpc","schema_version":1,"target":{"endpoint":"http://127.0.0.1:50051","service":"fixture.Echo","method":"Unary","descriptor":{"artifact_ref":"fixture-echo-v1","length":113,"sha256":"1882df0f4c54a559f89c96f3f72c891728f247bc98a765007ee4986937f2d025"},"message":{"value":"target"},"assertions":[{"assertion_id":"proof","kind":"protobuf_path_equals","path":["value"],"expected":"target"}]},"positive_control":{"endpoint":"http://127.0.0.1:50051","service":"fixture.Echo","method":"Unary","descriptor":{"artifact_ref":"fixture-echo-v1","length":113,"sha256":"1882df0f4c54a559f89c96f3f72c891728f247bc98a765007ee4986937f2d025"},"message":{"value":"baseline"},"assertions":[{"assertion_id":"healthy","kind":"grpc_status_equals","expected":"OK"}]},"negative_control":{"endpoint":"http://127.0.0.1:50051","service":"fixture.Echo","method":"Unary","descriptor":{"artifact_ref":"fixture-echo-v1","length":113,"sha256":"1882df0f4c54a559f89c96f3f72c891728f247bc98a765007ee4986937f2d025"},"message":{"value":"inert"},"assertions":[{"assertion_id":"proof","kind":"protobuf_path_equals","path":["value"],"expected":"target"}]}}
+```
+
+gRPC assertion kinds are exactly `grpc_status_equals`,
+`protobuf_path_equals`, `trailer_equals`, `error_detail_contains`,
+`duration_at_least_ms`, and `duration_at_most_ms`. HTTP transport status and
+gRPC status are distinct evidence. The endpoint is an HTTP(S) authority of at
+most 2,048 characters; service and method names are at most 256 and 128
+characters. Descriptor sets are at most 1,000,000 bytes and 64 files, with
+256-character unique filenames. Request JSON is at most 1,000,000 encoded
+bytes and 32 levels; serialized request and response limits are independently
+1--1,000,000 bytes. Each attempt has at most 32 metadata entries (256-character
+names and 16,384-character values, 32,768 bytes total), 16 unique credential
+references, 1--16 assertions, and a positive deadline no greater than 120
+seconds. Assertion IDs are at most 128 characters, expected strings at most
+16,384 characters, captured error details at most 16,384 bytes, paths at most
+16 components of at most 128 characters, trailers at most 256 characters, and
+response trailers at most 32 entries/32,768 bytes.
+
+For race effects, use `runtime_kind: "concurrent"`. It releases only HTTP or
+multipart child requests at a barrier; this minimal HTTP-child example is:
+
+```json
+{"runtime_kind":"concurrent","schema_version":1,"workers":2,"repeat_count":1,"release_strategy":"simultaneous","barrier_timeout_seconds":1,"target":{"request":{"query_parameters":{"variant":"target"}},"member_assertions":[{"assertion_id":"proof","kind":"status_equals","expected":200}],"aggregate_assertions":[{"assertion_id":"successes","kind":"success_count_equals","expected":2}],"start_skew_at_most_ms":100},"positive_control":{"request":{"query_parameters":{"variant":"baseline"}},"member_assertions":[{"assertion_id":"healthy","kind":"status_equals","expected":200}],"aggregate_assertions":[{"assertion_id":"healthy-successes","kind":"success_count_equals","expected":2}],"start_skew_at_most_ms":100},"negative_control":{"request":{"query_parameters":{"variant":"inert"}},"member_assertions":[{"assertion_id":"proof","kind":"status_equals","expected":200}],"aggregate_assertions":[{"assertion_id":"successes","kind":"success_count_equals","expected":2}],"start_skew_at_most_ms":100}}
+```
+
+Concurrent member and optional final HTTP assertions use the six HTTP assertion
+kinds. Aggregate kinds are exactly `success_count_equals`,
+`success_count_at_least`, `distinct_response_digests_at_least`, and
+`final_http_assertion_passes`; the last requires one bounded HTTP-only final
+verification. Workers are 2--20, repeat count 1--5, and their product is at most
+20. The barrier timeout is positive and at most 30 seconds. Each attempt has
+1--16 member assertions, at most 8 aggregate assertions, an optional positive
+start-skew limit no greater than 30,000 ms, and inherited HTTP/multipart child
+bounds. Aggregate counts are 0--20. WebSocket, gRPC, and recursive concurrent
+children are rejected.
+
+Binary content is either strict base64 or one opaque `artifact_ref`, never both.
+It always declares exact byte length and SHA-256; artifact references are 1--256
+characters matching `[A-Za-z0-9][A-Za-z0-9._:-]*`, never filesystem paths.
+Inline base64 text is at most 1,333,336 characters and still decodes to no more
+than 1,000,000 bytes.
+Declare identity roles in `required_identity_roles`; trusted staging binds them
+to opaque credential references instead of putting secrets in headers or
+metadata. gRPC's optional per-attempt credential references are 1--128
+characters in the same opaque alphabet, unique, and limited to 16; they must
+already be present in the staged case.
+
+Every multipart request and unary gRPC call, each WebSocket handshake and
+outbound frame, every concurrent member, and any concurrent final HTTP
+verification is durably reserved before network dispatch. Evidence may cite
+only completed operation rows owned by the current attempt. A dispatched or
+`running` operation with an unknowable result becomes `outcome_unknown` and is
+never retried automatically; only an undispatched reservation may be abandoned
+safely.
+
+These contracts do not admit raw TCP or HTTP-smuggling bytes, caller-selected
+multipart boundaries, Socket.IO framing, gRPC streaming or reflection,
+WebSocket/gRPC concurrent children, arbitrary local paths, shell commands,
+Python callbacks, or plaintext credentials.
+
 The target assertions describe the vulnerability effect and should pass when it
 is reproduced. The positive-control assertions describe a healthy transport,
 identity, and parser path and should pass. Negative-control assertions also

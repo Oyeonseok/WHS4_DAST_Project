@@ -47,6 +47,19 @@ class ValidationProfileTests(unittest.TestCase):
             self.assertTrue(skill_root.joinpath("SKILL.md").is_file())
             self.assertTrue(skill_root.joinpath("contract.json").is_file())
 
+    def test_protocol_profiles_resolve_to_their_native_runtimes(self):
+        expected = {
+            "hunt-websocket": ("websocket",),
+            "hunt-grpc": ("grpc",),
+            "hunt-file-upload": ("multipart",),
+            "hunt-race-condition": ("concurrent",),
+        }
+        resolver = SkillProfileResolver()
+        self.assertEqual(
+            {name: resolver.resolve(name).profile.runtime_kinds for name in expected},
+            expected,
+        )
+
     def test_resolved_profile_includes_base_and_skill_specific_guidance(self):
         resolved = SkillProfileResolver().resolve("hunt-idor")
         self.assertIn("name: aidast-blind-validation", resolved.validation_base_skill_text)

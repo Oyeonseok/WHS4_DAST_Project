@@ -5,7 +5,7 @@
     "error_signature"
   ],
   "runtime_kinds": [
-    "http"
+    "grpc"
   ],
   "target_expected_signal": {
     "kind": "hunt-grpc_verified",

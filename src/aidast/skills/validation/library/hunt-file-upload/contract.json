@@ -5,7 +5,7 @@
     "state_change"
   ],
   "runtime_kinds": [
-    "http"
+    "multipart"
   ],
   "target_expected_signal": {
     "kind": "hunt-file-upload_verified",

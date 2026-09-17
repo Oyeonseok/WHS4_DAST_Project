@@ -126,7 +126,7 @@
       "skill_path": "library/hunt-file-upload/SKILL.md",
       "contract_path": "library/hunt-file-upload/contract.json",
       "skill_sha256": "dafc2315e1cdaecf95161b07f170a55968718ce85159c25001df726d6fa01d82",
-      "contract_sha256": "c0b0f09901479d2f4a502e78adaaa29282f61dec2253e346dee8a994c771be74"
+      "contract_sha256": "2221301b9dd407eef8d88e05cedc0e00e633b42dd7e8c335501b00ec908b434d"
     },
     {
       "skill_id": "hunt-fintech-graphql",
@@ -154,7 +154,7 @@
       "skill_path": "library/hunt-grpc/SKILL.md",
       "contract_path": "library/hunt-grpc/contract.json",
       "skill_sha256": "3b3e6b4b6ee8b8e56d75246fa6696d207f9be1e7e0ef0f590f43b76abb7f8182",
-      "contract_sha256": "8e0fb211b8d4bb8a5ba1ddbaa2c9942923d7a02c6a4ed9b58748758512fa0794"
+      "contract_sha256": "36a7753d1eb39791ede940296e7e320bc82ef2d546c7b80aa5940d2875329654"
     },
     {
       "skill_id": "hunt-host-header",
@@ -287,7 +287,7 @@
       "skill_path": "library/hunt-race-condition/SKILL.md",
       "contract_path": "library/hunt-race-condition/contract.json",
       "skill_sha256": "b571df191cdf2bc45fff497d0a528982ebd41824c9ce2086a05e1e664489e81f",
-      "contract_sha256": "2e6d4eb211d9abe2f8a2c827edd77d5a5932f0129864fbcf762995eab4a84125"
+      "contract_sha256": "e07d4640d985c8b242873cb573b6bb27bf7f4fbcde590607bb2383c5e806d8dd"
     },
     {
       "skill_id": "hunt-rag-vector",
@@ -392,7 +392,7 @@
       "skill_path": "library/hunt-websocket/SKILL.md",
       "contract_path": "library/hunt-websocket/contract.json",
       "skill_sha256": "4fa6033ab6f778f1c33dec7f85fb2a25c2a1d5dca1526d95033e0ee015551eda",
-      "contract_sha256": "f575fad79d58235966756f6dafcf50e62cc5ed439644489acce482ffa258c6c1"
+      "contract_sha256": "5797572fdd2ab879aeda306e16e288490e135c05576f507a232fb118899b818d"
     },
     {
       "skill_id": "hunt-xss",
