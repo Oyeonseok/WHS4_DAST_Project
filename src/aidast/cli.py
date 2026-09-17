@@ -48,7 +48,11 @@ from aidast.reporting import (
     report_status,
 )
 from aidast.scope.paths import ScopePathError, resolve_scope_directory
-from aidast.scope.reader import PlaywrightProgramPageReader, ProgramPageError
+from aidast.scope.reader import (
+    PlaywrightProgramPageReader,
+    ProgramPageError,
+    RuntimeBrowserProgramPageReader,
+)
 from aidast.scope.models import AssetType, ScopeAsset, ScopeDocument
 from aidast.updater import UpdateError, update_aidast
 from aidast.validation import (
@@ -78,7 +82,7 @@ EXECUTION_PROFILES = {
 }
 EXECUTION_PROFILES["focused-recon"] = EXECUTION_PROFILES["focused-discovery"]
 
-RESULT_ROOT = Path("result")
+RESULT_ROOT = Path(os.environ.get("AIDAST_RESULT_ROOT", "result").strip() or "result").expanduser()
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -107,6 +111,22 @@ def _parser() -> argparse.ArgumentParser:
         help="program URL for the status operation",
     )
     _add_workflow_options(scope)
+    scope.add_argument(
+        "--login-mode",
+        dest="scope_login_mode",
+        choices=("native", "runtime-browser"),
+        default="native",
+        help=(
+            "native uses the isolated Codex browser; runtime-browser opens an "
+            "operator-controlled persistent browser for program-platform login"
+        ),
+    )
+    scope.add_argument(
+        "--identity",
+        dest="scope_identity",
+        default="primary",
+        help="account label for the isolated program-platform browser session",
+    )
 
     recon = commands.add_parser(
         "recon",
@@ -390,7 +410,10 @@ def _add_workflow_options(command: argparse.ArgumentParser) -> None:
         "--output-dir",
         type=Path,
         default=RESULT_ROOT / "Scope",
-        help="root directory for program scope artifacts (default: result/Scope)",
+        help=(
+            "root directory for program scope artifacts "
+            f"(default: {RESULT_ROOT / 'Scope'})"
+        ),
     )
     command.add_argument(
         "--by",
@@ -561,6 +584,8 @@ def _run_scope(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int
     if args.subject == "status":
         if args.approved_by:
             parser.error("--by is only valid when collecting a new Scope")
+        if args.scope_login_mode != "native" or args.scope_identity != "primary":
+            parser.error("--login-mode and --identity are only valid when collecting")
         approval = coordinator.verify_approval()
         print(
             f"Scope approval valid: {approval.scope_id} "
@@ -1418,9 +1443,16 @@ def _collect_scope(
     coordinator: ScopeCoordinator,
     main_agent: CodexMainAgent,
 ):
+    primary_reader = None
+    if getattr(args, "scope_login_mode", "native") == "runtime-browser":
+        primary_reader = RuntimeBrowserProgramPageReader(
+            identity=args.scope_identity,
+            timeout_seconds=args.page_timeout,
+        )
     return coordinator.collect(
         program_url,
         main_agent=main_agent,
+        primary_reader=primary_reader,
         fallback_reader=PlaywrightProgramPageReader(
             timeout_seconds=args.page_timeout
         ),

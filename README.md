@@ -143,6 +143,33 @@ aidast scope "<PROGRAM_URL>"
 
 생성된 임시 `Scope.md`를 원본 프로그램 페이지와 대조한 뒤 승인합니다.
 
+로그인이 필요한 Intigriti researcher 페이지는 격리된 persistent Chromium을
+열어 플랫폼 로그인과 MFA를 완료한 뒤 수집합니다.
+
+```bash
+aidast scope "<INTIGRITI_RESEARCHER_PROGRAM_URL>" \
+  --login-mode runtime-browser \
+  --identity "<ACCOUNT_LABEL>"
+```
+
+브라우저에서 정확한 프로그램 상세 페이지로 돌아와 Scope 화면을 연 다음
+터미널에서 Enter를 누릅니다. 브라우저 프로필에는 인증정보가 포함되므로
+공유하거나 Git에 추가하면 안 됩니다.
+
+Adobe Public 프로그램을 `aidast`로만 운영하는 명령 허용 목록과 단계별 게이트는
+[Intigriti Adobe Public aidast-only 가이드](docs/guides/INTIGRITI_ADOBE_PUBLIC_AIDAST_ONLY.md)를
+참고하세요.
+
+모든 기본 산출물을 저장소 밖의 한 디렉터리에 모으려면
+`AIDAST_RESULT_ROOT`를 지정합니다.
+
+```bash
+export AIDAST_RESULT_ROOT="/path/to/dast_result"
+```
+
+이 설정은 기본 Scope, Recon DB/Surface, Runs, Attack, Validation, Report 경로에
+적용됩니다. 명령에서 개별 출력 경로를 지정하면 해당 명령의 명시적 값이 우선합니다.
+
 ```text
 이 Scope를 승인하고 저장할까요? [y/N]:
 ```

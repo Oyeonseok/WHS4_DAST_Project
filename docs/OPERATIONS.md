@@ -36,6 +36,17 @@
   범용적으로 보장하지 않습니다.
 - Report는 로컬 초안만 생성하며 플랫폼에 자동 제출하지 않습니다.
 
+모든 기본 결과를 하나의 저장소 밖 디렉터리에 모으려면 실행 셸에서 다음 환경변수를
+설정합니다.
+
+```bash
+export AIDAST_RESULT_ROOT="/path/to/dast_result"
+```
+
+설정하지 않으면 기존과 같이 현재 작업 디렉터리의 `result/`를 사용합니다.
+`--output-dir`, `--db-path`, `--surface-path`, `--run-root` 등 명시적 CLI 경로는
+환경변수 기반 기본값보다 우선합니다.
+
 ## Scope 수집과 정책
 
 ### 수집과 승인
@@ -64,6 +75,29 @@ aidast scope status "<PROGRAM_URL>"
 
 승인 후 `Scope.md` 또는 `Scope.json`이 변경되면 무결성 검사가 실패합니다.
 기존 프로그램 산출물은 자동으로 덮어쓰지 않습니다.
+
+### 인증이 필요한 프로그램 페이지
+
+Intigriti researcher URL처럼 플랫폼 로그인이 필요한 프로그램 페이지는
+Scope 전용 runtime browser로 수집합니다.
+
+```bash
+aidast scope "<PROGRAM_URL>" \
+  --login-mode runtime-browser \
+  --identity "<ACCOUNT_LABEL>"
+```
+
+`aidast`가 저장소 밖의 격리된 persistent Chromium 프로필을 엽니다. 로그인과
+MFA를 직접 완료하고, 명령에 입력한 정확한 프로그램 페이지로 돌아와 Scope
+화면을 연 뒤 터미널에서 Enter를 누르세요. 다른 origin 또는 다른 path에 있는
+탭은 캡처 대상으로 인정하지 않습니다.
+
+프로필은 기본적으로
+`~/.local/share/aidast/scope-sessions/<binding-hash>/browser-profile/`에
+저장되어 같은 platform origin과 identity 조합에서 재사용됩니다. 실제 쿠키와
+토큰이 포함되므로 공유·백업·커밋하지 마세요. Scope 캡처는 완전성 검사를 통과한
+뒤에만 Codex가 해석하며, partial 또는 blocked 캡처는 승인 단계로 넘어가지
+않습니다.
 
 ```text
 result/Scope/<platform>/<program>/

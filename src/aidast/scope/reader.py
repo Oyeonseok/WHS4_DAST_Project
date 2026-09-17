@@ -2,12 +2,22 @@ from __future__ import annotations
 
 import hashlib
 import ipaddress
+import json
 import socket
 import time
 from datetime import datetime, timezone
+from pathlib import Path
+from typing import Callable
 from urllib.parse import urlsplit
 
-from playwright.sync_api import Browser, Page, Playwright, Route, sync_playwright
+from playwright.sync_api import (
+    Browser,
+    Page,
+    Playwright,
+    Route,
+    TimeoutError as PlaywrightTimeoutError,
+    sync_playwright,
+)
 
 from aidast.scope.models import CaptureReason, CaptureStatus, ProgramPage
 
@@ -47,6 +57,41 @@ def _validate_public_https_url(url: str) -> None:
         raise ProgramPageError("program URL must be an absolute HTTPS URL")
     if not _host_is_public(parsed.hostname):
         raise ProgramPageError(f"program URL resolves to a non-public address: {parsed.hostname}")
+
+
+def _url_origin(url: str) -> str:
+    parsed = urlsplit(url)
+    scheme = parsed.scheme.lower()
+    default_port = 443 if scheme == "https" else 80
+    port = parsed.port or default_port
+    host = (parsed.hostname or "").lower()
+    host = f"[{host}]" if ":" in host else host
+    return f"{scheme}://{host}" + (
+        f":{port}" if port != default_port else ""
+    )
+
+
+def _same_program_url(expected: str, actual: str) -> bool:
+    expected_parts = urlsplit(expected)
+    actual_parts = urlsplit(actual)
+    if _url_origin(expected) != _url_origin(actual):
+        return False
+
+    expected_path = expected_parts.path.rstrip("/")
+    actual_path = actual_parts.path.rstrip("/")
+    allowed_bases = {expected_path}
+    if (
+        (expected_parts.hostname or "").lower() == "app.intigriti.com"
+        and expected_path.startswith("/researcher/programs/")
+    ):
+        # Intigriti drops the UI-only /researcher prefix after authentication.
+        # Keep the company/program/detail suffix exact and allow only a nested
+        # view belonging to that same program.
+        allowed_bases.add(expected_path.removeprefix("/researcher"))
+    return any(
+        actual_path == base or actual_path.startswith(base + "/")
+        for base in allowed_bases
+    )
 
 
 class PlaywrightProgramPageReader:
@@ -108,46 +153,60 @@ class PlaywrightProgramPageReader:
                 raise ProgramPageError(
                     f"program page returned HTTP {response.status}: {response.url}"
                 )
-
-            landing_text = self._wait_for_stable_text(page)
-            final_url = page.url
-            title = page.title().strip()
-            _validate_public_https_url(final_url)
-            scope_view = self._read_scope_view(page, final_url, landing_text)
-            text = (
-                f"=== PROGRAM PAGE: {final_url} ===\n{landing_text}\n\n"
-                f"=== SCOPE VIEW: {scope_view[0]} ===\n{scope_view[1]}"
-                if scope_view is not None
-                else landing_text
-            )
-            normalized_text = "\n".join(
-                line.rstrip() for line in text.splitlines() if line.strip()
-            ).strip()
-            if not normalized_text:
-                raise ProgramPageError("program page rendered without readable text")
-            if len(normalized_text) > self._max_content_chars:
-                raise ProgramPageError(
-                    f"program page exceeds the {self._max_content_chars}-character "
-                    "capture budget"
-                )
-            capture_status, capture_reason = self._classify_capture(
-                normalized_text,
-                final_url=final_url,
-                has_scope_view=scope_view is not None,
-            )
-
-            return ProgramPage(
-                requested_url=url,
-                final_url=final_url,
-                title=title,
-                captured_at=datetime.now(timezone.utc),
-                capture_status=capture_status,
-                capture_reason=capture_reason,
-                content_sha256=hashlib.sha256(normalized_text.encode("utf-8")).hexdigest(),
-                text=normalized_text,
-            )
+            return self._capture_loaded_page(page, url)
         finally:
             context.close()
+
+    def _capture_loaded_page(
+        self,
+        page: Page,
+        requested_url: str,
+        *,
+        discover_scope_view: bool = True,
+    ) -> ProgramPage:
+        landing_text = self._wait_for_stable_text(page)
+        final_url = page.url
+        title = page.title().strip()
+        _validate_public_https_url(final_url)
+        scope_view = (
+            self._read_scope_view(page, final_url, landing_text)
+            if discover_scope_view
+            else None
+        )
+        text = (
+            f"=== PROGRAM PAGE: {final_url} ===\n{landing_text}\n\n"
+            f"=== SCOPE VIEW: {scope_view[0]} ===\n{scope_view[1]}"
+            if scope_view is not None
+            else landing_text
+        )
+        normalized_text = "\n".join(
+            line.rstrip() for line in text.splitlines() if line.strip()
+        ).strip()
+        if not normalized_text:
+            raise ProgramPageError("program page rendered without readable text")
+        if len(normalized_text) > self._max_content_chars:
+            raise ProgramPageError(
+                f"program page exceeds the {self._max_content_chars}-character "
+                "capture budget"
+            )
+        capture_status, capture_reason = self._classify_capture(
+            normalized_text,
+            final_url=final_url,
+            has_scope_view=scope_view is not None,
+        )
+
+        return ProgramPage(
+            requested_url=requested_url,
+            final_url=final_url,
+            title=title,
+            captured_at=datetime.now(timezone.utc),
+            capture_status=capture_status,
+            capture_reason=capture_reason,
+            content_sha256=hashlib.sha256(
+                normalized_text.encode("utf-8")
+            ).hexdigest(),
+            text=normalized_text,
+        )
 
     def _read_scope_view(
         self, page: Page, landing_url: str, landing_text: str
@@ -179,7 +238,10 @@ class PlaywrightProgramPageReader:
 
         while time.monotonic() < deadline:
             page.wait_for_timeout(500)
-            current = page.locator("body").inner_text(timeout=5_000).strip()
+            try:
+                current = page.locator("body").inner_text(timeout=5_000).strip()
+            except PlaywrightTimeoutError:
+                continue
             if current == latest and len(current) >= 500:
                 stable_samples += 1
                 if stable_samples >= 3:
@@ -210,6 +272,8 @@ class PlaywrightProgramPageReader:
         text: str, *, final_url: str, has_scope_view: bool
     ) -> tuple[CaptureStatus, CaptureReason]:
         folded = " ".join(text.lower().split())
+        if "log in to continue" in folded or "sign in to continue" in folded:
+            return CaptureStatus.BLOCKED, CaptureReason.AUTHENTICATION_REQUIRED
         if "access denied" in folded:
             return CaptureStatus.BLOCKED, CaptureReason.ACCESS_DENIED
         if "verify you are human" in folded:
@@ -234,3 +298,171 @@ class PlaywrightProgramPageReader:
         elif "in scope" not in folded:
             return CaptureStatus.PARTIAL, CaptureReason.CONTENT_INCOMPLETE
         return CaptureStatus.COMPLETE, CaptureReason.NONE
+
+
+class RuntimeBrowserProgramPageReader(PlaywrightProgramPageReader):
+    """Capture one authenticated program page in an isolated persistent browser."""
+
+    def __init__(
+        self,
+        *,
+        identity: str,
+        timeout_seconds: float = 45.0,
+        max_content_chars: int = 250_000,
+        session_root: Path | None = None,
+        input_fn: Callable[[str], str] | None = None,
+        output_fn: Callable[[str], None] | None = None,
+    ) -> None:
+        super().__init__(
+            timeout_seconds=timeout_seconds,
+            max_content_chars=max_content_chars,
+        )
+        if not identity.strip():
+            raise ProgramPageError("scope browser identity must not be blank")
+        self._identity = identity.strip()
+        self._session_root = session_root or (
+            Path.home() / ".local" / "share" / "aidast" / "scope-sessions"
+        )
+        self._input = input_fn or input
+        self._output = output_fn or print
+
+    def read(self, url: str) -> ProgramPage:
+        _validate_public_https_url(url)
+        session_dir = self._prepare_session_directory(url)
+        profile_dir = session_dir / "browser-profile"
+        if profile_dir.exists() and profile_dir.is_symlink():
+            raise ProgramPageError("scope browser profile must not be a symbolic link")
+        profile_dir.mkdir(mode=0o700, exist_ok=True)
+        try:
+            profile_dir.chmod(0o700)
+        except OSError:
+            pass
+
+        try:
+            with sync_playwright() as playwright:
+                try:
+                    context = playwright.chromium.launch_persistent_context(
+                        user_data_dir=str(profile_dir),
+                        headless=False,
+                        locale="en-US",
+                        viewport={"width": 1440, "height": 1200},
+                        args=["--disable-blink-features=AutomationControlled"],
+                    )
+                except Exception as exc:
+                    raise ProgramPageError(
+                        "Chromium is unavailable; run "
+                        "`python -m playwright install chromium`"
+                    ) from exc
+
+                try:
+                    context.add_init_script(
+                        "Object.defineProperty(navigator, 'webdriver', "
+                        "{get: () => undefined})"
+                    )
+                    page = context.pages[0] if context.pages else context.new_page()
+                    try:
+                        page.goto(
+                            url,
+                            wait_until="domcontentloaded",
+                            timeout=int(self._timeout_seconds * 1000),
+                        )
+                    except Exception:
+                        self._output(
+                            "Initial navigation did not finish. Use the open browser "
+                            "to navigate to the exact program URL after login."
+                        )
+                    self._output(
+                        "Scope login browser opened. Complete the platform login/MFA, "
+                        "return to the exact program page, and open its scope view."
+                    )
+                    try:
+                        self._input("준비가 끝나면 Enter > ")
+                    except EOFError as exc:
+                        raise ProgramPageError(
+                            "scope browser confirmation was not received"
+                        ) from exc
+
+                    page = self._select_program_page(context.pages, url)
+                    return self._capture_loaded_page(
+                        page,
+                        url,
+                        discover_scope_view=False,
+                    )
+                finally:
+                    context.close()
+        except ProgramPageError:
+            raise
+        except Exception as exc:
+            raise ProgramPageError(
+                f"failed to render authenticated program page: {exc}"
+            ) from exc
+
+    def _prepare_session_directory(self, url: str) -> Path:
+        root_candidate = self._session_root.expanduser()
+        if root_candidate.exists() and root_candidate.is_symlink():
+            raise ProgramPageError("scope session root must not be a symbolic link")
+        root = root_candidate.resolve(strict=False)
+        root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        try:
+            root.chmod(0o700)
+        except OSError:
+            pass
+
+        binding = f"{_url_origin(url)}\0{self._identity}"
+        directory = root / hashlib.sha256(binding.encode("utf-8")).hexdigest()[:24]
+        if directory.exists() and directory.is_symlink():
+            raise ProgramPageError("scope session directory must not be a symbolic link")
+        directory.mkdir(mode=0o700, exist_ok=True)
+        try:
+            directory.chmod(0o700)
+        except OSError:
+            pass
+
+        metadata_path = directory / "Session.json"
+        expected = {
+            "schema_version": "1.0",
+            "origin": _url_origin(url),
+            "identity": self._identity,
+        }
+        if metadata_path.exists():
+            try:
+                current = json.loads(metadata_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError) as exc:
+                raise ProgramPageError("scope session metadata is unreadable") from exc
+            if current != expected:
+                raise ProgramPageError(
+                    "scope session belongs to another platform or identity"
+                )
+        else:
+            metadata_path.write_text(
+                json.dumps(expected, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            try:
+                metadata_path.chmod(0o600)
+            except OSError:
+                pass
+        return directory
+
+    @staticmethod
+    def _select_program_page(pages: list[Page], expected_url: str) -> Page:
+        for page in reversed(pages):
+            if _same_program_url(expected_url, page.url):
+                return page
+        expected_origin = _url_origin(expected_url)
+        observed_paths = sorted(
+            {
+                urlsplit(page.url).path or "/"
+                for page in pages
+                if _url_origin(page.url) == expected_origin
+            }
+        )
+        diagnostic = (
+            f"; observed same-origin paths: {', '.join(observed_paths)}"
+            if observed_paths
+            else ""
+        )
+        raise ProgramPageError(
+            "login did not return to the exact requested program page; "
+            f"no scope content was captured{diagnostic}"
+        )
