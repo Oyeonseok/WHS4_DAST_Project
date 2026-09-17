@@ -363,6 +363,75 @@ class ReconExecutor:
         ))
         return {**reader.get_auth_headers(), **self.request_headers}
 
+    def _import_authentication_endpoints(
+        self, task: ReconTask, origin_id: str, session: TargetSession
+    ) -> int:
+        if not session.has_authentication_endpoint_provenance:
+            self._diagnostic(
+                "auth_endpoint_provenance_missing",
+                task_id=task.task_id,
+                target=task.target.asset,
+            )
+            return 0
+        target_origin = origin(session.start_url)
+        policy = self._policy_for(task)
+        candidates = []
+        rejected = 0
+        for endpoint in session.authentication_endpoints:
+            if endpoint.origin != target_origin:
+                continue
+            endpoint_url = endpoint.origin + endpoint.path
+            if policy is not None and not policy.allows_observed_url(endpoint_url):
+                rejected += 1
+                continue
+            candidates.append((endpoint, endpoint_url))
+        if rejected:
+            self._diagnostic(
+                "auth_endpoint_provenance_rejected",
+                task_id=task.task_id,
+                target=task.target.asset,
+                endpoint_count=rejected,
+            )
+        from aidast.recon.judgment import normalize_path
+        items = []
+        for endpoint, endpoint_url in candidates:
+            exists = self.conn.execute(
+                """SELECT 1 FROM endpoints e
+                   JOIN endpoint_observations v ON v.endpoint_id=e.endpoint_id
+                   WHERE e.origin_id=? AND upper(e.method)=? AND e.normalized_path=?
+                     AND v.source_tool='auth_bootstrap'
+                     AND v.discovery_kind='passive_login_observation'
+                     AND v.association_method='session_bundle'""",
+                (origin_id, endpoint.method, normalize_path(endpoint.path)),
+            ).fetchone()
+            if exists is not None:
+                continue
+            items.append({
+                "method": endpoint.method,
+                "path": endpoint.path,
+                "url": endpoint_url,
+                "source": "auth_bootstrap",
+                "discovery_kind": "passive_login_observation",
+                "observed_at": endpoint.observed_at or dbmod.now(),
+                "context": {
+                    "association_method": "session_bundle",
+                    "auth_state": "authenticated",
+                },
+            })
+        if not items:
+            return 0
+        from aidast.recon.annotations import ObservationRecorder
+        ObservationRecorder(
+            self.conn, origin_id=origin_id, scan_id=self.scan_id, agent=None
+        ).record("auth_bootstrap", items)
+        self._diagnostic(
+            "auth_endpoint_provenance_imported",
+            task_id=task.task_id,
+            target=task.target.asset,
+            endpoint_count=len(items),
+        )
+        return len(items)
+
     @_stage("asset_discovery")
     def _handle_asset_discovery(self, task: ReconTask) -> None:
         asset_id = self._ensure_asset(task)
@@ -554,6 +623,9 @@ class ReconExecutor:
             main_crawler_mode=resolution.main_crawler_mode,
         )
         self._origin_ids[task.target.asset] = origin_id
+        session = self._session_for(task)
+        if session is not None:
+            self._import_authentication_endpoints(task, origin_id, session)
         print(
             f"   SPA={resolution.spa_detected} "
             f"({resolution.framework_signature or '시그니처 없음'}) "
@@ -637,6 +709,9 @@ class ReconExecutor:
                 request_headers=self.request_headers,
                 browser_context_token=browser_context_token,
                 diagnostic_callback=self._diagnostic,
+                authentication_endpoint_callback=(
+                    session.replace_authentication_endpoints if session else None
+                ),
             )
         finally:
             stop_mitmproxy(proxy_process)

@@ -53,6 +53,8 @@ def fixture(
     max_requests: int = 1,
     attack_methods: list[str] | None = None,
     observed_post: bool = False,
+    observed_post_path: str = "/api/profile",
+    observed_post_source: str = "playwright_login",
 ) -> tuple[Path, Path, Path, str, str]:
     database = root / "Pipeline.db"
     conn = db.init_db(database)
@@ -69,8 +71,8 @@ def fixture(
     )
     if observed_post:
         post_endpoint = db.upsert_endpoint(
-            conn, origin_id=origin, method="POST", path="/api/profile",
-            normalized_path="/api/profile", source_tool="playwright_login",
+            conn, origin_id=origin, method="POST", path=observed_post_path,
+            normalized_path=observed_post_path, source_tool=observed_post_source,
         )
         conn.execute(
             """INSERT INTO endpoint_observations
@@ -78,8 +80,8 @@ def fixture(
                 association_method,observed_at)
                VALUES (?,?,?,?,?,?)""",
             (
-                db.new_id("observation"), post_endpoint, "playwright_login",
-                "http_request", "request_frame", db.now(),
+                db.new_id("observation"), post_endpoint, observed_post_source,
+                "passive_login_observation", "session_bundle", db.now(),
             ),
         )
     conn.execute(
@@ -123,6 +125,51 @@ def fixture(
 
 
 class AttackRequestGuardTests(unittest.TestCase):
+    def test_restored_authentication_endpoint_is_network_observed(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            database, policy, payload, stage, task = fixture(
+                root,
+                attack_methods=["GET", "POST"],
+                observed_post=True,
+                observed_post_path="/rest/user/login",
+                observed_post_source="auth_bootstrap",
+            )
+            document = json.loads(policy.read_text(encoding="utf-8"))
+            document["policies"][0]["allowed_path_prefixes"] = ["/api", "/rest"]
+            policy.write_text(json.dumps(document), encoding="utf-8")
+            payload.write_text(json.dumps({
+                "method": "POST",
+                "url": "https://example.test/rest/user/login",
+                "body": '{"email":"probe","password":"redacted"}',
+                "risk_class": "application_mutation",
+            }), encoding="utf-8")
+
+            with patch(
+                "aidast.attack.request_cli.build_opener", return_value=FakeOpener()
+            ):
+                result = guarded_request(
+                    database,
+                    scan_id="scan",
+                    stage_run_id=stage,
+                    task_id=task,
+                    policy_path=policy,
+                    payload_path=payload,
+                )
+
+            with closing(sqlite3.connect(database)) as conn:
+                request_row = conn.execute(
+                    """SELECT endpoint_provenance,endpoint_reference_id
+                       FROM attack_http_requests WHERE request_id=?""",
+                    (result["request_id"],),
+                ).fetchone()
+                endpoint_id = conn.execute(
+                    """SELECT endpoint_id FROM endpoints
+                       WHERE method='POST' AND normalized_path='/rest/user/login'"""
+                ).fetchone()[0]
+
+            self.assertEqual(request_row, ("network_observed", endpoint_id))
+
     def test_observed_attack_post_is_allowed_and_records_provenance(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
