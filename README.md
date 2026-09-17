@@ -286,6 +286,27 @@ Recon 묶음은 `result/Runs/<scan_id>/`, 후속 단계가 공유하는 DB는
 [Handoff와 데이터 무결성](docs/OPERATIONS.md#통합-파이프라인과-데이터-무결성)을
 참고하세요.
 
+### Attack 실행 경계
+
+`aidast.attack`에는 AI-DAST-ALL을 기준으로 병합한 로컬 승인 워크플로,
+Ed25519 승인 검증, 요청 intent, 세션 바인딩, 정책 실행기와 내구성 있는 요청 예산
+구현이 포함됩니다. 이 경로는 애플리케이션이 신뢰할 수 있는
+`SkillAttackWorkflow` 또는 `SessionAttackLauncher`를 명시적으로 구성해 주입할
+때만 네트워크 실행이 가능합니다.
+
+일반 CLI의 `aidast attack approve`와 `aidast attack execute`는 명령행 입력만으로
+신뢰 경계를 만들지 않습니다. 주입된 워크플로가 없으면 파일을 열거나 요청을
+보내기 전에 실패합니다. 실행하려면 다음 항목이 모두 일치해야 합니다.
+
+- Ed25519로 검증된 실행 승인과 현재 revocation generation
+- 실행 계획에 결합된 정확한 요청 intent digest
+- 승인된 Scope에서 파생된 `TargetPolicy`와 영속 요청 예산
+- 타깃과 identity에 정확히 결합된 일반 파일 형태의 세션 상태
+
+통합 `aidast run`의 Native Attack은 후속 Validation·Report와 같은
+`Pipeline.db`를 사용합니다. 병합된 로컬 승인 워크플로의 thin Attack DB는 별도
+호환 경로이며 Recon 원본을 읽기 전용으로 유지합니다.
+
 ### Validation
 
 ```bash
@@ -298,6 +319,12 @@ aidast validate status \
 `UNDERPOWERED`, `BLOCKED`, `INCONCLUSIVE`, `CONTESTED` 중 하나입니다.
 모델이 최종 상태를 직접 정하지 않습니다.
 
+Shared Validation과 case 기반 Report는 현재 `Pipeline.db` schema v10 계약을
+그대로 사용합니다. Attack finding의 runtime, development,
+impact-development 재현 계약은 정규화된 해시와 함께 원자적으로 저장되며,
+Report는 해당 Validation case가 허용한 evidence만 인용합니다. 생성 결과는 항상
+로컬 초안이고 플랫폼에 자동 제출되지 않습니다.
+
 ## 주요 명령
 
 | 명령 | 설명 |
@@ -308,7 +335,7 @@ aidast validate status \
 | `aidast recon` | Recon 계획, 정책 확인, 선택적 실행 |
 | `aidast tag` | 저장된 Recon 관측 태깅 재개 |
 | `aidast run` | Recon부터 Shared Validation까지 통합 실행 |
-| `aidast attack` | persisted-data 호환용 Legacy Attack 계획과 상태 관리 |
+| `aidast attack` | 오프라인 계획·상태 관리와 주입된 신뢰 워크플로 실행 경계 |
 | `aidast validate` | Shared 또는 Legacy Validation 실행·재개·조회 |
 | `aidast report` | 로컬 Report 초안 생성 및 상태 확인 |
 
