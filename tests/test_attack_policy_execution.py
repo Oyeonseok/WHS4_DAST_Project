@@ -1,15 +1,36 @@
 from __future__ import annotations
 
+import io
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
 
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives.serialization import (
+    Encoding,
+    NoEncryption,
+    PrivateFormat,
+    PublicFormat,
+)
+
+from aidast.attack.authorization import (
+    AuthorizationBindings,
+    RequestIntent,
+    RunAuthorization,
+    canonical_digest,
+    sign_ed25519,
+)
 from aidast.attack.executor_factory import select_executor
 from aidast.attack.idor import DualIdentityIdorExecutor
 from aidast.attack.policy_executor import PolicyServiceAttackExecutor
+from aidast.attack.service_factory import build_policy_service
 from aidast.attack.skill_agent import AuthorizedTest
+from aidast.core.policy_service import SQLiteBudgetLedger
 from aidast.core.request_broker import BrokerResponse
+from aidast.recon.policy import TargetPolicy
+from aidast.scope.models import AssetType
 
 
 def authorized_test() -> AuthorizedTest:
@@ -108,3 +129,78 @@ def test_executor_factory_requires_two_explicit_identities_for_idor() -> None:
         intent_resolver=Mock(),
     )
     assert isinstance(ordinary, PolicyServiceAttackExecutor)
+
+
+def test_pinned_ed25519_authorization_composes_with_policy_service(
+    tmp_path,
+) -> None:
+    policy = TargetPolicy(
+        scope_id="scope",
+        policy_id="policy",
+        asset_type=AssetType.DOMAIN,
+        asset="example.test",
+        allowed_hosts=["example.test"],
+        allowed_path_prefixes=["/item"],
+    )
+    bindings = AuthorizationBindings(
+        run_id="run",
+        scan_id="scan",
+        scope_digest="1" * 64,
+        policy_digest=canonical_digest(policy),
+        handoff_digest="3" * 64,
+        plan_digest="4" * 64,
+        catalog_digest="5" * 64,
+        plan_revision=1,
+    )
+    intent = RequestIntent(
+        **bindings.model_dump(mode="json"),
+        task_id="task",
+        adapter_id="policy-service",
+        endpoint_id="endpoint",
+        url="https://example.test/item/1",
+        method="GET",
+        identity_role="identity_a",
+    )
+    now = datetime.now(timezone.utc)
+    authorization = RunAuthorization(
+        **bindings.model_dump(mode="json"),
+        authorization_id="authorization",
+        issuer="trusted-local-issuer",
+        approver="operator",
+        issued_at=now,
+        not_before=now,
+        expires_at=now + timedelta(minutes=5),
+        task_ids=("task",),
+        adapter_ids=("policy-service",),
+        identity_roles=("identity_a",),
+        intent_digests=(canonical_digest(intent),),
+    )
+    private = Ed25519PrivateKey.generate()
+    private_bytes = private.private_bytes(
+        Encoding.Raw, PrivateFormat.Raw, NoEncryption()
+    )
+    public_bytes = private.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+    signed = sign_ed25519(authorization, private_bytes)
+    transport = Mock()
+
+    def respond(*_args, **_kwargs):
+        result = io.BytesIO(b"ok")
+        result.status = 200
+        result.headers = {}
+        return result
+
+    transport.side_effect = respond
+    service = build_policy_service(
+        signed,
+        policy=policy,
+        ledger=SQLiteBudgetLedger(tmp_path / "budget.db"),
+        transport=transport,
+        public_key=public_bytes,
+        intents=(intent,),
+    )
+
+    result, receipt = service.request(intent)
+
+    assert result.status_code == 200
+    assert receipt
+    transport.assert_called_once()

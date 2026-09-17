@@ -3,6 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import Mock, patch
 
+import pytest
+
 from aidast.attack.authorization import RunAuthorization
 from aidast.attack.intent_manifest import write_intent_manifest
 from aidast.attack.launcher import SessionAttackLauncher
@@ -42,6 +44,7 @@ def test_local_workflow_requires_injected_executor_factory() -> None:
     workflow = build_local_skill_workflow(
         agent=agent,
         executor_factory=factory,
+        trusted_public_key=b"p" * 32,
     )
 
     assert isinstance(workflow, SkillAttackWorkflow)
@@ -85,11 +88,28 @@ def test_launcher_filters_intents_by_explicit_identity(tmp_path: Path) -> None:
             url="https://example.test/b",
             identity_role="identity_b",
         ),
+        RequestIntent(
+            **common,
+            task_id="task",
+            adapter_id="policy-service",
+            endpoint_id="endpoint-anonymous",
+            url="https://example.test/anonymous",
+            identity_role=None,
+        ),
+        RequestIntent(
+            **common,
+            task_id="task",
+            adapter_id="policy-service",
+            endpoint_id="endpoint-other-target",
+            url="https://other.test/a",
+            identity_role="identity_a",
+        ),
     )
     write_intent_manifest(intents, manifest)
     launcher = SessionAttackLauncher(
         session_bindings=SessionBindings(
-            {"example.test": {"identity_a": str(state)}}
+            {"https://example.test": {"identity_a": str(state)}},
+            run_id="run",
         ),
         public_key=b"p" * 32,
     )
@@ -114,3 +134,27 @@ def test_launcher_filters_intents_by_explicit_identity(tmp_path: Path) -> None:
         storage_state=state.resolve(),
     )
     assert build.call_args.kwargs["intents"] == (intents[0],)
+
+
+def test_execute_rejects_same_id_with_a_changed_authorization_document() -> None:
+    stored = authorization_document()
+    changed = {**stored, "task_ids": ["other-task"]}
+    provider = Mock()
+    provider.verify.return_value = changed
+    store = Mock()
+    store.get_run.return_value = {"authorization_id": stored["authorization_id"]}
+    store.get_authorization.return_value = stored
+    context = Mock()
+    context.__enter__ = Mock(return_value=store)
+    context.__exit__ = Mock(return_value=False)
+    workflow = SkillAttackWorkflow(
+        planner=Mock(), authorization_provider=provider,
+    )
+
+    with patch("aidast.attack.workflow.AttackStore.open", return_value=context):
+        with pytest.raises(ValueError, match="differs from the approved document"):
+            workflow.execute(
+                Path("Attack.db"),
+                run_id="run",
+                authorization=Path("Authorization.json"),
+            )

@@ -2,23 +2,17 @@
 
 from __future__ import annotations
 
-import base64
 import json
+import os
 import uuid
 from collections.abc import Callable, Mapping
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from .authorization import RunAuthorization
+from .authorization import RunAuthorization, sign_ed25519, verify_ed25519
 from .skill_agent import AttackTestExecutor
 from .store import AttackStore
-
-
-def _canonical(document: Mapping[str, Any]) -> bytes:
-    return json.dumps(
-        document, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-    ).encode()
 
 
 def generate_keypair(private_path: Path, public_path: Path) -> None:
@@ -33,61 +27,67 @@ def generate_keypair(private_path: Path, public_path: Path) -> None:
     key = Ed25519PrivateKey.generate()
     private_path.parent.mkdir(parents=True, exist_ok=True)
     public_path.parent.mkdir(parents=True, exist_ok=True)
-    private_path.write_bytes(
-        key.private_bytes(Encoding.Raw, PrivateFormat.Raw, NoEncryption())
+    if private_path.exists() or public_path.exists():
+        raise FileExistsError("authorization key paths must not already exist")
+
+    def write_exclusive(path: Path, value: bytes, mode: int) -> None:
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        descriptor = os.open(path, flags, mode)
+        try:
+            remaining = memoryview(value)
+            while remaining:
+                written = os.write(descriptor, remaining)
+                if written <= 0:
+                    raise OSError("authorization key write did not make progress")
+                remaining = remaining[written:]
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+
+    write_exclusive(
+        private_path,
+        key.private_bytes(Encoding.Raw, PrivateFormat.Raw, NoEncryption()),
+        0o600,
     )
-    public_path.write_bytes(
-        key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+    write_exclusive(
+        public_path,
+        key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw),
+        0o644,
     )
 
 
 def sign_authorization(
     document: Mapping[str, Any], private_path: Path, output: Path
 ) -> None:
-    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-    from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
-
-    key = Ed25519PrivateKey.from_private_bytes(private_path.read_bytes())
-    payload = dict(document)
-    public_key = base64.urlsafe_b64encode(
-        key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
-    ).decode().rstrip("=")
-    envelope = {"document": payload, "public_key": public_key}
-    envelope["signature"] = base64.urlsafe_b64encode(
-        key.sign(_canonical(envelope))
-    ).decode().rstrip("=")
+    authorization = RunAuthorization.model_validate(dict(document))
+    signed = sign_ed25519(authorization, private_path.read_bytes())
+    envelope = {"document": signed.model_dump(mode="json")}
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(
         json.dumps(envelope, ensure_ascii=False, indent=2), encoding="utf-8"
     )
 
 
-def load_verified(path: Path) -> dict[str, Any]:
-    from cryptography.exceptions import InvalidSignature
-    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
-
+def load_verified(
+    path: Path, trusted_public_key: bytes
+) -> dict[str, Any]:
     envelope = json.loads(path.read_text(encoding="utf-8"))
     document = envelope.get("document")
-    signature = envelope.get("signature")
-    public_key = envelope.get("public_key")
-    if not isinstance(document, dict) or not isinstance(
-        signature, str
-    ) or not isinstance(public_key, str):
+    if set(envelope) != {"document"} or not isinstance(document, dict):
         raise ValueError("invalid Ed25519 authorization envelope")
-
-    def decode(value: str) -> bytes:
-        return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
-
+    if not isinstance(trusted_public_key, bytes) or len(trusted_public_key) != 32:
+        raise ValueError("trusted Ed25519 public key must be exactly 32 bytes")
     try:
-        Ed25519PublicKey.from_public_bytes(decode(public_key)).verify(
-            decode(signature),
-            _canonical({"document": document, "public_key": public_key}),
-        )
-    except (InvalidSignature, ValueError, TypeError) as exc:
+        authorization = RunAuthorization.model_validate(document)
+    except Exception as exc:
+        raise ValueError("authorization does not satisfy the Attack contract") from exc
+    if not verify_ed25519(authorization, trusted_public_key):
         raise ValueError(
             "Ed25519 authorization signature verification failed"
-        ) from exc
-    return document
+        )
+    return authorization.model_dump(mode="json")
 
 
 def to_run_authorization(document: Mapping[str, Any]) -> RunAuthorization:
@@ -103,9 +103,14 @@ class LocalEd25519AuthorizationProvider:
     def __init__(
         self,
         executor_factory: Callable[[Mapping[str, Any], AttackStore], AttackTestExecutor],
+        *,
+        trusted_public_key: bytes,
         revoker: Callable[[str], None] | None = None,
     ) -> None:
+        if not isinstance(trusted_public_key, bytes) or len(trusted_public_key) != 32:
+            raise ValueError("trusted Ed25519 public key must be exactly 32 bytes")
         self._executor_factory = executor_factory
+        self._trusted_public_key = trusted_public_key
         self._revoker = revoker
 
     def verify(
@@ -115,9 +120,9 @@ class LocalEd25519AuthorizationProvider:
         *,
         approved_by: str | None = None,
     ) -> Mapping:
-        document = to_run_authorization(load_verified(authorization)).model_dump(
-            mode="json"
-        )
+        document = to_run_authorization(
+            load_verified(authorization, self._trusted_public_key)
+        ).model_dump(mode="json")
         if approved_by is not None and document.get("approver") != approved_by:
             raise ValueError("authorization approver does not match reviewer")
         now = datetime.now(timezone.utc)

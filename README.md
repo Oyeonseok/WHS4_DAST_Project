@@ -298,10 +298,12 @@ Ed25519 승인 검증, 요청 intent, 세션 바인딩, 정책 실행기와 내�
 신뢰 경계를 만들지 않습니다. 주입된 워크플로가 없으면 파일을 열거나 요청을
 보내기 전에 실패합니다. 실행하려면 다음 항목이 모두 일치해야 합니다.
 
-- Ed25519로 검증된 실행 승인과 현재 revocation generation
+- 애플리케이션이 미리 고정한 Ed25519 공개키로 검증된 실행 승인과 현재
+  revocation generation
 - 실행 계획에 결합된 정확한 요청 intent digest
 - 승인된 Scope에서 파생된 `TargetPolicy`와 영속 요청 예산
-- 타깃과 identity에 정확히 결합된 일반 파일 형태의 세션 상태
+- run ID, scheme, host, port, path prefix와 identity에 정확히 결합된 일반 파일
+  형태의 세션 상태
 
 통합 `aidast run`의 Native Attack은 후속 Validation·Report와 같은
 `Pipeline.db`를 사용합니다. 병합된 로컬 승인 워크플로의 thin Attack DB는 별도

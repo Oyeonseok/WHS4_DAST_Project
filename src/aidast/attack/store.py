@@ -498,6 +498,127 @@ class AttackStore:
 
         return self._write(identifier, "evidence", operation)
 
+    def record_finding_bundle(
+        self,
+        *,
+        finding_id: str,
+        task_id: str,
+        endpoint_id: str,
+        skill_name: str,
+        hypothesis_id: str,
+        assessment: Mapping,
+        requests: Sequence[Mapping],
+    ) -> WriteResult:
+        """Atomically persist one confirmed thin-store finding and its requests."""
+
+        def operation() -> str:
+            for value in (finding_id, task_id, endpoint_id, skill_name, hypothesis_id):
+                _identifier(value)
+            self._bound(assessment)
+            self._endpoint(endpoint_id)
+            run = self.get_run()
+            revision = run["plan_revision"]
+            if not self.conn.execute(
+                """SELECT 1 FROM attack_plan_tasks
+                WHERE run_id=? AND scan_id=? AND plan_revision=? AND task_id=?
+                AND endpoint_id=?""",
+                (self.run_id, self.scan_id, revision, task_id, endpoint_id),
+            ).fetchone():
+                raise AttackStoreError("finding task does not belong to the bound run")
+            if assessment.get("hypothesis_id") != hypothesis_id or assessment.get(
+                "disposition"
+            ) != "confirmed":
+                raise AttackStoreError("finding assessment is not confirmed and bound")
+            severity = str(assessment.get("severity", "")).upper()
+            if severity not in {"CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"}:
+                raise AttackStoreError("invalid finding severity")
+            if not requests or len(requests) > 8:
+                raise AttackStoreError("a finding requires bounded supporting requests")
+            existing = self.conn.execute(
+                """SELECT run_id,scan_id,plan_task_id,plan_revision,endpoint_id,
+                vuln_type,severity,title,description,cwe_id,status
+                FROM findings WHERE finding_id=?""",
+                (finding_id,),
+            ).fetchone()
+            finding_values = (
+                self.run_id,
+                self.scan_id,
+                task_id,
+                revision,
+                endpoint_id,
+                _identifier(str(assessment.get("vuln_type", ""))),
+                severity,
+                _identifier(str(assessment.get("title", ""))),
+                str(assessment.get("description", ""))[:20_000] or None,
+                str(assessment.get("cwe_id"))[:64]
+                if assessment.get("cwe_id") is not None
+                else None,
+                "unreviewed",
+            )
+            if existing is not None:
+                if tuple(existing) != finding_values:
+                    raise AttackStoreError(
+                        "finding identifier already contains different data"
+                    )
+                return "duplicate"
+            self.conn.execute(
+                """INSERT INTO findings
+                (finding_id,run_id,scan_id,plan_task_id,plan_revision,endpoint_id,
+                 vuln_type,severity,title,description,cwe_id,status)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (finding_id, *finding_values),
+            )
+            for request in requests:
+                test_id = _identifier(str(request.get("test_id", "")))
+                method = str(request.get("method", "")).upper()
+                if method not in {"GET", "HEAD", "OPTIONS"}:
+                    raise AttackStoreError("finding request method is not read-only")
+                url = str(request.get("url", ""))
+                parsed = urlsplit(url)
+                if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+                    raise AttackStoreError("finding request URL is invalid")
+                response_status = request.get("response_status")
+                if response_status is not None and not 100 <= response_status <= 599:
+                    raise AttackStoreError("invalid finding response status")
+                body = request.get("response_body", b"")
+                if isinstance(body, str):
+                    body = body.encode("utf-8")
+                if not isinstance(body, bytes) or len(body) > 200_000:
+                    raise AttackStoreError("finding response body is invalid")
+                headers = request.get("response_headers", ())
+                if not isinstance(headers, (list, tuple)):
+                    raise AttackStoreError("finding response headers are invalid")
+                request_id = "request_" + _sha(
+                    _json([self.run_id, finding_id, test_id])
+                )
+                self.conn.execute(
+                    """INSERT INTO attack_requests
+                    (request_id,finding_id,role,method,url,response_status,
+                     response_headers,response_body)
+                    VALUES (?,?,?,?,?,?,?,?)""",
+                    (
+                        request_id,
+                        finding_id,
+                        str(request.get("identity_role") or "unknown")[:128],
+                        method,
+                        url,
+                        response_status,
+                        "\n".join(str(value) for value in headers)[:65_536] or None,
+                        body,
+                    ),
+                )
+            return "inserted"
+
+        return self._write(finding_id, "finding", operation)
+
+    def list_finding_ids(self) -> list[str]:
+        rows = self.conn.execute(
+            """SELECT finding_id FROM findings
+            WHERE run_id=? AND scan_id=? ORDER BY finding_id""",
+            (self.run_id, self.scan_id),
+        )
+        return [row[0] for row in rows]
+
     def save_authorization(self, document: Mapping) -> WriteResult:
         """Archive an exact binding; this method does not verify signatures."""
         identifier = document.get("authorization_id", "")
@@ -541,6 +662,16 @@ class AttackStore:
 
         return self._write(identifier, "authorization", operation)
 
+    def get_authorization(self, authorization_id: str) -> dict | None:
+        """Return the immutable authorization archived for this bound run."""
+        _identifier(authorization_id)
+        row = self.conn.execute(
+            """SELECT document_json FROM run_authorizations
+            WHERE authorization_id=? AND run_id=? AND scan_id=?""",
+            (authorization_id, self.run_id, self.scan_id),
+        ).fetchone()
+        return None if row is None else json.loads(row[0])
+
     def activate_authorization(self, authorization_id: str) -> None:
         """Activate only a current, non-revoked authorization for this run."""
         _identifier(authorization_id)
@@ -580,6 +711,17 @@ class AttackStore:
     ) -> int:
         current = self.get_run()
         authorization_id = current.get("authorization_id")
+        unrevoked = self.conn.execute(
+            """SELECT 1 FROM run_authorizations
+            WHERE run_id=? AND scan_id=? AND revoked_at IS NULL LIMIT 1""",
+            (self.run_id, self.scan_id),
+        ).fetchone()
+        if (
+            authorization_id is None
+            and current["status"] == "paused"
+            and unrevoked is None
+        ):
+            return current["revocation_generation"]
         if revoke_authorization is not None and authorization_id:
             revoke_authorization(authorization_id)
         with self.conn:

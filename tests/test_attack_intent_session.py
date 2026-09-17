@@ -128,15 +128,33 @@ def test_session_binding_requires_exact_regular_file(tmp_path: Path) -> None:
     state = tmp_path / "identity-a.json"
     state.write_text(json.dumps({"cookies": []}), encoding="utf-8")
     bindings_document = SessionBindings(
-        {"scan.test": {"identity_a": str(state)}}
+        {"https://scan.test/app": {"identity_a": str(state)}},
+        run_id="run",
     )
 
     assert (
-        bindings_document.resolve("https://scan.test/app", "identity_a")
+        bindings_document.resolve(
+            "https://scan.test/app/items", "identity_a", run_id="run"
+        )
         == state.resolve()
     )
     with pytest.raises(SessionBindingError, match="no session"):
-        bindings_document.resolve("https://other.test", "identity_a")
+        bindings_document.resolve(
+            "https://other.test/app", "identity_a", run_id="run"
+        )
+    for target in (
+        "http://scan.test/app",
+        "https://scan.test:8443/app",
+        "https://scan.test/other",
+    ):
+        with pytest.raises(SessionBindingError, match="no session"):
+            bindings_document.resolve(target, "identity_a", run_id="run")
+    with pytest.raises(SessionBindingError, match="does not belong to this run"):
+        bindings_document.resolve(
+            "https://scan.test/app", "identity_a", run_id="other"
+        )
     state.unlink()
     with pytest.raises(SessionBindingError, match="unavailable"):
-        bindings_document.resolve("https://scan.test", "identity_a")
+        bindings_document.resolve(
+            "https://scan.test/app", "identity_a", run_id="run"
+        )

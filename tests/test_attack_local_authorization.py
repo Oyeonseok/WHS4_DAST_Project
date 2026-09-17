@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import stat
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -53,7 +54,10 @@ def test_signed_envelope_round_trips_and_rejects_tampering(tmp_path: Path) -> No
 
     sign_authorization(document, private, envelope)
 
-    assert load_verified(envelope) == document
+    verified = load_verified(envelope, public.read_bytes())
+    expected = RunAuthorization.model_validate(document).model_dump(mode="json")
+    assert {**verified, "signature": ""} == {**expected, "signature": ""}
+    assert verified["signature"].startswith("ed25519:")
     assert to_run_authorization(document).identity_roles == (
         "identity_a",
         "identity_b",
@@ -62,7 +66,35 @@ def test_signed_envelope_round_trips_and_rejects_tampering(tmp_path: Path) -> No
     changed["document"]["approver"] = "attacker"
     envelope.write_text(json.dumps(changed), encoding="utf-8")
     with pytest.raises(ValueError, match="signature verification failed"):
-        load_verified(envelope)
+        load_verified(envelope, public.read_bytes())
+
+
+def test_key_generation_is_exclusive_and_private_key_is_owner_only(
+    tmp_path: Path,
+) -> None:
+    private = tmp_path / "private.key"
+    public = tmp_path / "public.key"
+    generate_keypair(private, public)
+
+    assert stat.S_IMODE(private.stat().st_mode) == 0o600
+    with pytest.raises(FileExistsError):
+        generate_keypair(private, public)
+
+
+def test_signed_envelope_rejects_a_signature_from_an_untrusted_key(
+    tmp_path: Path,
+) -> None:
+    trusted_private = tmp_path / "trusted-private.key"
+    trusted_public = tmp_path / "trusted-public.key"
+    attacker_private = tmp_path / "attacker-private.key"
+    attacker_public = tmp_path / "attacker-public.key"
+    envelope = tmp_path / "Authorization.json"
+    generate_keypair(trusted_private, trusted_public)
+    generate_keypair(attacker_private, attacker_public)
+    sign_authorization(authorization_document(), attacker_private, envelope)
+
+    with pytest.raises(ValueError, match="signature verification failed"):
+        load_verified(envelope, trusted_public.read_bytes())
 
 
 def test_typed_authorization_rejects_unknown_fields() -> None:

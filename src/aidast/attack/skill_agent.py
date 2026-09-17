@@ -281,14 +281,23 @@ class SkillAttackAgent:
                     try:
                         result = self.executor.execute(test, hypothesis_id=hypothesis_id)
                     except Exception:
-                        self.store.complete_attempt(attempt_id, outcome="outcome_unknown")
+                        self._require_write(
+                            self.store.complete_attempt(
+                                attempt_id, outcome="outcome_unknown"
+                            )
+                        )
                         self.store.set_status("paused")
                         return SkillAttackResult(self.run_id, "paused", hypothesis_count,
                                                  tuple(finding_ids), "test_outcome_unknown")
                     if result.test_id != test.test_id:
                         raise ValueError("executor result does not match authorized test")
-                    self.store.complete_attempt(attempt_id, outcome=result.outcome,
-                                                response_status=result.response_status)
+                    self._require_write(
+                        self.store.complete_attempt(
+                            attempt_id,
+                            outcome=result.outcome,
+                            response_status=result.response_status,
+                        )
+                    )
                     evidence_id = "evidence_" + self._digest([attempt_id, result.outcome,
                                                                hashlib.sha256(result.response_body).hexdigest()])
                     self._require_write(self.store.record_evidence(

@@ -40,14 +40,26 @@ class SessionAttackLauncher:
         ledger,
         identity: str,
     ) -> PolicyService:
-        intents = tuple(
-            item
-            for item in load_intent_manifest(intent_manifest)
-            if item.identity_role in {None, identity}
+        if identity not in authorization.identity_roles:
+            raise ValueError("selected identity is not approved by the authorization")
+        state = self.bindings.resolve(
+            target, identity, run_id=authorization.run_id
         )
+        intents = []
+        for item in load_intent_manifest(intent_manifest):
+            if item.identity_role != identity:
+                continue
+            try:
+                intent_state = self.bindings.resolve(
+                    item.url, identity, run_id=authorization.run_id
+                )
+            except ValueError:
+                continue
+            if intent_state == state:
+                intents.append(item)
+        intents = tuple(intents)
         if not intents:
             raise ValueError("no approved intents are bound to the selected identity")
-        state = self.bindings.resolve(target, identity)
         transport = self.pool.transport(
             target=target,
             identity=identity,

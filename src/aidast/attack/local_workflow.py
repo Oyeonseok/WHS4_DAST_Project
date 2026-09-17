@@ -72,6 +72,7 @@ class CodexSkillAttackPlanner(StructuredSkillAttackPlanner):
 def build_local_skill_workflow(
     *,
     executor_factory: Callable[[Mapping, object], object],
+    trusted_public_key: bytes,
     revoker: Callable[[str], None] | None = None,
     agent: "CodexMainAgent | None" = None,
 ) -> SkillAttackWorkflow:
@@ -79,7 +80,9 @@ def build_local_skill_workflow(
     if not callable(executor_factory):
         raise TypeError("executor_factory must be callable")
     provider = LocalEd25519AuthorizationProvider(
-        executor_factory, revoker=revoker
+        executor_factory,
+        trusted_public_key=trusted_public_key,
+        revoker=revoker,
     )
     return SkillAttackWorkflow(
         planner=CodexSkillAttackPlanner(agent),
