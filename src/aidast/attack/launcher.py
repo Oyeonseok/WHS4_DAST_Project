@@ -45,17 +45,20 @@ class SessionAttackLauncher:
         state = self.bindings.resolve(
             target, identity, run_id=authorization.run_id
         )
+        binding_id = self.bindings.binding_id(
+            target, identity, run_id=authorization.run_id
+        )
         intents = []
         for item in load_intent_manifest(intent_manifest):
             if item.identity_role != identity:
                 continue
             try:
-                intent_state = self.bindings.resolve(
+                intent_binding_id = self.bindings.binding_id(
                     item.url, identity, run_id=authorization.run_id
                 )
             except ValueError:
                 continue
-            if intent_state == state:
+            if intent_binding_id == binding_id:
                 intents.append(item)
         intents = tuple(intents)
         if not intents:

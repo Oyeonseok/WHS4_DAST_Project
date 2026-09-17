@@ -342,6 +342,32 @@ class AttackStoreTests(unittest.TestCase):
             "description": "The approved fixture returned the same object.",
             "supporting_test_ids": ["test"],
         }
+        self.assertEqual(
+            store.record_attempt(
+                attempt_id="attempt",
+                task_id="task",
+                endpoint_id="scan",
+                skill_name="hunt-idor",
+                test_id="test",
+                hypothesis_id="hypothesis",
+            ).status,
+            "inserted",
+        )
+        self.assertEqual(
+            store.complete_attempt(
+                "attempt", outcome="supports", response_status=200
+            ).status,
+            "updated",
+        )
+        self.assertEqual(
+            store.record_evidence(
+                evidence_id="evidence",
+                task_id="task",
+                attempt_id="attempt",
+                body=b'{"id":1}',
+            ).status,
+            "inserted",
+        )
         result = store.record_finding_bundle(
             finding_id="finding",
             task_id="task",
@@ -351,8 +377,10 @@ class AttackStoreTests(unittest.TestCase):
             assessment=assessment,
             requests=[{
                 "test_id": "test",
+                "attempt_id": "attempt",
+                "evidence_id": "evidence",
                 "method": "GET",
-                "url": "https://example.test/",
+                "url": "https://user:secret@example.test/?token=secret#proof",
                 "identity_role": "identity_b",
                 "response_status": 200,
                 "response_headers": ("content-type: application/json",),
@@ -370,10 +398,28 @@ class AttackStoreTests(unittest.TestCase):
         )
         self.assertEqual(
             tuple(store.conn.execute(
-                "SELECT role,method,response_status FROM attack_requests"
+                """SELECT role,method,url,response_status,response_headers,
+                response_body FROM attack_requests"""
             ).fetchone()),
-            ("identity_b", "GET", 200),
+            ("identity_b", "GET", "https://example.test/", 200, None, None),
         )
+        conflicting = store.record_finding_bundle(
+            finding_id="finding",
+            task_id="task",
+            endpoint_id="scan",
+            skill_name="hunt-idor",
+            hypothesis_id="hypothesis",
+            assessment=assessment,
+            requests=[{
+                "test_id": "test",
+                "attempt_id": "attempt",
+                "evidence_id": "evidence",
+                "method": "GET",
+                "url": "https://example.test/",
+                "response_status": 201,
+            }],
+        )
+        self.assertEqual(conflicting.status, "invalid")
         rejected = store.record_finding_bundle(
             finding_id="other",
             task_id="task",
@@ -383,6 +429,8 @@ class AttackStoreTests(unittest.TestCase):
             assessment=assessment,
             requests=[{
                 "test_id": "test",
+                "attempt_id": "attempt",
+                "evidence_id": "evidence",
                 "method": "POST",
                 "url": "https://example.test/",
                 "response_status": 200,
@@ -436,6 +484,15 @@ class AttackStoreTests(unittest.TestCase):
             1,
         )
         self.assertEqual(events, ["auth"])
+
+    def test_repeated_revocation_is_idempotent_for_terminal_run(self):
+        store = self.store()
+        store.set_status("completed")
+
+        self.assertEqual(store.revoke_run("terminal revocation"), 1)
+        self.assertEqual(store.get_run()["status"], "completed")
+        self.assertEqual(store.revoke_run("terminal revocation"), 1)
+        self.assertEqual(store.get_run()["revocation_generation"], 1)
 
     def test_lease_fencing_persists_and_rejects_stale_workers(self):
         store = self.store()

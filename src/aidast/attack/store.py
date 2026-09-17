@@ -534,12 +534,87 @@ class AttackStore:
                 raise AttackStoreError("invalid finding severity")
             if not requests or len(requests) > 8:
                 raise AttackStoreError("a finding requires bounded supporting requests")
-            existing = self.conn.execute(
-                """SELECT run_id,scan_id,plan_task_id,plan_revision,endpoint_id,
-                vuln_type,severity,title,description,cwe_id,status
-                FROM findings WHERE finding_id=?""",
-                (finding_id,),
-            ).fetchone()
+            supporting_test_ids = assessment.get("supporting_test_ids")
+            if (
+                not isinstance(supporting_test_ids, (list, tuple))
+                or len(supporting_test_ids) != len(set(supporting_test_ids))
+            ):
+                raise AttackStoreError("finding supporting test IDs are invalid")
+            normalized_requests = []
+            for request in requests:
+                test_id = _identifier(str(request.get("test_id", "")))
+                attempt_id = _identifier(str(request.get("attempt_id", "")))
+                evidence_id = _identifier(str(request.get("evidence_id", "")))
+                method = str(request.get("method", "")).upper()
+                if method not in {"GET", "HEAD", "OPTIONS"}:
+                    raise AttackStoreError("finding request method is not read-only")
+                raw_url = str(request.get("url", ""))
+                parsed = urlsplit(raw_url)
+                if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+                    raise AttackStoreError("finding request URL is invalid")
+                response_status = request.get("response_status")
+                if response_status is not None and not 100 <= response_status <= 599:
+                    raise AttackStoreError("invalid finding response status")
+                attempt = self.conn.execute(
+                    """SELECT outcome FROM attack_attempts
+                    WHERE attempt_id=? AND run_id=? AND scan_id=?
+                    AND plan_task_id=? AND plan_revision=? AND endpoint_id=?
+                    AND logical_check_id=? AND execution_id=?""",
+                    (
+                        attempt_id,
+                        self.run_id,
+                        self.scan_id,
+                        task_id,
+                        revision,
+                        endpoint_id,
+                        test_id,
+                        hypothesis_id,
+                    ),
+                ).fetchone()
+                if attempt is None or attempt[0] != "supports":
+                    raise AttackStoreError(
+                        "finding request requires a completed supporting attempt"
+                    )
+                if not self.conn.execute(
+                    """SELECT 1 FROM attack_evidence
+                    WHERE evidence_id=? AND attempt_id=? AND run_id=? AND scan_id=?
+                    AND task_id=? AND plan_revision=?""",
+                    (
+                        evidence_id,
+                        attempt_id,
+                        self.run_id,
+                        self.scan_id,
+                        task_id,
+                        revision,
+                    ),
+                ).fetchone():
+                    raise AttackStoreError(
+                        "finding request requires bound persisted evidence"
+                    )
+                safe_url = _redact({"url": raw_url})["url"]
+                request_id = "request_" + _sha(
+                    _json([self.run_id, finding_id, test_id])
+                )
+                normalized_requests.append(
+                    (
+                        request_id,
+                        finding_id,
+                        str(request.get("identity_role") or "unknown")[:128],
+                        method,
+                        safe_url,
+                        response_status,
+                        None,
+                        None,
+                    )
+                )
+            if set(supporting_test_ids) != {
+                request.get("test_id") for request in requests
+            } or len(normalized_requests) != len(
+                {request[0] for request in normalized_requests}
+            ):
+                raise AttackStoreError(
+                    "finding requests do not match the supporting test IDs"
+                )
             finding_values = (
                 self.run_id,
                 self.scan_id,
@@ -555,10 +630,28 @@ class AttackStore:
                 else None,
                 "unreviewed",
             )
+            existing = self.conn.execute(
+                """SELECT run_id,scan_id,plan_task_id,plan_revision,endpoint_id,
+                vuln_type,severity,title,description,cwe_id,status
+                FROM findings WHERE finding_id=?""",
+                (finding_id,),
+            ).fetchone()
             if existing is not None:
                 if tuple(existing) != finding_values:
                     raise AttackStoreError(
                         "finding identifier already contains different data"
+                    )
+                stored_requests = self.conn.execute(
+                    """SELECT request_id,finding_id,role,method,url,response_status,
+                    response_headers,response_body FROM attack_requests
+                    WHERE finding_id=? ORDER BY request_id""",
+                    (finding_id,),
+                ).fetchall()
+                if [tuple(row) for row in stored_requests] != sorted(
+                    normalized_requests
+                ):
+                    raise AttackStoreError(
+                        "finding identifier already contains different requests"
                     )
                 return "duplicate"
             self.conn.execute(
@@ -568,44 +661,13 @@ class AttackStore:
                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (finding_id, *finding_values),
             )
-            for request in requests:
-                test_id = _identifier(str(request.get("test_id", "")))
-                method = str(request.get("method", "")).upper()
-                if method not in {"GET", "HEAD", "OPTIONS"}:
-                    raise AttackStoreError("finding request method is not read-only")
-                url = str(request.get("url", ""))
-                parsed = urlsplit(url)
-                if parsed.scheme not in {"http", "https"} or not parsed.hostname:
-                    raise AttackStoreError("finding request URL is invalid")
-                response_status = request.get("response_status")
-                if response_status is not None and not 100 <= response_status <= 599:
-                    raise AttackStoreError("invalid finding response status")
-                body = request.get("response_body", b"")
-                if isinstance(body, str):
-                    body = body.encode("utf-8")
-                if not isinstance(body, bytes) or len(body) > 200_000:
-                    raise AttackStoreError("finding response body is invalid")
-                headers = request.get("response_headers", ())
-                if not isinstance(headers, (list, tuple)):
-                    raise AttackStoreError("finding response headers are invalid")
-                request_id = "request_" + _sha(
-                    _json([self.run_id, finding_id, test_id])
-                )
+            for normalized in normalized_requests:
                 self.conn.execute(
                     """INSERT INTO attack_requests
                     (request_id,finding_id,role,method,url,response_status,
                      response_headers,response_body)
                     VALUES (?,?,?,?,?,?,?,?)""",
-                    (
-                        request_id,
-                        finding_id,
-                        str(request.get("identity_role") or "unknown")[:128],
-                        method,
-                        url,
-                        response_status,
-                        "\n".join(str(value) for value in headers)[:65_536] or None,
-                        body,
-                    ),
+                    normalized,
                 )
             return "inserted"
 
@@ -711,16 +773,13 @@ class AttackStore:
     ) -> int:
         current = self.get_run()
         authorization_id = current.get("authorization_id")
-        unrevoked = self.conn.execute(
-            """SELECT 1 FROM run_authorizations
-            WHERE run_id=? AND scan_id=? AND revoked_at IS NULL LIMIT 1""",
-            (self.run_id, self.scan_id),
+        already_revoked = self.conn.execute(
+            """SELECT 1 FROM audit_events
+            WHERE scan_id=? AND event_type='run.revoked'
+            AND json_extract(details_json,'$.run_id')=? LIMIT 1""",
+            (self.scan_id, self.run_id),
         ).fetchone()
-        if (
-            authorization_id is None
-            and current["status"] == "paused"
-            and unrevoked is None
-        ):
+        if already_revoked is not None:
             return current["revocation_generation"]
         if revoke_authorization is not None and authorization_id:
             revoke_authorization(authorization_id)

@@ -76,12 +76,14 @@ class SessionBindings:
             )
         return cls(raw["targets"], run_id=raw["run_id"])
 
-    def resolve(self, target: str, identity: str, *, run_id: str) -> Path:
+    def _select(
+        self, target: str, identity: str, *, run_id: str
+    ) -> tuple[tuple[str, str, int, str, str], Path]:
         if run_id != self.run_id:
             raise SessionBindingError("session binding does not belong to this run")
         scheme, host, port, path = _target_key(target)
         candidates = [
-            (prefix, state)
+            ((item_scheme, item_host, item_port, prefix, item_identity), state)
             for (item_scheme, item_host, item_port, prefix, item_identity), state
             in self._items.items()
             if (
@@ -94,10 +96,21 @@ class SessionBindings:
             raise SessionBindingError(
                 f"no session is configured for {scheme}://{host}:{port}{path}/{identity}"
             )
-        candidates.sort(key=lambda item: len(item[0]), reverse=True)
-        if len(candidates) > 1 and len(candidates[0][0]) == len(candidates[1][0]):
+        candidates.sort(key=lambda item: len(item[0][3]), reverse=True)
+        if (
+            len(candidates) > 1
+            and len(candidates[0][0][3]) == len(candidates[1][0][3])
+        ):
             raise SessionBindingError("session binding is ambiguous")
-        state = candidates[0][1]
+        return candidates[0]
+
+    def binding_id(
+        self, target: str, identity: str, *, run_id: str
+    ) -> tuple[str, str, int, str, str]:
+        return self._select(target, identity, run_id=run_id)[0]
+
+    def resolve(self, target: str, identity: str, *, run_id: str) -> Path:
+        _key, state = self._select(target, identity, run_id=run_id)
         if not state.is_file() or state.is_symlink():
             raise SessionBindingError("configured session file is unavailable")
         return state.resolve(strict=True)

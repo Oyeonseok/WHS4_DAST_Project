@@ -346,11 +346,12 @@ class SkillAttackAgent:
                     finding_id = "finding_" + self._digest([self.run_id, hypothesis_id])
                     supporting_requests = [{
                         "test_id": test.test_id, "method": result.method, "url": result.url,
+                        "attempt_id": attempt, "evidence_id": evidence,
                         "identity_role": result.identity_role,
                         "response_status": result.response_status,
                         "response_headers": result.response_headers,
                         "response_body": result.response_body,
-                    } for test, result, _, _ in results
+                    } for test, result, attempt, evidence in results
                         if test.test_id in assessment.supporting_test_ids]
                     self._require_write(self.store.record_finding_bundle(
                         finding_id=finding_id, task_id=proposal.task_id,

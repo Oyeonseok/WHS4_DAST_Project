@@ -108,7 +108,10 @@ def test_launcher_filters_intents_by_explicit_identity(tmp_path: Path) -> None:
     write_intent_manifest(intents, manifest)
     launcher = SessionAttackLauncher(
         session_bindings=SessionBindings(
-            {"https://example.test": {"identity_a": str(state)}},
+            {
+                "https://example.test": {"identity_a": str(state)},
+                "https://other.test": {"identity_a": str(state)},
+            },
             run_id="run",
         ),
         public_key=b"p" * 32,
