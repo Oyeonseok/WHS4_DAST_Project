@@ -3,9 +3,17 @@
 from __future__ import annotations
 
 import hashlib
+import socket
+import socketserver
+import ssl
+import subprocess
 import threading
+import time
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from unittest.mock import patch
+from urllib.request import BaseHandler, HTTPBasicAuthHandler, HTTPSHandler, build_opener
 
 from pydantic import ValidationError
 
@@ -20,6 +28,7 @@ from aidast.validation.execution.concurrent_adapter import (
 from aidast.recon.policy import PolicyLimits
 import test_validation_request_broker as request_fixture
 from aidast.validation import SkillProfileResolver
+from aidast.validation.execution.multipart_adapter import _NoRedirect
 
 
 def _attempt(variant: str) -> dict[str, object]:
@@ -251,6 +260,196 @@ class ConcurrentLoopbackTests(unittest.TestCase):
         self.assertEqual([row[0] for row in self.conn.execute(
             "SELECT status FROM validation_transport_operations ORDER BY member_ordinal"
         )], ["outcome_unknown", "outcome_unknown"])
+
+
+class ConcurrentTransportRegressionTests(unittest.TestCase):
+    setUp = request_fixture.ValidationRequestBrokerTests.setUp
+
+    def start_server(self, handler, *, context=None):
+        class Server(ThreadingHTTPServer):
+            request_queue_size = 64
+
+        server = Server(("127.0.0.1", 0), handler)
+        if context is not None:
+            server.socket = context.wrap_socket(server.socket, server_side=True)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(lambda: (server.shutdown(), thread.join(timeout=2)))
+        return server
+
+    def runtime(self, *, workers=2, seconds=2):
+        child = {
+            "request": {},
+            "member_assertions": [{"assertion_id": "status", "kind": "status_equals", "expected": 200}],
+        }
+        return ConcurrentRuntimeContract(
+            runtime_kind="concurrent", schema_version=1, workers=workers, repeat_count=1,
+            release_strategy="simultaneous", barrier_timeout_seconds=seconds,
+            target=child, positive_control=child, negative_control=child,
+        )
+
+    def execute(self, url, *, workers=2, seconds=2):
+        from urllib.parse import urlsplit
+
+        parsed = urlsplit(url)
+        runtime = self.runtime(workers=workers, seconds=seconds)
+        policy = self.policy.model_copy(update={
+            "allowed_schemes": [parsed.scheme], "allowed_hosts": [parsed.hostname],
+            "allowed_ports": [parsed.port],
+            "limits": PolicyLimits(requests_per_second=50, concurrency=workers,
+                                   timeout_seconds=seconds, max_validation_bytes=30_000_000),
+        })
+        blind = self.blind.model_copy(update={
+            "endpoint": url, "credential_references": (), "signal_types": ("timing",),
+            "runtime_contract": runtime.model_dump(mode="json"),
+        })
+        return ConcurrentReproductionPort().execute(
+            blind, attempt_kind="target", batch_no=1, ordinal=1, attempt_id="attempt",
+            db_path=self.path, scan_id="scan", stage_run_id="stage", case_id="case", policy=policy,
+        )
+
+    def send(self, port, url):
+        prepared = port._prepare(self.runtime().target, url, {})
+        return port._send(prepared, "GET", deadline=time.monotonic() + 2, timeout=2)[0]
+
+    def tls_contexts(self):
+        # Ephemeral, synthetic loopback certificate; private key is deleted by
+        # the existing TemporaryDirectory cleanup and never enters evidence.
+        certificate = Path(self.temp.name) / "localhost.pem"
+        key = Path(self.temp.name) / "localhost.key"
+        subprocess.run([
+            "openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1",
+            "-subj", "/CN=localhost", "-addext", "subjectAltName=DNS:localhost",
+            "-keyout", str(key), "-out", str(certificate),
+        ], check=True, capture_output=True)
+        server = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        server.load_cert_chain(certificate, key)
+        client = ssl.create_default_context(cafile=str(certificate))
+        client.minimum_version = ssl.TLSVersion.TLSv1_3
+        return server, client
+
+    @staticmethod
+    def body_handler(body):
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args):
+                pass
+
+        return Handler
+
+    def test_supplied_tls_context_trust_is_preserved_for_both_handler_orders(self):
+        # Replacing either opener with a default context loses the fixture CA.
+        server_context, client_context = self.tls_contexts()
+        server = self.start_server(self.body_handler(b"trusted"), context=server_context)
+        for tls_first in (True, False):
+            with self.subTest(tls_first=tls_first):
+                handlers = [HTTPSHandler(context=client_context), _NoRedirect()]
+                opener = build_opener(*(handlers if tls_first else handlers[::-1]))
+                response = self.send(ConcurrentReproductionPort(transport=opener.open),
+                                     f"https://localhost:{server.server_port}/items")
+                self.assertEqual(response.body, b"trusted")
+
+    def test_default_https_verifies_certificate_and_original_hostname_sni(self):
+        server_context, client_context = self.tls_contexts()
+        names = []
+        server_context.set_servername_callback(lambda sock, name, context: names.append(name))
+        server = self.start_server(self.body_handler(b"verified"), context=server_context)
+        url = f"https://localhost:{server.server_port}/items"
+        with self.assertRaises(ssl.SSLCertVerificationError):
+            self.send(ConcurrentReproductionPort(), url)
+        with patch("ssl._create_default_https_context", return_value=client_context):
+            self.assertEqual(self.send(ConcurrentReproductionPort(), url).body, b"verified")
+            with self.assertRaises(ssl.SSLCertVerificationError):
+                self.send(ConcurrentReproductionPort(), url.replace("localhost", "127.0.0.1"))
+        self.assertEqual(names[:2], ["localhost", "localhost"])
+        self.assertEqual(client_context.verify_mode, ssl.CERT_REQUIRED)
+        self.assertTrue(client_context.check_hostname)
+
+    def test_supplied_auth_and_custom_request_handlers_are_invoked(self):
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                if self.headers.get("Authorization") != "Basic Zml4dHVyZTpmaXh0dXJl":
+                    self.send_response(401)
+                    self.send_header("WWW-Authenticate", 'Basic realm="fixture"')
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
+                self.send_response(200 if self.headers.get("X-Fixture") == "custom" else 400)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+            def log_message(self, *args):
+                pass
+
+        class CustomHandler(BaseHandler):
+            def http_request(self, request):
+                request.add_header("X-Fixture", "custom")
+                return request
+
+        server = self.start_server(Handler)
+        url = f"http://127.0.0.1:{server.server_port}/items"
+        auth = HTTPBasicAuthHandler()
+        auth.add_password("fixture", url, "fixture", "fixture")
+        opener = build_opener(_NoRedirect(), auth, CustomHandler())
+        self.assertEqual(self.send(ConcurrentReproductionPort(transport=opener.open), url).status_code, 200)
+
+    def test_tls_handshake_after_slow_tcp_stays_inside_absolute_deadline_and_closes(self):
+        # A stale pre-connect timeout extends the 1s attempt to about 1.45s.
+        release = threading.Event()
+        accepted = []
+
+        class Handler(socketserver.BaseRequestHandler):
+            def handle(self):
+                accepted.append(self.request)
+                release.wait(timeout=3)
+
+        class Server(socketserver.ThreadingTCPServer):
+            daemon_threads = True
+
+        server = Server(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(lambda: (release.set(), server.shutdown(), thread.join(timeout=2)))
+        number = server.server_address[1]
+        original_connect, original_wrap = socket.socket.connect, ssl.SSLContext.wrap_socket
+        wrapped = []
+
+        def delayed_connect(candidate, address):
+            original_connect(candidate, address)
+            if address[:2] == ("127.0.0.1", number):
+                time.sleep(0.45)
+
+        def retain_wrapped(context, *args, **kwargs):
+            sock = original_wrap(context, *args, **kwargs)
+            wrapped.append(sock)
+            return sock
+
+        started = time.monotonic()
+        with patch.object(socket.socket, "connect", delayed_connect), \
+                patch.object(ssl.SSLContext, "wrap_socket", retain_wrapped):
+            result = self.execute(f"https://127.0.0.1:{number}/items", seconds=1)
+        elapsed = time.monotonic() - started
+        self.assertEqual(result.outcome, "outcome_unknown")
+        self.assertEqual(len(accepted), 2)
+        self.assertLess(elapsed, 1.3)
+        self.assertEqual(len(wrapped), 2, "TLS sockets must be owned before a blocking handshake")
+        self.assertTrue(all(sock.fileno() == -1 for sock in wrapped))
+
+    def test_native_twenty_maximum_responses_complete_with_exact_capture_lengths(self):
+        # Byte-at-a-time socket timeout updates exhaust the supported 30s bound.
+        server = self.start_server(self.body_handler(b"x" * 199_999))
+        result = self.execute(f"http://127.0.0.1:{server.server_port}/items", workers=20, seconds=30)
+        self.assertEqual(result.outcome, "observed")
+        self.assertEqual([member["l"] for member in result.details["members"]], [199_999] * 20)
+        rows = self.conn.execute("SELECT status FROM validation_transport_operations").fetchall()
+        self.assertEqual([row[0] for row in rows], ["completed"] * 20)
 
 
 if __name__ == "__main__":

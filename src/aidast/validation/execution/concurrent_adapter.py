@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 from urllib.error import HTTPError
 from urllib.parse import urlsplit
-from urllib.request import Request, build_opener
+from urllib.request import Request
 from uuid import uuid4
 
 from aidast.core.http_safety import is_sensitive_header
@@ -36,7 +36,7 @@ from ..contracts.runtime_contract import (
 )
 from ..persistence.evidence_policy import sanitize_metadata
 from .credentials import PipelineCredentialResolver
-from .multipart_adapter import MultipartReproductionPort, _NoRedirect
+from .multipart_adapter import MultipartReproductionPort
 from .transport_broker import (
     TransportDispatchResult, TransportOperationSpec, TransportReservation,
     ValidationTransportBroker, ValidationTransportError,
@@ -49,9 +49,6 @@ _HTTP_TRANSPORT_HEADERS = frozenset({
     "keep-alive", "upgrade", "te", "expect", "proxy-connection",
 })
 _MAX_RESOLVER_WORK = 20
-_CANONICAL_NO_REDIRECT_HANDLER_TYPES = tuple(
-    type(handler) for handler in build_opener(_NoRedirect()).handlers
-)
 
 
 class _BoundedResolverFacility:
@@ -174,24 +171,12 @@ class ConcurrentReproductionPort:
                  clock: Callable[[], float] = time.monotonic,
                  monotonic_ns: Callable[[], int] = time.monotonic_ns):
         self.transport = transport
-        # ``None`` is the default sentinel.  The exact canonical no-redirect
-        # opener remains a backward-compatible spelling of that default; any
-        # different configured callable is an injected transport, including
-        # stock urllib handlers whose TLS/auth/proxy configuration is owned by
-        # the caller.
-        self._ordinary_http = transport is None or self._is_canonical_no_redirect_opener(transport)
+        # Only the owned default selects the native transport. Every supplied
+        # callable retains its caller-owned TLS/auth/proxy/handler configuration.
+        self._ordinary_http = transport is None
         self.credential_resolver = credential_resolver
         self.artifact_resolver = artifact_resolver
         self.clock, self.monotonic_ns = clock, monotonic_ns
-
-    @staticmethod
-    def _is_canonical_no_redirect_opener(transport: Callable | None) -> bool:
-        """Accept only the exact standard compatibility opener, never a guess."""
-        owner = getattr(transport, "__self__", None)
-        handlers = getattr(owner, "handlers", None)
-        if not isinstance(handlers, list):
-            return False
-        return tuple(type(handler) for handler in handlers) == _CANONICAL_NO_REDIRECT_HANDLER_TYPES
 
     def unsupported_reason(self, blind_case: BlindCase) -> str | None:
         if blind_case.target_kind != "finding":
@@ -332,7 +317,7 @@ class ConcurrentReproductionPort:
             candidates = [connecting_socket, None if connection is None else connection.sock]
             fp = None if response is None else getattr(response, "fp", None)
             candidates.append(getattr(getattr(fp, "raw", None), "_sock", None))
-            return tuple(item for item in candidates if isinstance(item, socket.socket))
+            return tuple(dict.fromkeys(item for item in candidates if isinstance(item, socket.socket)))
 
         def abort() -> None:
             for item in sockets():
@@ -368,16 +353,18 @@ class ConcurrentReproductionPort:
                 try:
                     candidate.settimeout(ensure_remaining())
                     candidate.connect(sockaddr)
-                    ensure_remaining()
+                    candidate.settimeout(ensure_remaining())
                     return candidate
-                except OSError as error:
-                    last_error = error
+                except BaseException as error:
                     try:
                         candidate.close()
                     except OSError:
                         pass
                     if connecting_socket is candidate:
                         connecting_socket = None
+                    if not isinstance(error, OSError):
+                        raise
+                    last_error = error
             if last_error is not None:
                 raise last_error
             raise ConcurrentExecutionError("concurrent hostname resolution failed")
@@ -397,7 +384,22 @@ class ConcurrentReproductionPort:
                     # expiry cannot turn into a later request transmission.
                     if hasattr(connection, "connect"):
                         connection._create_connection = connect_with_deadline
-                        connection.connect()
+                        if parsed.scheme == "https":
+                            # Acquire TCP with the absolute deadline, then take
+                            # ownership of the TLS socket before its handshake
+                            # blocks. Implicit wrapping detaches the raw socket
+                            # before the watchdog can see the handshaking socket.
+                            http.client.HTTPConnection.connect(connection)
+                            connecting_socket = connection._context.wrap_socket(
+                                connection.sock, server_hostname=connection.host,
+                                do_handshake_on_connect=False,
+                            )
+                            connection.sock = connecting_socket
+                            connecting_socket.settimeout(ensure_remaining())
+                            connecting_socket.do_handshake()
+                            connecting_socket.settimeout(ensure_remaining())
+                        else:
+                            connection.connect()
                     ensure_remaining()  # immediately after socket acquisition
                     dispatch_ns = self.monotonic_ns()  # immediately before send
                     connection.request(method, target, body=prepared.body, headers=dict(prepared.headers))
@@ -443,6 +445,11 @@ class ConcurrentReproductionPort:
             if connection is not None:
                 try:
                     connection.close()
+                except OSError:
+                    pass
+            if connecting_socket is not None:
+                try:
+                    connecting_socket.close()
                 except OSError:
                     pass
         duration = max(0.0, (self.clock() - started) * 1000)

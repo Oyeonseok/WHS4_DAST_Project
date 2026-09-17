@@ -105,18 +105,18 @@ class MultipartReproductionPort:
                                 before_read: Callable[[], None] | None = None) -> bytes:
         """Read complete data below the capture limit, never a byte beyond it."""
         content = bytearray()
+        # read1 returns buffered/available bytes without waiting to fill a whole
+        # chunk. This leaves a deadline check between socket reads while the
+        # caller's watchdog bounds HTTP framing/header reads inside read1.
+        read_available = getattr(response, "read1", None) if deadline is not None else None
+        reader = read_available or response.read
+        maximum = _RESPONSE_READ_CHUNK_BYTES if deadline is None or read_available else 1
         while len(content) < _MAX_RESPONSE_BYTES:
             if deadline is not None and clock() >= deadline:
                 raise MultipartResponseIncompleteError("multipart response exceeded its absolute deadline")
             if before_read is not None:
                 before_read()
-            # ``HTTPResponse.read(n)`` may wait for all ``n`` bytes while a peer
-            # trickles data.  During an absolute-deadline replay, a one-byte
-            # bounded read gives the clock an enforcement point between every
-            # received byte; ordinary multipart replay retains the efficient
-            # established chunk size.
-            maximum = 1 if deadline is not None else _RESPONSE_READ_CHUNK_BYTES
-            chunk = response.read(min(maximum, _MAX_RESPONSE_BYTES - len(content)))
+            chunk = reader(min(maximum, _MAX_RESPONSE_BYTES - len(content)))
             if deadline is not None and clock() >= deadline:
                 raise MultipartResponseIncompleteError("multipart response exceeded its absolute deadline")
             if type(chunk) is not bytes:
