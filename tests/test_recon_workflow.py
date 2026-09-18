@@ -897,6 +897,30 @@ class ReconCliTests(unittest.TestCase):
         self.assertEqual(payload["policies"][0]["limits"]["requests_per_second"], 1.0)
         self.assertEqual(payload["policies"][0]["limits"]["max_requests"], 2000)
 
+    def test_hackerone_username_is_bound_to_generated_target_policy(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir) / "Scope"
+            with (
+                patch("aidast.cli.CodexMainAgent", return_value=FakeReconMainAgent()),
+                patch("builtins.input", return_value="y"),
+                redirect_stdout(io.StringIO()),
+            ):
+                result = main([
+                    "recon", PROGRAM_URL,
+                    "--target", "*.example.com",
+                    "--hackerone-username", "alice_1",
+                    "--policy-only",
+                    "--output-dir", str(root),
+                ])
+            payload = json.loads(
+                (root / "bugcrowd" / "example" / "TargetPolicy.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+
+        self.assertEqual(result, 0)
+        self.assertEqual(payload["policies"][0]["hackerone_username"], "alice_1")
+
     def test_policy_only_writes_policy_without_running_executor(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_dir:
             root = Path(temporary_dir) / "Scope"

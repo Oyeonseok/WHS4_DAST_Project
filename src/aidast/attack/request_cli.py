@@ -24,6 +24,8 @@ from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 from uuid import uuid4
 
+from aidast.core.http_safety import merge_hackerone_identity
+
 
 MAX_REQUEST_BODY_BYTES = 200_000
 MAX_RESPONSE_BODY_BYTES = 200_000
@@ -778,6 +780,9 @@ def guarded_request(
         raise RequestGuardError("unsupported HTTP method")
     policy = _select_policy(policy_path, url, method)
     headers, body = _request_data(item)
+    headers = merge_hackerone_identity(
+        headers, policy.get("hackerone_username")
+    )
     consumed_bindings, consumed_binding_contracts = _binding_hashes(
         db_path, scan_id=scan_id, stage_run_id=stage_run_id, task_id=task_id,
         bindings=item.get("bindings"), url=url, headers=headers, body=body,

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from pathlib import Path
 from typing import Annotated, Any, Literal, Protocol
 
@@ -198,11 +199,20 @@ class BlindDisclosureError(ValueError):
 class StagedBlindCase:
     """Keep the claim inaccessible until a valid assessment is frozen."""
 
-    def __init__(self, blind_case: BlindCase, attack_claim: AttackClaim):
+    def __init__(
+        self, blind_case: BlindCase, attack_claim: AttackClaim,
+        *, reproduction_spec_sha256: str | None = None,
+    ):
         if blind_case.target_kind != attack_claim.target_kind:
             raise BlindDisclosureError("blind case and Attack claim target kinds differ")
+        if reproduction_spec_sha256 is not None and (
+            not isinstance(reproduction_spec_sha256, str)
+            or re.fullmatch(r"[0-9a-f]{64}", reproduction_spec_sha256) is None
+        ):
+            raise BlindDisclosureError("reproduction spec digest is invalid")
         self._blind_case = blind_case
         self._attack_claim = attack_claim
+        self.reproduction_spec_sha256 = reproduction_spec_sha256
         self.blind_case_sha256 = canonical_sha256(blind_case.model_dump())
         self.attack_claim_sha256 = canonical_sha256(attack_claim.model_dump())
         self.blind_assessment_sha256: str | None = None
@@ -211,6 +221,30 @@ class StagedBlindCase:
         """Return only the allowlisted BlindCase, copied through serialization."""
         return self._blind_case.model_dump(mode="json") | {
             "blind_case_sha256": self.blind_case_sha256,
+        }
+
+    def eligibility_view(self) -> dict[str, Any]:
+        """Return the claim with only the execution metadata policy review needs."""
+        from ..core.matching import payload_structure_sha256
+
+        if self.reproduction_spec_sha256 is None:
+            raise BlindDisclosureError("verified reproduction spec digest is unavailable")
+        execution = {
+            "endpoint": self._blind_case.endpoint,
+            "method": self._blind_case.method,
+            "injection_location": self._blind_case.injection_location,
+            "parameter_name": self._blind_case.parameter_name,
+            "payload_structure_sha256": payload_structure_sha256(
+                self._blind_case.payload_template
+            ),
+            "runtime_kind": (self._blind_case.runtime_contract or {}).get(
+                "runtime_kind", "http"
+            ),
+        }
+        return {
+            "attack_claim": self._attack_claim.model_dump(mode="json"),
+            **execution,
+            "reproduction_spec_sha256": self.reproduction_spec_sha256,
         }
 
     def freeze_assessment(self, assessment: BlindAssessment) -> str:

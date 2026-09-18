@@ -138,13 +138,36 @@ def is_sensitive_header(name: str) -> bool:
     return (
         normalized in {
             "authorization", "proxy-authorization", "cookie", "set-cookie",
-            "x-intigriti-username",
+            "x-intigriti-username", "x-hackerone",
         }
         or any(
             part in normalized
             for part in ("token", "secret", "api-key", "apikey", "capability")
         )
     )
+
+
+def validate_hackerone_username(value: str) -> str:
+    candidate = value.strip()
+    if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", candidate) is None:
+        raise ValueError(
+            "must be a 1-64 character HackerOne handle using letters, digits, ., _, or -"
+        )
+    return candidate
+
+
+def merge_hackerone_identity(
+    headers: Mapping[str, str] | None,
+    username: str | None,
+) -> dict[str, str]:
+    merged = {
+        str(name): str(value)
+        for name, value in (headers or {}).items()
+        if str(name).casefold() != "x-hackerone"
+    }
+    if username is not None:
+        merged["X-HackerOne"] = validate_hackerone_username(username)
+    return merged
 
 
 def sanitize_headers(headers: Mapping[str, str] | None) -> dict[str, str]:

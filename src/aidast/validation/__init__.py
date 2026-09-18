@@ -95,6 +95,14 @@ from .contracts.models import (
     canonical_json,
     canonical_sha256,
 )
+from .contracts.eligibility import (
+    EligibilityAssessment,
+    EligibilityRequest,
+    RequiredImpactCondition,
+    ScopeEligibilityError,
+    ScopePolicySource,
+)
+from .core.scope_eligibility import unknown_assessment, validate_grounding
 from .orchestration.native import build_native_validation_coordinator
 from .execution.oob_adapter import OobObserver, OobReproductionPort
 from .contracts.oob_contract import (
@@ -188,6 +196,8 @@ __all__ = [
     "DevelopmentCapability",
     "DevelopmentRuntimeContract",
     "DescriptorMethod",
+    "EligibilityAssessment",
+    "EligibilityRequest",
     "EvidenceOnlyReviewer",
     "HttpAttemptContract",
     "HttpJsonOobObserver",
@@ -245,8 +255,11 @@ __all__ = [
     "ResponseAssertion",
     "RuntimeReproductionRouter",
     "RuntimeSemanticError",
+    "RequiredImpactCondition",
     "SharedValidationError",
     "SkillProfileResolver",
+    "ScopeEligibilityError",
+    "ScopePolicySource",
     "StagedBlindCase",
     "TargetPolicyProvider",
     "TextFrame",
@@ -301,9 +314,11 @@ __all__ = [
     "reproduction_spec_digest",
     "shared_validation_status",
     "validate_assessment",
+    "validate_grounding",
     "validate_runtime_contract",
     "validate_runtime_semantics",
     "validation_status",
+    "unknown_assessment",
 ]
 
 # Preserve established module paths while implementations live in responsibility packages.
@@ -325,6 +340,7 @@ _COMPAT_MODULES = {
     "credentials": "execution.credentials",
     "decision": "core.decision",
     "development": "contracts.development",
+    "eligibility": "contracts.eligibility",
     "evidence_policy": "persistence.evidence_policy",
     "gaps": "core.decision",
     "grpc_adapter": "execution.grpc_adapter",
@@ -349,6 +365,7 @@ _COMPAT_MODULES = {
     "runtime_adapter": "execution.runtime_adapter",
     "runtime_contract": "contracts.runtime_contract",
     "runtime_semantics": "contracts.runtime_semantics",
+    "scope_eligibility": "core.scope_eligibility",
     "source": "persistence.source",
     "status": "persistence.repository",
     "store": "legacy.store",

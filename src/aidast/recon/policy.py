@@ -101,6 +101,9 @@ class TargetPolicy(TargetPolicyProposal):
     schema_version: Literal["1.0"] = "1.0"
     scope_id: str = Field(min_length=1)
     policy_id: str = Field(min_length=1)
+    hackerone_username: str | None = Field(
+        default=None, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+    )
 
     def allows_host(self, host: str) -> bool:
         candidate = host.lower().rstrip(".")

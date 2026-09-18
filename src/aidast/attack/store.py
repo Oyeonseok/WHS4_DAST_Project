@@ -33,6 +33,18 @@ class AttackStoreError(ValueError):
     """Invalid or inconsistent local review state."""
 
 
+def _trusted_root_symlink(path: Path) -> bool:
+    """Allow OS-managed top-level aliases such as macOS /var -> /private/var."""
+    try:
+        return (
+            path.is_symlink()
+            and path.parent == Path(path.anchor)
+            and path.lstat().st_uid == 0
+        )
+    except OSError:
+        return False
+
+
 @dataclass(frozen=True)
 class WriteResult:
     status: str
@@ -872,7 +884,10 @@ def materialize_attack_database(handoff_path: Path, output_dir: Path, *,
     """
     source = Path(handoff_path).expanduser().resolve(strict=True)
     raw_output = Path(output_dir).expanduser().absolute()
-    if any(part.is_symlink() for part in (raw_output, *raw_output.parents)):
+    if any(
+        part.is_symlink() and not _trusted_root_symlink(part)
+        for part in (raw_output, *raw_output.parents)
+    ):
         raise AttackStoreError("review output must not traverse a symlink")
     output = raw_output.resolve()
     if output.is_relative_to(source.parent) or source.is_relative_to(output):

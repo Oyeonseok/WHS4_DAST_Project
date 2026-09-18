@@ -100,6 +100,31 @@ class ValidationRequestBrokerTests(unittest.TestCase):
         self.assertNotIn("private", row[2])
         self.assertEqual(len(row[3]), 64)
 
+    def test_hackerone_identity_header_is_added_after_runtime_and_credentials(self):
+        captured = []
+
+        def transport(request, timeout):
+            captured.append(dict(request.header_items()))
+            return Response()
+
+        self.policy = self.policy.model_copy(update={
+            "hackerone_username": "trusted_hacker",
+        })
+        broker = ValidationRequestBroker(
+            db_path=self.path, scan_id="scan", stage_run_id="stage", case_id="case",
+            attempt_id="attempt", blind_case=self.blind, policy=self.policy,
+            transport=transport,
+            credential_resolver=lambda reference: {"X-HackerOne": "credential-value"},
+            sleeper=lambda delay: None, clock=lambda: 100.0,
+        )
+
+        broker.request(
+            "https://test/items/7", method="GET",
+            headers={"x-hackerone": "runtime-value"},
+        )
+
+        self.assertEqual(captured[0]["X-hackerone"], "trusted_hacker")
+
     def test_staged_method_and_path_cannot_be_broadened(self):
         broker = self.broker()
         with self.assertRaises(ValidationRequestError):

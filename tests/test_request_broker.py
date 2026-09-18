@@ -43,12 +43,14 @@ class RequestBrokerTests(unittest.TestCase):
         result = sanitize_headers({
             "X-Intigriti-Username": "baekggum",
             "User-Agent": "aidast-recon/0.1 <intigriti:baekggum>",
+            "X-HackerOne": "public-handle",
         })
         self.assertEqual(result["X-Intigriti-Username"], "[REDACTED]")
         self.assertEqual(
             result["User-Agent"],
             "aidast-recon/0.1 <intigriti:[REDACTED]>",
         )
+        self.assertEqual(result["X-HackerOne"], "[REDACTED]")
 
     def test_missing_policy_fails_before_transport(self):
         transport = MagicMock()

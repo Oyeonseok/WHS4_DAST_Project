@@ -6,6 +6,7 @@ import hashlib
 from pathlib import Path
 from typing import Callable, Mapping, Protocol
 
+from aidast.core.http_safety import merge_hackerone_identity
 from aidast.recon.policy import TargetPolicy
 
 from ..contracts.models import BlindCase
@@ -86,6 +87,9 @@ class BrowserReproductionPort:
                 details={"reason": "credential_resolution_failed"},
                 content_sha256=hashlib.sha256(b"").hexdigest(), content_length=0,
             )
+        merged = merge_hackerone_identity(
+            merged, policy.hackerone_username
+        )
         selectors = tuple(sorted({
             item.selector for item in attempt.assertions if item.selector is not None
         }))

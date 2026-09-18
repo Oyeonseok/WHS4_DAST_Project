@@ -360,6 +360,19 @@ class ValidationCoordinatorTests(unittest.TestCase):
         finish_stage_run(conn, chaining, status="skipped")
         conn.close()
 
+    def test_candidate_gate_carries_the_verified_persisted_reproduction_digest(self):
+        with db.connect(self.path) as conn:
+            persisted_digest = conn.execute(
+                "SELECT spec_sha256 FROM finding_reproduction_specs WHERE finding_id='finding'"
+            ).fetchone()[0]
+            staged = CandidateIntegrityGate(conn).validate_finding(
+                case_id="case", scan_id="scan", finding_id="finding",
+            ).staged
+
+        self.assertEqual(
+            staged.eligibility_view()["reproduction_spec_sha256"], persisted_digest,
+        )
+
     def test_candidate_gate_rejects_runtime_incompatible_with_profile_signal(self):
         from aidast.validation import canonical_sha256, validate_runtime_contract
 

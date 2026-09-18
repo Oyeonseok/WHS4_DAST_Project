@@ -15,7 +15,7 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 from uuid import uuid4
 
-from aidast.core.http_safety import sanitize_headers
+from aidast.core.http_safety import merge_hackerone_identity, sanitize_headers
 from aidast.core.request_broker import BrokerResponse, RequestBroker, RequestPolicyError
 from aidast.recon.policy import TargetPolicy
 
@@ -116,6 +116,9 @@ class ValidationRequestBroker:
                                                         for k, v in resolved.items()):
                 raise ValidationCredentialError("credential resolver returned invalid headers")
             merged.update(resolved)
+        merged = merge_hackerone_identity(
+            merged, self.policy.hackerone_username
+        )
         broker = RequestBroker(
             self.policy, transport=self._ledger_transport,
             max_redirects=self.max_redirects, max_body_bytes=200_000,
