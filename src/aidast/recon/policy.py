@@ -105,10 +105,30 @@ class TargetPolicy(TargetPolicyProposal):
     def allows_host(self, host: str) -> bool:
         candidate = host.lower().rstrip(".")
         allowed_hosts = {value.lower().rstrip(".") for value in self.allowed_hosts}
-        allowed = candidate in allowed_hosts or (
-            self.include_subdomains
-            and any(candidate.endswith("." + root) for root in allowed_hosts)
-        )
+        if self.asset_type is AssetType.WILDCARD and "*" in self.asset:
+            # A WILDCARD asset may carry an embedded glob anywhere in the
+            # pattern (e.g. "info*semtech.com", "*.sip.*.twilio.com") or a
+            # leading scheme (e.g. "https://*.motel6.com"). allowed_hosts
+            # alone only tracks the canonical root, so a plain membership
+            # check would reject every discovered subdomain of such a
+            # pattern; fall back to the scheme-stripped glob match.
+            canonical = canonical_host_for_asset(self.asset_type, self.asset)
+            wildcard_glob = _wildcard_pattern(self.asset).lower().rstrip(".")
+            allowed = (
+                canonical is not None
+                and (
+                    candidate == canonical.lower().rstrip(".")
+                    or (
+                        self.include_subdomains
+                        and candidate.endswith("." + canonical.lower().rstrip("."))
+                    )
+                )
+            ) or fnmatchcase(candidate, wildcard_glob)
+        else:
+            allowed = candidate in allowed_hosts or (
+                self.include_subdomains
+                and any(candidate.endswith("." + root) for root in allowed_hosts)
+            )
         return allowed and not any(
             _host_matches(candidate, pattern) for pattern in self.excluded_hosts
         )
@@ -293,12 +313,25 @@ def _normalized_web_asset_url(
     return parsed
 
 
+def _wildcard_pattern(asset: str) -> str:
+    """Strip a leading ``scheme://`` from a WILDCARD asset string.
+
+    Bug bounty scopes sometimes write a WILDCARD asset as a full URL prefix
+    (for example ``https://*.motel6.com`` or ``http://*.oyorooms.io``) instead
+    of a bare DNS pattern (``*.motel6.com``). Every wildcard-matching helper
+    below must compare against the DNS pattern only; leaving the scheme
+    attached makes ``*.`` prefix checks and ``fnmatchcase`` glob comparisons
+    fail even though the wildcard is otherwise valid.
+    """
+    return asset.split("://", 1)[1] if "://" in asset else asset
+
+
 def canonical_host_for_asset(asset_type: AssetType, asset: str) -> str | None:
     if asset_type in {AssetType.URL, AssetType.API}:
         parsed = _normalized_web_asset_url(asset_type, asset)
         return parsed.hostname if parsed is not None else None
     if asset_type is AssetType.WILDCARD:
-        return asset.removeprefix("*.")
+        return _wildcard_pattern(asset).removeprefix("*.")
     if asset_type in {AssetType.DOMAIN, AssetType.IP_ADDRESS}:
         return asset
     return None
@@ -327,8 +360,10 @@ def validate_start_url_for_target(
     if asset_type is AssetType.WILDCARD:
         # Match against the original wildcard expression.  canonical_host_for_asset
         # strips a leading "*." for policy roots, which must not erase the
-        # wildcard semantics during start-URL validation.
-        if not _host_matches(host, asset):
+        # wildcard semantics during start-URL validation. Strip a leading
+        # scheme (e.g. "https://*.motel6.com") the same way, or a
+        # scheme-prefixed wildcard would never match any concrete host.
+        if not _host_matches(host, _wildcard_pattern(asset)):
             raise ValueError("start URL host is outside the approved wildcard")
     elif host != root:
         raise ValueError("start URL host does not match the approved target")
@@ -361,20 +396,27 @@ def validate_policy_for_target(
         raise ValueError(f"asset type cannot be executed as a web target: {asset_type}")
     allowed = {host.lower().rstrip(".") for host in policy.allowed_hosts}
     canonical = canonical.lower().rstrip(".")
+    # A WILDCARD asset may be written as a full URL prefix (e.g.
+    # "https://*.motel6.com"). Compare against the scheme-stripped DNS
+    # pattern everywhere below, or every _host_matches() call in this
+    # function would fail on an otherwise-valid scheme-prefixed wildcard.
+    wildcard_pattern = (
+        _wildcard_pattern(asset) if asset_type is AssetType.WILDCARD else asset
+    )
     wildcard_allowed = (
         asset_type is AssetType.WILDCARD
-        and any(_host_matches(host, asset) for host in allowed)
+        and any(_host_matches(host, wildcard_pattern) for host in allowed)
     )
     if canonical not in allowed and not wildcard_allowed and not (
         asset_type is AssetType.WILDCARD
         and not policy.include_subdomains
         and allowed
-        and all(_host_matches(host, asset) for host in allowed)
+        and all(_host_matches(host, wildcard_pattern) for host in allowed)
     ):
         raise ValueError(f"policy omits the approved target host: {canonical}")
     if any(
         host != canonical
-        and not (asset_type is AssetType.WILDCARD and _host_matches(host, asset))
+        and not (asset_type is AssetType.WILDCARD and _host_matches(host, wildcard_pattern))
         and not (asset_type is AssetType.WILDCARD and policy.include_subdomains
                  and host.endswith("." + canonical))
         for host in allowed
@@ -413,10 +455,28 @@ def validate_policy_for_target(
         if any(not _path_matches(path, approved_path) for path in policy.allowed_path_prefixes):
             raise ValueError("URL policy may not broaden the approved path")
     else:
-        if any(scheme != "https" for scheme in policy.allowed_schemes):
-            raise ValueError("non-URL policies may not broaden the default HTTPS scheme")
-        if any(port != 443 for port in policy.allowed_ports):
-            raise ValueError("non-URL policies may not broaden the default HTTPS port")
+        explicit_scheme = None
+        explicit_port = None
+        if asset_type is AssetType.WILDCARD and "://" in asset:
+            # Some scopes write a wildcard as a full URL prefix, e.g.
+            # "http://*.oyorooms.io". Treat that scheme as an explicit,
+            # narrower boundary instead of forcing the HTTPS-only default,
+            # which previously made any http-scheme wildcard unrepresentable.
+            parsed_wildcard = urlsplit(asset)
+            explicit_scheme = parsed_wildcard.scheme.lower()
+            explicit_port = parsed_wildcard.port or (
+                443 if explicit_scheme == "https" else 80
+            )
+        if explicit_scheme is None:
+            if any(scheme != "https" for scheme in policy.allowed_schemes):
+                raise ValueError("non-URL policies may not broaden the default HTTPS scheme")
+            if any(port != 443 for port in policy.allowed_ports):
+                raise ValueError("non-URL policies may not broaden the default HTTPS port")
+        else:
+            if policy.allowed_schemes != [explicit_scheme]:
+                raise ValueError("wildcard URL policy must preserve the approved scheme exactly")
+            if set(policy.allowed_ports) != {explicit_port}:
+                raise ValueError("wildcard URL policy must preserve the approved port exactly")
     if any(method not in SAFE_METHODS for method in policy.allowed_methods):
         raise ValueError("Recon policies may not enable state-changing HTTP methods")
     mutation_methods = {

@@ -1378,8 +1378,29 @@ def _apply_scope_host_exclusions(
                 )
             )
         }
+        excluded_hosts = sorted(existing | applicable)
+
+        allowed_hosts = list(policy.allowed_hosts)
+        # A Scope may approve "*.example.com" while separately marking its
+        # own root "example.com" out of scope (e.g. a marketing site hosted
+        # at the apex, with the real product on subdomains). A wildcard
+        # never covers its own apex by DNS convention, so this is not a
+        # contradiction in the Scope -- but the policy proposal always
+        # seeds a WILDCARD's allowed_hosts with the bare root as its
+        # crawl/DNS anchor, so applying the root exclusion above would
+        # otherwise make the compiled policy self-contradictory. Keep the
+        # exclusion (the root must stay unreachable) and re-anchor
+        # allowed_hosts on the wildcard pattern instead, which every
+        # WILDCARD host check already accepts in place of the bare root.
+        if policy.asset_type.value == "WILDCARD" and canonical in excluded_hosts:
+            allowed_hosts = [
+                f"*.{canonical}" if host.lower().rstrip(".") == canonical else host
+                for host in allowed_hosts
+            ]
+
         narrowed = policy.model_copy(update={
-            "excluded_hosts": sorted(existing | applicable)
+            "excluded_hosts": excluded_hosts,
+            "allowed_hosts": allowed_hosts,
         })
         try:
             validate_policy_for_target(
