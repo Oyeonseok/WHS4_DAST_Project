@@ -29,6 +29,41 @@ deferred tagging 실패는 0건이었다.
 | tagging 처리 | 168 | 328 |
 | tagging 실패 | 0 | 0 |
 
+## Endpoint 기준 목록 대비 탐지율
+
+기존 Phase B와 동일한 고정 기준 및 정규화 규칙을 이번 attempt-3 `Recon.db`에
+적용했다.
+
+- Juice Shop 20.2.0의 source-declared application GET route 71개
+- VulnBank commit `5e5ea5425fcf309373a0655dd111ecfb45037cbf`의
+  source-declared application GET route 47개
+- endpoint 단위는 `HTTP method + 정규화된 path template`
+- trailing slash를 제거하고 Flask converter와 concrete parameter segment를
+  `:parameter` template에 맞춰 비교
+- 정적 asset, Swagger UI 내부 모듈, Socket.IO transport, generic middleware route와
+  ffuf candidate는 분모와 분자에서 제외
+
+| 대상 | 평가 기준 GET route | 탐지 route | 누락 route | 탐지율 |
+| --- | ---: | ---: | ---: | ---: |
+| Juice Shop | 71 | 7 | 64 | 9.9% |
+| VulnBank | 47 | 11 | 36 | 23.4% |
+| 합계 | 118 | 18 | 100 | 15.3% |
+
+합계는 대상별 비율의 단순 평균이 아니라 `18 / 118 × 100`으로 계산했다.
+
+Juice Shop에서는 `/`, `/api/Challenges`, `/api/Quantitys`, 세 개의 공개 admin/language
+metadata route와 `/rest/products/search`가 기준 목록에 적중했다. VulnBank에서는 `/`,
+`/blog`, `/careers`, `/compliance`, `/forgot-password`, `/login`, 두 merchant 인증 route,
+`/privacy`, `/register`, `/terms`가 적중했다.
+
+118개 기준 route는 기존 main-branch Phase B에서 확정한 고정 inventory를 재사용했다.
+이번 DB의 기준 route 적중 집합은 기존 재실행과 동일했다.
+
+이 15.3%는 **비인증 application GET route 수집률**이다. 취약점 finding의 탐지율이나
+recall을 뜻하지 않는다. 인증 뒤에만 노출되는 route와 실제 parameter 값을 알아야 하는
+route는 anonymous Recon에서 발견하기 어렵고, VulnBank OpenAPI import 실패로 명세 기반
+route 보강도 수행되지 않았다.
+
 Juice Shop의 첫 ffuf root는 180초 timeout 경고가 있었지만 이후 root와 Recon
 stage는 완료됐다. VulnBank의 `/static/openapi.json`은 발견됐으나 대상 fixture의
 `requestBody.schema.required` 형식 오류 때문에 ZAP OpenAPI import가 실패했다.
