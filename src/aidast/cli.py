@@ -23,6 +23,7 @@ from aidast.agents.main import (
 )
 from aidast.auth.codex import CodexAuth, CodexAuthError
 from aidast.auth.browser import BrowserLoginError, collect_target_sessions
+from aidast.core.http_safety import validate_hackerone_username
 from aidast.attack.runtime import ReviewPreparationError, prepare_review
 from aidast.orchestration.attack import AttackCoordinator, AttackCoordinatorError
 from aidast.orchestration.chaining import (
@@ -189,6 +190,11 @@ def _parser() -> argparse.ArgumentParser:
             "required User-Agent suffix for every Recon HTTP request"
         ),
     )
+    recon.add_argument(
+        "--hackerone-username",
+        type=_hackerone_username,
+        help="HackerOne handle injected into X-HackerOne for approved target requests",
+    )
     recon.add_argument("--auth-host", action="append", default=[], help="host allowed only during manual login bootstrap")
     recon.add_argument("--auth-path", action="append", default=[], help="path prefix allowed on --auth-host during login bootstrap")
     recon.add_argument("--db-path", type=Path, default=RESULT_ROOT / "Recon.db")
@@ -246,6 +252,11 @@ def _parser() -> argparse.ArgumentParser:
             "Intigriti handle injected into X-Intigriti-Username and the "
             "required User-Agent suffix for every Recon HTTP request"
         ),
+    )
+    run.add_argument(
+        "--hackerone-username",
+        type=_hackerone_username,
+        help="HackerOne handle injected into X-HackerOne for approved target requests",
     )
     run.add_argument("--auth-host", action="append", default=[])
     run.add_argument("--auth-path", action="append", default=[])
@@ -416,6 +427,13 @@ def _intigriti_username(value: str) -> str:
             "must be a 1-64 character Intigriti handle using letters, digits, ., _, or -"
         )
     return candidate
+
+
+def _hackerone_username(value: str) -> str:
+    try:
+        return validate_hackerone_username(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
 
 
 def _positive_int(value: str) -> int:
@@ -684,6 +702,11 @@ def _run_recon(
         print(f"Approved Scope saved: {program_dir / 'Scope.md'}")
 
     intigriti_username = getattr(args, "intigriti_username", None)
+    hackerone_username = getattr(args, "hackerone_username", None)
+    if intigriti_username and hackerone_username:
+        raise ReconCoordinatorError(
+            "--intigriti-username and --hackerone-username cannot be combined"
+        )
     if (
         args.execute
         and "X-Intigriti-Username" in scope_markdown
@@ -693,12 +716,18 @@ def _run_recon(
             "approved Scope requires X-Intigriti-Username; "
             "supply --intigriti-username"
         )
+    if args.execute and "X-HackerOne" in scope_markdown and not hackerone_username:
+        raise ReconCoordinatorError(
+            "approved Scope requires X-HackerOne; supply --hackerone-username"
+        )
     request_headers = (
         {
             "X-Intigriti-Username": intigriti_username,
             "User-Agent": f"aidast-recon/0.1 <intigriti:{intigriti_username}>",
         }
         if intigriti_username
+        else {"X-HackerOne": hackerone_username}
+        if hackerone_username
         else {}
     )
 
@@ -822,6 +851,13 @@ def _run_recon(
             max_concurrency=args.max_concurrency,
             timeout_seconds=args.timeout_seconds,
         )
+        if hackerone_username:
+            policies = {
+                key: policy.model_copy(update={
+                    "hackerone_username": hackerone_username,
+                })
+                for key, policy in policies.items()
+            }
         policy_path = program_dir / "TargetPolicy.json"
         policy_path.write_text(
             json.dumps(

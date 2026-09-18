@@ -212,6 +212,15 @@ aidast run "<PROGRAM_URL>" \
   --target "api.example.com"
 ```
 
+HackerOne 프로그램이 자동화 요청 식별을 요구하거나 권장하면 사용자명을
+`X-HackerOne` 헤더로 전달합니다.
+
+```bash
+aidast run "<HACKERONE_PROGRAM_URL>" \
+  --target "example.com" \
+  --hackerone-username "<HACKERONE_USERNAME>"
+```
+
 `aidast run`은 Recon, 태깅, Handoff, Native Attack, Chaining,
 Shared Validation 순서로 실행합니다. Report는 검토할 Validation case를 선택한 뒤
 별도 명령으로 생성합니다.

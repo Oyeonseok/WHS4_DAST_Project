@@ -58,6 +58,9 @@ class ValidationBrowserContractTests(unittest.TestCase):
 
     def test_browser_port_uses_only_declared_selectors_and_ledger_ids(self):
         calls = []
+        self.policy = self.policy.model_copy(update={
+            "hackerone_username": "trusted_hacker",
+        })
 
         def executor(**kwargs):
             calls.append(kwargs)
@@ -85,6 +88,7 @@ class ValidationBrowserContractTests(unittest.TestCase):
         )
         self.assertTrue(result.signal_observed)
         self.assertEqual(calls[0]["url"], "https://test/items/7")
+        self.assertEqual(calls[0]["headers"]["X-HackerOne"], "trusted_hacker")
         self.assertEqual(calls[0]["selectors"], ("#result",))
         self.assertEqual(result.details["request_ids"], ["browser-request"])
 

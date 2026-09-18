@@ -55,6 +55,7 @@ def fixture(
     observed_post: bool = False,
     observed_post_path: str = "/api/profile",
     observed_post_source: str = "playwright_login",
+    hackerone_username: str | None = None,
 ) -> tuple[Path, Path, Path, str, str]:
     database = root / "Pipeline.db"
     conn = db.init_db(database)
@@ -114,6 +115,7 @@ def fixture(
                        for method in (attack_methods or []))
                 else None
             ),
+            "hackerone_username": hackerone_username,
             "limits": {"requests_per_second": 50, "concurrency": 1,
                        "timeout_seconds": 5, "max_depth": 1,
                        "max_requests": max_requests},
@@ -125,6 +127,28 @@ def fixture(
 
 
 class AttackRequestGuardTests(unittest.TestCase):
+    def test_hackerone_identity_header_overrides_untrusted_payload_header(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            database, policy, payload, stage, task = fixture(
+                root, hackerone_username="trusted_hacker",
+            )
+            payload.write_text(json.dumps({
+                "method": "GET",
+                "url": "https://example.test/api/profile",
+                "headers": {"x-hackerone": "attacker-controlled"},
+            }), encoding="utf-8")
+            opener = FakeOpener()
+
+            with patch("aidast.attack.request_cli.build_opener", return_value=opener):
+                guarded_request(
+                    database, scan_id="scan", stage_run_id=stage, task_id=task,
+                    policy_path=policy, payload_path=payload,
+                )
+
+            request, _ = opener.calls[0]
+            self.assertEqual(request.get_header("X-hackerone"), "trusted_hacker")
+
     def test_restored_authentication_endpoint_is_network_observed(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
