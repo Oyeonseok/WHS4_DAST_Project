@@ -319,10 +319,21 @@ class ReconExecutor:
         return policy
 
     def _url_for(self, task: ReconTask) -> str:
-        return self.execution_start_urls.get(
-            (task.target.asset_type.value, task.target.asset),
-            _as_url(task.target.asset),
+        explicit = self.execution_start_urls.get(
+            (task.target.asset_type.value, task.target.asset)
         )
+        if explicit is not None:
+            return explicit
+        # A discovered child host inherits the narrowed policy's scheme. This
+        # matters for URL-form wildcard scopes that explicitly allow HTTP;
+        # falling back to the global HTTPS default would make the subsequent
+        # HTTP_PROBE fail policy validation before a request is ever sent.
+        policy = self.target_policies.get(
+            (task.target.asset_type.value, task.target.asset)
+        )
+        if policy is not None and policy.allowed_schemes:
+            return f"{policy.allowed_schemes[0]}://{_extract_host(task.target.asset)}"
+        return _as_url(task.target.asset)
 
     def _broker_for(self, task: ReconTask, policy: TargetPolicy) -> RequestBroker:
         key = (task.target.asset_type.value, task.target.asset)

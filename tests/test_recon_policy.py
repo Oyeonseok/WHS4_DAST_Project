@@ -375,6 +375,39 @@ class TargetPolicyTests(unittest.TestCase):
         self.assertFalse(result.allows_host("x.email.shopify.com"))
         self.assertTrue(result.allows_host("admin.shopify.com"))
 
+    def test_scope_excluded_root_reanchors_wildcard_instead_of_failing(self) -> None:
+        # Real-world pattern (e.g. YesWeHack's Alasco program): "*.example.com"
+        # is in scope while the bare apex "example.com" is separately marked
+        # Ineligible/Excluded. A wildcard never covers its own apex by DNS
+        # convention, so this is not a contradictory Scope -- but the policy
+        # proposal always seeds allowed_hosts with the bare root, so applying
+        # the exclusion naively would make validate_policy_for_target reject
+        # the policy as unsafe (allowed and excluded at once).
+        from aidast.cli import _apply_scope_host_exclusions
+
+        wildcard = TargetPolicy(
+            scope_id="scope", policy_id="policy", asset_type=AssetType.WILDCARD,
+            asset="*.example.com", allowed_hosts=["example.com"],
+            include_subdomains=True,
+        )
+        exclusions = [
+            ScopeAsset(
+                asset_type=AssetType.DOMAIN, asset="example.com",
+                description="marketing site on third-party host",
+                eligibility="ineligible", maximum_severity="None",
+            ),
+        ]
+
+        result = _apply_scope_host_exclusions(
+            {(AssetType.WILDCARD.value, "*.example.com"): wildcard}, exclusions
+        )[(AssetType.WILDCARD.value, "*.example.com")]
+
+        self.assertEqual(result.excluded_hosts, ["example.com"])
+        self.assertEqual(result.allowed_hosts, ["*.example.com"])
+        self.assertFalse(result.allows_host("example.com"))
+        self.assertTrue(result.allows_host("app.example.com"))
+        self.assertTrue(result.allows_host("api.example.com"))
+
     def test_scope_exclusion_revalidation_preserves_grounded_active_grant(self) -> None:
         from aidast.cli import _apply_scope_host_exclusions
 
@@ -475,6 +508,73 @@ class TargetPolicyTests(unittest.TestCase):
         self.assertFalse(wildcard.allows_host("blocked.example.com"))
         self.assertFalse(wildcard.allows_host("a.email.example.com"))
         self.assertFalse(wildcard.allows_url("https://blocked.example.com/"))
+
+    def test_scheme_prefixed_wildcard_preserves_its_explicit_scheme(self) -> None:
+        # Some bug bounty scopes write a WILDCARD asset as a full URL prefix,
+        # e.g. "https://*.motel6.com" or "http://*.oyorooms.io", instead of a
+        # bare DNS pattern. This must not be forced onto the HTTPS-only
+        # default that applies to bare wildcards/domains.
+        proposal = TargetPolicyProposal(
+            asset_type=AssetType.WILDCARD,
+            asset="http://*.oyorooms.io",
+            allowed_hosts=["oyorooms.io"],
+            include_subdomains=True,
+            allowed_schemes=["http"],
+            allowed_ports=[80],
+        )
+        validate_policy_for_target(
+            proposal, asset_type=AssetType.WILDCARD, asset="http://*.oyorooms.io",
+        )
+        mismatched = proposal.model_copy(update={"allowed_schemes": ["https"], "allowed_ports": [443]})
+        with self.assertRaisesRegex(ValueError, "scheme"):
+            validate_policy_for_target(
+                mismatched, asset_type=AssetType.WILDCARD, asset="http://*.oyorooms.io",
+            )
+
+    def test_canonical_host_strips_scheme_from_wildcard_asset(self) -> None:
+        self.assertEqual(
+            canonical_host_for_asset(AssetType.WILDCARD, "https://*.motel6.com"),
+            "motel6.com",
+        )
+
+    def test_start_url_validation_accepts_scheme_prefixed_wildcard(self) -> None:
+        validate_start_url_for_target(
+            "https://www.motel6.com/",
+            asset_type=AssetType.WILDCARD,
+            asset="https://*.motel6.com",
+        )
+        with self.assertRaisesRegex(ValueError, "wildcard"):
+            validate_start_url_for_target(
+                "https://evil.test/",
+                asset_type=AssetType.WILDCARD,
+                asset="https://*.motel6.com",
+            )
+
+    def test_allows_host_handles_scheme_prefixed_wildcard_subdomains(self) -> None:
+        wildcard = policy(
+            asset_type=AssetType.WILDCARD,
+            asset="https://*.motel6.com",
+            allowed_hosts=["motel6.com"],
+            include_subdomains=True,
+            allowed_path_prefixes=["/"],
+        )
+        self.assertTrue(wildcard.allows_host("motel6.com"))
+        self.assertTrue(wildcard.allows_host("www.motel6.com"))
+        self.assertFalse(wildcard.allows_host("notmotel6.com"))
+
+    def test_allows_host_matches_embedded_glob_wildcard(self) -> None:
+        # HackerOne-style embedded globs, e.g. "info*semtech.com", are not a
+        # classic "*.<root>" suffix pattern and cannot be expressed by an
+        # exact-membership or subdomain-suffix check alone.
+        wildcard = policy(
+            asset_type=AssetType.WILDCARD,
+            asset="info*semtech.com",
+            allowed_hosts=["info*semtech.com"],
+            allowed_path_prefixes=["/"],
+        )
+        self.assertTrue(wildcard.allows_host("infosemtech.com"))
+        self.assertTrue(wildcard.allows_host("info-us.semtech.com"))
+        self.assertFalse(wildcard.allows_host("other.com"))
 
     def test_form_submission_cannot_be_enabled_for_recon(self) -> None:
         proposal = TargetPolicyProposal(
