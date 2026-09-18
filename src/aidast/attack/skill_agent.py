@@ -281,14 +281,23 @@ class SkillAttackAgent:
                     try:
                         result = self.executor.execute(test, hypothesis_id=hypothesis_id)
                     except Exception:
-                        self.store.complete_attempt(attempt_id, outcome="outcome_unknown")
+                        self._require_write(
+                            self.store.complete_attempt(
+                                attempt_id, outcome="outcome_unknown"
+                            )
+                        )
                         self.store.set_status("paused")
                         return SkillAttackResult(self.run_id, "paused", hypothesis_count,
                                                  tuple(finding_ids), "test_outcome_unknown")
                     if result.test_id != test.test_id:
                         raise ValueError("executor result does not match authorized test")
-                    self.store.complete_attempt(attempt_id, outcome=result.outcome,
-                                                response_status=result.response_status)
+                    self._require_write(
+                        self.store.complete_attempt(
+                            attempt_id,
+                            outcome=result.outcome,
+                            response_status=result.response_status,
+                        )
+                    )
                     evidence_id = "evidence_" + self._digest([attempt_id, result.outcome,
                                                                hashlib.sha256(result.response_body).hexdigest()])
                     self._require_write(self.store.record_evidence(
@@ -296,7 +305,13 @@ class SkillAttackAgent:
                         kind="attack_test", body=result.response_body,
                         metadata={"hypothesis_id": hypothesis_id, "test_id": test.test_id,
                                   "outcome": result.outcome, "summary": result.evidence_summary,
-                                  "response_status": result.response_status},
+                                  "response_status": result.response_status,
+                                  "method": result.method, "url": result.url,
+                                  "identity_role": result.identity_role,
+                                  "response_body_sha256": hashlib.sha256(
+                                      result.response_body
+                                  ).hexdigest(),
+                                  "response_body_length": len(result.response_body)},
                     ))
                     results.append((test, result, attempt_id, evidence_id))
                     used_tests += 1
@@ -337,11 +352,12 @@ class SkillAttackAgent:
                     finding_id = "finding_" + self._digest([self.run_id, hypothesis_id])
                     supporting_requests = [{
                         "test_id": test.test_id, "method": result.method, "url": result.url,
+                        "attempt_id": attempt, "evidence_id": evidence,
                         "identity_role": result.identity_role,
                         "response_status": result.response_status,
                         "response_headers": result.response_headers,
                         "response_body": result.response_body,
-                    } for test, result, _, _ in results
+                    } for test, result, attempt, evidence in results
                         if test.test_id in assessment.supporting_test_ids]
                     self._require_write(self.store.record_finding_bundle(
                         finding_id=finding_id, task_id=proposal.task_id,

@@ -56,6 +56,11 @@ class SkillAttackWorkflow:
             run = store.get_run()
             if run["authorization_id"] != document.get("authorization_id"):
                 raise ValueError("authorization is not activated for this Attack run")
+            approved = store.get_authorization(document["authorization_id"])
+            if approved != document:
+                raise ValueError(
+                    "authorization differs from the approved document"
+                )
             manifest_path = (store.path.parent / run["source_manifest_path"]).resolve(strict=True)
             recon_path = (store.path.parent / run["source_database_path"]).resolve(strict=True)
             review = prepare_review(manifest_path, store.path.parent / "review")

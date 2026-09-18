@@ -341,6 +341,121 @@ class AttackStore:
 
         return self._write(identifier, "iteration", operation)
 
+    def record_attempt(
+        self,
+        *,
+        attempt_id: str,
+        task_id: str,
+        endpoint_id: str,
+        skill_name: str,
+        test_id: str,
+        hypothesis_id: str,
+        status: str = "started",
+    ) -> WriteResult:
+        """Persist an idempotent, run-bound attempt before dispatch."""
+
+        def operation() -> str:
+            for value in (
+                attempt_id,
+                task_id,
+                endpoint_id,
+                skill_name,
+                test_id,
+                hypothesis_id,
+            ):
+                _identifier(value)
+            self._endpoint(endpoint_id)
+            if status != "started":
+                raise AttackStoreError("attempt must be recorded before dispatch")
+            revision = self.get_run()["plan_revision"]
+            if not self.conn.execute(
+                """SELECT 1 FROM attack_plan_tasks
+                WHERE run_id=? AND scan_id=? AND plan_revision=? AND task_id=?
+                AND endpoint_id=?""",
+                (self.run_id, self.scan_id, revision, task_id, endpoint_id),
+            ).fetchone():
+                raise AttackStoreError("task does not belong to the bound run")
+            fingerprint = _sha(
+                _json({"test_id": test_id, "hypothesis_id": hypothesis_id})
+            )
+            values = (
+                attempt_id,
+                self.scan_id,
+                self.run_id,
+                skill_name,
+                endpoint_id,
+                fingerprint,
+                task_id,
+                revision,
+                test_id,
+                hypothesis_id,
+                "unknown",
+                test_id,
+                status,
+            )
+            row = self.conn.execute(
+                """SELECT attempt_id,scan_id,run_id,skill_name,endpoint_id,
+                request_fingerprint,plan_task_id,plan_revision,logical_check_id,
+                execution_id,identity_role,payload_variant,outcome
+                FROM attack_attempts WHERE attempt_id=?""",
+                (attempt_id,),
+            ).fetchone()
+            if row is not None:
+                if tuple(row) != values:
+                    raise AttackStoreError(
+                        "attempt identifier already contains different data"
+                    )
+                return "duplicate"
+            self.conn.execute(
+                """INSERT INTO attack_attempts
+                (attempt_id,scan_id,run_id,skill_name,endpoint_id,
+                 request_fingerprint,plan_task_id,plan_revision,logical_check_id,
+                 execution_id,identity_role,payload_variant,outcome)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                values,
+            )
+            return "inserted"
+
+        return self._write(attempt_id, "attempt", operation)
+
+    def complete_attempt(
+        self,
+        attempt_id: str,
+        *,
+        outcome: str,
+        response_status: int | None = None,
+    ) -> WriteResult:
+        """Close a previously reserved attempt in the bound run."""
+
+        def operation() -> str:
+            _identifier(attempt_id)
+            _identifier(outcome)
+            row = self.conn.execute(
+                """SELECT outcome FROM attack_attempts
+                WHERE attempt_id=? AND run_id=? AND scan_id=?""",
+                (attempt_id, self.run_id, self.scan_id),
+            ).fetchone()
+            if row is None:
+                raise AttackStoreError("attempt does not belong to the bound run")
+            if row[0] != "started":
+                raise AttackStoreError("attempt is already completed")
+            if response_status is not None and not 100 <= response_status <= 599:
+                raise AttackStoreError("invalid response status")
+            self.conn.execute(
+                """UPDATE attack_attempts SET outcome=?,response_status=?
+                WHERE attempt_id=? AND run_id=? AND scan_id=?""",
+                (
+                    outcome,
+                    response_status,
+                    attempt_id,
+                    self.run_id,
+                    self.scan_id,
+                ),
+            )
+            return "updated"
+
+        return self._write(attempt_id, "attempt", operation)
+
     def record_evidence(self, *, evidence_id: str | None = None, task_id: str | None = None,
                         attempt_id: str | None = None, kind: str = "observation",
                         body: bytes | str = b"", metadata: Mapping | None = None) -> WriteResult:
@@ -382,6 +497,225 @@ class AttackStore:
             return "inserted"
 
         return self._write(identifier, "evidence", operation)
+
+    def record_finding_bundle(
+        self,
+        *,
+        finding_id: str,
+        task_id: str,
+        endpoint_id: str,
+        skill_name: str,
+        hypothesis_id: str,
+        assessment: Mapping,
+        requests: Sequence[Mapping],
+    ) -> WriteResult:
+        """Atomically persist one confirmed thin-store finding and its requests."""
+
+        def operation() -> str:
+            for value in (finding_id, task_id, endpoint_id, skill_name, hypothesis_id):
+                _identifier(value)
+            self._bound(assessment)
+            self._endpoint(endpoint_id)
+            run = self.get_run()
+            revision = run["plan_revision"]
+            if not self.conn.execute(
+                """SELECT 1 FROM attack_plan_tasks
+                WHERE run_id=? AND scan_id=? AND plan_revision=? AND task_id=?
+                AND endpoint_id=?""",
+                (self.run_id, self.scan_id, revision, task_id, endpoint_id),
+            ).fetchone():
+                raise AttackStoreError("finding task does not belong to the bound run")
+            if assessment.get("hypothesis_id") != hypothesis_id or assessment.get(
+                "disposition"
+            ) != "confirmed":
+                raise AttackStoreError("finding assessment is not confirmed and bound")
+            severity = str(assessment.get("severity", "")).upper()
+            if severity not in {"CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"}:
+                raise AttackStoreError("invalid finding severity")
+            if not requests or len(requests) > 8:
+                raise AttackStoreError("a finding requires bounded supporting requests")
+            supporting_test_ids = assessment.get("supporting_test_ids")
+            if (
+                not isinstance(supporting_test_ids, (list, tuple))
+                or len(supporting_test_ids) != len(set(supporting_test_ids))
+            ):
+                raise AttackStoreError("finding supporting test IDs are invalid")
+            normalized_requests = []
+            for request in requests:
+                test_id = _identifier(str(request.get("test_id", "")))
+                attempt_id = _identifier(str(request.get("attempt_id", "")))
+                evidence_id = _identifier(str(request.get("evidence_id", "")))
+                method = str(request.get("method", "")).upper()
+                if method not in {"GET", "HEAD", "OPTIONS"}:
+                    raise AttackStoreError("finding request method is not read-only")
+                raw_url = str(request.get("url", ""))
+                parsed = urlsplit(raw_url)
+                if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+                    raise AttackStoreError("finding request URL is invalid")
+                response_status = request.get("response_status")
+                if response_status is not None and not 100 <= response_status <= 599:
+                    raise AttackStoreError("invalid finding response status")
+                attempt = self.conn.execute(
+                    """SELECT outcome,response_status FROM attack_attempts
+                    WHERE attempt_id=? AND run_id=? AND scan_id=?
+                    AND plan_task_id=? AND plan_revision=? AND endpoint_id=?
+                    AND logical_check_id=? AND execution_id=?""",
+                    (
+                        attempt_id,
+                        self.run_id,
+                        self.scan_id,
+                        task_id,
+                        revision,
+                        endpoint_id,
+                        test_id,
+                        hypothesis_id,
+                    ),
+                ).fetchone()
+                if (
+                    attempt is None
+                    or attempt[0] != "supports"
+                    or attempt[1] != response_status
+                ):
+                    raise AttackStoreError(
+                        "finding request requires a completed supporting attempt"
+                    )
+                evidence = self.conn.execute(
+                    """SELECT body_sha256,body_length,metadata_json
+                    FROM attack_evidence
+                    WHERE evidence_id=? AND attempt_id=? AND run_id=? AND scan_id=?
+                    AND task_id=? AND plan_revision=?""",
+                    (
+                        evidence_id,
+                        attempt_id,
+                        self.run_id,
+                        self.scan_id,
+                        task_id,
+                        revision,
+                    ),
+                ).fetchone()
+                if evidence is None:
+                    raise AttackStoreError(
+                        "finding request requires bound persisted evidence"
+                    )
+                safe_url = _redact({"url": raw_url})["url"]
+                body = request.get("response_body", b"")
+                if isinstance(body, str):
+                    body = body.encode("utf-8")
+                if not isinstance(body, bytes) or len(body) > 200_000:
+                    raise AttackStoreError("finding response body is invalid")
+                evidence_metadata = json.loads(evidence[2])
+                expected_evidence = {
+                    "hypothesis_id": hypothesis_id,
+                    "test_id": test_id,
+                    "outcome": "supports",
+                    "response_status": response_status,
+                    "method": method,
+                    "url": safe_url,
+                    "identity_role": str(
+                        request.get("identity_role") or "unknown"
+                    )[:128],
+                    "response_body_sha256": _sha(body),
+                    "response_body_length": len(body),
+                }
+                if (
+                    any(
+                        evidence_metadata.get(key) != value
+                        for key, value in expected_evidence.items()
+                    )
+                    or evidence[0] != _sha(body)
+                    or evidence[1] != len(body)
+                ):
+                    raise AttackStoreError(
+                        "finding request does not match persisted evidence"
+                    )
+                request_id = "request_" + _sha(
+                    _json([self.run_id, finding_id, test_id])
+                )
+                normalized_requests.append(
+                    (
+                        request_id,
+                        finding_id,
+                        str(request.get("identity_role") or "unknown")[:128],
+                        method,
+                        safe_url,
+                        response_status,
+                        None,
+                        None,
+                    )
+                )
+            if set(supporting_test_ids) != {
+                request.get("test_id") for request in requests
+            } or len(normalized_requests) != len(
+                {request[0] for request in normalized_requests}
+            ):
+                raise AttackStoreError(
+                    "finding requests do not match the supporting test IDs"
+                )
+            finding_values = (
+                self.run_id,
+                self.scan_id,
+                task_id,
+                revision,
+                endpoint_id,
+                _identifier(str(assessment.get("vuln_type", ""))),
+                severity,
+                _identifier(str(assessment.get("title", ""))),
+                str(assessment.get("description", ""))[:20_000] or None,
+                str(assessment.get("cwe_id"))[:64]
+                if assessment.get("cwe_id") is not None
+                else None,
+                "unreviewed",
+            )
+            existing = self.conn.execute(
+                """SELECT run_id,scan_id,plan_task_id,plan_revision,endpoint_id,
+                vuln_type,severity,title,description,cwe_id,status
+                FROM findings WHERE finding_id=?""",
+                (finding_id,),
+            ).fetchone()
+            if existing is not None:
+                if tuple(existing) != finding_values:
+                    raise AttackStoreError(
+                        "finding identifier already contains different data"
+                    )
+                stored_requests = self.conn.execute(
+                    """SELECT request_id,finding_id,role,method,url,response_status,
+                    response_headers,response_body FROM attack_requests
+                    WHERE finding_id=? ORDER BY request_id""",
+                    (finding_id,),
+                ).fetchall()
+                if [tuple(row) for row in stored_requests] != sorted(
+                    normalized_requests
+                ):
+                    raise AttackStoreError(
+                        "finding identifier already contains different requests"
+                    )
+                return "duplicate"
+            self.conn.execute(
+                """INSERT INTO findings
+                (finding_id,run_id,scan_id,plan_task_id,plan_revision,endpoint_id,
+                 vuln_type,severity,title,description,cwe_id,status)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (finding_id, *finding_values),
+            )
+            for normalized in normalized_requests:
+                self.conn.execute(
+                    """INSERT INTO attack_requests
+                    (request_id,finding_id,role,method,url,response_status,
+                     response_headers,response_body)
+                    VALUES (?,?,?,?,?,?,?,?)""",
+                    normalized,
+                )
+            return "inserted"
+
+        return self._write(finding_id, "finding", operation)
+
+    def list_finding_ids(self) -> list[str]:
+        rows = self.conn.execute(
+            """SELECT finding_id FROM findings
+            WHERE run_id=? AND scan_id=? ORDER BY finding_id""",
+            (self.run_id, self.scan_id),
+        )
+        return [row[0] for row in rows]
 
     def save_authorization(self, document: Mapping) -> WriteResult:
         """Archive an exact binding; this method does not verify signatures."""
@@ -426,8 +760,67 @@ class AttackStore:
 
         return self._write(identifier, "authorization", operation)
 
-    def revoke_run(self, reason: str = "operator revoked") -> int:
+    def get_authorization(self, authorization_id: str) -> dict | None:
+        """Return the immutable authorization archived for this bound run."""
+        _identifier(authorization_id)
+        row = self.conn.execute(
+            """SELECT document_json FROM run_authorizations
+            WHERE authorization_id=? AND run_id=? AND scan_id=?""",
+            (authorization_id, self.run_id, self.scan_id),
+        ).fetchone()
+        return None if row is None else json.loads(row[0])
+
+    def activate_authorization(self, authorization_id: str) -> None:
+        """Activate only a current, non-revoked authorization for this run."""
+        _identifier(authorization_id)
         with self.conn:
+            row = self.conn.execute(
+                """SELECT 1 FROM run_authorizations
+                WHERE authorization_id=? AND run_id=? AND scan_id=?
+                AND plan_revision=? AND revocation_generation=?
+                AND revoked_at IS NULL""",
+                (
+                    authorization_id,
+                    self.run_id,
+                    self.scan_id,
+                    self.get_run()["plan_revision"],
+                    self.get_run()["revocation_generation"],
+                ),
+            ).fetchone()
+            if row is None:
+                raise AttackStoreError(
+                    "authorization is not current for the bound run"
+                )
+            self.conn.execute(
+                """UPDATE attack_runs SET authorization_id=?,status='ready',updated_at=?
+                WHERE run_id=? AND scan_id=?""",
+                (authorization_id, _now(), self.run_id, self.scan_id),
+            )
+            self._audit(
+                "authorization.activated",
+                {"authorization_id": authorization_id},
+            )
+
+    def revoke_run(
+        self,
+        reason: str = "operator revoked",
+        *,
+        revoke_authorization: Callable[[str], None] | None = None,
+    ) -> int:
+        self.conn.execute("BEGIN IMMEDIATE")
+        with self.conn:
+            current = self.get_run()
+            authorization_id = current.get("authorization_id")
+            already_revoked = self.conn.execute(
+                """SELECT 1 FROM audit_events
+                WHERE scan_id=? AND event_type='run.revoked'
+                AND json_extract(details_json,'$.run_id')=? LIMIT 1""",
+                (self.scan_id, self.run_id),
+            ).fetchone()
+            if already_revoked is not None:
+                return current["revocation_generation"]
+            if revoke_authorization is not None and authorization_id:
+                revoke_authorization(authorization_id)
             self.conn.execute("""UPDATE attack_runs SET revocation_generation=revocation_generation+1,
                 authorization_id=NULL,status=CASE WHEN status IN ('completed','failed','cancelled')
                 THEN status ELSE 'paused' END,updated_at=? WHERE run_id=? AND scan_id=?""",

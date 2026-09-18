@@ -20,7 +20,8 @@ from aidast.pipeline.lifecycle import create_task, finish_stage_run, start_stage
 from aidast.pipeline.live_schema import migrate_live_pipeline_schema
 from aidast.recon import db
 from aidast.validation import (CandidateIntegrityGate, HttpRuntimeContract,
-                               DevelopmentRuntimeContract, canonical_sha256)
+                               DevelopmentRuntimeContract,
+                               ImpactDevelopmentRuntimeContract, canonical_sha256)
 
 
 class FakeNativeMain:
@@ -451,6 +452,26 @@ class NativeAttackDatabaseCliTests(unittest.TestCase):
                     "credential_roles": [],
                 }],
             }
+            impact_development_contract = {
+                "schema_version": 1,
+                "actions": [{
+                    "contract_id": "bounded-cors-impact",
+                    "path_id": "bounded-impact-confirmation",
+                    "endpoint_template": "/api/items",
+                    "method": "GET",
+                    "request": {
+                        "query_parameters": {"object_id": "7"},
+                        "headers": {"Origin": "https://redacted.invalid"},
+                    },
+                    "assertions": [{
+                        "assertion_id": "cors-impact-origin",
+                        "kind": "header_equals",
+                        "header": "Access-Control-Allow-Origin",
+                        "expected": "https://redacted.invalid",
+                    }],
+                    "credential_roles": [],
+                }],
+            }
             finding.write_text(json.dumps({
                 "scan_id": "scan_native", "endpoint_id": endpoint_id,
                 "vuln_type": "CORS", "severity": "MEDIUM",
@@ -465,6 +486,7 @@ class NativeAttackDatabaseCliTests(unittest.TestCase):
                     "source_request_ids": ["http_fixture"],
                     "runtime_contract": runtime_contract,
                     "development_contract": development_contract,
+                    "impact_development_contract": impact_development_contract,
                 },
                 "evidence": [{
                     "role": "unauthenticated", "method": "GET",
@@ -487,11 +509,15 @@ class NativeAttackDatabaseCliTests(unittest.TestCase):
                 ).fetchone()
                 stored_runtime = conn.execute(
                     """SELECT runtime_contract_json,runtime_contract_sha256,
-                              development_contract_json,development_contract_sha256
+                              development_contract_json,development_contract_sha256,
+                              impact_development_contract_json,
+                              impact_development_contract_sha256,
+                              spec_sha256
                        """
                     "FROM finding_reproduction_specs WHERE finding_id=?",
                     (result["finding_id"],),
                 ).fetchone()
+                schema_version = conn.execute("PRAGMA user_version").fetchone()[0]
             self.assertEqual(stored, ("CORS", "unreviewed"))
             self.assertEqual(requests, 1)
             self.assertEqual(promoted, ("confirmed", result["finding_id"], 1))
@@ -508,6 +534,15 @@ class NativeAttackDatabaseCliTests(unittest.TestCase):
             self.assertEqual(
                 stored_runtime[3], canonical_sha256(normalized_development)
             )
+            normalized_impact = ImpactDevelopmentRuntimeContract.model_validate(
+                impact_development_contract
+            ).model_dump(mode="json")
+            self.assertEqual(json.loads(stored_runtime[4]), normalized_impact)
+            self.assertEqual(
+                stored_runtime[5], canonical_sha256(normalized_impact)
+            )
+            self.assertTrue(all(len(value) == 64 for value in stored_runtime[1::2]))
+            self.assertEqual(schema_version, 10)
 
             second_attempt = root / "second-attempt.json"
             second_attempt.write_text(json.dumps({

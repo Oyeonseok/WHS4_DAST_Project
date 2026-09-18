@@ -161,6 +161,7 @@ def test_recon_snapshot_drives_downstream_pipeline_without_mutation() -> None:
             source_before
         ).hexdigest()
         with sqlite3.connect(pipeline_path) as connection:
+            assert connection.execute("PRAGMA user_version").fetchone()[0] == 10
             selected_skills = connection.execute(
                 "SELECT skill_name FROM attack_tasks WHERE stage_run_id=?",
                 (attack.stage_run_id,),

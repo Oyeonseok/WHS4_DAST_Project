@@ -422,6 +422,96 @@ class AttackCliTests(unittest.TestCase):
             ):
                 with self.assertRaisesRegex(ValueError, "runtime.*profile"):
                     commit_finding(database, "scan", payload)
+            with closing(sqlite3.connect(database)) as conn:
+                self.assertEqual(conn.execute("SELECT COUNT(*) FROM findings").fetchone()[0], 0)
+                self.assertEqual(conn.execute("SELECT COUNT(*) FROM attack_requests").fetchone()[0], 0)
+                self.assertEqual(
+                    conn.execute(
+                        "SELECT COUNT(*) FROM finding_reproduction_specs"
+                    ).fetchone()[0],
+                    0,
+                )
+
+    def test_validation_v10_contract_rejections_are_atomic(self):
+        impact = {
+            "schema_version": 1,
+            "actions": [{
+                "contract_id": "bounded-cors-impact",
+                "path_id": "bounded-impact-confirmation",
+                "endpoint_template": "/items",
+                "method": "GET",
+                "request": {"query_parameters": {"variant": "target"}},
+                "assertions": [{
+                    "assertion_id": "cors-origin",
+                    "kind": "header_equals",
+                    "header": "Access-Control-Allow-Origin",
+                    "expected": "https://redacted.invalid",
+                }],
+                "credential_roles": [],
+            }],
+        }
+        cases = [
+            ("undeclared identity role", lambda reproduction: reproduction.update({
+                "development_contract": {
+                    "schema_version": 1,
+                    "actions": [{
+                        "contract_id": "refresh-current-role",
+                        "action_type": "refresh_current_role_credential",
+                        "blocker_axis": "identity_auth",
+                        "endpoint_template": "/session/refresh",
+                        "method": "GET",
+                        "risk_class": "http_probe",
+                        "request": {},
+                        "assertions": [{
+                            "assertion_id": "refreshed",
+                            "kind": "body_contains",
+                            "expected": "refreshed",
+                        }],
+                        "credential_roles": ["undeclared-role"],
+                    }],
+                },
+            })),
+            ("widens the reproduction endpoint", lambda reproduction: reproduction.update({
+                "impact_development_contract": {
+                    **impact,
+                    "actions": [{**impact["actions"][0], "endpoint_template": "/other"}],
+                },
+            })),
+            ("widens the reproduction endpoint", lambda reproduction: reproduction.update({
+                "impact_development_contract": {
+                    **impact,
+                    "actions": [{**impact["actions"][0], "method": "HEAD"}],
+                },
+            })),
+            ("exceeds the Validation profile", lambda reproduction: reproduction.update({
+                "impact_development_contract": {
+                    **impact,
+                    "actions": [{**impact["actions"][0], "path_id": "unknown-path"}],
+                },
+            })),
+        ]
+        for expected, mutate in cases:
+            with self.subTest(expected=expected), tempfile.TemporaryDirectory() as directory:
+                database, payload, _ = self.protocol_finding_fixture(
+                    Path(directory), runtime_kind="multipart", skill_name="hunt-cors",
+                )
+                document = json.loads(payload.read_text(encoding="utf-8"))
+                document["reproduction"].pop("runtime_contract")
+                mutate(document["reproduction"])
+                payload.write_text(json.dumps(document), encoding="utf-8")
+
+                with self.assertRaisesRegex(ValueError, expected):
+                    commit_finding(database, "scan", payload)
+
+                with closing(sqlite3.connect(database)) as conn:
+                    self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], 10)
+                    for table in (
+                        "findings", "attack_requests", "finding_reproduction_specs",
+                    ):
+                        self.assertEqual(
+                            conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0],
+                            0,
+                        )
 
 
 if __name__ == "__main__":

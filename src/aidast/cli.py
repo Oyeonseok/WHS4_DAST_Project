@@ -894,11 +894,7 @@ def _run_recon(
                         flush=True,
                     ),
                 )
-                if failed_tags:
-                    raise ReconExecutionError(
-                        f"{failed_tags} Recon observations could not be tagged; "
-                        "Attack was not started"
-                    )
+                _require_complete_recon_annotations(failed_tags)
             recon_review = OfflineReconReview(
                 planner=main_agent,
                 conn=executor.conn,
@@ -996,6 +992,14 @@ def _run_recon(
         finally:
             getattr(executor, "close", executor.conn.close)()
     return 2 if recon_failures else 0
+
+
+def _require_complete_recon_annotations(failed_tags: int) -> None:
+    if failed_tags:
+        raise ReconExecutionError(
+            f"{failed_tags} Recon observations could not be tagged; "
+            "Attack was not started"
+        )
 
 
 def _write_recon_handoff(
