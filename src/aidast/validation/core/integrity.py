@@ -255,7 +255,9 @@ class CandidateIntegrityGate:
         return ValidatedCandidate(
             case_id, scan_id, finding_id, finding["vuln_type"], spec["endpoint_template"],
             spec["parameter_name"], spec["payload_template"], spec["source_policy_sha256"],
-            profile, StagedBlindCase(blind, claim), development_actions, impact_actions,
+            profile, StagedBlindCase(
+                blind, claim, reproduction_spec_sha256=spec["spec_sha256"],
+            ), development_actions, impact_actions,
         )
 
     def validate_chain(self, *, case_id: str, scan_id: str, chain_id: str) -> ValidatedCandidate:
@@ -443,7 +445,10 @@ class CandidateIntegrityGate:
         return ValidatedCandidate(
             case_id, scan_id, chain_id, "chain", terminal.endpoint_template,
             terminal.parameter_name, composite_payload, terminal.source_policy_sha256,
-            profile, StagedBlindCase(blind, claim), terminal.development_actions,
+            profile, StagedBlindCase(
+                blind, claim,
+                reproduction_spec_sha256=terminal.staged.reproduction_spec_sha256,
+            ), terminal.development_actions,
         )
 
     def _source_attempts(self, scan_id: str, finding_id: str, identifiers: Any) -> list[sqlite3.Row]:
