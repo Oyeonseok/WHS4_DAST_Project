@@ -1,5 +1,6 @@
 """Deterministic contracts for the shared Validation design."""
 
+import json
 import unittest
 
 from pydantic import ValidationError as PydanticValidationError
@@ -106,3 +107,25 @@ class ValidationContractTests(unittest.TestCase):
         changed = claim.model_copy(update={"claimed_severity": "LOW"})
         with self.assertRaises(BlindDisclosureError):
             staged.reveal_claim(changed)
+
+    def test_blind_view_remains_claim_free_after_eligibility_view_is_added(self):
+        blind = BlindCase(case_id="case", target_kind="finding", endpoint="/objects/{id}",
+            method="GET", injection_location="query", parameter_name="id",
+            payload_template={"id": "<slot:int>"}, required_identity_roles=("subscriber",),
+            credential_references=("opaque_ref",), signal_types=("response_diff",),
+            controls={"positive": {}, "negative": {}}, attack_skill_name="hunt-idor",
+            attack_skill_sha256="a" * 64, validation_skill_sha256="b" * 64,
+            validation_profile_sha256="c" * 64)
+        claim = AttackClaim(target_kind="finding", target_id="finding", vuln_class="idor",
+            title="private claim", claimed_impact="impact", claimed_severity="HIGH",
+            attack_evidence_ids=("attack_evidence",))
+        staged = StagedBlindCase(blind, claim)
+
+        eligibility_view = staged.eligibility_view()
+        self.assertEqual(eligibility_view["attack_claim"]["claimed_impact"], "impact")
+        self.assertNotIn("credential_references", eligibility_view)
+        self.assertIn("payload_structure_sha256", eligibility_view)
+        self.assertIn("reproduction_spec_sha256", eligibility_view)
+        self.assertEqual(eligibility_view["runtime_kind"], "http")
+        self.assertNotIn("attack_claim", staged.blind_view())
+        self.assertNotIn("claimed_impact", json.dumps(staged.blind_view()))

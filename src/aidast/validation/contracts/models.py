@@ -213,6 +213,28 @@ class StagedBlindCase:
             "blind_case_sha256": self.blind_case_sha256,
         }
 
+    def eligibility_view(self) -> dict[str, Any]:
+        """Return the claim with only the execution metadata policy review needs."""
+        from ..core.matching import payload_structure_sha256
+
+        execution = {
+            "endpoint": self._blind_case.endpoint,
+            "method": self._blind_case.method,
+            "injection_location": self._blind_case.injection_location,
+            "parameter_name": self._blind_case.parameter_name,
+            "payload_structure_sha256": payload_structure_sha256(
+                self._blind_case.payload_template
+            ),
+            "runtime_kind": (self._blind_case.runtime_contract or {}).get(
+                "runtime_kind", "http"
+            ),
+        }
+        return {
+            "attack_claim": self._attack_claim.model_dump(mode="json"),
+            **execution,
+            "reproduction_spec_sha256": canonical_sha256(execution),
+        }
+
     def freeze_assessment(self, assessment: BlindAssessment) -> str:
         if self.blind_assessment_sha256 is not None:
             raise BlindDisclosureError("blind assessment is already frozen")
