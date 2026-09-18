@@ -291,6 +291,39 @@ class TargetPolicyTests(unittest.TestCase):
         self.assertFalse(result.allows_host("x.email.shopify.com"))
         self.assertTrue(result.allows_host("admin.shopify.com"))
 
+    def test_scope_excluded_root_reanchors_wildcard_instead_of_failing(self) -> None:
+        # Real-world pattern (e.g. YesWeHack's Alasco program): "*.example.com"
+        # is in scope while the bare apex "example.com" is separately marked
+        # Ineligible/Excluded. A wildcard never covers its own apex by DNS
+        # convention, so this is not a contradictory Scope -- but the policy
+        # proposal always seeds allowed_hosts with the bare root, so applying
+        # the exclusion naively would make validate_policy_for_target reject
+        # the policy as unsafe (allowed and excluded at once).
+        from aidast.cli import _apply_scope_host_exclusions
+
+        wildcard = TargetPolicy(
+            scope_id="scope", policy_id="policy", asset_type=AssetType.WILDCARD,
+            asset="*.example.com", allowed_hosts=["example.com"],
+            include_subdomains=True,
+        )
+        exclusions = [
+            ScopeAsset(
+                asset_type=AssetType.DOMAIN, asset="example.com",
+                description="marketing site on third-party host",
+                eligibility="ineligible", maximum_severity="None",
+            ),
+        ]
+
+        result = _apply_scope_host_exclusions(
+            {(AssetType.WILDCARD.value, "*.example.com"): wildcard}, exclusions
+        )[(AssetType.WILDCARD.value, "*.example.com")]
+
+        self.assertEqual(result.excluded_hosts, ["example.com"])
+        self.assertEqual(result.allowed_hosts, ["*.example.com"])
+        self.assertFalse(result.allows_host("example.com"))
+        self.assertTrue(result.allows_host("app.example.com"))
+        self.assertTrue(result.allows_host("api.example.com"))
+
     def test_scope_exclusion_revalidation_preserves_grounded_active_grant(self) -> None:
         from aidast.cli import _apply_scope_host_exclusions
 
