@@ -32,6 +32,7 @@ Skill 실행만 담당합니다. 전체 파이프라인을 자율적으로 지�
 
 - [설치](#설치)
 - [빠른 시작](#빠른-시작)
+- [웹 대시보드](#웹-대시보드)
 - [핵심 워크플로](#핵심-워크플로)
 - [주요 명령](#주요-명령)
 - [운영 상세](docs/OPERATIONS.md)
@@ -47,6 +48,11 @@ Skill 실행만 담당합니다. 전체 파이프라인을 자율적으로 지�
 | Chaining | 검증 가능한 finding 간 연결 분석 | chain candidate |
 | Validation | 재현·대조군·증거 기반 최종 판정 | validation case |
 | Report | 검증된 case의 플랫폼별 로컬 초안 생성 | `Report.md`, `Report.json` |
+
+Attack은 Recon 신호로 선택된 Hunt Skill을 사용합니다. 템플릿이 지원되는
+프로브는 Agent가 payload를 직접 생성하지 않고, 버전과 해시가 고정된 YAML
+템플릿과 Python Runner가 요청 변형·matcher·evidence를 결정론적으로
+처리합니다. matcher 적중은 finding 확정이 아니라 Validation 후보입니다.
 
 ## 실행 전 확인
 
@@ -71,29 +77,29 @@ Skill 실행만 담당합니다. 전체 파이프라인을 자율적으로 지�
 ### GitHub에서 설치
 
 ```bash
-OWNER="Oyeonseok"
-REPO="WHS4_DAST_Project"
-GITHUB="https://github.com"
-uv tool install \
-  "git+${GITHUB}/${OWNER}/${REPO}.git"
+git clone https://github.com/Oyeonseok/WHS4_DAST_Project.git
+cd WHS4_DAST_Project
+uv sync
+uv tool install --editable .
 
 uvx --from playwright \
   playwright install chromium
 ```
 
-### 팀 개발용 clone 설치
+이후 어느 폴더에서든 `aidast`를 실행할 수 있습니다. 기본 산출물은 명령을
+실행한 폴더가 아니라 위에서 clone한 저장소의 `result/`에 모입니다.
 
-코드를 수정하고 PR을 만드는 팀원은 저장소를 clone한 뒤 editable tool로 연결합니다.
+### 팀 개발용 의존성 설치
+
+코드를 수정하고 PR을 만드는 팀원은 clone한 저장소에서 개발 의존성도 설치합니다.
 
 ```bash
-git clone https://github.com/Oyeonseok/WHS4_DAST_Project.git
 cd WHS4_DAST_Project
 uv sync --group dev
-uv tool install --editable .
 ```
 
-이후 어느 폴더에서든 `aidast`를 실행할 수 있으며, clone 폴더의 코드 수정이
-재설치 없이 바로 반영됩니다.
+editable tool로 연결되어 있으므로 clone 폴더의 코드 수정은 재설치 없이 바로
+반영됩니다.
 
 ### 설치 확인과 로그인
 
@@ -115,8 +121,7 @@ aidast login
 aidast update
 ```
 
-GitHub에서 uv tool로 설치한 경우 패키지를 다시 내려받아 갱신합니다. editable
-설치에서는 연결된 Git 저장소가 깨끗한지 확인한 뒤 현재 브랜치를
+clone한 저장소에 연결된 editable 설치에서는 저장소가 깨끗한지 확인한 뒤 현재 브랜치를
 `git pull --ff-only`로 업데이트하고 tool 의존성을 새로 맞춥니다. 로컬 변경사항이
 있으면 작업을 덮어쓰지 않고 중단하므로 먼저 commit하거나 stash해야 합니다.
 
@@ -132,6 +137,38 @@ katana     ffuf  mitmdump
 일부 선택 도구는 없으면 건너뜁니다. 단, wildcard 자산 발견에 필요한
 Subfinder가 없거나 실패하면 해당 타깃을 실패 처리하고, 정책 강제에 필요한
 `mitmdump`를 시작하지 못하면 Recon을 실행하지 않습니다.
+
+## 웹 대시보드
+
+WebUI를 live 모드로 빌드한 뒤 로컬 운영자 대시보드를 실행합니다.
+
+```bash
+cd WebUI
+npm ci
+npm run build
+
+cd ..
+aidast dashboard --ui-dir WebUI/dist
+```
+
+기본 저장 경로는 명령을 실행한 위치와 관계없이 clone한 저장소의 `result/`입니다.
+브라우저에서 `http://127.0.0.1:8000`을 엽니다. 서버는 `Recon.db` 또는
+`Pipeline.db`를 read-only로 읽고, 승인 파일의 SHA-256 무결성을 다시 확인한 후
+스캔 상태와 비밀정보가 제거된 활동 로그를 REST/WebSocket으로 전달합니다.
+재연결용 이벤트 커서는 `result/.webui/events.db`에 별도로 저장되며 원본 실행 DB는
+수정하지 않습니다.
+
+현재 서버에는 원격 인증이 없으므로 loopback 주소에만 바인딩할 수 있습니다.
+`Scopes / Programs`에서 프로그램 URL과 Public/Private 구분을 먼저 등록합니다.
+등록 항목은 Scope 수집 대기열일 뿐 실행 권한이 아닙니다. 대시보드에서 Public
+headless 수집 또는 로그인/MFA용 interactive browser 수집을 시작하고, 진행 로그와
+추출된 인/아웃 스코프 및 정책을 검토한 뒤 반드시 **Yes(승인)** 또는 **No(거절)** 를
+선택합니다. Yes만 해시로 묶인 승인 파일을 게시하며 No는 초안을 삭제합니다.
+`New scan`은 무결성이 확인된 승인 Scope만 선택할 수 있고,
+그 Scope의 정확한 타깃과 그 안에 포함되는 시작 URL만 기존 `aidast run`으로
+전달합니다. 승인되지 않은 프로그램·Scope 밖 URL·임의 명령은 거부하며 CLI의
+정책·승인·예산 게이트를 그대로 통과합니다. 프론트엔드 빌드 변수와 전체 이벤트 계약은
+[`WebUI/README.md`](WebUI/README.md)를 참고하세요.
 
 ## 빠른 시작
 
@@ -197,6 +234,14 @@ aidast recon "<PROGRAM_URL>" --policy-only
 ```
 
 Scope 해석, `TargetPolicy.json`, 도구 제어값만 확인하며 실제 타깃에는 요청하지 않습니다.
+
+Recon은 별도 로그인 옵션 없이 먼저 비로그인 접속합니다. 404나 공개
+페이지에서는 로그인을 요청하지 않고, 비밀번호 입력창·폼·버튼·링크처럼 실제 로그인 UI가
+확인될 때만 로그인 창을 엽니다. 로그인 UI를 완전히 금지하려면
+`--login-mode none`, 처음부터 수동 로그인을 강제하려면
+`--login-mode runtime-browser`를 사용합니다.
+로그인 세션은 URL 경로별이 아니라 `scheme + host + port` 단위로 저장하므로 같은
+사이트의 여러 엔드포인트를 탐색할 때 로그인은 최초 한 번만 요구합니다.
 
 ### 3. 승인된 전체 자산 실행
 

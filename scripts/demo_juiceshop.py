@@ -29,6 +29,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from aidast.orchestration.recon import ReconCoordinator
+from aidast.paths import RESULT_ROOT
 from aidast.recon.executor import ReconExecutor
 from aidast.recon.models import ReconPlan, ReconPlanProposal, ReconPlanTarget, ReconStep
 from aidast.recon.surface import export_surface
@@ -147,8 +148,8 @@ def main() -> None:
     # 실행 결과가 DB에 계속 누적되면 안 된다. _ensure_asset()이 DB를
     # 조회하지 않고 매 실행마다 새 asset/origin을 만들기 때문에, 재실행 전
     # 기존 DB/Surface.json을 지우고 깨끗한 상태에서 시작한다.
-    db_path = Path("result/demo/recon_juiceshop.db")
-    surface_path = Path("result/demo/Surface.json")
+    db_path = RESULT_ROOT / "demo" / "recon_juiceshop.db"
+    surface_path = RESULT_ROOT / "demo" / "Surface.json"
     db_path.unlink(missing_ok=True)
     surface_path.unlink(missing_ok=True)
     # 예전에 WAL 모드로 생성됐던 보조 파일이 남아있으면 같이 정리한다.

@@ -21,7 +21,9 @@ from aidast.recon.executor import ReconExecutionError, ReconExecutor
 from aidast.recon.models import (
     ReconPlan,
     ReconPlanProposal,
+    ReconPlanSelectionProposal,
     ReconPlanTarget,
+    ReconPlanTargetSelection,
     ReconStep,
     ReconTask,
     ReconTaskStatus,
@@ -593,13 +595,12 @@ class ReconExecutorWildcardTests(unittest.TestCase):
 
 class ReconMainAgentTests(unittest.TestCase):
     def test_adds_required_origin_chain_before_endpoint_discovery(self) -> None:
-        proposal = ReconPlanProposal(
+        proposal = ReconPlanSelectionProposal(
             objective="웹 자산을 정찰한다.",
             mode="RECON",
             targets=[
-                ReconPlanTarget(
-                    asset_type=AssetType.URL,
-                    asset="https://example.com/app",
+                ReconPlanTargetSelection(
+                    target_id="target_0001",
                     steps=[ReconStep.ENDPOINT_DISCOVERY],
                     constraints=[],
                 )
@@ -632,13 +633,12 @@ class ReconMainAgentTests(unittest.TestCase):
         )
 
     def test_excludes_non_web_assets_from_canonical_recon_targets(self) -> None:
-        proposal = ReconPlanProposal(
+        proposal = ReconPlanSelectionProposal(
             objective="웹 자산을 정찰한다.",
             mode="RECON",
             targets=[
-                ReconPlanTarget(
-                    asset_type=AssetType.WILDCARD,
-                    asset="*.example.com",
+                ReconPlanTargetSelection(
+                    target_id="target_0001",
                     steps=[ReconStep.ASSET_DISCOVERY],
                     constraints=[],
                 )
@@ -678,13 +678,12 @@ class ReconMainAgentTests(unittest.TestCase):
         self.assertEqual(result.targets[0].asset, "*.example.com")
 
     def test_codex_creates_structured_recon_plan_from_scope_markdown(self) -> None:
-        proposal = ReconPlanProposal(
+        proposal = ReconPlanSelectionProposal(
             objective="승인된 자산의 공격 표면을 수집한다.",
             mode="FULL_RECON",
             targets=[
-                ReconPlanTarget(
-                    asset_type=AssetType.WILDCARD,
-                    asset="*.example.com",
+                ReconPlanTargetSelection(
+                    target_id="target_0001",
                     steps=[ReconStep.ASSET_DISCOVERY, ReconStep.DNS_RESOLUTION],
                     constraints=["서비스 거부 공격 금지"],
                 )
@@ -717,14 +716,13 @@ class ReconMainAgentTests(unittest.TestCase):
         self.assertEqual(result.plan_type, "RECON")
         self.assertEqual(result.targets[0].asset, "*.example.com")
 
-    def test_rejects_markdown_escaped_target_not_in_canonical_list(self) -> None:
-        proposal = ReconPlanProposal(
+    def test_rejects_unknown_canonical_target_id(self) -> None:
+        proposal = ReconPlanSelectionProposal(
             objective="승인된 자산의 공격 표면을 수집한다.",
             mode="FULL_RECON",
             targets=[
-                ReconPlanTarget(
-                    asset_type=AssetType.WILDCARD,
-                    asset="\\*.example.com",
+                ReconPlanTargetSelection(
+                    target_id="target_9999",
                     steps=[ReconStep.ASSET_DISCOVERY],
                     constraints=[],
                 )
@@ -735,7 +733,7 @@ class ReconMainAgentTests(unittest.TestCase):
         agent = CodexMainAgent(executable="codex-test")
         with patch.object(agent, "_run_structured", return_value=proposal):
             with self.assertRaisesRegex(
-                Exception, "canonical in-scope target list"
+                Exception, "unknown canonical Recon target ID"
             ):
                 agent.create_recon_plan(
                     scope_id="scope_test",
@@ -744,6 +742,42 @@ class ReconMainAgentTests(unittest.TestCase):
                     ),
                     allowed_targets=scope_analysis().in_scope_assets,
                 )
+
+    def test_target_id_binding_preserves_scheme_less_wildcard(self) -> None:
+        proposal = ReconPlanSelectionProposal(
+            objective="승인된 자산을 정찰한다.",
+            mode="RECON",
+            targets=[ReconPlanTargetSelection(
+                target_id="target_0001",
+                steps=[ReconStep.ASSET_DISCOVERY],
+                constraints=[],
+            )],
+            global_constraints=[],
+            completion_criteria=["완료"],
+        )
+        canonical = ScopeAsset(
+            asset_type=AssetType.WILDCARD,
+            asset="*.checkin.life",
+            description="scheme-less wildcard",
+            eligibility="in scope",
+            maximum_severity="High",
+        )
+        agent = CodexMainAgent(executable="codex-test")
+        with patch.object(agent, "_run_structured", return_value=proposal) as run:
+            result = agent.create_recon_plan(
+                scope_id="scope_test",
+                scope_markdown="정책",
+                allowed_targets=[canonical],
+            )
+
+        self.assertEqual(result.targets[0].asset_type, AssetType.WILDCARD)
+        self.assertEqual(result.targets[0].asset, "*.checkin.life")
+        self.assertIs(
+            run.call_args.kwargs["model_type"], ReconPlanSelectionProposal
+        )
+        prompt = run.call_args.kwargs["prompt"]
+        self.assertIn('"target_id": "target_0001"', prompt)
+        self.assertIn('"asset": "*.checkin.life"', prompt)
 
 
 class ReconCliTests(unittest.TestCase):

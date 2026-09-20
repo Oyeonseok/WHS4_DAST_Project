@@ -132,6 +132,8 @@ class ReconExecutor:
         annotation_agent=None,
         auth_bootstrap: dict | None = None,
         target_sessions: dict[tuple[str, str], TargetSession] | None = None,
+        interactive_login: bool = False,
+        automatic_login: bool = False,
         request_headers: dict[str, str] | None = None,
         diagnostic_path: Path | None = None,
         prioritize_discovered_assets_first: bool = False,
@@ -139,6 +141,8 @@ class ReconExecutor:
         candidate_db_path: Path | None = None,
     ):
         self.target_sessions = target_sessions
+        self.interactive_login = bool(interactive_login)
+        self.automatic_login = bool(automatic_login)
         self.request_headers = dict(request_headers or {})
         self.prioritize_discovered_assets_first = prioritize_discovered_assets_first
         self.annotation_agent = annotation_agent
@@ -717,6 +721,8 @@ class ReconExecutor:
                 session_file=str(session.runtime_path(self.scan_id)) if session else None,
                 identity_id=session.identity if session else None,
                 preauthenticated=session is not None,
+                interactive_login=self.interactive_login and session is None,
+                automatic_login=self.automatic_login and session is None,
                 request_headers=self.request_headers,
                 browser_context_token=browser_context_token,
                 diagnostic_callback=self._diagnostic,

@@ -12,6 +12,7 @@ from aidast.attack.skill_selector import (
     available_attack_skill_names,
     select_relevant_attack_skills,
 )
+from aidast.attack.template_loader import template_ids_for_skill
 from aidast.pipeline.lifecycle import create_task, finish_stage_run, start_stage_run
 
 
@@ -91,6 +92,7 @@ class AttackCoordinator:
                     "task_id": task_id,
                     "skill_name": skill_name,
                     "selection_reasons": list(selection_reasons[skill_name]),
+                    "template_ids": list(template_ids_for_skill(skill_name)),
                 })
 
         try:

@@ -313,6 +313,7 @@ class NativeAttackMainAgentTests(unittest.TestCase):
                     (work / ".agents/skills/aidast-live-attack/SKILL.md").is_file()
                 )
                 self.assertTrue((work / "tools/request_cli.py").is_file())
+                self.assertTrue((work / "tools/template_cli.py").is_file())
                 self.assertTrue(
                     (work / "hunt-skills/hunt-dispatch/SKILL.md").is_file()
                 )
@@ -332,6 +333,7 @@ class NativeAttackMainAgentTests(unittest.TestCase):
                 )
                 self.assertEqual(config["hunt_skill_root"], str(work / "hunt-skills"))
                 self.assertEqual(config["attack_tasks"][0]["task_id"], "task_one")
+                self.assertEqual(config["attack_templates"], [])
                 output = Path(command[command.index("--output-last-message") + 1])
                 output.write_text(AttackStageResult(
                     status="COMPLETED", scan_id="scan_native",

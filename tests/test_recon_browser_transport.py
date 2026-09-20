@@ -227,6 +227,167 @@ class ReconBrowserTransportTests(unittest.TestCase):
         ])
         self.assertIs(self.driver.context.pages[0], page)
 
+    def test_unauthenticated_start_never_opens_manual_login(self):
+        page = Mock(url=self.policy.asset)
+        with tempfile.TemporaryDirectory() as directory:
+            self.driver.session_config.session_file = str(Path(directory) / "session.json")
+            with patch.object(self.driver, "_launch_manual_browser") as launch, patch.object(
+                self.driver, "_ensure_page", return_value=page
+            ), patch.object(self.driver, "save_session", return_value=True), patch.object(
+                self.driver, "_shutdown_runtime"
+            ) as shutdown, patch(
+                "aidast.recon.tools.playwright_driver._wait_for_manual_login"
+            ) as wait:
+                self.driver.start_unauthenticated()
+
+        launch.assert_called_once_with()
+        page.goto.assert_called_once_with(
+            self.policy.asset, wait_until="domcontentloaded", timeout=15_000
+        )
+        wait.assert_not_called()
+        shutdown.assert_not_called()
+
+    def test_automatic_start_does_not_prompt_for_404(self):
+        page = Mock(url=self.policy.asset)
+        response = SimpleNamespace(status=404, headers={})
+        with patch.object(
+            self.driver, "_start_unauthenticated", return_value=(page, response)
+        ), patch.object(self.driver, "save_session", return_value=True), patch.object(
+            self.driver, "capture_and_start"
+        ) as login:
+            self.assertFalse(self.driver.start_automatic())
+        login.assert_not_called()
+
+    def test_automatic_start_does_not_prompt_for_login_text_without_a_control(self):
+        page = Mock(url=self.policy.asset)
+        page.locator("input[type='password']:visible").count.return_value = 0
+        page.locator("body").inner_text.return_value = "Welcome. Log in"
+        response = SimpleNamespace(status=200, headers={})
+        with patch.object(
+            self.driver, "_start_unauthenticated", return_value=(page, response)
+        ), patch.object(self.driver, "save_session", return_value=True), patch.object(
+            self.driver, "capture_and_start"
+        ) as login:
+            self.assertFalse(self.driver.start_automatic())
+        login.assert_not_called()
+
+    def test_automatic_start_prompts_for_visible_login_link(self):
+        page = Mock(url=self.policy.asset)
+
+        def locator(selector):
+            result = Mock()
+            result.count.return_value = 0
+            result.evaluate_all.return_value = []
+            result.all_inner_texts.return_value = []
+            result.inner_text.return_value = "Welcome"
+            if selector == "a[href]:visible":
+                result.evaluate_all.return_value = ["https://example.com/login"]
+            return result
+
+        page.locator.side_effect = locator
+        response = SimpleNamespace(status=200, headers={})
+        with tempfile.TemporaryDirectory() as directory:
+            self.driver.session_config.session_file = str(Path(directory) / "session.json")
+            with patch.object(
+                self.driver, "_start_unauthenticated", return_value=(page, response)
+            ), patch.object(self.driver, "_shutdown_runtime"), patch.object(
+                self.driver, "capture_and_start"
+            ) as login:
+                self.assertTrue(self.driver.start_automatic())
+            self.assertTrue(self.driver.automatic_auth_marker_path.is_file())
+        login.assert_called_once_with()
+
+    def test_automatic_start_prompts_for_visible_password_input(self):
+        page = Mock(url="https://example.com/login")
+
+        def locator(selector):
+            result = Mock()
+            result.count.return_value = 1 if selector == "input[type='password']:visible" else 0
+            result.evaluate_all.return_value = []
+            result.all_inner_texts.return_value = []
+            return result
+
+        page.locator.side_effect = locator
+        response = SimpleNamespace(status=200, headers={})
+        with tempfile.TemporaryDirectory() as directory:
+            self.driver.session_config.session_file = str(Path(directory) / "session.json")
+            with patch.object(
+                self.driver, "_start_unauthenticated", return_value=(page, response)
+            ), patch.object(self.driver, "_shutdown_runtime"), patch.object(
+                self.driver, "capture_and_start"
+            ) as login:
+                self.assertTrue(self.driver.start_automatic())
+        login.assert_called_once_with()
+
+    def test_json_401_without_login_ui_does_not_prompt(self):
+        page = Mock(url="https://example.com/api/me")
+
+        def locator(_selector):
+            result = Mock()
+            result.count.return_value = 0
+            result.evaluate_all.return_value = []
+            result.all_inner_texts.return_value = []
+            return result
+
+        page.locator.side_effect = locator
+        response = SimpleNamespace(
+            status=401,
+            headers={
+                "content-type": "application/json",
+                "www-authenticate": "Bearer",
+            },
+        )
+        with patch.object(
+            self.driver, "_start_unauthenticated", return_value=(page, response)
+        ), patch.object(self.driver, "save_session", return_value=True), patch.object(
+            self.driver, "capture_and_start"
+        ) as login:
+            self.assertFalse(self.driver.start_automatic())
+        login.assert_not_called()
+
+    def test_automatic_start_reuses_one_authenticated_session_per_origin(self):
+        page = Mock(url="https://example.com/api/missing")
+        response = SimpleNamespace(status=404, headers={})
+        with tempfile.TemporaryDirectory() as directory:
+            self.driver.session_config.session_file = str(Path(directory) / "session.json")
+            self.driver.session_path.write_text("{}", encoding="utf-8")
+            self.driver.session_storage_path.write_text("{}", encoding="utf-8")
+            self.driver.automatic_auth_marker_path.write_text(
+                "authenticated\n", encoding="utf-8"
+            )
+            with patch.object(
+                self.driver, "_start_unauthenticated", return_value=(page, response)
+            ) as start, patch.object(
+                self.driver, "save_session", return_value=True
+            ), patch.object(self.driver, "capture_and_start") as login:
+                self.assertTrue(self.driver.start_automatic())
+        start.assert_called_once_with(restore_saved_session=True)
+        login.assert_not_called()
+
+    def test_none_mode_never_reauthenticates_during_session_check(self):
+        self.driver._interactive_authentication_enabled = False
+        with patch.object(self.driver, "restore_runtime"), patch.object(
+            self.driver, "session_is_valid", return_value=False
+        ) as validate, patch.object(self.driver, "capture_and_start") as login:
+            self.driver.ensure_session()
+        validate.assert_not_called()
+        login.assert_not_called()
+
+    def test_endpoint_discovery_uses_automatic_login_detection_when_selected(self):
+        with patch(
+            "aidast.recon.tools.endpoint_discovery.PlaywrightDriver"
+        ) as driver:
+            driver.return_value.start_automatic.side_effect = RuntimeError("stop")
+            with self.assertRaisesRegex(RuntimeError, "stop"):
+                discover_endpoints(
+                    self.policy.asset,
+                    target_policy=self.policy,
+                    mitm_proxy_url="http://127.0.0.1:8080",
+                    automatic_login=True,
+                )
+        driver.return_value.start_automatic.assert_called_once_with()
+        driver.return_value.capture_and_start.assert_not_called()
+
     def test_authentication_observer_keeps_only_secret_free_same_origin_coordinates(self):
         self.driver._phase = "login"
         self.driver._observe_authentication_request(SimpleNamespace(
@@ -498,7 +659,7 @@ class ReconBrowserTransportTests(unittest.TestCase):
             with self.subTest(options=options), patch(
                 "aidast.recon.tools.endpoint_discovery.PlaywrightDriver"
             ) as driver:
-                driver.return_value.capture_and_start.side_effect = RuntimeError("stop before browser launch")
+                driver.return_value.start_unauthenticated.side_effect = RuntimeError("stop before browser launch")
                 with self.assertRaisesRegex(RuntimeError, "stop before browser launch"):
                     discover_endpoints(
                         self.policy.asset, target_policy=self.policy,
@@ -522,7 +683,7 @@ class ReconBrowserTransportTests(unittest.TestCase):
         with patch(
             "aidast.recon.tools.endpoint_discovery.PlaywrightDriver"
         ) as driver:
-            driver.return_value.capture_and_start.side_effect = RuntimeError("stop")
+            driver.return_value.start_unauthenticated.side_effect = RuntimeError("stop")
             with self.assertRaisesRegex(RuntimeError, "stop"):
                 discover_endpoints(
                     self.policy.asset,
@@ -531,6 +692,21 @@ class ReconBrowserTransportTests(unittest.TestCase):
                     request_headers=headers,
                 )
         self.assertEqual(driver.call_args.kwargs["request_headers"], headers)
+
+    def test_endpoint_discovery_uses_manual_login_only_when_explicit(self):
+        with patch(
+            "aidast.recon.tools.endpoint_discovery.PlaywrightDriver"
+        ) as driver:
+            driver.return_value.capture_and_start.side_effect = RuntimeError("stop")
+            with self.assertRaisesRegex(RuntimeError, "stop"):
+                discover_endpoints(
+                    self.policy.asset,
+                    target_policy=self.policy,
+                    mitm_proxy_url="http://127.0.0.1:8080",
+                    interactive_login=True,
+                )
+        driver.return_value.capture_and_start.assert_called_once_with()
+        driver.return_value.start_unauthenticated.assert_not_called()
 
     def test_route_guard_injects_identity_only_into_target_requests(self):
         self.driver.request_headers = {
@@ -604,11 +780,18 @@ class ReconBrowserTransportTests(unittest.TestCase):
 
     def test_default_sessions_are_scoped_by_run_identity_and_target(self):
         first = _make_default_session_file(self.policy.asset, run_id="run", identity_id="alice")
-        self.assertEqual(Path(first).parts[:2], ("result", ".aidast_sessions"))
+        from aidast.paths import RESULT_ROOT
+        self.assertTrue(Path(first).is_relative_to(RESULT_ROOT / ".aidast_sessions"))
         self.assertEqual(first, _make_default_session_file(self.policy.asset, run_id="run", identity_id="alice"))
+        self.assertEqual(
+            first,
+            _make_default_session_file(
+                "https://example.com/api/other", run_id="run", identity_id="alice"
+            ),
+        )
         for url, run, identity in [(self.policy.asset, "run2", "alice"),
                                   (self.policy.asset, "run", "bob"),
-                                  ("https://example.com/other", "run", "alice")]:
+                                  ("https://other.example.com/api", "run", "alice")]:
             self.assertNotEqual(first, _make_default_session_file(url, run_id=run, identity_id=identity))
         malicious = _make_default_session_file(self.policy.asset, run_id="../../secret", identity_id="../token")
         self.assertNotIn("..", Path(malicious).parts)

@@ -12,13 +12,17 @@ dependencies = [
   "cryptography>=41,<46",
   "playwright>=1.55,<2",
   "pydantic>=2.12,<3",
+  "pyyaml>=6.0.2,<7",
   "websockets>=17.1,<18",
   "grpcio>=1.84,<2",
   "protobuf>=7.36,<8",
+  "fastapi>=0.115,<1",
+  "uvicorn[standard]>=0.34,<1",
 ]
 
 [dependency-groups]
 dev = [
+  "httpx>=0.27,<1",
   "pytest>=8,<10",
 ]
 
@@ -35,6 +39,7 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 "aidast.auth" = ["*.ps1"]
+"aidast.attack" = ["templates/*/*.yaml"]
 "aidast.skills.scope" = ["SKILL.md"]
 "aidast.skills.ffuf_root_selection" = ["SKILL.md"]
 "aidast.skills.target_policy" = ["SKILL.md"]

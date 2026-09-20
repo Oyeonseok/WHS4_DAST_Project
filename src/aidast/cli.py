@@ -40,6 +40,7 @@ from aidast.recon.surface import export_surface
 from aidast.pipeline.lifecycle import finish_stage_run, start_stage_run
 from aidast.pipeline.materialize import materialize_pipeline
 from aidast.pipeline.models import HandoffManifest, hash_artifact
+from aidast.paths import RESULT_ROOT
 from aidast.reporting import (
     CaseReportAgent,
     CaseReportError,
@@ -82,9 +83,6 @@ EXECUTION_PROFILES = {
     },
 }
 EXECUTION_PROFILES["focused-recon"] = EXECUTION_PROFILES["focused-discovery"]
-
-RESULT_ROOT = Path(os.environ.get("AIDAST_RESULT_ROOT", "result").strip() or "result").expanduser()
-
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="aidast")
@@ -226,6 +224,11 @@ def _parser() -> argparse.ArgumentParser:
         help="run AI Recon and tagging, then Attack, Chaining and Validation",
     )
     run.add_argument("program_url", help="bug bounty program URL")
+    run.add_argument(
+        "--scan-id",
+        type=_scan_identifier,
+        help=argparse.SUPPRESS,
+    )
     _add_workflow_options(run)
     run_selection = run.add_mutually_exclusive_group(required=True)
     run_selection.add_argument(
@@ -384,12 +387,32 @@ def _parser() -> argparse.ArgumentParser:
         "status", help="verify and inspect a Report.db"
     )
     report_status_parser.add_argument("database", type=Path)
+
+    dashboard = commands.add_parser(
+        "dashboard", help="serve the local operator WebUI and live scan events"
+    )
+    dashboard.add_argument(
+        "--host", default="127.0.0.1",
+        help="loopback address to bind (default: 127.0.0.1)",
+    )
+    dashboard.add_argument("--port", type=_positive_int, default=8000)
+    dashboard.add_argument(
+        "--result-root", type=Path, default=RESULT_ROOT,
+        help=(
+            "AI DAST result root (default: AIDAST_RESULT_ROOT, otherwise the "
+            "cloned project's result directory)"
+        ),
+    )
+    dashboard.add_argument(
+        "--ui-dir", type=Path,
+        help="optional built WebUI dist directory to serve at /",
+    )
     return parser
 
 
-def _default_login_mode() -> str:
-    """Use the same Chromium profile for login and Recon on every platform."""
-    return "runtime-browser"
+def _default_login_mode() -> None:
+    """No override means normal login-capability detection and session reuse."""
+    return None
 
 
 def _add_session_options(command):
@@ -397,11 +420,13 @@ def _add_session_options(command):
     command.add_argument("--session-bundle", type=Path, help="reuse a Session.json for exactly one target/account")
     command.add_argument(
         "--login-mode",
-        choices=("system-browser", "runtime-browser"),
+        choices=("none", "system-browser", "runtime-browser"),
         default=_default_login_mode(),
         help=(
-            "runtime-browser logs in with Phase 1 Chromium and reuses that "
-            "profile for Recon; system-browser is an explicit compatibility option"
+            "omit this option for normal login detection and one session per site; "
+            "none never opens a login prompt; "
+            "runtime-browser opens Phase 1 Chromium for an explicit login and "
+            "reuses that profile; system-browser is a compatibility option"
         ),
     )
     command.add_argument(
@@ -434,6 +459,12 @@ def _hackerone_username(value: str) -> str:
         return validate_hackerone_username(value)
     except ValueError as exc:
         raise argparse.ArgumentTypeError(str(exc)) from exc
+
+
+def _scan_identifier(value: str) -> str:
+    if re.fullmatch(r"scan_[0-9a-f]{32}", value) is None:
+        raise argparse.ArgumentTypeError("must match scan_[0-9a-f]{32}")
+    return value
 
 
 def _positive_int(value: str) -> int:
@@ -565,6 +596,8 @@ def main(
             )
         if args.command == "report":
             return _run_report(args, writer=report_writer)
+        if args.command == "dashboard":
+            return _run_dashboard(args)
         parser.error(f"unsupported command: {args.command}")
     except (
         CoordinatorError,
@@ -592,6 +625,31 @@ def main(
 def _run_login() -> int:
     CodexAuth().login()
     print("Codex login verified. AI DAST is ready.")
+    return 0
+
+
+def _run_dashboard(args: argparse.Namespace) -> int:
+    """Serve the loopback-only operator UI and read-only run projections."""
+    import ipaddress
+
+    import uvicorn
+
+    from aidast.web import create_app
+
+    host = str(args.host).strip()
+    try:
+        loopback = host == "localhost" or ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        loopback = False
+    if not loopback:
+        raise MainAgentError(
+            "dashboard has no remote authentication yet; bind only to localhost or a loopback IP"
+        )
+    application = create_app(
+        result_root=args.result_root,
+        ui_dir=args.ui_dir,
+    )
+    uvicorn.run(application, host=host, port=args.port, log_level="info")
     return 0
 
 
@@ -753,7 +811,14 @@ def _run_recon(
         for target in selected_targets:
             print(f"- {target.asset_type.value}: {target.asset}")
 
-    scan_id = f"scan_{uuid4().hex}" if args.execute else None
+    scan_id = (
+        getattr(args, "scan_id", None) or f"scan_{uuid4().hex}"
+        if args.execute
+        else None
+    )
+    if prepare_attack and scan_id is not None:
+        if (args.run_root / scan_id).exists() or (args.attack_output_root / scan_id).exists():
+            raise ReconCoordinatorError(f"scan output already exists: {scan_id}")
     target_sessions = None
     if args.execute and (
         args.session_bundle is not None or args.login_mode == "system-browser"
@@ -770,10 +835,21 @@ def _run_recon(
             identity=args.identity, start_urls=start_urls, session_bundle=args.session_bundle,
             root=RESULT_ROOT / ".aidast_sessions",
         )
+    elif args.execute and args.login_mode == "runtime-browser":
+        print(
+            "로그인 모드가 활성화되었습니다. Endpoint Discovery에서 "
+            "타깃별 Chromium 로그인 세션을 수집합니다."
+        )
+    elif args.execute and args.login_mode is None:
+        print(
+            "자동 로그인 기능 판별 모드입니다. 먼저 비로그인으로 접속하고 로그인 "
+            "폼·버튼·링크가 확인될 때만 Chromium 로그인 창을 엽니다."
+        )
     elif args.execute:
         print(
-            "Wildcard 타깃은 먼저 승인된 Scope 범위의 자산 발견을 수행합니다. "
-            "발견된 구체 호스트의 Endpoint Discovery에서 필요할 때 로그인합니다."
+            "비로그인 Recon 모드입니다. 브라우저 로그인 창을 열지 않습니다. "
+            "인증 탐색이 필요하면 --login-mode runtime-browser 또는 "
+            "--session-bundle을 사용하세요."
         )
 
     plan = main_agent.create_recon_plan(
@@ -898,6 +974,8 @@ def _run_recon(
                 {"hosts": args.auth_host, "paths": args.auth_path}
                 if args.auth_host or args.auth_path else None
             ),
+            interactive_login=args.login_mode == "runtime-browser",
+            automatic_login=args.login_mode is None,
             diagnostic_path=(
                 RESULT_ROOT / "logs" / scan_id / "recon.jsonl"
                 if args.diagnostic_logs else None

@@ -615,25 +615,20 @@ class CliTests(unittest.TestCase):
             self.assertIn("In-scope 자산: 1개", output)
             self.assertIn("Temporary Scope draft:", output)
 
-    def test_aidast_scope_approval_saves_default_scope_directory(self) -> None:
+    def test_aidast_scope_approval_saves_configured_scope_directory(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_dir:
-            previous_directory = Path.cwd()
-            os.chdir(temporary_dir)
-            try:
-                with (
-                    patch("aidast.cli.CodexMainAgent", return_value=FakeMainAgent()),
-                    patch("builtins.input", return_value="y"),
-                    redirect_stdout(io.StringIO()),
-                ):
-                    result = main(
-                        ["scope", "https://bugcrowd.com/engagements/example"]
-                    )
-            finally:
-                os.chdir(previous_directory)
+            root = Path(temporary_dir) / "result" / "Scope"
+            with (
+                patch("aidast.cli.CodexMainAgent", return_value=FakeMainAgent()),
+                patch("builtins.input", return_value="y"),
+                redirect_stdout(io.StringIO()),
+            ):
+                result = main([
+                    "scope", "https://bugcrowd.com/engagements/example",
+                    "--output-dir", str(root),
+                ])
 
-            output = (
-                Path(temporary_dir) / "result" / "Scope" / "bugcrowd" / "example"
-            )
+            output = root / "bugcrowd" / "example"
             self.assertEqual(result, 0)
             self.assertTrue((output / "Scope.md").is_file())
             self.assertTrue((output / "Approval.json").is_file())
