@@ -38,9 +38,19 @@ from .policy_executor import PolicyServiceAttackExecutor
 from .service_factory import build_policy_service
 from .session_binding import SessionBindingError, SessionBindings
 from .session_pool import PersistentSessionPool
+from .template_loader import (
+    AttackTemplateError,
+    load_attack_template,
+    template_descriptors,
+    template_ids_for_skill,
+)
+from .template_models import AttackTemplate, TemplateTarget
+from .template_runner import compile_template_probes, evaluate_template_response
 
 __all__ = [
     "AttackSkill",
+    "AttackTemplate",
+    "AttackTemplateError",
     "AttackSkillLibrary",
     "AttackTestResult",
     "AuthorizedTest",
@@ -62,18 +72,24 @@ __all__ = [
     "SessionAttackLauncher",
     "SessionBindingError",
     "SessionBindings",
+    "TemplateTarget",
     "bind_intents_to_authorization",
     "build_local_skill_workflow",
     "build_policy_service",
     "generate_keypair",
+    "compile_template_probes",
+    "evaluate_template_response",
     "intent_digest",
     "load_intent_manifest",
+    "load_attack_template",
     "load_verified",
     "new_document",
     "select_executor",
     "sign_authorization",
     "sign_ed25519",
     "to_run_authorization",
+    "template_descriptors",
+    "template_ids_for_skill",
     "verify_ed25519",
     "write_intent_manifest",
     "StructuredSkillAttackPlanner",

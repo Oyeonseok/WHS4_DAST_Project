@@ -55,6 +55,35 @@ class ReconPlanTarget(StrictModel):
         return self
 
 
+class ReconPlanTargetSelection(StrictModel):
+    """Planner choice bound to an application-owned canonical target ID."""
+
+    target_id: Annotated[str, Field(pattern=r"^target_[0-9]{4}$")]
+    steps: Annotated[list[ReconStep], Field(min_length=1)]
+    constraints: list[NonBlankText]
+
+    @model_validator(mode="after")
+    def reject_duplicate_steps(self) -> ReconPlanTargetSelection:
+        if len(self.steps) != len(set(self.steps)):
+            raise ValueError("recon target steps must be unique")
+        return self
+
+
+class ReconPlanSelectionProposal(StrictModel):
+    objective: NonBlankText
+    mode: NonBlankText
+    targets: Annotated[list[ReconPlanTargetSelection], Field(min_length=1)]
+    global_constraints: list[NonBlankText]
+    completion_criteria: Annotated[list[NonBlankText], Field(min_length=1)]
+
+    @model_validator(mode="after")
+    def reject_duplicate_targets(self) -> ReconPlanSelectionProposal:
+        target_ids = [target.target_id for target in self.targets]
+        if len(target_ids) != len(set(target_ids)):
+            raise ValueError("recon plan target IDs must be unique")
+        return self
+
+
 class ReconPlanProposal(StrictModel):
     objective: NonBlankText
     mode: NonBlankText

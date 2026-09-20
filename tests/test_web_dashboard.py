@@ -1,0 +1,589 @@
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import json
+import sqlite3
+import threading
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+import httpx
+import pytest
+
+from aidast.agents.main import MainAgentError
+from aidast.cli import _parser, _run_dashboard
+from aidast.web.projection import DashboardProjector, ScanNotFoundError
+from aidast.web.launch import (
+    ApprovedScope,
+    ProgramResolveRequest,
+    ScanLaunchManager,
+    ScanLaunchRequest,
+)
+from aidast.web.server import create_app
+from aidast.web.programs import ProgramRegistrationRequest, ProgramRegistry
+from aidast.web.scope_workflow import ScopeWorkflowManager
+from aidast.scope.models import (
+    AssetType,
+    CaptureReason,
+    CaptureStatus,
+    ProgramPage,
+    ScopeAnalysis,
+    ScopeAsset,
+    SourceEvidence,
+)
+
+
+SCAN_ID = "scan_web_test"
+SCOPE_ID = "scope_web_test"
+
+
+def _fixture(root: Path) -> Path:
+    run = root / "Runs" / SCAN_ID
+    run.mkdir(parents=True)
+    database = run / "Recon.db"
+    conn = sqlite3.connect(database)
+    conn.executescript(
+        """
+        CREATE TABLE scans (
+          scan_id TEXT PRIMARY KEY, scope_type TEXT, scope_value TEXT,
+          status TEXT, started_at TEXT, finished_at TEXT
+        );
+        CREATE TABLE assets (asset_id TEXT PRIMARY KEY,scan_id TEXT);
+        CREATE TABLE origins (origin_id TEXT PRIMARY KEY,asset_id TEXT);
+        CREATE TABLE endpoints (
+          endpoint_id TEXT PRIMARY KEY,origin_id TEXT,method TEXT,normalized_path TEXT
+        );
+        CREATE TABLE http_transactions (
+          http_transaction_id TEXT PRIMARY KEY,endpoint_id TEXT
+        );
+        CREATE TABLE stage_runs (
+          stage_run_id TEXT PRIMARY KEY,scan_id TEXT,stage TEXT,status TEXT,
+          error_message TEXT,started_at TEXT,finished_at TEXT,created_at TEXT
+        );
+        CREATE TABLE attack_tasks (
+          task_id TEXT PRIMARY KEY,stage_run_id TEXT,scan_id TEXT,status TEXT
+        );
+        CREATE TABLE findings (
+          finding_id TEXT PRIMARY KEY,scan_id TEXT,endpoint_id TEXT,vuln_type TEXT,
+          severity TEXT,title TEXT,description TEXT,cvss_score REAL,cvss_vector TEXT,
+          cwe_id TEXT,status TEXT,created_at TEXT
+        );
+        CREATE TABLE audit_events (
+          audit_event_id TEXT PRIMARY KEY,scan_id TEXT,stage_run_id TEXT,task_id TEXT,
+          event_type TEXT,details_json TEXT,created_at TEXT
+        );
+        """
+    )
+    conn.execute(
+        "INSERT INTO scans VALUES (?,?,?,?,?,?)",
+        (SCAN_ID, "approved_scope", SCOPE_ID, "failed", "2026-09-20 01:00:00", "2026-09-20 01:05:00"),
+    )
+    conn.execute("INSERT INTO assets VALUES ('asset',?)", (SCAN_ID,))
+    conn.execute("INSERT INTO origins VALUES ('origin','asset')")
+    conn.execute("INSERT INTO endpoints VALUES ('endpoint','origin','GET','/health')")
+    conn.execute("INSERT INTO http_transactions VALUES ('http','endpoint')")
+    conn.execute(
+        "INSERT INTO stage_runs VALUES (?,?,?,?,?,?,?,?)",
+        ("stage", SCAN_ID, "recon", "failed", None, "2026-09-20T01:00:00Z", "2026-09-20T01:05:00Z", "2026-09-20 01:00:00"),
+    )
+    conn.execute(
+        "INSERT INTO findings VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+        ("finding", SCAN_ID, "endpoint", "header", "LOW", "Version header", None, None, None, "CWE-200", "unreviewed", "2026-09-20 01:04:00"),
+    )
+    conn.execute(
+        "INSERT INTO audit_events VALUES (?,?,?,?,?,?,?)",
+        ("audit-1", SCAN_ID, "stage", None, "stage.started", json.dumps({"token": "must-not-leak"}), "2026-09-20 01:00:00"),
+    )
+    conn.execute(
+        "INSERT INTO audit_events VALUES (?,?,?,?,?,?,?)",
+        ("audit-2", SCAN_ID, "stage", None, "stage.failed", json.dumps({"body": "secret"}), "2026-09-20 01:05:00"),
+    )
+    conn.commit()
+    conn.close()
+
+    scope_dir = root / "Scope" / "hackerone" / "prism_vdp"
+    scope_dir.mkdir(parents=True)
+    scope = {
+        "scope_id": SCOPE_ID,
+        "analysis": {"program_name": "PRISM"},
+    }
+    raw = json.dumps(scope, separators=(",", ":")).encode()
+    (scope_dir / "Scope.json").write_bytes(raw)
+    (scope_dir / "Approval.json").write_text(
+        json.dumps(
+            {
+                "scope_id": SCOPE_ID,
+                "scope_json_sha256": hashlib.sha256(raw).hexdigest(),
+            }
+        ),
+        encoding="utf-8",
+    )
+    (scope_dir / "TargetPolicy.json").write_text(
+        json.dumps({"policies": [{"limits": {"max_requests": 2000}}]}),
+        encoding="utf-8",
+    )
+
+    report_dir = root / "ReportRun" / SCAN_ID / "case_web_test"
+    report_dir.mkdir(parents=True)
+    markdown = "# Local verified draft\n\nRedacted evidence summary.\n"
+    with sqlite3.connect(report_dir / "Report.db") as report_conn:
+        report_conn.executescript(
+            """
+            CREATE TABLE report_runs (
+              report_id TEXT PRIMARY KEY, source_path TEXT, scan_id TEXT,
+              case_id TEXT, decision_sha256 TEXT, context_sha256 TEXT,
+              context_json TEXT, created_at TEXT
+            );
+            CREATE TABLE report_drafts (
+              report_id TEXT PRIMARY KEY, draft_sha256 TEXT, draft_json TEXT,
+              markdown_sha256 TEXT, markdown TEXT, created_at TEXT
+            );
+            """
+        )
+        report_conn.execute(
+            "INSERT INTO report_runs VALUES (?,?,?,?,?,?,?,?)",
+            (
+                "report_" + "a" * 32,
+                "source.db",
+                SCAN_ID,
+                "case_web_test",
+                "d" * 64,
+                "c" * 64,
+                json.dumps({"platform": "hackerone"}),
+                "2026-09-20T01:06:00Z",
+            ),
+        )
+        report_conn.execute(
+            "INSERT INTO report_drafts VALUES (?,?,?,?,?,?)",
+            (
+                "report_" + "a" * 32,
+                hashlib.sha256(b"{}").hexdigest(),
+                "{}",
+                hashlib.sha256(markdown.encode()).hexdigest(),
+                markdown,
+                "2026-09-20T01:07:00Z",
+            ),
+        )
+    return database
+
+
+def test_projection_reads_sources_without_leaking_audit_details(tmp_path: Path) -> None:
+    database = _fixture(tmp_path)
+    projector = DashboardProjector(tmp_path)
+
+    snapshot = projector.snapshot(SCAN_ID)
+
+    assert snapshot["status"] == "failed"
+    assert snapshot["stage"] == "Recon"
+    assert snapshot["endpoints"] == 1
+    assert snapshot["requests"] == 1
+    assert snapshot["budget"] == 2000
+    assert snapshot["scope_approved"] is True
+    assert snapshot["program_id"] == "h1-prism-vdp"
+    assert snapshot["findings"][0]["endpoint"] == "GET /health"
+    assert snapshot["last_event_id"] == 2
+    assert [item["id"] for item in snapshot["logs"]] == [1, 2]
+    assert "must-not-leak" not in json.dumps(snapshot)
+    assert "secret" not in json.dumps(snapshot)
+
+    conn = sqlite3.connect(database)
+    conn.execute("UPDATE scans SET status='running',finished_at=NULL WHERE scan_id=?", (SCAN_ID,))
+    conn.execute(
+        "INSERT INTO stage_runs VALUES (?,?,?,?,?,?,?,?)",
+        ("attack", SCAN_ID, "attack", "running", None, "2026-09-20T01:06:00Z", None, "2026-09-20 01:06:00"),
+    )
+    conn.execute(
+        "INSERT INTO audit_events VALUES (?,?,?,?,?,?,?)",
+        ("audit-3", SCAN_ID, "attack", None, "stage.started", "{}", "2026-09-20 01:06:00"),
+    )
+    conn.commit()
+    conn.close()
+
+    events = projector.events_after(SCAN_ID, 2)
+    assert [item["event_id"] for item in events] == list(
+        range(3, events[-1]["event_id"] + 1)
+    )
+    assert {item["type"] for item in events} >= {
+        "log.appended",
+        "stage.status.changed",
+        "scan.status.changed",
+    }
+    assert projector.snapshot(SCAN_ID)["stage"] == "Attack"
+
+
+def test_projection_rejects_unknown_and_unsafe_scan_ids(tmp_path: Path) -> None:
+    _fixture(tmp_path)
+    projector = DashboardProjector(tmp_path)
+    for scan_id in ("../Scope", "scan/other", "", "x" * 129):
+        try:
+            projector.snapshot(scan_id)
+        except ScanNotFoundError:
+            pass
+        else:
+            raise AssertionError(f"unsafe scan id accepted: {scan_id}")
+
+
+def test_api_snapshot_listing_and_websocket_replay(tmp_path: Path) -> None:
+    _fixture(tmp_path)
+    app = create_app(result_root=tmp_path, poll_interval=0.01)
+
+    async def exercise_api() -> None:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            assert (await client.get("/api/v1/health")).json() == {
+                "status": "ok",
+                "mode": "local-operator",
+                "protocol": 1,
+                "result_root": str(tmp_path.resolve()),
+            }
+            listing = await client.get("/api/v1/scans")
+            assert listing.status_code == 200
+            assert [item["scan_id"] for item in listing.json()["scans"]] == [SCAN_ID]
+
+            response = await client.get(f"/api/v1/scans/{SCAN_ID}")
+            assert response.status_code == 200
+            assert response.json()["scope_approved"] is True
+            audit = await client.get(f"/api/v1/scans/{SCAN_ID}/audit")
+            assert audit.status_code == 200
+            assert [item["event_type"] for item in audit.json()["events"]] == [
+                "stage.failed",
+                "stage.started",
+            ]
+            assert "must-not-leak" not in audit.text
+            assert "secret" not in audit.text
+            reports = await client.get(f"/api/v1/reports?scan_id={SCAN_ID}")
+            assert reports.status_code == 200
+            assert reports.json()["reports"][0]["title"] == "Local verified draft"
+            assert "markdown" not in reports.json()["reports"][0]
+            report = await client.get("/api/v1/reports/report_" + "a" * 32)
+            assert report.status_code == 200
+            assert report.text.startswith("# Local verified draft")
+            assert (await client.get("/api/v1/reports/..%2Fsecret")).status_code == 404
+            assert (await client.get("/api/v1/scans/..%2Fsecret")).status_code == 404
+
+            registered = await client.post(
+                "/api/v1/programs",
+                headers={"Origin": "http://test"},
+                json={
+                    "program_url": "https://hackerone.com/new-public-program",
+                    "visibility": "public",
+                },
+            )
+            assert registered.status_code == 201
+            assert registered.json()["program"]["scope_status"] == "scope_required"
+            assert (await client.get("/api/v1/programs")).json()["programs"][0]["program"] == "New Public Program"
+            denied = await client.post(
+                "/api/v1/programs",
+                headers={"Origin": "https://foreign.example"},
+                json={
+                    "program_url": "https://hackerone.com/rejected",
+                    "visibility": "public",
+                },
+            )
+            assert denied.status_code == 403
+
+        incoming: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+        await incoming.put({"type": "websocket.connect"})
+        await incoming.put({"type": "websocket.disconnect", "code": 1000})
+        outgoing: list[dict[str, Any]] = []
+
+        async def receive() -> dict[str, Any]:
+            return await incoming.get()
+
+        async def send(message: dict[str, Any]) -> None:
+            outgoing.append(message)
+
+        await app(
+            {
+                "type": "websocket",
+                "asgi": {"version": "3.0", "spec_version": "2.4"},
+                "http_version": "1.1",
+                "scheme": "ws",
+                "server": ("test", 80),
+                "client": ("testclient", 50000),
+                "root_path": "",
+                "path": f"/ws/scans/{SCAN_ID}",
+                "raw_path": f"/ws/scans/{SCAN_ID}".encode(),
+                "query_string": b"after=0",
+                "headers": [],
+                "subprotocols": [],
+                "state": {},
+            },
+            receive,
+            send,
+        )
+        payloads = [
+            json.loads(message["text"])
+            for message in outgoing
+            if message["type"] == "websocket.send"
+        ]
+        first, second = payloads
+        assert [first["event_id"], second["event_id"]] == [1, 2]
+        assert first["scan_id"] == SCAN_ID
+
+    asyncio.run(exercise_api())
+
+
+def test_scope_dashboard_requires_explicit_yes_or_no(tmp_path: Path) -> None:
+    text = "Example policy: *.example.test is in scope. Denial of service is prohibited."
+    page = ProgramPage(
+        requested_url="https://bugcrowd.com/engagements/example",
+        final_url="https://bugcrowd.com/engagements/example",
+        title="Example",
+        captured_at=datetime(2026, 9, 20, tzinfo=timezone.utc),
+        capture_status=CaptureStatus.COMPLETE,
+        capture_reason=CaptureReason.NONE,
+        content_sha256=hashlib.sha256(text.encode()).hexdigest(),
+        text=text,
+    )
+    analysis = ScopeAnalysis(
+        program_name="Example Program",
+        program_description="Authorized public bug bounty program.",
+        in_scope_assets=[
+            ScopeAsset(
+                asset_type=AssetType.WILDCARD,
+                asset="*.example.test",
+                description="Public applications",
+                eligibility="Bounty eligible",
+                maximum_severity="Critical",
+            )
+        ],
+        out_of_scope_assets=[],
+        allowed_activities=["Non-destructive testing"],
+        prohibited_activities=["Denial of service"],
+        submission_requirements=["Reproducible steps"],
+        operational_constraints=["Low request rate"],
+        safe_harbor="Policy-compliant research is authorized.",
+        ambiguities=[],
+        source_evidence=[
+            SourceEvidence(section="Scope", quote="*.example.test is in scope")
+        ],
+    )
+
+    class Reader:
+        def read(self, _url: str) -> ProgramPage:
+            return page
+
+    class Agent:
+        def collect_scope(self, _url: str):
+            raise AssertionError("the injected deterministic reader must be used")
+
+        def interpret_captured_scope(self, _page: ProgramPage) -> ScopeAnalysis:
+            return analysis
+
+    registry = ProgramRegistry(tmp_path)
+    workflow = ScopeWorkflowManager(
+        tmp_path,
+        registry,
+        agent_factory=Agent,
+        public_reader_factory=Reader,
+    )
+    app = create_app(result_root=tmp_path, scope_workflow=workflow)
+
+    async def wait_for_status(client: httpx.AsyncClient, program_id: str, expected: str):
+        for _ in range(100):
+            response = await client.get(f"/api/v1/programs/{program_id}/scope-job")
+            if response.status_code == 200 and response.json()["job"]["scope_status"] == expected:
+                return response.json()
+            await asyncio.sleep(0.01)
+        raise AssertionError(f"Scope job never reached {expected}")
+
+    async def exercise() -> None:
+        transport = httpx.ASGITransport(app=app)
+        headers = {"Origin": "http://test"}
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            registered = await client.post(
+                "/api/v1/programs",
+                headers=headers,
+                json={
+                    "program_url": "https://bugcrowd.com/engagements/example",
+                    "visibility": "public",
+                },
+            )
+            program_id = registered.json()["program"]["id"]
+            started = await client.post(
+                f"/api/v1/programs/{program_id}/scope-collection",
+                headers=headers,
+                json={"login_mode": "headless"},
+            )
+            assert started.status_code == 202
+            await wait_for_status(client, program_id, "review_required")
+            draft = await client.get(f"/api/v1/programs/{program_id}/scope-draft")
+            assert draft.status_code == 200
+            assert draft.json()["draft"]["in_scope_assets"][0]["asset"] == "*.example.test"
+            assert not (tmp_path / "Scope" / "bugcrowd" / "example").exists()
+
+            rejected = await client.post(
+                f"/api/v1/programs/{program_id}/scope-decision",
+                headers=headers,
+                json={"decision": "no"},
+            )
+            assert rejected.json()["job"]["scope_status"] == "rejected"
+            assert not (tmp_path / "Scope" / "bugcrowd" / "example").exists()
+
+            await client.post(
+                f"/api/v1/programs/{program_id}/scope-collection",
+                headers=headers,
+                json={"login_mode": "headless"},
+            )
+            await wait_for_status(client, program_id, "review_required")
+            unconfirmed = await client.post(
+                f"/api/v1/programs/{program_id}/scope-decision",
+                headers=headers,
+                json={"decision": "yes", "approved_by": "reviewer"},
+            )
+            assert unconfirmed.status_code == 422
+            approved = await client.post(
+                f"/api/v1/programs/{program_id}/scope-decision",
+                headers=headers,
+                json={
+                    "decision": "yes",
+                    "approved_by": "reviewer",
+                    "confirmation": True,
+                },
+            )
+            assert approved.status_code == 200
+            assert approved.json()["job"]["scope_status"] == "approved"
+            output = tmp_path / "Scope" / "bugcrowd" / "example"
+            assert (output / "Scope.json").is_file()
+            assert (output / "Scope.md").is_file()
+            assert (output / "Manifest.json").is_file()
+            assert (output / "Approval.json").is_file()
+            assert (await client.get("/api/v1/scopes")).json()["scopes"][0]["program_name"] == "Example Program"
+
+    asyncio.run(exercise())
+
+
+def test_dashboard_cli_defaults_and_rejects_remote_bind(tmp_path: Path) -> None:
+    defaults = _parser().parse_args(["dashboard"])
+    assert defaults.host == "127.0.0.1"
+    assert defaults.port == 8000
+
+    remote = _parser().parse_args(
+        ["dashboard", "--host", "0.0.0.0", "--result-root", str(tmp_path)]
+    )
+    with pytest.raises(MainAgentError, match="bind only to localhost"):
+        _run_dashboard(remote)
+
+
+def test_scan_launcher_builds_fixed_argv_and_streams_pre_database_logs(tmp_path: Path) -> None:
+    projector = DashboardProjector(tmp_path)
+    captured: dict[str, Any] = {}
+    waiting = threading.Event()
+
+    class Process:
+        def wait(self) -> int:
+            waiting.wait(2)
+            return 0
+
+    def process_factory(argv: list[str], **kwargs: Any) -> Process:
+        captured.update(argv=argv, kwargs=kwargs)
+        return Process()
+
+    approved = ApprovedScope(
+        scope_id="scope_verified",
+        program_id="h1-prism-vdp",
+        program_name="PRISM VDP",
+        platform="hackerone",
+        program_url="https://hackerone.com/prism_vdp",
+        targets=({"asset_type": "DOMAIN", "asset": "prismlife.com", "description": "", "maximum_severity": "HIGH"},),
+        identity_header="hackerone",
+        approved_by="operator",
+    )
+
+    class Catalog:
+        def list(self) -> list[ApprovedScope]:
+            return [approved]
+
+        def get(self, scope_id: str) -> ApprovedScope:
+            if scope_id != approved.scope_id:
+                raise ValueError("approved scope not found")
+            return approved
+
+    manager = ScanLaunchManager(
+        tmp_path, projector, process_factory=process_factory, project_root=tmp_path
+    )
+    manager.catalog = Catalog()  # type: ignore[assignment]
+    request = ScanLaunchRequest(
+        scope_id=approved.scope_id,
+        targets=["prismlife.com"],
+        profile="safe-recon",
+        max_requests=120,
+        login_mode="none",
+        start_url="https://prismlife.com/app",
+        hackerone_username="web_operator",
+        authorization_confirmed=True,
+    )
+    launched = manager.launch(request)
+    argv = captured["argv"]
+    assert captured["kwargs"]["shell"] is False
+    assert argv[1:4] == ["-m", "aidast", "run"]
+    assert argv[argv.index("--target") + 1] == "prismlife.com"
+    assert argv[argv.index("--max-requests") + 1] == "120"
+    assert argv[argv.index("--scan-id") + 1] == launched["scan_id"]
+    assert argv[argv.index("--start-url") + 1] == "https://prismlife.com/app"
+    assert manager.snapshot(launched["scan_id"])["logs"][-1]["message"] == "AI DAST pipeline process started."
+    assert projector.stored_events_after(launched["scan_id"], 0)[0]["event_id"] == 1
+
+    with pytest.raises(ValueError, match="not in the approved Scope"):
+        manager.launch(request.model_copy(update={"targets": ["outside.example"]}))
+    with pytest.raises(ValueError, match="outside the selected approved target"):
+        manager.launch(request.model_copy(update={"start_url": "https://outside.example/"}))
+    waiting.set()
+
+
+def test_scan_request_rejects_unconfirmed_or_excessive_budget() -> None:
+    base = {
+        "scope_id": "scope_verified",
+        "targets": ["prismlife.com"],
+        "profile": "safe-recon",
+    }
+    with pytest.raises(ValueError, match="authorization confirmation"):
+        ScanLaunchRequest(**base)
+    with pytest.raises(ValueError, match="request budget exceeds"):
+        ScanLaunchRequest(**base, max_requests=501, authorization_confirmed=True)
+    with pytest.raises(ValueError, match="exactly one target"):
+        ScanLaunchRequest(**{
+            **base,
+            "targets": ["one.example", "two.example"],
+            "start_url": "https://one.example/",
+            "authorization_confirmed": True,
+        })
+    with pytest.raises(ValueError, match="absolute HTTPS"):
+        ProgramResolveRequest(program_url="http://hackerone.com/program")
+
+
+def test_run_parser_accepts_only_generated_scan_identifiers() -> None:
+    valid = "scan_" + "a" * 32
+    parsed = _parser().parse_args(
+        ["run", "https://example.test/program", "--target", "example.test", "--scan-id", valid]
+    )
+    assert parsed.scan_id == valid
+    with pytest.raises(SystemExit):
+        _parser().parse_args(
+            ["run", "https://example.test/program", "--target", "example.test", "--scan-id", "../escape"]
+        )
+
+
+def test_program_registry_persists_and_masks_private_programs(tmp_path: Path) -> None:
+    registry = ProgramRegistry(tmp_path)
+    public = registry.register(ProgramRegistrationRequest(
+        program_url="https://hackerone.com/public-program",
+        visibility="public",
+    ))
+    private = registry.register(ProgramRegistrationRequest(
+        program_url="https://hackerone.com/private-program",
+        visibility="private",
+    ))
+    assert public["program"] == "Public Program"
+    assert private["program"] == "Private program"
+    assert private["id"].startswith("registered-")
+    serialized = json.dumps(ProgramRegistry(tmp_path).list())
+    assert "private-program" not in serialized
+    with pytest.raises(ValueError, match="absolute HTTPS"):
+        ProgramRegistrationRequest(
+            program_url="http://hackerone.com/not-https",
+            visibility="public",
+        )

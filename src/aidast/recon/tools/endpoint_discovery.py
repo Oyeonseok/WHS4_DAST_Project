@@ -59,6 +59,8 @@ from urllib.parse import (
     unquote,
 )
 
+from aidast.paths import RESULT_ROOT
+
 from .api_secondary_discovery import (
     discover_api_secondary,
 )
@@ -1481,8 +1483,9 @@ def _make_default_session_file(
     # disclose identity labels. An omitted run ID deliberately starts fresh.
     run_key = hashlib.sha256((run_id or uuid.uuid4().hex).encode()).hexdigest()[:24]
     identity_key = hashlib.sha256((identity_id or "manual").encode()).hexdigest()[:24]
-    origin_key = hashlib.sha256(base_url.encode()).hexdigest()[:16]
-    return str(Path("result/.aidast_sessions") / run_key / identity_key
+    origin_value = f"{parsed.scheme.lower()}://{hostname.lower()}:{port}"
+    origin_key = hashlib.sha256(origin_value.encode()).hexdigest()[:16]
+    return str(RESULT_ROOT / ".aidast_sessions" / run_key / identity_key
                / f"{safe_host}_{port}_{origin_key}.json")
 
 
@@ -1541,6 +1544,8 @@ def discover_endpoints(
     identity_id: str | None = None,
     auth_bootstrap: dict | None = None,
     preauthenticated: bool = False,
+    interactive_login: bool = False,
+    automatic_login: bool = False,
     browser_context_token: str | None = None,
     diagnostic_callback=None,
     authentication_endpoint_callback=None,
@@ -1552,6 +1557,10 @@ def discover_endpoints(
         raise ValueError("policy-enforced browser must use the shared enforcement proxy")
     if target_policy is not None and not target_policy.allows_url(base_url):
         raise ValueError(f"TargetPolicy가 base URL을 허용하지 않음: {base_url}")
+    if sum(bool(value) for value in (
+        preauthenticated, interactive_login, automatic_login,
+    )) > 1:
+        raise ValueError("authentication startup modes are mutually exclusive")
 
     from aidast.recon.diagnostics import diagnostic_endpoint
 
@@ -1596,6 +1605,8 @@ def discover_endpoints(
         "endpoint_discovery_started", base_url=base_url,
         ffuf_wordlist_configured=bool(ffuf_wordlist),
         preauthenticated=preauthenticated,
+        interactive_login=interactive_login,
+        automatic_login=automatic_login,
         playwright_interaction_enabled=enable_playwright_interaction,
         policy_enforced=target_policy is not None,
     )
@@ -1611,10 +1622,13 @@ def discover_endpoints(
         print(
             "  =================================="
         )
-        print(
-            "  PHASE 1 - "
-            "Playwright Session Restore" if preauthenticated else "Playwright Authentication"
+        phase_one = (
+            "Playwright Session Restore" if preauthenticated
+            else "Playwright Authentication" if interactive_login
+            else "Playwright Automatic Login Capability Detection" if automatic_login
+            else "Playwright Unauthenticated Bootstrap"
         )
+        print(f"  PHASE 1 - {phase_one}")
         print(
             "  =================================="
         )
@@ -1693,11 +1707,19 @@ def discover_endpoints(
         # Session 저장
         # ---------------------------------------------
 
+        authenticated_run = preauthenticated or interactive_login
         if preauthenticated:
             driver.start_from_session()
-        else:
+        elif interactive_login:
             driver.capture_and_start()
-        observe_browser("playwright_login")
+        elif automatic_login:
+            authenticated_run = driver.start_automatic()
+        else:
+            driver.start_unauthenticated()
+        observe_browser(
+            "playwright_login" if authenticated_run
+            else "playwright_unauthenticated"
+        )
 
         auth_headers = (
             driver.get_auth_headers()
@@ -1731,7 +1753,7 @@ def discover_endpoints(
         )
 
         print(
-            "  로그인 과정 HTTP : "
+            "  초기 브라우저 HTTP : "
             f"{len(login_results)}건"
         )
 
@@ -1764,7 +1786,8 @@ def discover_endpoints(
         )
         print(
             "  PHASE 2 - "
-            "Authenticated Katana"
+            +
+            ("Authenticated Katana" if authenticated_run else "Katana")
         )
         print(
             "  =================================="
@@ -1952,7 +1975,10 @@ def discover_endpoints(
 
         print()
         print("  ==================================")
-        print("  PHASE 4 - Authenticated ffuf")
+        print(
+            "  PHASE 4 - "
+            + ("Authenticated ffuf" if authenticated_run else "ffuf")
+        )
         print("  ==================================")
 
         driver.ensure_session()

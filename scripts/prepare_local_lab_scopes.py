@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from aidast.orchestration.scope import CoordinatorError, ScopeCoordinator
+from aidast.paths import RESULT_ROOT
 from aidast.scope.models import (
     AssetType,
     CaptureReason,
@@ -165,7 +166,7 @@ def main() -> int:
         default="all",
         help="local Scope fixture to create (default: all)",
     )
-    parser.add_argument("--output-dir", type=Path, default=Path("result/Scope"))
+    parser.add_argument("--output-dir", type=Path, default=RESULT_ROOT / "Scope")
     parser.add_argument("--approved-by", default="local-lab-operator")
     args = parser.parse_args()
     if not args.approved_by.strip():

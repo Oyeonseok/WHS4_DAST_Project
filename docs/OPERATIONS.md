@@ -13,6 +13,7 @@
 - [로그인과 브라우저 모드](#로그인과-브라우저-모드)
 - [요청 예산과 프록시 경계](#요청-예산과-프록시-경계)
 - [진단 로그](#진단-로그)
+- [로컬 웹 대시보드](#로컬-웹-대시보드)
 - [관측과 태깅](#관측과-태깅)
 - [통합 파이프라인과 데이터 무결성](#통합-파이프라인과-데이터-무결성)
 - [Legacy Attack 경로](#legacy-attack-경로)
@@ -43,9 +44,24 @@
 export AIDAST_RESULT_ROOT="/path/to/dast_result"
 ```
 
-설정하지 않으면 기존과 같이 현재 작업 디렉터리의 `result/`를 사용합니다.
+설정하지 않으면 clone한 저장소의 `result/`를 사용합니다. 따라서 어느 작업
+디렉터리에서 `aidast`를 실행해도 CLI와 WebUI가 같은 결과를 읽습니다.
 `--output-dir`, `--db-path`, `--surface-path`, `--run-root` 등 명시적 CLI 경로는
 환경변수 기반 기본값보다 우선합니다.
+
+## 로컬 웹 대시보드
+
+`aidast dashboard --ui-dir <WebUI-dist>`는 clone한 저장소의 `result/`에 있는 persisted run을
+읽기 전용으로 투영합니다. `/api/v1/scans`와 scan snapshot REST API, scan별
+WebSocket replay stream을 제공하고 선택한 정적 WebUI도 같은 origin에서 제공합니다.
+
+- `Recon.db`와 `Pipeline.db`는 SQLite read-only URI와 `query_only`로 엽니다.
+- 로그에는 audit event type만 사용하며 `details_json`, HTTP body, cookie, token은
+  전달하지 않습니다.
+- durable WebSocket cursor는 파생 데이터인 `result/.webui/events.db`에 저장합니다.
+- `Scope.json`과 `Approval.json`의 SHA-256이 일치해야 승인 상태가 표시됩니다.
+- 인증이 구현되기 전까지 `127.0.0.1`, `::1`, `localhost` 이외의 bind는 거부합니다.
+- UI에는 실행/변경 endpoint가 없으며 스캔 제어는 계속 CLI를 사용합니다.
 
 ## Scope 수집과 정책
 
@@ -217,7 +233,14 @@ Scope의 out-of-scope 호스트는 `excluded_hosts`로 컴파일되며 wildcard 
 
 ## 로그인과 브라우저 모드
 
-기본 `runtime-browser` 모드는 Playwright Chromium과 실행별 전용 프로필을 사용합니다.
+별도 `--login-mode`를 지정하지 않으면 먼저 비로그인 Playwright Chromium으로
+시작합니다. 404나 공개
+페이지는 그대로 탐색하고, 비밀번호 입력창·폼·버튼·링크 같은 실제 로그인 UI가
+확인될 때만 로그인 창을 엽니다. `--login-mode none`은 어떤 응답에서도 로그인 UI를
+열지 않습니다. `--login-mode runtime-browser`를 지정하면 처음부터 Playwright
+Chromium과 실행별 전용 프로필을 사용해 로그인한 뒤 같은 세션으로 Recon을 계속합니다.
+기본 흐름으로 완료한 로그인은 같은 실행의 동일 origin 전체에서 재사용합니다. 경로가
+달라지거나 이후 엔드포인트가 404를 반환해도 로그인 완료 입력을 다시 요구하지 않습니다.
 Endpoint Discovery의 Phase 1에서 프록시 없이 로그인하고, 같은 Chromium 컨텍스트에
 정책과 관측 핸들러를 적용해 Phase 2 Recon을 이어갑니다.
 

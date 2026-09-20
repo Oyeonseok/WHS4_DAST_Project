@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from aidast.cli import _parser, _write_recon_handoff, main
+from aidast.paths import RESULT_ROOT
 from aidast.recon import db
 
 
@@ -32,7 +33,7 @@ class PipelineCliTests(unittest.TestCase):
             with self.subTest(command=arguments[:2]):
                 parsed = parser.parse_args(arguments)
                 for field in fields:
-                    self.assertEqual(getattr(parsed, field).parts[0], "result")
+                    self.assertTrue(getattr(parsed, field).is_relative_to(RESULT_ROOT))
 
     def test_run_prepares_thin_database_and_offline_plan(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_dir:

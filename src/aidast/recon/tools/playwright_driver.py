@@ -260,6 +260,10 @@ class PlaywrightDriver:
         self._phase = "runtime"
 
         self._auth_expired = False
+        # Public and missing pages must never fall through to a manual login
+        # wait. This is enabled only after an explicit or auto-detected auth
+        # flow has actually started.
+        self._interactive_authentication_enabled = bool(preauthenticated)
 
         # 외부 Chromium Process
         self._chrome_process: (
@@ -304,6 +308,11 @@ class PlaywrightDriver:
             self.session_config.session_file
             + ".sessionstorage.json"
         )
+
+    @property
+    def automatic_auth_marker_path(self) -> Path:
+        """Run-scoped proof that this origin already completed manual login."""
+        return Path(self.session_config.session_file + ".authenticated")
 
     @property
     def profile_path(
@@ -1289,7 +1298,128 @@ class PlaywrightDriver:
             raise
 
         self._auth_expired = False
+        self._interactive_authentication_enabled = True
         print("  [Playwright] 로그인한 동일 Chromium 컨텍스트에 정책을 적용했습니다; Recon을 시작합니다.")
+
+    @staticmethod
+    def _login_path(url: str) -> bool:
+        try:
+            segments = [item for item in urlparse(url).path.lower().split("/") if item]
+        except ValueError:
+            return False
+        return any(
+            segment in {"login", "log-in", "signin", "sign-in", "sso", "authenticate"}
+            for segment in segments
+        )
+
+    def _login_capability_reason(self, page: Page, response) -> str | None:
+        """Detect visible, interactive login UI instead of inferring from HTTP text."""
+        status = getattr(response, "status", None)
+        if status in {404, 410}:
+            return None
+        if isinstance(status, int) and status >= 500:
+            return None
+
+        try:
+            if page.locator("input[type='password']:visible").count() > 0:
+                return "visible password form"
+        except Exception:
+            pass
+
+        # A public landing page can still provide a real login feature. Detect
+        # only visible interactive controls, not incidental words in prose.
+        try:
+            hrefs = page.locator("a[href]:visible").evaluate_all(
+                "elements => elements.map(element => element.href)"
+            )
+            if any(self._login_path(str(href)) for href in hrefs):
+                return "visible login link"
+        except Exception:
+            pass
+        try:
+            actions = page.locator("form[action]:visible").evaluate_all(
+                "elements => elements.map(element => element.action)"
+            )
+            if any(self._login_path(str(action)) for action in actions):
+                return "visible login form"
+        except Exception:
+            pass
+        try:
+            labels = page.locator(
+                "a:visible, button:visible, input[type='submit']:visible"
+            ).all_inner_texts()
+            login_labels = {
+                "login", "log in", "sign in", "signin", "로그인", "로그 인",
+            }
+            if any(str(label).strip().lower() in login_labels for label in labels):
+                return "visible login control"
+        except Exception:
+            pass
+        return None
+
+    def _start_unauthenticated(self, *, restore_saved_session: bool = False):
+        self._phase = "runtime"
+        self._interactive_authentication_enabled = False
+        self._launch_manual_browser()
+        if restore_saved_session:
+            self._restore_target_session()
+        page = self._ensure_page()
+        response = page.goto(
+            self.base_url,
+            wait_until="domcontentloaded",
+            timeout=self.session_config.timeout_ms,
+        )
+        if self.target_policy is not None and not self.target_policy.allows_url(page.url):
+            raise RuntimeError(
+                "unauthenticated browser left the approved start URL boundary"
+            )
+        return page, response
+
+    def start_unauthenticated(self) -> None:
+        """Start policy-enforced Recon without opening an operator login UI."""
+        try:
+            self._start_unauthenticated()
+            if not self.save_session():
+                raise RuntimeError("could not save the unauthenticated browser state")
+        except BaseException:
+            self._shutdown_runtime()
+            raise
+        self._auth_expired = False
+        print("  [Playwright] 비로그인 브라우저로 Recon을 시작합니다.")
+
+    def start_automatic(self) -> bool:
+        """Open a login UI only when the anonymous page exposes login functionality."""
+        try:
+            reuse_authenticated_session = (
+                self.automatic_auth_marker_path.is_file()
+                and self.session_path.is_file()
+                and self.session_storage_path.is_file()
+            )
+            page, response = self._start_unauthenticated(
+                restore_saved_session=reuse_authenticated_session
+            )
+            if reuse_authenticated_session:
+                if not self.save_session():
+                    raise RuntimeError("could not refresh the authenticated browser state")
+                self._auth_expired = False
+                self._interactive_authentication_enabled = True
+                print("  [Playwright] 동일 사이트의 로그인 세션을 재사용합니다.")
+                return True
+            reason = self._login_capability_reason(page, response)
+            if reason is None:
+                if not self.save_session():
+                    raise RuntimeError("could not save the unauthenticated browser state")
+                self._auth_expired = False
+                print("  [Playwright] 로그인 기능 없음; 비로그인 Recon을 시작합니다.")
+                return False
+            print(f"  [Playwright] 로그인 기능 감지 ({reason}); 로그인 창을 엽니다.")
+            self._shutdown_runtime()
+            self.capture_and_start()
+            self.automatic_auth_marker_path.write_text("authenticated\n", encoding="utf-8")
+            return True
+        except BaseException:
+            self._shutdown_runtime()
+            raise
 
     def start_from_session(self) -> None:
         """Restore the pre-Recon snapshot without launching another login flow."""
@@ -1336,6 +1466,7 @@ class PlaywrightDriver:
                     self._phase = "runtime"
 
         self._auth_expired = False
+        self._interactive_authentication_enabled = True
         print("  [Playwright] 프록시·Scope 적용 및 타깃 복귀 완료; Recon을 시작합니다.")
 
     @staticmethod
@@ -2358,6 +2489,9 @@ class PlaywrightDriver:
         # Context가 Katana 등에 의해 죽었으면
         # 먼저 저장된 세션으로 복구
         self.restore_runtime()
+
+        if not (self._interactive_authentication_enabled or self.preauthenticated):
+            return
 
         if self.session_is_valid():
 

@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <script>
+      (() => {
+        try {
+          const saved = localStorage.getItem('aidast-theme') || 'system';
+          const theme = saved === 'system'
+            ? (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')
+            : saved;
+          document.documentElement.dataset.theme = theme === 'light' ? 'light' : 'dark';
+          document.documentElement.style.colorScheme = document.documentElement.dataset.theme;
+        } catch { document.documentElement.dataset.theme = 'dark'; }
+      })();
+    </script>
+    <meta name="theme-color" content="#101419" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="description" content="AI DAST security workspace — approved scope, scan activity, findings, validation, and local reports." />
+    <title>AI DAST — Security Operations</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

@@ -11,6 +11,8 @@ from aidast.recon.policy import (
     RestrictionEvidence,
     TargetPolicy,
     TargetPolicyProposal,
+    TargetPolicySelectionProposal,
+    TargetPolicySelectionSetProposal,
     ToolPolicy,
     canonical_host_for_asset,
     validate_start_url_for_target,
@@ -263,11 +265,10 @@ class TargetPolicyTests(unittest.TestCase):
         self.assertEqual(_tool_rate_args("ffuf", 1.9), ["-rate", "1"])
 
     def test_main_agent_normalizes_approved_wildcard_host_notation(self) -> None:
-        proposal = TargetPolicySetProposal(
+        proposal = TargetPolicySelectionSetProposal(
             policies=[
-                TargetPolicyProposal(
-                    asset_type=AssetType.WILDCARD,
-                    asset="*.example.com",
+                TargetPolicySelectionProposal(
+                    target_id="target_0001",
                     allowed_hosts=["*.example.com"],
                     include_subdomains=True,
                 )
@@ -307,8 +308,8 @@ class TargetPolicyTests(unittest.TestCase):
         self.assertTrue(result.include_subdomains)
 
     def test_operator_start_url_is_bound_to_one_exact_host_and_path(self) -> None:
-        proposal = TargetPolicySetProposal(policies=[TargetPolicyProposal(
-            asset_type=AssetType.DOMAIN, asset="admin.shopify.com",
+        proposal = TargetPolicySelectionSetProposal(policies=[TargetPolicySelectionProposal(
+            target_id="target_0001",
             allowed_hosts=["admin.shopify.com"], allowed_path_prefixes=["/"],
         )])
         plan = ReconPlan(

@@ -7,16 +7,18 @@ description: Inspect one completed Recon scan, load relevant hunt skills, send s
 
 You are the only Attack Agent for this scan. Keep one continuous session until
 the applicable Hunt queue is exhausted. Do not spawn agents or launch Codex.
-You choose every HTTP request and interpret every response yourself. Send each
-request only through the configured policy-enforcing request helper. The helper
-contains no vulnerability-specific request logic.
+You choose the applicable endpoint and test family and interpret every response.
+When an Attack task lists `template_ids`, execute those probes through the
+configured deterministic template helper; do not recreate their payloads or
+requests yourself. Send non-template fallback requests only through the
+configured policy-enforcing request helper.
 
 # Fixed inputs
 
 Read `config.json`, `scope.md`, `TargetPolicy.json`, and `database-contract.md`
 first. Use only the exact scan ID, DB path, DB helper path, HTTP request helper
-path, tasks, and Skill names in that configuration. The shared DB contains both
-Recon and Attack records.
+path, template helper path, tasks, templates, and Skill names in that
+configuration. The shared DB contains both Recon and Attack records.
 
 # Scope and safety
 
@@ -31,7 +33,8 @@ Recon and Attack records.
   Redact secret values from stored evidence.
 - Never send target traffic with curl, wget, Invoke-WebRequest, a browser,
   sockets, Python networking, or any transport other than the configured HTTP
-  request helper. It reserves the durable budget before one non-redirecting hop.
+  request helper or deterministic template helper. Both reserve the durable
+  budget through the same guarded request boundary before one non-redirecting hop.
 - A Scope-authorized active, non-destructive Attack is still mediated by the
   helper. Recon observation is provenance, not permission: normal bounded
   mutations may test a static candidate or a newly proposed path. Classify every
@@ -58,12 +61,37 @@ Recon and Attack records.
    staying inside Scope. A status code by itself never confirms a vulnerability.
    Before a probe, query prior `attack_attempts` across all Attack stage runs and
    skip an equivalent method, URL, identity role, and payload variant.
-6. Write one request JSON object and invoke the configured HTTP request helper
+6. If the task contains a compatible `template_id`, write only a bounded target
+   binding JSON object containing an existing `endpoint_id`, method, URL,
+   parameter name/location, and optional non-secret headers. Invoke the template
+   helper with that template ID. The helper owns payload rendering, request
+   mutation, policy-checked dispatch, matcher evaluation, and bounded evidence.
+   A template `candidate=true` result is a lead only, never a confirmed finding.
+   Record each template probe using `template_id:variant_id` as its
+   `payload_variant` and its returned request fingerprint. Do not send an
+   equivalent direct probe through the request helper.
+
+   The target binding has this exact shape:
+
+   ```json
+   {"endpoint_id":"existing ID","method":"GET","url":"observed absolute URL","parameter_name":"q","parameter_location":"query","headers":{}}
+   ```
+
+   Invoke it as:
+
+   ```text
+   <python_executable> <template_helper_path> run --db <pipeline_db_path> --scan-id <scan_id> --stage-run-id <stage_run_id> --task-id <task_id> --policy <target_policy_path> --template-id <template_id> --target <binding.json>
+   ```
+
+   Use only template IDs listed both on the task and in `attack_templates` and
+   verify the descriptor's Skill name matches the running task.
+7. For a workflow not covered by a listed template, write one request JSON
+   object and invoke the configured HTTP request helper
    with the exact scan, stage, task, policy, and DB arguments. Use the returned
    request fingerprint in `commit-attempt`, including the current `task_id`,
    after each useful positive or negative result. Use `commit-fact` for reusable
    non-secret facts.
-7. When observed behavior satisfies the active Skill's confirmation criteria,
+8. When observed behavior satisfies the active Skill's confirmation criteria,
    write a minimal redacted evidence JSON and use `commit-finding`. Include all
    supporting open attempt IDs in `lead_attempt_ids` and the official
    `reproduction` object described by the database contract. This atomically
@@ -76,7 +104,7 @@ Recon and Attack records.
    fact is useful context but is never a substitute for this promotion. When an
    exact safe-method request can test a Validation profile's declared impact path,
    include it as `impact_development_contract`; otherwise omit it.
-8. Close all leads for the task, then transition it to `completed`. Continue
+9. Close all leads for the task, then transition it to `completed`. Continue
    until every configured task is `completed` or `skipped`. Chaining is not part
    of this stage; a future Chaining Agent owns that work.
 

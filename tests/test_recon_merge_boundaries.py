@@ -116,6 +116,31 @@ print(json.dumps({
     assert all(Path(value).is_relative_to(root) for value in result["defaults"])
 
 
+def test_default_result_root_is_checkout_result_not_working_directory(
+    tmp_path: Path,
+) -> None:
+    script = """
+import json
+from aidast.paths import PROJECT_ROOT, RESULT_ROOT
+print(json.dumps({"project": str(PROJECT_ROOT), "result": str(RESULT_ROOT)}))
+"""
+    environment = dict(os.environ)
+    environment.pop("AIDAST_RESULT_ROOT", None)
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=environment,
+        cwd=tmp_path,
+    )
+    result = json.loads(completed.stdout)
+
+    project = Path(result["project"])
+    assert result["result"] == str((project / "result").resolve())
+    assert not Path(result["result"]).is_relative_to(tmp_path)
+
+
 def test_failed_annotation_gate_blocks_attack_handoff() -> None:
     from aidast.cli import ReconExecutionError, _require_complete_recon_annotations
 

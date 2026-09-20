@@ -56,15 +56,35 @@ class ScopeCoordinator:
         approved_by: str,
         review: Callable[[Path], bool],
     ) -> ScopeDocument | None:
+        approved_by = self._validate_approver(approved_by)
+        document, staging = self.collect_draft(
+            program_url,
+            main_agent=main_agent,
+            primary_reader=primary_reader,
+            fallback_reader=fallback_reader,
+        )
+        try:
+            if not review(staging / "Scope.md"):
+                return None
+            return self.approve_draft(staging, approved_by=approved_by)
+        finally:
+            shutil.rmtree(staging, ignore_errors=True)
+
+    def collect_draft(
+        self,
+        program_url: str,
+        *,
+        main_agent: ScopeCollector,
+        primary_reader: ProgramPageReader | None = None,
+        fallback_reader: ProgramPageReader | None = None,
+        draft_root: Path | str | None = None,
+    ) -> tuple[ScopeDocument, Path]:
+        """Collect an unapproved draft for a later explicit review decision."""
         if self.output_dir.exists():
             raise CoordinatorError(
                 f"scope output already exists: {self.output_dir}; "
                 "move or remove it before collecting a new scope"
             )
-        approved_by = approved_by.strip()
-        if not approved_by:
-            raise CoordinatorError("approved_by must not be blank")
-
         if primary_reader is not None:
             page = primary_reader.read(program_url)
             self._require_complete_capture(page)
@@ -92,14 +112,35 @@ class ScopeCoordinator:
             source=page,
             analysis=analysis,
         )
-        staging = self._create_scope_draft(document)
-        try:
-            if not review(staging / "Scope.md"):
-                return None
-            self._publish_scope(staging, document, approved_by)
-            return document
-        finally:
-            shutil.rmtree(staging, ignore_errors=True)
+        staging = self._create_scope_draft(document, draft_root=draft_root)
+        return document, staging
+
+    def approve_draft(
+        self, draft_dir: Path | str, *, approved_by: str
+    ) -> ScopeDocument:
+        """Verify and atomically publish one previously collected draft."""
+        approved_by = self._validate_approver(approved_by)
+        staging = Path(draft_dir).resolve(strict=True)
+        document = self._load_model(staging / "Scope.json", ScopeDocument)
+        self._require_complete_capture(document.source)
+        manifest = self._load_model(staging / "Manifest.json", ScopeManifest)
+        if manifest.scope_id != document.scope_id:
+            raise CoordinatorError("scope document and manifest IDs do not match")
+        self._verify_content_hashes(
+            manifest,
+            {"json": staging / "Scope.json", "markdown": staging / "Scope.md"},
+        )
+        self._publish_scope(staging, document, approved_by)
+        return document
+
+    @staticmethod
+    def _validate_approver(value: str) -> str:
+        approved_by = value.strip()
+        if not approved_by:
+            raise CoordinatorError("approved_by must not be blank")
+        if len(approved_by) > 160:
+            raise CoordinatorError("approved_by must be at most 160 characters")
+        return approved_by
 
     @staticmethod
     def _require_complete_capture(page: ProgramPage) -> None:
@@ -163,8 +204,14 @@ class ScopeCoordinator:
             raise CoordinatorError("scope files have changed since approval")
         return approval, document, markdown
 
-    def _create_scope_draft(self, document: ScopeDocument) -> Path:
-        parent = self.output_dir.parent
+    def _create_scope_draft(
+        self, document: ScopeDocument, *, draft_root: Path | str | None = None
+    ) -> Path:
+        parent = (
+            Path(draft_root).resolve(strict=False)
+            if draft_root is not None
+            else self.output_dir.parent
+        )
         parent.mkdir(parents=True, exist_ok=True)
         staging = Path(
             tempfile.mkdtemp(prefix=f".{self.output_dir.name}-", dir=str(parent))
@@ -222,6 +269,10 @@ class ScopeCoordinator:
             encoding="utf-8",
         )
         approval_path.chmod(0o600)
+        # Dashboard drafts live under result/.webui while approved artifacts are
+        # published under result/Scope/<platform>/<program>.  Ensure that nested
+        # destination exists before the atomic rename/cross-device fallback.
+        self.output_dir.parent.mkdir(parents=True, exist_ok=True)
         try:
             os.replace(staging, self.output_dir)
         except OSError as exc:

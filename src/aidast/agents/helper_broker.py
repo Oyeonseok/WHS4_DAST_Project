@@ -15,10 +15,13 @@ from pathlib import Path
 from typing import Literal, Self
 
 PIPELINE_DATABASE_TOKEN = "broker://pipeline"
-HelperName = Literal["attack_db", "attack_request", "chaining_db"]
+HelperName = Literal[
+    "attack_db", "attack_request", "attack_template", "chaining_db",
+]
 _HELPER_MODULES: dict[HelperName, str] = {
     "attack_db": "aidast.attack.db_cli",
     "attack_request": "aidast.attack.request_cli",
+    "attack_template": "aidast.attack.template_cli",
     "chaining_db": "aidast.chaining.db_cli",
 }
 _MAX_MESSAGE_BYTES = 64 * 1024
@@ -107,7 +110,7 @@ class HelperCommandBroker:
         ):
             raise ValueError("invalid helper argument list")
         prepared: list[str] = []
-        path_flags = {"--payload", "--policy", "--sql-file"}
+        path_flags = {"--payload", "--policy", "--sql-file", "--target"}
 
         def checked_path(value: str) -> str:
             candidate = Path(value).expanduser()

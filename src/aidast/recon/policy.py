@@ -59,9 +59,7 @@ class RestrictionEvidence(StrictModel):
     source_quote: str = Field(min_length=1)
 
 
-class TargetPolicyProposal(StrictModel):
-    asset_type: AssetType
-    asset: str = Field(min_length=1)
+class TargetPolicyControls(StrictModel):
     allowed_schemes: list[Literal["http", "https"]] = ["https"]
     allowed_hosts: list[str] = Field(min_length=1)
     excluded_hosts: list[str] = []
@@ -82,7 +80,7 @@ class TargetPolicyProposal(StrictModel):
     restriction_evidence: list[RestrictionEvidence] = []
 
     @model_validator(mode="after")
-    def validate_paths_and_hosts(self) -> "TargetPolicyProposal":
+    def validate_paths_and_hosts(self) -> "TargetPolicyControls":
         if any(not host or "://" in host or "/" in host for host in self.allowed_hosts):
             raise ValueError("allowed_hosts must contain host names only")
         if any(not _valid_host_pattern(host) for host in self.excluded_hosts):
@@ -95,6 +93,17 @@ class TargetPolicyProposal(StrictModel):
         if any(not path.startswith("/") for path in self.api_probe.allowed_paths):
             raise ValueError("api probe paths must start with /")
         return self
+
+
+class TargetPolicyProposal(TargetPolicyControls):
+    asset_type: AssetType
+    asset: str = Field(min_length=1)
+
+
+class TargetPolicySelectionProposal(TargetPolicyControls):
+    """Planner policy controls bound to an application-owned target ID."""
+
+    target_id: str = Field(pattern=r"^target_[0-9]{4}$")
 
 
 class TargetPolicy(TargetPolicyProposal):
@@ -238,6 +247,17 @@ class TargetPolicy(TargetPolicyProposal):
 
 class TargetPolicySetProposal(StrictModel):
     policies: list[TargetPolicyProposal] = Field(min_length=1)
+
+
+class TargetPolicySelectionSetProposal(StrictModel):
+    policies: list[TargetPolicySelectionProposal] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def reject_duplicate_targets(self) -> "TargetPolicySelectionSetProposal":
+        target_ids = [policy.target_id for policy in self.policies]
+        if len(target_ids) != len(set(target_ids)):
+            raise ValueError("target policy IDs must be unique")
+        return self
 
 
 def _path_matches(path: str, prefix: str) -> bool:

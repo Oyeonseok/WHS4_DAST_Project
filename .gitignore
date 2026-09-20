@@ -33,6 +33,15 @@ scope_rules_*.json
 # OS / 에디터
 .DS_Store
 .vscode/
+.playwright-mcp/
+
+# Web dashboard
+WebUI/node_modules/
+WebUI/dist/
+WebUI/*.tsbuildinfo
+WebUI/vite.config.js
+WebUI/vite.config.d.ts
+WebUI/verification/*.png
 
 # Local pre-migration database backups
 .aidast_db_backups/

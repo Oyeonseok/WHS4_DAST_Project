@@ -54,17 +54,27 @@ class CodexAuthTests(unittest.TestCase):
 
 
 class LoginCliTests(unittest.TestCase):
-    def test_recon_defaults_to_same_runtime_chromium_on_wsl(self) -> None:
+    def test_recon_defaults_to_unauthenticated_mode_on_wsl(self) -> None:
         from aidast.cli import _default_login_mode, _parser
 
         with patch("aidast.cli.os.name", "posix"), patch(
             "aidast.cli.platform.release", return_value="microsoft-standard-WSL2"
         ):
-            self.assertEqual(_default_login_mode(), "runtime-browser")
+            self.assertIsNone(_default_login_mode())
             args = _parser().parse_args([
                 "recon", "https://example.com/program", "--target", "example.com"
             ])
-            self.assertEqual(args.login_mode, "runtime-browser")
+            self.assertIsNone(args.login_mode)
+            never = _parser().parse_args([
+                "recon", "https://example.com/program", "--target", "example.com",
+                "--login-mode", "none",
+            ])
+            self.assertEqual(never.login_mode, "none")
+            interactive = _parser().parse_args([
+                "recon", "https://example.com/program", "--target", "example.com",
+                "--login-mode", "runtime-browser",
+            ])
+            self.assertEqual(interactive.login_mode, "runtime-browser")
             explicit = _parser().parse_args([
                 "recon", "https://example.com/program", "--target", "example.com",
                 "--login-mode", "system-browser",

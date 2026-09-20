@@ -16,6 +16,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from aidast.recon.policy import validate_start_url_for_target
+from aidast.paths import RESULT_ROOT
 from aidast.scope.models import AssetType
 from aidast.auth.endpoints import (
     AuthenticationEndpoint,
@@ -244,7 +245,7 @@ def _capture_native(url: str, output: Path) -> dict:
 
 def collect_target_sessions(targets, *, scope_id: str, run_id: str, identity: str,
                             start_urls: dict, session_bundle: Path | None = None,
-                            root: Path = Path("result/.aidast_sessions"), capture=None) -> dict:
+                            root: Path = RESULT_ROOT / ".aidast_sessions", capture=None) -> dict:
     if not identity.strip():
         raise BrowserLoginError("identity must not be blank")
     if session_bundle is not None and len(targets) != 1:
