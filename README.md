@@ -1,41 +1,68 @@
 # AI DAST
 
-AI DAST는 승인된 버그바운티 Scope 안에서 작동하는 멀티 Agent DAST CLI입니다.
-Recon부터 Attack, Chaining, Validation, Report 초안까지 연결합니다.
+AI DAST는 **승인된 버그바운티 범위 안에서만 동작하는 웹 취약점 분석 도구**입니다.
+웹 대시보드와 CLI를 제공하며, Scope 수집부터 정찰·공격 후보 분석·검증·보고서 초안까지
+하나의 흐름으로 연결합니다.
+
+> **주의:** 반드시 참여 권한이 있고 테스트가 명시적으로 허용된 프로그램과 자산에서만
+> 사용하세요.
+
+## 동작 흐름
 
 ```text
-Scope 수집·승인
+Scope 수집 및 사용자 승인
     ↓
-AI-Dast Recon
+Recon(자산·endpoint 탐색)
     ↓
-관측 태깅
+Attack 후보 분석
     ↓
-Handoff / Pipeline.db
+Chaining(취약점 연결)
     ↓
-Native Attack
+Validation(재현·검증)
     ↓
-Chaining
-    ↓
-Shared Validation
-    ↓
-플랫폼별 Report 초안
+버그바운티 플랫폼별 보고서 초안
 ```
 
-전체 단계 순서, 실행 gate, DB 상태 전이와 재개는 결정론적인 Python
-오케스트레이터가 관리합니다. Codex CLI는 각 단계에서 제한된 구조화 판단과
-Skill 실행만 담당합니다. 전체 파이프라인을 자율적으로 지휘하는 상위 Main Agent는
-없으며, 실제 네트워크 요청은 Python 검증기와 정책 경계를 통과한 경우에만 실행합니다.
-
-> 이 도구는 승인된 버그바운티 프로그램과 명시적으로 허가된 자산에서만 사용하세요.
+단계 순서, 실행 조건, 데이터베이스 상태와 재개 처리는 Python 오케스트레이터가
+결정론적으로 관리합니다. 실제 네트워크 요청은 Scope, 정책, 승인과 요청 예산 검사를
+모두 통과한 경우에만 실행됩니다.
 
 ## 바로가기
 
 - [설치](#설치)
-- [빠른 시작](#빠른-시작)
 - [웹 대시보드](#웹-대시보드)
+- [빠른 시작](#빠른-시작)
 - [핵심 워크플로](#핵심-워크플로)
 - [주요 명령](#주요-명령)
+- [결과 폴더](#결과-폴더)
 - [운영 상세](docs/OPERATIONS.md)
+
+## 처음 사용하는 경우
+
+```bash
+git clone https://github.com/Oyeonseok/WHS4_DAST_Project.git
+cd WHS4_DAST_Project
+uv sync
+uv tool install --editable .
+uvx --from playwright playwright install chromium
+
+cd WebUI
+npm ci
+npm run build
+cd ..
+
+aidast login
+aidast dashboard --ui-dir WebUI/dist
+```
+
+브라우저에서 <http://127.0.0.1:8000>을 열고 다음 순서로 진행합니다.
+
+1. **Scope / Programs**에서 프로그램 URL과 Public/Private 여부를 등록합니다.
+2. Scope를 수집하고 인스코프·아웃오브스코프 항목을 검토합니다.
+3. **Yes**로 승인한 Scope만 **New Scan**에서 실행합니다.
+4. 스캔 진행 상태와 로그를 대시보드에서 확인합니다.
+
+자세한 화면 설명은 [WebUI 사용 설명서](WebUI/README.md)를 참고하세요.
 
 ## 주요 기능
 
