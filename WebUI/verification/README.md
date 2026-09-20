@@ -1,21 +1,34 @@
-# Verification record
+# WebUI 검증 기록
 
-Verified on 2026-09-20 with Node 24.18.1 and the available Chromium/Playwright browser tools.
+2026-09-20 기준 Node.js 24.18.1과 Chromium/Playwright 환경에서 검증했습니다.
 
-- `npm test`: **14 passed, 0 failed**. Native Node contract tests cover the exact inventory, private flag, stage order, snapshot validation, malformed/foreign/versioned frames, bounds, duplicate handling, ordered replay, gap limits, heartbeat cursor semantics, finding/stage/status updates, and 500-log retention.
-- `npm run build`: **passed**, strict TypeScript plus Vite production bundle. Approximate compressed output: JavaScript 95 kB, CSS 11 kB. No extra runtime dependencies beyond React/React DOM.
-- Browser: all eight sidebar destinations render their expected heading, including hash navigation. The program inventory starts empty and displays only programs registered through the local intake API. Private names start masked and can be revealed or hidden again. Verified Scope counts come from `GET /api/v1/scopes`, not from whichever scan happens to be selected.
-- Scope intake accepts a program URL plus Public/Private visibility and creates a durable local queue entry. Private API/dashboard output masks the stored name and URL. Registration does not approve an executable Scope.
-- New scan lists only integrity-verified approved Scopes and their canonical targets. The specific start-URL control remains disabled until exactly one target is selected. With one approved target, an in-scope start URL, platform identity, and authorization confirmation, Start scan becomes enabled. The button was not clicked and no real target scan was launched.
-- Activity ingestion continued from 22 to 23 visible log entries while scrolling was paused and the user navigated from Overview to Findings. Resume following worked.
-- Responsive check: all eight destinations plus the Add Program and New Scan dialogs were exercised at **768 and 390 px**, with desktop regression checks at **1024 and 1440 px**. There is no document-level horizontal overflow. At 390 px navigation is fixed to the bottom; Scope cards/forms, scan statistics, settings, and action rows reflow without clipping; the six-stage pipeline uses a two-column layout. At 768 px Live activity stacks below the main content; desktop retains the full sidebar and right activity rail. Narrow finding tables scroll within their panel. Sidebar icon buttons retain accessible labels on tablets/phones.
-- Mocked live test: REST snapshot cursor 7, received WS events 9, malformed JSON, 8, duplicate 8. Display order was 8 then 9; duplicate was ignored; protocol warning was visible. After a simulated disconnect, the next subscription used `after=9`, applied event 10, and showed exactly three messages in order. First URL: `/ws/scans/demo_local_042?after=7`; second: `/ws/scans/demo_local_042?after=9`.
-- Mocked live REST 503 test: backend-unavailable state and retry control appeared; zero fixture log entries and no synthetic lab scan were displayed.
-- Live audit API returned the selected scan's newest-first event metadata and omitted `details_json`, request bodies, headers, tokens, and cookies. The 390 px Audit view rendered both persisted records without horizontal overflow.
-- Report API tests accepted a valid hash-bound `Report.db` draft, omitted Markdown bodies from list responses, returned the selected Markdown through an identifier-validated endpoint, and rejected traversal-shaped identifiers. The current real result root contains no report draft, so the live UI correctly renders its empty state.
+## 자동 검증
 
-Backend verification covered durable program registration, same-origin enforcement, private-field masking, approved-scope discovery, out-of-scope rejection, fixed non-shell argv construction with a mocked process, pre-database WebSocket events, CLI scan-ID validation, and existing snapshot replay. No real target scan was launched.
+- `npm test`: **14개 통과, 실패 0개**
+- `npm run build`: TypeScript 검사와 Vite production build 통과
+- gzip 기준 대략적인 번들 크기: JavaScript 95kB, CSS 11kB
 
-Browser screenshots are local verification artifacts and are intentionally excluded
-from Git so the repository does not accumulate generated binary files. They contained
-no executed real-target scan results.
+테스트는 스냅샷 검증, 잘못된 WebSocket frame 거부, 이벤트 순서 복구, 중복 제거,
+heartbeat 처리, 로그 500개 보관 제한과 스캔 상태 변경을 확인합니다.
+
+## 브라우저 검증
+
+- 8개 메뉴와 hash 기반 앞/뒤 탐색
+- 비어 있는 초기 프로그램 목록과 사용자 등록 항목만 표시되는지 확인
+- Private 프로그램 이름의 기본 마스킹과 일시적 표시
+- Scope 수집 진행 로그, 초안 검토와 명시적인 Yes/No 승인
+- 승인된 Scope만 New Scan에서 선택 가능한지 확인
+- 1440px, 1024px, 768px, 390px 반응형 레이아웃
+- 라이트·다크·시스템 테마와 한국어·영어 전환
+- 활동 로그 일시정지 중에도 이벤트 수신이 계속되는지 확인
+
+## 실시간 연결 검증
+
+- REST 스냅샷 cursor 이후의 WebSocket 이벤트 재생
+- 순서가 바뀐 이벤트의 정렬, 중복 frame 무시와 재연결
+- REST 503 발생 시 데모 데이터로 바뀌지 않고 오류 상태 표시
+- Audit API에서 요청 본문, 헤더, 쿠키, 토큰과 `details_json`이 제외되는지 확인
+- 해시가 일치하는 `Report.db` 초안만 표시하고 경로 탐색 형태의 ID는 거부
+
+실제 외부 타깃 스캔은 실행하지 않았습니다. 브라우저 검증 스크린샷은 생성 파일이므로
+Git에 포함하지 않습니다.
