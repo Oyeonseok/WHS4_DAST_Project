@@ -13,7 +13,9 @@ import httpx
 import pytest
 
 from aidast.agents.main import MainAgentError
+from aidast.cli import EXECUTION_PROFILES as CLI_EXECUTION_PROFILES
 from aidast.cli import _parser, _run_dashboard
+from aidast.recon.profiles import EXECUTION_PROFILES
 from aidast.web.projection import DashboardProjector, ScanNotFoundError
 from aidast.web.launch import (
     ApprovedScope,
@@ -23,6 +25,10 @@ from aidast.web.launch import (
 )
 from aidast.web.server import create_app
 from aidast.web.programs import ProgramRegistrationRequest, ProgramRegistry
+from aidast.web.requirements import (
+    IdentityHeader,
+    build_scope_execution_requirements,
+)
 from aidast.web.scope_workflow import ScopeWorkflowManager
 from aidast.scope.models import (
     AssetType,
@@ -37,6 +43,27 @@ from aidast.scope.models import (
 
 SCAN_ID = "scan_web_test"
 SCOPE_ID = "scope_web_test"
+
+
+def _execution_requirements(identity_header: IdentityHeader | None):
+    return build_scope_execution_requirements(
+        ScopeAnalysis(
+            program_name="Fixture",
+            program_description="Fixture",
+            in_scope_assets=[],
+            out_of_scope_assets=[],
+            allowed_activities=[],
+            prohibited_activities=[],
+            submission_requirements=[],
+            operational_constraints=[],
+            safe_harbor="",
+            ambiguities=["Focused launcher fixture."],
+            source_evidence=[
+                SourceEvidence(section="Scope", quote="Fixture scope")
+            ],
+        ),
+        identity_header=identity_header,
+    )
 
 
 def _fixture(root: Path) -> Path:
@@ -354,11 +381,21 @@ def test_scope_dashboard_requires_explicit_yes_or_no(tmp_path: Path) -> None:
         allowed_activities=["Non-destructive testing"],
         prohibited_activities=["Denial of service"],
         submission_requirements=["Reproducible steps"],
-        operational_constraints=["Low request rate"],
+        operational_constraints=[
+            "Maximum automated-tooling rate: 10 requests per second.",
+            "Use request header X-Intigriti-Username:{Username}.",
+        ],
         safe_harbor="Policy-compliant research is authorized.",
         ambiguities=[],
         source_evidence=[
-            SourceEvidence(section="Scope", quote="*.example.test is in scope")
+            SourceEvidence(section="Scope", quote="*.example.test is in scope"),
+            SourceEvidence(
+                section="Rules of engagement",
+                quote=(
+                    "Automated tooling\nmax. 10 requests /sec\n"
+                    "Request header\nX-Intigriti-Username:{Username}"
+                ),
+            ),
         ],
     )
 
@@ -451,7 +488,15 @@ def test_scope_dashboard_requires_explicit_yes_or_no(tmp_path: Path) -> None:
             assert (output / "Scope.md").is_file()
             assert (output / "Manifest.json").is_file()
             assert (output / "Approval.json").is_file()
-            assert (await client.get("/api/v1/scopes")).json()["scopes"][0]["program_name"] == "Example Program"
+            approved_scope = (await client.get("/api/v1/scopes")).json()["scopes"][0]
+            assert approved_scope["program_name"] == "Example Program"
+            requirements = approved_scope["execution_requirements"]
+            assert requirements["scope_max_requests_per_second"] == 10
+            assert requirements["required_header"] == {
+                "name": "X-Intigriti-Username",
+                "input_field": "intigriti_username",
+            }
+            assert requirements["profiles"][0]["limits"]["max_requests"] == 500
 
     asyncio.run(exercise())
 
@@ -491,6 +536,7 @@ def test_scan_launcher_builds_fixed_argv_and_streams_pre_database_logs(tmp_path:
         targets=({"asset_type": "DOMAIN", "asset": "prismlife.com", "description": "", "maximum_severity": "HIGH"},),
         identity_header="hackerone",
         approved_by="operator",
+        execution_requirements=_execution_requirements("hackerone"),
     )
 
     class Catalog:
@@ -511,6 +557,10 @@ def test_scan_launcher_builds_fixed_argv_and_streams_pre_database_logs(tmp_path:
         targets=["prismlife.com"],
         profile="safe-recon",
         max_requests=120,
+        max_rps=0.4,
+        max_depth=1,
+        max_concurrency=1,
+        timeout_seconds=10,
         login_mode="none",
         start_url="https://prismlife.com/app",
         hackerone_username="web_operator",
@@ -522,6 +572,10 @@ def test_scan_launcher_builds_fixed_argv_and_streams_pre_database_logs(tmp_path:
     assert argv[1:4] == ["-m", "aidast", "run"]
     assert argv[argv.index("--target") + 1] == "prismlife.com"
     assert argv[argv.index("--max-requests") + 1] == "120"
+    assert argv[argv.index("--max-rps") + 1] == "0.4"
+    assert argv[argv.index("--max-depth") + 1] == "1"
+    assert argv[argv.index("--max-concurrency") + 1] == "1"
+    assert argv[argv.index("--timeout-seconds") + 1] == "10"
     assert argv[argv.index("--scan-id") + 1] == launched["scan_id"]
     assert argv[argv.index("--start-url") + 1] == "https://prismlife.com/app"
     assert manager.snapshot(launched["scan_id"])["logs"][-1]["message"] == "AI DAST pipeline process started."
@@ -544,6 +598,18 @@ def test_scan_request_rejects_unconfirmed_or_excessive_budget() -> None:
         ScanLaunchRequest(**base)
     with pytest.raises(ValueError, match="request budget exceeds"):
         ScanLaunchRequest(**base, max_requests=501, authorization_confirmed=True)
+    with pytest.raises(ValueError, match="request rate exceeds"):
+        ScanLaunchRequest(
+            **base,
+            max_rps=0.6,
+            authorization_confirmed=True,
+        )
+    with pytest.raises(ValueError, match="concurrency exceeds"):
+        ScanLaunchRequest(
+            **base,
+            max_concurrency=3,
+            authorization_confirmed=True,
+        )
     with pytest.raises(ValueError, match="exactly one target"):
         ScanLaunchRequest(**{
             **base,
@@ -556,6 +622,7 @@ def test_scan_request_rejects_unconfirmed_or_excessive_budget() -> None:
 
 
 def test_run_parser_accepts_only_generated_scan_identifiers() -> None:
+    assert CLI_EXECUTION_PROFILES is EXECUTION_PROFILES
     valid = "scan_" + "a" * 32
     parsed = _parser().parse_args(
         ["run", "https://example.test/program", "--target", "example.test", "--scan-id", valid]

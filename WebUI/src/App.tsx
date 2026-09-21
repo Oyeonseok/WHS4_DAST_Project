@@ -3,12 +3,18 @@ import { DEMO_SCAN } from './data/demo';
 import { transportMode, useScanSocket } from './hooks/useScanSocket';
 import { stages, type Finding, type Snapshot } from './lib/events';
 import { initialLanguage, translate, type Language } from './lib/i18n';
+import {
+  resolveExecutionLimits,
+  type ExecutionProfileId,
+  type ScopeExecutionRequirements,
+} from './lib/scan';
+import { scopeCollectionRequest } from './lib/scope';
 
 const pages = ['Overview', 'Scopes / Programs', 'Scans', 'Findings', 'Validation', 'Reports', 'Audit log', 'Settings'] as const;
 type Page = typeof pages[number];
 type ScanSummary = { scan_id: string; status: Snapshot['status']; started_at: string; finished_at: string | null };
 type ScopeTarget = { asset_type: string; asset: string; description: string; maximum_severity: string };
-type ApprovedScope = { scope_id: string; program_id: string; program_name: string; platform: string; targets: ScopeTarget[]; identity_header: 'hackerone' | 'intigriti' | null; approved_by: string };
+type ApprovedScope = { scope_id: string; program_id: string; program_name: string; platform: string; targets: ScopeTarget[]; identity_header: 'hackerone' | 'intigriti' | null; approved_by: string; execution_requirements: ScopeExecutionRequirements };
 type ScopeStatus = 'scope_required' | 'collecting' | 'awaiting_browser' | 'review_required' | 'approved' | 'rejected' | 'failed';
 type RegisteredProgram = { id: string; platform: string; program: string; visibility: 'public' | 'private'; scope_status: ScopeStatus; scope_job_id?: string; scope_error?: string | null; scope_updated_at?: string; created_at: string };
 type ScopeJobEvent = { job_id: string; event_id: number; occurred_at: string; level: string; message: string };
@@ -75,7 +81,7 @@ export default function App() {
   const [logSearch, setLogSearch] = useState('');
   const [paused, setPaused] = useState(false);
   const [compact, setCompact] = useState(false);
-  const [collapsed, setCollapsed] = useState(false);
+  const [collapsed, setCollapsed] = useState(() => window.matchMedia('(max-width: 900px)').matches);
   const [theme, setTheme] = useState<ThemeChoice>(savedTheme);
   const [resolvedTheme, setResolvedTheme] = useState<'dark' | 'light'>('dark');
   const [language, setLanguage] = useState<Language>(initialLanguage);
@@ -92,8 +98,6 @@ export default function App() {
   const [scopeSubmitting, setScopeSubmitting] = useState(false);
   const [scopeError, setScopeError] = useState('');
   const [workflowProgram, setWorkflowProgram] = useState<RegisteredProgram | null>(null);
-  const [collectionMode, setCollectionMode] = useState<'headless' | 'runtime-browser'>('headless');
-  const [collectionIdentity, setCollectionIdentity] = useState('');
   const [scopeEvents, setScopeEvents] = useState<ScopeJobEvent[]>([]);
   const [scopeDraft, setScopeDraft] = useState<ScopeDraft | null>(null);
   const [scopeReviewer, setScopeReviewer] = useState('');
@@ -102,11 +106,14 @@ export default function App() {
   const [scopeWorkflowError, setScopeWorkflowError] = useState('');
   const [scopeId, setScopeId] = useState('');
   const [selectedTargets, setSelectedTargets] = useState<string[]>([]);
-  const [scanProfile, setScanProfile] = useState<'safe-recon' | 'focused-discovery'>('safe-recon');
+  const [scanProfile, setScanProfile] = useState<ExecutionProfileId>('safe-recon');
   const [maxRequests, setMaxRequests] = useState(500);
+  const [maxRps, setMaxRps] = useState(0.5);
+  const [maxConcurrency, setMaxConcurrency] = useState(2);
+  const [timeoutSeconds, setTimeoutSeconds] = useState(15);
+  const [maxDepth, setMaxDepth] = useState(2);
   const [platformHandle, setPlatformHandle] = useState('');
   const [loginMode, setLoginMode] = useState<'none' | 'runtime-browser'>('none');
-  const [startUrl, setStartUrl] = useState('');
   const [authorizationConfirmed, setAuthorizationConfirmed] = useState(false);
   const [launching, setLaunching] = useState(false);
   const [launchError, setLaunchError] = useState('');
@@ -219,7 +226,6 @@ export default function App() {
     return () => { abort.abort(); window.clearInterval(timer); };
   }, [demo, modal, workflowProgram?.id, workflowProgram?.scope_job_id]);
   useEffect(() => { if (modal) dialog.current?.showModal(); else dialog.current?.close(); }, [modal]);
-  useEffect(() => { if (selectedTargets.length !== 1) setStartUrl(''); }, [selectedTargets.length]);
   useEffect(() => {
     if (demo || page !== 'Audit log' || !scanId) return;
     const abort = new AbortController();
@@ -265,12 +271,22 @@ export default function App() {
         const loaded = Array.isArray(body.scopes) ? body.scopes : [];
         setScopes(loaded);
         setScopeId(current => loaded.some(item => item.scope_id === current) ? current : loaded[0]?.scope_id || '');
-        setSelectedTargets([]);
       } catch (e) { if (!abort.signal.aborted) setLaunchError(e instanceof Error ? e.message : 'Approved scopes could not be loaded.'); }
     })();
     return () => abort.abort();
   }, [modal, demo]);
   const selectedScope = scopes.find(item => item.scope_id === scopeId);
+  const selectedLimits = selectedScope
+    ? resolveExecutionLimits(selectedScope.execution_requirements, scanProfile)
+    : null;
+  useEffect(() => {
+    if (!selectedLimits) return;
+    setMaxRequests(selectedLimits.max_requests);
+    setMaxRps(selectedLimits.requests_per_second);
+    setMaxConcurrency(selectedLimits.concurrency);
+    setTimeoutSeconds(selectedLimits.timeout_seconds);
+    setMaxDepth(selectedLimits.max_depth);
+  }, [selectedScope?.scope_id, scanProfile]);
   const registerProgram = async () => {
     if (!scopeProgramUrl.trim()) return;
     setScopeSubmitting(true); setScopeError('');
@@ -291,13 +307,13 @@ export default function App() {
     setWorkflowProgram(item); setScopeEvents([]); setScopeDraft(null); setScopeReviewer(''); setScopeConfirmed(false); setScopeWorkflowError(''); setModal('scope-workflow');
   };
   const startScopeCollection = async () => {
-    if (!workflowProgram || (collectionMode === 'runtime-browser' && !collectionIdentity.trim())) return;
+    if (!workflowProgram) return;
     setScopeActionBusy(true); setScopeWorkflowError(''); setScopeEvents([]); setScopeDraft(null);
     try {
       const base = import.meta.env.VITE_API_BASE_URL || location.origin;
       const response = await fetch(new URL(`/api/v1/programs/${encodeURIComponent(workflowProgram.id)}/scope-collection`, base), {
         method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ login_mode: collectionMode, identity: collectionMode === 'runtime-browser' ? collectionIdentity.trim() : null }),
+        body: JSON.stringify(scopeCollectionRequest),
       });
       const body = await response.json() as { job?: Partial<RegisteredProgram>; detail?: string };
       if (!response.ok || !body.job) throw new Error(body.detail || `Scope collection returned ${response.status}`);
@@ -344,7 +360,9 @@ export default function App() {
         method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           scope_id: selectedScope.scope_id, targets: selectedTargets, profile: scanProfile,
-          max_requests: maxRequests, login_mode: loginMode, start_url: startUrl.trim() || null, authorization_confirmed: true,
+          max_requests: maxRequests, max_rps: maxRps, max_concurrency: maxConcurrency,
+          timeout_seconds: timeoutSeconds, max_depth: maxDepth,
+          login_mode: loginMode, authorization_confirmed: true,
           hackerone_username: selectedScope.identity_header === 'hackerone' ? platformHandle : null,
           intigriti_username: selectedScope.identity_header === 'intigriti' ? platformHandle : null,
         }),
@@ -379,18 +397,29 @@ export default function App() {
   const scanPanel = <Panel title={demo ? tr('Local lab · API assessment') : snapshot?.program_name || scanId} subtitle={demo ? tr('Synthetic fixture · isolated from program inventory') : `${tr('Read-only scan snapshot')} · ${scanId}`} action={<Badge tone="success"><span className="dot"/>{tr(snapshot?.status || state)}</Badge>}>
     {snapshot ? <><Pipeline snapshot={snapshot} language={language}/><div className="scan-stats"><div><span>{tr('Scan ID')}</span><strong className="mono">{snapshot.scan_id}</strong></div><div><span>{tr('Endpoints')}</span><strong>{snapshot.endpoints}</strong></div><div><span>{tr('Request budget')}</span><strong>{snapshot.requests} <small>/ {snapshot.budget.toLocaleString()}</small></strong></div><div className="progress-stat"><span>{snapshot.stage} {tr('progress')} <b>{snapshot.progress}%</b></span><progress max="100" value={snapshot.progress} aria-label={`${snapshot.stage} ${tr('progress')}`}/></div></div></> : <Empty title={tr(state === 'offline' ? 'Backend unavailable' : 'Loading scan snapshot')}>{tr('Connect the REST snapshot endpoint to display scan state. Demo data is never substituted in live mode.')}</Empty>}
   </Panel>;
-  const handleRequired = !!selectedScope?.identity_header;
-  const canLaunch = !demo && !!selectedScope && selectedTargets.length > 0 && authorizationConfirmed && (!handleRequired || !!platformHandle.trim()) && !launching;
+  const requiredHeader = selectedScope?.execution_requirements.required_header;
+  const handleRequired = !!requiredHeader;
+  const limitsValid = !!selectedLimits
+    && maxRequests >= 1 && maxRequests <= selectedLimits.max_requests
+    && maxRps > 0 && maxRps <= selectedLimits.requests_per_second
+    && maxConcurrency >= 1 && maxConcurrency <= selectedLimits.concurrency
+    && timeoutSeconds >= 1 && timeoutSeconds <= selectedLimits.timeout_seconds
+    && maxDepth >= 0 && maxDepth <= selectedLimits.max_depth;
+  const canLaunch = !demo && !!selectedScope && selectedTargets.length > 0
+    && authorizationConfirmed && limitsValid
+    && (!handleRequired || !!platformHandle.trim()) && !launching;
   const newScanContent = <div className="scan-form">
     <div className="notice"><Icon name="lock"/><div><strong>{tr('Approved Scope only')}</strong><p>{tr('The backend re-verifies approval integrity and the Python orchestrator enforces TargetPolicy and request budgets.')}</p></div></div>
     {demo ? <p className="form-error">{tr('Switch to the live local dashboard to start a scan.')}</p> : <>
-      <label className="form-field"><span>{tr('Verified Scope')}</span><select aria-label={tr('Approved program')} value={scopeId} onChange={event => { setScopeId(event.target.value); setSelectedTargets([]); setStartUrl(''); setPlatformHandle(''); }}><option value="">{tr('Select a recent approved scope')}</option>{scopes.map(scope => <option key={scope.scope_id} value={scope.scope_id}>{scope.program_name} · {scope.platform}</option>)}</select></label>
+      <label className="form-field"><span>{tr('Verified Scope')}</span><select aria-label={tr('Approved program')} value={scopeId} onChange={event => { setScopeId(event.target.value); setSelectedTargets([]); setPlatformHandle(''); }}><option value="">{tr('Select a recent approved scope')}</option>{scopes.map(scope => <option key={scope.scope_id} value={scope.scope_id}>{scope.program_name} · {scope.platform}</option>)}</select></label>
       {selectedScope && <>
         <fieldset className="target-fieldset"><legend>{tr('Targets')} <small>{selectedTargets.length}{tr('selected')}</small></legend><div className="target-actions"><button type="button" className="text-button" onClick={() => setSelectedTargets(selectedScope.targets.map(item => item.asset))}>{tr('Select all')}</button><button type="button" className="text-button" onClick={() => setSelectedTargets([])}>{tr('Clear')}</button></div><div className="target-list">{selectedScope.targets.map(target => <label key={`${target.asset_type}:${target.asset}`}><input type="checkbox" checked={selectedTargets.includes(target.asset)} onChange={() => setSelectedTargets(current => current.includes(target.asset) ? current.filter(item => item !== target.asset) : [...current, target.asset])}/><span><strong>{target.asset}</strong><small>{target.asset_type} · max {target.maximum_severity || tr('program policy')}</small></span></label>)}</div></fieldset>
-        <div className="form-grid"><label className="form-field"><span>{tr('Execution profile')}</span><select value={scanProfile} onChange={event => { const profile = event.target.value as 'safe-recon' | 'focused-discovery'; setScanProfile(profile); setMaxRequests(profile === 'safe-recon' ? 500 : 2000); }}><option value="safe-recon">{tr('Safe recon · up to 500 requests')}</option><option value="focused-discovery">{tr('Focused discovery · up to 2,000')}</option></select></label><label className="form-field"><span>{tr('Request budget')}</span><input type="number" min="1" max={scanProfile === 'safe-recon' ? 500 : 2000} value={maxRequests} onChange={event => setMaxRequests(Number(event.target.value))}/></label></div>
-        <label className="form-field"><span>{tr('Specific start URL')} <small>{tr('optional · one selected target only')}</small></span><input type="url" value={startUrl} disabled={selectedTargets.length !== 1} onChange={event => setStartUrl(event.target.value)} placeholder={selectedTargets.length === 1 ? 'https://app.approved-domain.example/path' : tr('Select exactly one target to narrow the scan')}/></label>
-        <div className="form-grid"><label className="form-field"><span>{tr('Login behavior')}</span><select value={loginMode} onChange={event => setLoginMode(event.target.value as 'none' | 'runtime-browser')}><option value="none">{tr('No login prompt')}</option><option value="runtime-browser">{tr('Open runtime browser')}</option></select></label>{handleRequired && <label className="form-field"><span>{selectedScope.identity_header === 'hackerone' ? 'HackerOne' : 'Intigriti'} {tr('username')}</span><input value={platformHandle} onChange={event => setPlatformHandle(event.target.value)} autoComplete="off" maxLength={64} placeholder={tr('Required request identity')}/></label>}</div>
-        <label className="confirm-field"><input type="checkbox" checked={authorizationConfirmed} onChange={event => setAuthorizationConfirmed(event.target.checked)}/><span>{tr('I confirm these selected targets are currently authorized and accept the configured request budget.')}</span></label>
+        {selectedTargets.length > 0 && selectedLimits && <section className="execution-requirements"><div className="execution-requirements-heading"><div><h3>{tr('Execution requirements')}</h3><p>{tr("Derived from this Scope's policy and the selected safe profile.")}</p></div><div className="stage-badges"><Badge>{tr('Recon')}</Badge><Badge>{tr('Attack')}</Badge><Badge>{tr('Validation')}</Badge></div></div><div className="requirements-summary"><div><span>{tr('Scope request-rate limit')}</span><strong>{selectedScope.execution_requirements.scope_max_requests_per_second ? `${selectedScope.execution_requirements.scope_max_requests_per_second}/s` : tr('Not specified by policy')}</strong></div><div><span>{tr('Required request header')}</span><strong className="mono">{selectedScope.execution_requirements.required_header?.name || tr('None')}</strong></div></div>{selectedScope.execution_requirements.operational_constraints.length > 0 && <div className="operational-constraints"><h3>{tr('Operational constraints')}</h3><ul>{selectedScope.execution_requirements.operational_constraints.map(item => <li key={item}>{item}</li>)}</ul></div>}<p className="requirements-note">{tr('TargetPolicy is regenerated at launch and may lower these limits further.')}</p></section>}
+        <div className="form-grid"><label className="form-field"><span>{tr('Execution profile')}</span><select value={scanProfile} onChange={event => setScanProfile(event.target.value as ExecutionProfileId)}><option value="safe-recon">{tr('Safe recon')}</option><option value="focused-discovery">{tr('Focused discovery')}</option></select></label><label className="form-field"><span>{tr('Request budget')} <small>≤ {selectedLimits?.max_requests.toLocaleString()}</small></span><input type="number" min="1" max={selectedLimits?.max_requests} value={maxRequests} onChange={event => setMaxRequests(Number(event.target.value))}/></label></div>
+        <div className="form-grid"><label className="form-field"><span>{tr('Requests per second')} <small>≤ {selectedLimits?.requests_per_second}</small></span><input type="number" min="0.1" step="0.1" max={selectedLimits?.requests_per_second} value={maxRps} onChange={event => setMaxRps(Number(event.target.value))}/></label><label className="form-field"><span>{tr('Concurrency')} <small>≤ {selectedLimits?.concurrency}</small></span><input type="number" min="1" max={selectedLimits?.concurrency} value={maxConcurrency} onChange={event => setMaxConcurrency(Number(event.target.value))}/></label></div>
+        <div className="form-grid"><label className="form-field"><span>{tr('Timeout seconds')} <small>≤ {selectedLimits?.timeout_seconds}</small></span><input type="number" min="1" max={selectedLimits?.timeout_seconds} value={timeoutSeconds} onChange={event => setTimeoutSeconds(Number(event.target.value))}/></label><label className="form-field"><span>{tr('Maximum depth')} <small>≤ {selectedLimits?.max_depth}</small></span><input type="number" min="0" max={selectedLimits?.max_depth} value={maxDepth} onChange={event => setMaxDepth(Number(event.target.value))}/></label></div>
+        <div className="form-grid"><label className="form-field"><span>{tr('Login behavior')}</span><select value={loginMode} onChange={event => setLoginMode(event.target.value as 'none' | 'runtime-browser')}><option value="none">{tr('No login prompt')}</option><option value="runtime-browser">{tr('Open runtime browser')}</option></select></label>{requiredHeader && <label className="form-field"><span className="mono">{requiredHeader.name} <small>{tr('required for every request')}</small></span><input value={platformHandle} onChange={event => setPlatformHandle(event.target.value)} autoComplete="off" maxLength={64} placeholder={tr('Enter the platform username sent in this header')}/></label>}</div>
+        <label className="confirm-field"><input type="checkbox" checked={authorizationConfirmed} onChange={event => setAuthorizationConfirmed(event.target.checked)}/><span>{tr('I confirm these selected targets are currently authorized and accept the policy-derived execution requirements shown above.')}</span></label>
       </>}
       {launchError && <p className="form-error" role="alert">{launchError}</p>}
       {!scopes.length && !launchError && <p className="form-empty">{tr('Loading verified scopes…')}</p>}
@@ -407,11 +436,9 @@ export default function App() {
   const scopeWorkflowContent = workflowProgram && <div className="scope-workflow">
     <div className="workflow-summary"><div><span>{workflowProgram.platform}</span><strong>{workflowProgram.visibility === 'private' && !privateVisible ? tr('Private program') : workflowProgram.program}</strong></div><Badge tone={scopeStatusTone(workflowProgram.scope_status)}>{tr(scopeStatusLabel[workflowProgram.scope_status])}</Badge></div>
     {(workflowProgram.scope_status === 'scope_required' || workflowProgram.scope_status === 'rejected' || workflowProgram.scope_status === 'failed') && <>
-      <div className="notice"><Icon name="scope"/><div><strong>{tr('Collect a policy snapshot')}</strong><p>{tr('This creates an unapproved draft only. It cannot be used for scanning until you inspect it and choose Yes.')}</p></div></div>
-      <label className="form-field"><span>{tr('Capture method')}</span><select value={collectionMode} onChange={event => setCollectionMode(event.target.value as 'headless' | 'runtime-browser')}><option value="headless">{tr('Public page · headless browser')}</option><option value="runtime-browser">{tr('Interactive browser · login / MFA')}</option></select></label>
-      {collectionMode === 'runtime-browser' && <label className="form-field"><span>{tr('Local browser identity')} <small>{tr('profile label, not a password')}</small></span><input value={collectionIdentity} onChange={event => setCollectionIdentity(event.target.value)} maxLength={64} autoComplete="off" placeholder="e.g. hackerone-operator"/></label>}
+      <div className="notice"><Icon name="scope"/><div><strong>{tr('Collect a policy snapshot')}</strong><p>{tr('AI DAST opens its own browser. Log in to the bug bounty platform, open the exact Scope page, and continue here. The result remains an unapproved draft until you review it.')}</p></div></div>
       {workflowProgram.scope_error && <p className="form-error">{tr('Previous attempt:')} {workflowProgram.scope_error}</p>}
-      <div className="button-row"><button className="secondary-button" onClick={() => setModal(null)}>{tr('Cancel')}</button><button className="primary-button" disabled={scopeActionBusy || (collectionMode === 'runtime-browser' && !collectionIdentity.trim())} onClick={() => void startScopeCollection()}>{tr(scopeActionBusy ? 'Starting…' : workflowProgram.scope_status === 'scope_required' ? 'Collect Scope' : 'Collect again')} <Icon name="arrow" size={14}/></button></div>
+      <div className="button-row"><button className="secondary-button" onClick={() => setModal(null)}>{tr('Cancel')}</button><button className="primary-button" disabled={scopeActionBusy} onClick={() => void startScopeCollection()}>{tr(scopeActionBusy ? 'Starting…' : workflowProgram.scope_status === 'scope_required' ? 'Collect Scope' : 'Collect again')} <Icon name="arrow" size={14}/></button></div>
     </>}
     {(workflowProgram.scope_status === 'collecting' || workflowProgram.scope_status === 'awaiting_browser') && <>
       <div className="notice"><Icon name="terminal"/><div><strong>{tr(workflowProgram.scope_status === 'awaiting_browser' ? 'Browser input required' : 'Scope collection is running')}</strong><p>{tr(workflowProgram.scope_status === 'awaiting_browser' ? 'Finish login or MFA in the opened local browser, return to the exact policy page, then continue here.' : 'The dashboard is collecting and interpreting the program policy. Keep this dialog open to follow progress.')}</p></div></div>
@@ -434,15 +461,16 @@ export default function App() {
     <a className="skip-link" href="#main-content">{tr('Skip to content')}</a>
     <aside className="sidebar"><div className="brand"><div className="brand-mark"><Icon name="shield" size={22}/></div><div><strong>AI DAST<span className="brand-period">.</span></strong><small>{tr('SECURITY WORKSPACE')}</small></div></div>
       <div className="workspace-label"><span className="workspace-avatar">W</span><div>{tr('Local workspace')}<small>WHS4 / DAST Project</small></div><Badge>01</Badge></div>
-      <nav aria-label={tr('Main navigation')}><p className="nav-label">{tr('OPERATIONS')}</p>{pages.slice(0,7).map((p,i) => <button key={p} aria-label={pageLabel(p)} title={pageLabel(p)} className={`nav-item ${page === p ? 'active' : ''}`} onClick={() => go(p)} aria-current={page === p ? 'page' : undefined}><Icon name={symbols[i]}/><span>{pageLabel(p)}</span>{i === 1 && <em>{totalProgramCount}</em>}{i === 3 && snapshot && <em>{findings.length}</em>}</button>)}</nav>
+      <nav aria-label={tr('Main navigation')}><p className="nav-label">{tr('OPERATIONS')}</p>{pages.map((p,i) => <button key={p} aria-label={pageLabel(p)} title={pageLabel(p)} className={`nav-item ${p === 'Settings' ? 'mobile-settings-nav' : ''} ${page === p ? 'active' : ''}`} onClick={() => go(p)} aria-current={page === p ? 'page' : undefined}><Icon name={symbols[i]}/><span>{pageLabel(p)}</span>{i === 1 && <em>{totalProgramCount}</em>}{i === 3 && snapshot && <em>{findings.length}</em>}</button>)}</nav>
       <div className="sidebar-bottom"><div className="boundary-note"><Icon name="lock" size={16}/><strong>{tr('Scope comes first.')}</strong><p>{tr('Every request stays inside verified approval and policy boundaries.')}</p></div><button aria-label={tr('Settings')} title={tr('Settings')} className={`nav-item ${page === 'Settings' ? 'active' : ''}`} aria-current={page === 'Settings' ? 'page' : undefined} onClick={() => go('Settings')}><Icon name="settings"/><span>{tr('Settings')}</span></button><div className="operator"><div className="avatar">LO</div><div><strong>{tr('Local operator')}</strong><small>{tr(demo ? 'Demo workspace' : 'Backend session')}</small></div><span className="dot"/></div></div>
     </aside>
-    <div className="main-shell"><header className="topbar"><div className="breadcrumb">{tr('Workspace')} <span>/</span> <strong>{pageLabel(page)}</strong></div><div className="top-actions"><span className={`connection ${demo ? 'demo' : ''}`}><span className="dot"/>{tr(demo ? 'Demo environment' : state)}</span><label className="language-select"><span className="sr-only">{tr('Language')}</span><select aria-label={tr('Language')} value={language} onChange={event => setLanguage(event.target.value as Language)}><option value="ko">한국어</option><option value="en">English</option></select></label><button className="icon-button theme-toggle" title={tr(`Switch to ${resolvedTheme === 'dark' ? 'light' : 'dark'} mode`)} aria-label={tr(`Switch to ${resolvedTheme === 'dark' ? 'light' : 'dark'} mode`)} onClick={() => setTheme(resolvedTheme === 'dark' ? 'light' : 'dark')}><Icon name={resolvedTheme === 'dark' ? 'sun' : 'moon'} size={16}/></button><button className="primary-button" onClick={() => setModal('new')}><Icon name="plus" size={16}/>{tr('New scan')}</button></div></header>
+    <div className="main-shell"><header className="topbar"><div className="breadcrumb">{tr('Workspace')} <span>/</span> <strong>{pageLabel(page)}</strong></div><div className="top-actions"><span className={`connection ${demo ? 'demo' : ''}`}><span className="dot"/>{tr(demo ? 'Demo environment' : state)}</span><label className="language-select"><span className="sr-only">{tr('Language')}</span><select aria-label={tr('Language')} value={language} onChange={event => setLanguage(event.target.value as Language)}><option value="ko">한국어</option><option value="en">English</option></select></label><button className="icon-button theme-toggle" title={tr(`Switch to ${resolvedTheme === 'dark' ? 'light' : 'dark'} mode`)} aria-label={tr(`Switch to ${resolvedTheme === 'dark' ? 'light' : 'dark'} mode`)} onClick={() => setTheme(resolvedTheme === 'dark' ? 'light' : 'dark')}><Icon name={resolvedTheme === 'dark' ? 'sun' : 'moon'} size={16}/></button></div></header>
       <div className="demo-strip"><Icon name={demo ? 'terminal' : 'lock'} size={14}/><span>{tr(demo ? 'DEMO DATA' : 'LOCAL OPERATOR')}<b>·</b>{tr(demo ? 'A synthetic workflow. No network scans or program activity.' : 'Approved-scope scan controls + live REST and WebSocket status.')}</span><button onClick={() => go('Settings')}>{tr('Connection details')} <Icon name="arrow" size={13}/></button></div>
       <div className={`workspace-grid ${collapsed ? 'activity-collapsed' : ''}`}><main id="main-content" tabIndex={-1} className="content-column">
         <div className="page-heading"><div><p className="eyebrow">{tr(page === 'Overview' ? 'YOUR OPERATIONS, AT A GLANCE' : 'AI DAST / WORKSPACE')}</p><h1>{tr(page === 'Overview' ? 'Security overview' : page)}</h1><p>{tr(page === 'Overview' ? 'From approved scope to evidence you can stand behind.' : page === 'Scopes / Programs' ? 'Program inventory is a starting point. Approved scope defines execution.' : page === 'Scans' ? 'One deterministic pipeline. Traceable decisions at every stage.' : page === 'Findings' ? 'Signals become findings. Validation establishes the verdict.' : page === 'Validation' ? 'Reproduction, controls, and evidence before confirmation.' : page === 'Reports' ? 'Reviewable local drafts. Nothing is submitted automatically.' : page === 'Audit log' ? 'Trace the decisions and provenance behind each run.' : 'Connection, privacy, and display preferences.')}</p></div><span className="heading-tag">{demo ? 'FIXTURE / 042' : 'LIVE / V1'}</span></div>
         {page === 'Scopes / Programs' && <div className="scope-page-actions"><div><strong>{tr('Scope intake')}</strong><p>{tr('Register a bug bounty program before collecting and approving its executable Scope.')}</p></div><button className="primary-button" onClick={() => { setScopeError(''); setModal('scope'); }}><Icon name="plus" size={15}/>{tr('Add program')}</button></div>}
-        {error && <div className="error-banner" role="status"><span>{error}</span><button onClick={refresh}>Reload snapshot</button></div>}
+        {page === 'Scans' && <div className="scope-page-actions"><div><strong>{tr('Start scan')}</strong><p>{tr('Choose a verified approved Scope and configure a new scan.')}</p></div><button className="primary-button" onClick={() => { setSelectedTargets([]); setPlatformHandle(''); setAuthorizationConfirmed(false); setLaunchError(''); setModal('new'); }}><Icon name="plus" size={15}/>{tr('New scan')}</button></div>}
+        {error && (page === 'Overview' || page === 'Scans' || page === 'Findings' || page === 'Validation') && <div className="error-banner" role="status"><span>{tr(error)}</span><button onClick={refresh}>{tr('Reload snapshot')}</button></div>}
         {page === 'Overview' && <>
           <section className="metrics" aria-label={tr('Workspace metrics')}>{[{ label: tr('Active scans'), value: snapshot?.status === 'running' ? '01' : '00', note: demo ? tr('1 synthetic workflow') : tr('Selected scan'), icon: 'pulse', color: 'green' },{ label: tr('Programs'), value: String(totalProgramCount).padStart(2,'0'), note: language === 'ko' ? `승인된 Scope ${approvedScopeCount}개` : `${approvedScopeCount} approved scope${approvedScopeCount === 1 ? '' : 's'}`, icon: 'scope', color: 'blue' },{ label: tr('Awaiting review'), value: String(reviewCount).padStart(2,'0'), note: tr('Candidates, not verdicts'), icon: 'shield', color: 'amber' },{ label: tr('Confirmed findings'), value: String(findings.filter(f => f.status === 'confirmed').length).padStart(2,'0'), note: tr(demo ? 'Synthetic evidence only' : 'From backend snapshot'), icon: 'check', color: 'purple' }].map(m => <article className={`metric ${m.color}`} key={m.label}><div><span>{m.label}</span><Icon name={m.icon}/></div><strong>{m.value}</strong><small><span className="mini-line"/>{m.note}</small></article>)}</section>
           <div className="section-caption"><span><span className="dot"/>{tr('IN PROGRESS')}</span><button className="text-button" onClick={() => go('Scans')}>{tr('Open scan workspace')} <Icon name="arrow" size={14}/></button></div>{scanPanel}

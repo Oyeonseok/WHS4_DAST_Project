@@ -3,12 +3,47 @@ import assert from 'node:assert/strict';
 import { parseEvent, parseSnapshot, applyEvent, applyOrderedEvent, stages } from '../src/lib/events.ts';
 import { demoSnapshot, DEMO_SCAN } from '../src/data/demo.ts';
 import { translate } from '../src/lib/i18n.ts';
+import { resolveExecutionLimits } from '../src/lib/scan.ts';
+import { scopeCollectionRequest } from '../src/lib/scope.ts';
 
 const event = (id = 8, overrides = {}) => ({ version: 1, event_id: id, scan_id: DEMO_SCAN, occurred_at: '2026-09-20T06:00:00Z', type: 'log.appended', payload: { stage: 'Attack', level: 'info', message: 'Redacted fixture event' }, ...overrides });
 test('dashboard labels support Korean and preserve English', () => {
   assert.equal(translate('ko', 'Scopes / Programs'), '스코프 / 프로그램');
   assert.equal(translate('ko', 'Yes · Approve Scope'), 'Yes · Scope 승인');
   assert.equal(translate('en', 'Scopes / Programs'), 'Scopes / Programs');
+});
+test('scope collection always uses the persistent operator browser', () => {
+  assert.deepEqual(scopeCollectionRequest, {
+    login_mode: 'runtime-browser',
+    identity: 'primary',
+  });
+});
+test('scan limits use the stricter Scope request rate', () => {
+  const requirements = {
+    scope_max_requests_per_second: 0.75,
+    required_header: null,
+    operational_constraints: [],
+    profiles: [{
+      id: 'focused-discovery',
+      limits: {
+        requests_per_second: 1,
+        concurrency: 3,
+        timeout_seconds: 20,
+        max_depth: 3,
+        max_requests: 2000,
+      },
+    }],
+  };
+  assert.deepEqual(
+    resolveExecutionLimits(requirements, 'focused-discovery'),
+    {
+      requests_per_second: 0.75,
+      concurrency: 3,
+      timeout_seconds: 20,
+      max_depth: 3,
+      max_requests: 2000,
+    },
+  );
 });
 test('pipeline includes report and preserves the real stage order', () => assert.deepEqual(stages, ['Scope','Recon','Attack','Chaining','Validation','Report']));
 test('snapshot validates the synthetic scan independently', () => {
