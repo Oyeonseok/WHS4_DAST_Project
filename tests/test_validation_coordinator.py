@@ -64,6 +64,28 @@ class FakePort:
         )
 
 
+class ConditionalEligibilityAgent(FakeEligibilityAgent):
+    def __init__(self, post="ELIGIBLE", mutation=None):
+        super().__init__()
+        self.post = post
+        self.mutation = mutation or {}
+
+    def assess(self, request, correction=None):
+        result = super().assess(request, correction).model_dump()
+        eligibility = "CONDITIONAL" if request.phase == "preflight" else self.post
+        result.update(
+            eligibility=eligibility,
+            replay_allowed=eligibility in {"CONDITIONAL", "ELIGIBLE"},
+            required_impact=({"condition": "Additional account impact",
+                              "evidence_needed": "Sealed replay observations"},)
+            if eligibility == "CONDITIONAL" else (),
+            evidence_refs=request.evidence_refs,
+        )
+        if request.phase == "post_replay":
+            result.update(self.mutation)
+        return result
+
+
 class RoutingPort:
     def __init__(self):
         self.calls = 0
@@ -1725,6 +1747,107 @@ class ValidationCoordinatorTests(unittest.TestCase):
                 table: tuple(conn.execute(f"SELECT * FROM {table} ORDER BY rowid"))
                 for table in chaining_tables
             }, chaining_before)
+
+
+class ConditionalEligibilityTests(unittest.TestCase):
+    setUp = ValidationCoordinatorTests.setUp
+
+    def run_conditional(self, post="ELIGIBLE", *, agent=None, port=None, mutation=None):
+        self.conditional = ConditionalEligibilityAgent(post, mutation)
+        self.port = port or FakePort()
+        coordinator = ValidationCoordinator(
+            db_path=self.path, agent=agent or FakeAgent(), reproduction=self.port,
+            policy_provider=lambda endpoint, method: self.policy,
+            eligibility_agent=self.conditional,
+        )
+        result = coordinator.run("scan")
+        with db.connect(self.path) as conn:
+            self.decision = json.loads(conn.execute("SELECT decision_json FROM validation_cases").fetchone()[0])
+            self.phases = [row[0] for row in conn.execute(
+                "SELECT phase FROM validation_eligibility_assessments ORDER BY rowid")]
+        return result
+
+    def test_conditional_without_required_impact_becomes_out_of_scope(self):
+        result = self.run_conditional("INELIGIBLE")
+        self.assertEqual(result.summary["statuses"], {"OUT_OF_SCOPE": 1})
+        self.assertEqual(self.decision["reason"], "conditional_impact_absent")
+        self.assertEqual(self.phases, ["preflight", "post_replay"])
+        with db.connect(self.path) as conn:
+            post_id = conn.execute("SELECT assessment_id FROM validation_eligibility_assessments WHERE phase='post_replay'").fetchone()[0]
+            self.assertEqual(self.decision["eligibility_assessment_id"], post_id)
+            self.assertEqual(set(self.decision["evidence_ids"]),
+                             {row[0] for row in conn.execute("SELECT evidence_id FROM validation_evidence")})
+            self.assertEqual(conn.execute("SELECT impact_score FROM validation_cases").fetchone()[0], None)
+
+    def test_conditional_with_qualifying_impact_uses_existing_decision_path(self):
+        result = self.run_conditional()
+        self.assertEqual(result.summary["statuses"], {"CONFIRMED": 1})
+        self.assertEqual(self.phases, ["preflight", "post_replay"])
+        self.assertEqual(len(self.port.calls), 5)
+
+    def test_conditional_eligible_preserves_underpowered_technical_decision(self):
+        result = self.run_conditional(agent=UnderpoweredAgent())
+        self.assertEqual(result.summary["statuses"], {"UNDERPOWERED": 1})
+        self.assertEqual(self.phases, ["preflight", "post_replay"])
+
+    def test_conditional_unresolved_never_reaches_decision_engine(self):
+        with patch("aidast.validation.core.decision.DecisionEngine.decide",
+                   side_effect=AssertionError("unresolved policy reached technical decision")):
+            result = self.run_conditional("CONDITIONAL")
+        self.assertEqual(result.summary["statuses"], {"INCONCLUSIVE": 1})
+        self.assertEqual(self.decision["reason"], "conditional_impact_unresolved")
+
+    def test_conditional_unknown_never_reaches_decision_engine(self):
+        with patch("aidast.validation.core.decision.DecisionEngine.decide",
+                   side_effect=AssertionError("unknown policy reached technical decision")):
+            result = self.run_conditional("UNKNOWN")
+        self.assertEqual(result.summary["statuses"], {"INCONCLUSIVE": 1})
+        self.assertEqual(self.decision["reason"], "eligibility_post_replay_unknown")
+
+    def test_conditional_foreign_post_evidence_fails_closed(self):
+        result = self.run_conditional(mutation={"evidence_refs": ("foreign-evidence",)})
+        self.assertEqual(result.summary["statuses"], {"INCONCLUSIVE": 1})
+        self.assertEqual(self.decision["reason"], "eligibility_post_replay_unknown")
+        self.assertEqual([request.phase for request in self.conditional.requests],
+                         ["preflight", "post_replay", "post_replay"])
+        self.assertEqual(self.phases, ["preflight", "post_replay"])
+
+    def test_conditional_unavailable_post_is_durable_unknown(self):
+        class UnavailablePost(ConditionalEligibilityAgent):
+            def assess(self, request, correction=None):
+                if request.phase == "post_replay":
+                    raise RuntimeError("fixture backend unavailable")
+                return super().assess(request, correction)
+
+        coordinator = ValidationCoordinator(
+            db_path=self.path, agent=FakeAgent(), reproduction=FakePort(),
+            policy_provider=lambda endpoint, method: self.policy,
+            eligibility_agent=UnavailablePost(),
+        )
+        result = coordinator.run("scan")
+        self.assertEqual(result.summary["statuses"], {"INCONCLUSIVE": 1})
+        with db.connect(self.path) as conn:
+            self.assertEqual(conn.execute("SELECT eligibility FROM validation_eligibility_assessments WHERE phase='post_replay'").fetchone()[0], "UNKNOWN")
+
+    def test_conditional_resume_reuses_post_assessment_without_more_replay(self):
+        eligibility = ConditionalEligibilityAgent()
+        agent, port = CountingAgent(), FakePort()
+        coordinator = ValidationCoordinator(
+            db_path=self.path, agent=agent, reproduction=port,
+            policy_provider=lambda endpoint, method: self.policy, eligibility_agent=eligibility,
+        )
+        with patch.object(coordinator.engine, "decide", side_effect=RuntimeError("interrupted after post assessment")):
+            with self.assertRaisesRegex(ValidationCoordinatorError, "interrupted after post assessment"):
+                coordinator.run("scan")
+        with db.connect(self.path) as conn:
+            stage = conn.execute("SELECT latest_stage_run_id FROM validation_cases").fetchone()[0]
+        result = coordinator.resume(stage)
+        self.assertTrue(result.summary["resumed"])
+        self.assertEqual(len(port.calls), 5)
+        self.assertEqual((agent.assess_calls, agent.compare_calls), (1, 1))
+        self.assertEqual([request.phase for request in eligibility.requests], ["preflight", "post_replay"])
+        with db.connect(self.path) as conn:
+            self.assertEqual(conn.execute("SELECT current_status FROM validation_cases").fetchone()[0], "CONFIRMED")
 
 
 class ValidationOperationLedgerTests(unittest.TestCase):

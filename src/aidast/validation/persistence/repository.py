@@ -93,6 +93,8 @@ class ValidationRepository:
             or assessment.scope_sha256 != request.scope_sha256
         ):
             raise ValidationRepositoryError("eligibility assessment binding mismatch")
+        if not set(assessment.evidence_refs) <= set(request.evidence_refs):
+            raise ValidationRepositoryError("eligibility assessment cites evidence outside its request")
         identifier = new_id("veligibility")
         request_document = request.model_dump()
         assessment_document = assessment.model_dump()
@@ -119,6 +121,11 @@ class ValidationRepository:
                 raise ValidationRepositoryError("eligibility scope snapshot does not match request")
             if assessment.scope_quote and assessment.scope_quote not in snapshot[0]:
                 raise ValidationRepositoryError("eligibility scope quote is not grounded")
+            if request.phase == "post_replay":
+                self.eligibility_evidence_summaries(
+                    case_id=request.case_id, stage_run_id=case[1],
+                    evidence_ids=request.evidence_refs,
+                )
             self.conn.execute(
                 """INSERT INTO validation_eligibility_assessments
                    (assessment_id,case_id,stage_run_id,phase,scope_sha256,eligibility,
@@ -150,6 +157,38 @@ class ValidationRepository:
         if row is None:
             return None
         return dict(zip((column[0] for column in cursor.description), row, strict=True))
+
+    def eligibility_evidence_summaries(
+        self, *, case_id: str, stage_run_id: str, evidence_ids: tuple[str, ...],
+    ) -> tuple[dict[str, Any], ...]:
+        """Read only cited, append-only evidence in the current case and stage."""
+        self._assert_current_case(case_id, stage_run_id)
+        if len(evidence_ids) > 128 or len(evidence_ids) != len(set(evidence_ids)):
+            raise ValidationRepositoryError("invalid eligibility evidence set")
+        cursor = self.conn.execute(
+            """SELECT evidence_id,evidence_kind,content_sha256,content_length,details_json
+               FROM validation_evidence WHERE case_id=? AND stage_run_id=?
+               AND evidence_id IN (%s)""" % (",".join("?" for _ in evidence_ids) or "NULL"),
+            (case_id, stage_run_id, *evidence_ids),
+        )
+        rows = {row[0]: row for row in cursor}
+        if set(rows) != set(evidence_ids):
+            raise ValidationRepositoryError("eligibility cites evidence outside the current case and stage")
+
+        def omit_reasoning(value: Any) -> Any:
+            if isinstance(value, dict):
+                return {key: omit_reasoning(child) for key, child in value.items()
+                        if not any(part in key.casefold()
+                                   for part in ("reasoning", "thought", "analysis", "scratchpad"))}
+            if isinstance(value, list):
+                return [omit_reasoning(child) for child in value]
+            return value
+
+        return tuple({
+            "evidence_id": rows[identifier][0], "evidence_kind": rows[identifier][1],
+            "content_sha256": rows[identifier][2], "content_length": rows[identifier][3],
+            "details": omit_reasoning(sanitize_metadata(json.loads(rows[identifier][4]))),
+        } for identifier in evidence_ids)
 
     def create_case(self, *, scan_id: str, stage_run_id: str, target_kind: str,
                     target_id: str, scope_sha256: str | None = None,

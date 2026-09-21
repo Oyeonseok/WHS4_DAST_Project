@@ -6,7 +6,7 @@ import json
 import sqlite3
 from contextlib import closing
 from pathlib import Path
-from typing import Any, Callable, Iterable, Protocol
+from typing import Any, Callable, Iterable, Literal, Protocol
 
 from pydantic import ValidationError as PydanticValidationError
 
@@ -301,6 +301,20 @@ class ValidationCoordinator:
                 break
         return assessment, repo.record_eligibility(request, assessment)
 
+    @staticmethod
+    def _finalize_eligibility_result(
+        repo: ValidationRepository, *, case_id: str, stage_run_id: str,
+        expected_version: int, status: Literal["OUT_OF_SCOPE", "INCONCLUSIVE"],
+        reason: str, assessment_id: str, evidence_ids: tuple[str, ...],
+    ) -> bool:
+        repo.finalize(
+            case_id, stage_run_id=stage_run_id, expected_version=expected_version,
+            status=status, decision={"reason": reason,
+                "eligibility_assessment_id": assessment_id, "evidence_ids": list(evidence_ids)},
+            evidence_ids=evidence_ids,
+        )
+        return True
+
     def _run_finding(self, conn: sqlite3.Connection, repo: ValidationRepository,
                      case: dict[str, Any], stage_run_id: str) -> bool:
         version = case["state_version"]
@@ -454,10 +468,10 @@ class ValidationCoordinator:
             if recovered is None:
                 if self.reproduction is None:
                     raise ValidationCoordinatorError("blind replay requires an injected ReproductionPort")
-                preflight = getattr(self.reproduction, "unsupported_reason", None)
+                adapter_preflight = getattr(self.reproduction, "unsupported_reason", None)
                 unsupported = (
-                    preflight(candidate.staged._blind_case)
-                    if callable(preflight) else None
+                    adapter_preflight(candidate.staged._blind_case)
+                    if callable(adapter_preflight) else None
                 )
                 if unsupported is not None:
                     repo.finalize(
@@ -597,6 +611,42 @@ class ValidationCoordinator:
         evidence_ids.append(comparison_evidence)
         if stop_incomplete_replay(observations, evidence_ids):
             return True
+        if preflight.eligibility == "CONDITIONAL":
+            controls = {item["attempt_kind"] for item in observations
+                        if item["signal_observed"] is not None}
+            if (any(item["outcome"] not in {"observed", "not_observed"} for item in observations)
+                    or not {"positive_control", "negative_control"} <= controls):
+                repo.finalize(
+                    case["case_id"], stage_run_id=stage_run_id, expected_version=version,
+                    status="INCONCLUSIVE",
+                    decision={"reason": "transport_observation_incomplete", "phase": "blind_replay"},
+                    evidence_ids=evidence_ids,
+                )
+                return True
+            # Recovery can load the same sealed rows in a different attempt order.
+            post_evidence_ids = tuple(sorted(evidence_ids))
+            summaries = repo.eligibility_evidence_summaries(
+                case_id=case["case_id"], stage_run_id=stage_run_id,
+                evidence_ids=post_evidence_ids,
+            )
+            post, post_id = self._eligibility_assessment(
+                conn=conn, repo=repo, candidate=candidate, stage_run_id=stage_run_id,
+                phase="post_replay", scope=self._load_scope(conn, case.get("scope_sha256")),
+                evidence_ids=post_evidence_ids, evidence_summaries=summaries,
+            )
+            reasons = {
+                "INELIGIBLE": "conditional_impact_absent",
+                "UNKNOWN": "eligibility_post_replay_unknown",
+                "CONDITIONAL": "conditional_impact_unresolved",
+            }
+            if post.eligibility in reasons:
+                return self._finalize_eligibility_result(
+                    repo, case_id=case["case_id"], stage_run_id=stage_run_id,
+                    expected_version=version,
+                    status="OUT_OF_SCOPE" if post.eligibility == "INELIGIBLE" else "INCONCLUSIVE",
+                    reason=reasons[post.eligibility], assessment_id=post_id,
+                    evidence_ids=tuple(evidence_ids),
+                )
         targets = tuple(bool(item["signal_observed"]) for item in observations if item["attempt_kind"] == "target")
         positive = all(bool(item["signal_observed"]) for item in observations
                        if item["attempt_kind"] == "positive_control")

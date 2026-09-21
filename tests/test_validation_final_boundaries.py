@@ -19,6 +19,7 @@ import test_validation_multipart_runtime as multipart_fixture
 import test_validation_request_broker as request_fixture
 import test_validation_transport_broker as transport_fixture
 import test_validation_websocket_runtime as websocket_fixture
+import test_validation_repository as repository_fixture
 from aidast.recon.policy import PolicyLimits
 from aidast.validation.contracts.models import ReproductionObservation, canonical_sha256
 from aidast.validation.execution.multipart_adapter import MultipartReproductionPort
@@ -580,3 +581,158 @@ class EligibilityPreflightBoundaryTests(unittest.TestCase):
         with sqlite3.connect(self.path) as conn:
             self.assertEqual(conn.execute("SELECT eligibility,scope_quote FROM validation_eligibility_assessments").fetchall(),
                              [("ELIGIBLE", self.scope.scope_markdown)])
+
+
+class ConditionalEvidenceBoundaryTests(unittest.TestCase):
+    setUp = coordinator_fixture.ValidationCoordinatorTests.setUp
+    run_conditional = coordinator_fixture.ConditionalEligibilityTests.run_conditional
+
+    def test_conditional_blind_assessment_and_comparison_stay_policy_oblivious(self):
+        captured = []
+
+        class Spy(coordinator_fixture.FakeAgent):
+            def assess(self, blind_case, observations, correction=None):
+                captured.append((blind_case, observations, correction))
+                return super().assess(blind_case, observations, correction)
+
+            def compare(self, claim, assessment, correction=None):
+                captured.append((claim, assessment, correction))
+                return super().compare(claim, assessment, correction)
+
+        self.run_conditional(agent=Spy())
+        self.assertEqual(len(captured), 2)
+        for forbidden in ("scope_markdown", "eligibility", "matched_rule",
+                          "Fixture policy rationale", "Fixture policy permits", "Additional account impact"):
+            self.assertNotIn(forbidden, json.dumps(captured))
+
+    def test_conditional_post_receives_only_sealed_summaries_after_comparison(self):
+        test = self
+
+        class InspectingEligibility(coordinator_fixture.ConditionalEligibilityAgent):
+            def assess(self, request, correction=None):
+                if request.phase == "post_replay":
+                    with sqlite3.connect(test.path) as conn:
+                        case = conn.execute("SELECT case_id,latest_stage_run_id,blind_assessment_sha256 FROM validation_cases").fetchone()
+                        test.assertIsNotNone(case[2])
+                        rows = conn.execute("SELECT evidence_id,evidence_kind,content_sha256,content_length FROM validation_evidence WHERE case_id=? AND stage_run_id=?", case[:2]).fetchall()
+                    test.assertEqual(set(request.evidence_refs), {row[0] for row in rows})
+                    test.assertEqual({item["evidence_kind"] for item in request.evidence_summaries},
+                                     {"observation", "blind_assessment", "claim_comparison"})
+                    test.assertEqual({(item["evidence_id"], item["evidence_kind"], item["content_sha256"], item["content_length"])
+                                      for item in request.evidence_summaries}, set(rows))
+                return super().assess(request, correction)
+
+        eligibility = InspectingEligibility()
+        coordinator_fixture.ValidationCoordinator(
+            db_path=self.path, agent=coordinator_fixture.FakeAgent(),
+            reproduction=coordinator_fixture.FakePort(), eligibility_agent=eligibility,
+            policy_provider=lambda endpoint, method: self.policy,
+        ).run("scan")
+        self.assertEqual([request.phase for request in eligibility.requests], ["preflight", "post_replay"])
+
+    def test_conditional_incomplete_transport_never_guesses_policy(self):
+        for outcome in ("blocked", "error", "outcome_unknown"):
+            with self.subTest(outcome=outcome):
+                class IncompletePort(coordinator_fixture.FakePort):
+                    def execute(self, *args, **kwargs):
+                        result = super().execute(*args, **kwargs)
+                        return result.model_copy(update={"outcome": outcome, "signal_observed": None})
+
+                result = self.run_conditional("INELIGIBLE", port=IncompletePort())
+                self.assertEqual(result.summary["statuses"], {"INCONCLUSIVE": 1})
+                self.assertEqual([request.phase for request in self.conditional.requests], ["preflight"])
+                self.assertIn(self.decision["reason"],
+                              {"transport_observation_incomplete", "outcome_unknown_requires_manual_review"})
+
+    def test_conditional_unavailable_adapter_never_calls_post(self):
+        class UnavailablePort(coordinator_fixture.FakePort):
+            def unsupported_reason(self, blind):
+                return "grpc_adapter_unavailable"
+
+        result = self.run_conditional("INELIGIBLE", port=UnavailablePort())
+        self.assertEqual(result.summary["statuses"], {"INCONCLUSIVE": 1})
+        self.assertEqual(self.decision["reason"], "grpc_adapter_unavailable")
+        self.assertEqual(self.phases, ["preflight"])
+        self.assertEqual(self.port.calls, [])
+
+    def test_conditional_missing_controls_never_calls_post(self):
+        from unittest.mock import patch
+
+        execute = coordinator_fixture.ValidationCoordinator._execute_batch
+
+        def incomplete_batch(coordinator, *args, **kwargs):
+            observations, evidence = execute(coordinator, *args, **kwargs)
+            return [item for item in observations if item["attempt_kind"] == "target"], evidence
+
+        with patch.object(coordinator_fixture.ValidationCoordinator, "_execute_batch", incomplete_batch):
+            result = self.run_conditional("INELIGIBLE")
+        self.assertEqual(result.summary["statuses"], {"INCONCLUSIVE": 1})
+        self.assertEqual(self.phases, ["preflight"])
+
+
+class EligibilityEvidenceRepositoryTests(unittest.TestCase):
+    setUp = repository_fixture.ValidationRepositoryTests.setUp
+
+    def prepare_evidence(self):
+        for case, finding in (("case", "one"), ("other", "two")):
+            self.repo.create_case(scan_id="scan", stage_run_id=self.run, target_kind="finding",
+                                  target_id=finding, case_id=case)
+        self.repo.add_evidence(case_id="case", stage_run_id=self.run, evidence_id="cited",
+            evidence_kind="blind_assessment", details={"reproduced": True},
+            content_sha256="a" * 64, content_length=1)
+        self.repo.add_evidence(case_id="other", stage_run_id=self.run, evidence_id="foreign",
+            evidence_kind="blind_assessment", details={}, content_sha256="b" * 64, content_length=0)
+        self.repo.add_evidence(case_id="case", stage_run_id=self.run, evidence_id="uncited",
+            evidence_kind="blind_assessment", details={}, content_sha256="c" * 64, content_length=0)
+
+    def test_conditional_evidence_read_excludes_uncited_and_rejects_foreign_missing_or_duplicate_ids(self):
+        self.prepare_evidence()
+        rows = self.repo.eligibility_evidence_summaries(case_id="case", stage_run_id=self.run, evidence_ids=("cited",))
+        self.assertEqual([row["evidence_id"] for row in rows], ["cited"])
+        for ids in (("foreign",), ("missing",), ("cited", "cited")):
+            with self.subTest(ids=ids), self.assertRaises(repository_fixture.ValidationRepositoryError):
+                self.repo.eligibility_evidence_summaries(case_id="case", stage_run_id=self.run, evidence_ids=ids)
+
+    def test_conditional_evidence_read_rejects_previous_stage(self):
+        self.prepare_evidence()
+        self.repo.finalize("case", stage_run_id=self.run, expected_version=0,
+                           status="INCONCLUSIVE", decision={}, evidence_ids=("cited",))
+        self.repo.finalize("other", stage_run_id=self.run, expected_version=0,
+                           status="INCONCLUSIVE", decision={}, evidence_ids=())
+        repository_fixture.finish_stage_run(self.conn, self.run)
+        stage = repository_fixture.start_stage_run(self.conn, scan_id="scan", stage="validation")
+        self.repo.begin_revalidation("case", stage_run_id=stage, expected_version=1)
+        with self.assertRaisesRegex(repository_fixture.ValidationRepositoryError, "current case and stage"):
+            self.repo.eligibility_evidence_summaries(case_id="case", stage_run_id=stage, evidence_ids=("cited",))
+
+    def test_conditional_post_summaries_remove_bodies_secrets_and_hidden_reasoning_recursively(self):
+        self.prepare_evidence()
+        details = {"response_body": "body-canary", "headers": {"Cookie": "cookie-canary"},
+                   "nested": [{"password": "password-canary", "chain_of_thought": "thought-canary",
+                               "hidden_reasoning": "reasoning-canary", "analysis": "analysis-canary",
+                               "signal_observed": True}]}
+        # Legacy/raw producers may not have applied the repository sanitizer.
+        self.conn.execute("""INSERT INTO validation_evidence
+            (evidence_id,case_id,stage_run_id,evidence_kind,details_json,content_sha256,content_length)
+            VALUES ('raw','case',?,'observation',?,?,1)""", (self.run, json.dumps(details), "d" * 64))
+        rows = self.repo.eligibility_evidence_summaries(case_id="case", stage_run_id=self.run, evidence_ids=("raw",))
+        serialized = json.dumps(rows)
+        self.assertNotIn("canary", serialized)
+        self.assertTrue(rows[0]["details"]["nested"][0]["signal_observed"])
+
+    def test_conditional_repository_rejects_post_assessment_evidence_outside_request(self):
+        self.prepare_evidence()
+        request = repository_fixture.EligibilityRequest(
+            case_id="case", scope_sha256=self.scope_sha256, phase="post_replay",
+            scope_markdown="# Policy\nRule", target_kind="finding", vuln_class="idor",
+            endpoint="https://test/", method="GET", title="fixture", claimed_impact="Account impact",
+            reproduction_summary={}, evidence_refs=("cited",), evidence_summaries=(),
+        )
+        for ref in ("uncited", "foreign", "missing"):
+            assessment = repository_fixture.EligibilityAssessment(
+                case_id="case", scope_sha256=self.scope_sha256, phase="post_replay",
+                eligibility="ELIGIBLE", matched_rule="Rule", scope_quote="Rule", required_impact=(),
+                replay_allowed=True, reason="Rule applies.", evidence_refs=(ref,),
+            )
+            with self.subTest(ref=ref), self.assertRaises(repository_fixture.ValidationRepositoryError):
+                self.repo.record_eligibility(request.model_copy(update={"title": ref}), assessment)
