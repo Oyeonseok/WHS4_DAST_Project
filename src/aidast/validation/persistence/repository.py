@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 from contextlib import closing
@@ -10,9 +11,14 @@ from typing import Any, Iterable
 
 from aidast.recon.db import new_id, now
 
+from ..contracts.eligibility import (
+    EligibilityAssessment,
+    EligibilityRequest,
+    ScopePolicySource,
+)
+from ..contracts.models import ValidationError, TerminalStatus, canonical_json, canonical_sha256
 from ..core.decision import evaluate_impact
 from .evidence_policy import sanitize_metadata
-from ..contracts.models import ValidationError, TerminalStatus, canonical_json, canonical_sha256
 
 
 class ValidationRepositoryError(ValueError):
@@ -35,8 +41,117 @@ class ValidationRepository:
             raise ValidationRepositoryError("a running Validation stage is required")
         return row
 
+    def bind_scope(self, scan_id: str, source: ScopePolicySource) -> str:
+        digest = hashlib.sha256(source.scope_markdown.encode("utf-8")).hexdigest()
+        if digest != source.scope_sha256:
+            raise ValidationRepositoryError("scope snapshot digest does not match Markdown")
+        with self.conn:
+            self.conn.execute(
+                """INSERT INTO scope_policy_snapshots(scope_sha256,scope_markdown)
+                   VALUES (?,?) ON CONFLICT(scope_sha256) DO NOTHING""",
+                (source.scope_sha256, source.scope_markdown),
+            )
+            row = self.conn.execute(
+                "SELECT scope_markdown FROM scope_policy_snapshots WHERE scope_sha256=?",
+                (source.scope_sha256,),
+            ).fetchone()
+            if row is None or row[0] != source.scope_markdown:
+                raise ValidationRepositoryError("scope snapshot digest collision")
+            self.conn.execute(
+                """INSERT INTO validation_scope_bindings
+                   (scan_id,scope_sha256,source_path,approval_digest)
+                   VALUES (?,?,?,?)
+                   ON CONFLICT(scan_id) DO UPDATE SET
+                       scope_sha256=excluded.scope_sha256,
+                       source_path=excluded.source_path,
+                       approval_digest=excluded.approval_digest,
+                       updated_at=CURRENT_TIMESTAMP""",
+                (scan_id, source.scope_sha256, source.source_path, source.approval_digest),
+            )
+        return source.scope_sha256
+
+    def current_scope_sha256(self, scan_id: str) -> str | None:
+        row = self.conn.execute(
+            "SELECT scope_sha256 FROM validation_scope_bindings WHERE scan_id=?",
+            (scan_id,),
+        ).fetchone()
+        return None if row is None else row[0]
+
+    def _resolve_current_scope(self, scan_id: str, scope_sha256: str | None) -> str:
+        current = self.current_scope_sha256(scan_id)
+        if current is None:
+            raise ValidationRepositoryError("scan has no current scope binding")
+        if scope_sha256 is not None and scope_sha256 != current:
+            raise ValidationRepositoryError("scope digest is not the current scope binding")
+        return current
+
+    def record_eligibility(self, request: EligibilityRequest,
+                           assessment: EligibilityAssessment) -> str:
+        if (
+            assessment.case_id != request.case_id
+            or assessment.phase != request.phase
+            or assessment.scope_sha256 != request.scope_sha256
+        ):
+            raise ValidationRepositoryError("eligibility assessment binding mismatch")
+        identifier = new_id("veligibility")
+        request_document = request.model_dump()
+        assessment_document = assessment.model_dump()
+        with self.conn:
+            case = self.conn.execute(
+                """SELECT scan_id,latest_stage_run_id,target_kind,scope_sha256
+                   FROM validation_cases WHERE case_id=?""",
+                (request.case_id,),
+            ).fetchone()
+            if case is None:
+                raise ValidationRepositoryError("unknown Validation case")
+            stage = self._stage(case[1])
+            if stage[0] != case[0]:
+                raise ValidationRepositoryError("case and stage scan do not match")
+            if case[2] != request.target_kind:
+                raise ValidationRepositoryError("eligibility target kind does not match case")
+            if case[3] != request.scope_sha256:
+                raise ValidationRepositoryError("eligibility scope does not match case scope")
+            snapshot = self.conn.execute(
+                "SELECT scope_markdown FROM scope_policy_snapshots WHERE scope_sha256=?",
+                (request.scope_sha256,),
+            ).fetchone()
+            if snapshot is None or snapshot[0] != request.scope_markdown:
+                raise ValidationRepositoryError("eligibility scope snapshot does not match request")
+            self.conn.execute(
+                """INSERT INTO validation_eligibility_assessments
+                   (assessment_id,case_id,stage_run_id,phase,scope_sha256,eligibility,
+                    exclusion_kind,matched_rule,scope_quote,required_impact_json,
+                    replay_allowed,reason,evidence_refs_json,input_sha256,output_sha256)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    identifier, request.case_id, case[1], request.phase,
+                    request.scope_sha256, assessment.eligibility,
+                    assessment.exclusion_kind, assessment.matched_rule,
+                    assessment.scope_quote,
+                    canonical_json(assessment_document["required_impact"]),
+                    assessment.replay_allowed, assessment.reason,
+                    canonical_json(assessment_document["evidence_refs"]),
+                    canonical_sha256(request_document),
+                    canonical_sha256(assessment_document),
+                ),
+            )
+        return identifier
+
+    def find_eligibility(self, case_id: str, stage_run_id: str, phase: str,
+                         input_sha256: str) -> dict[str, Any] | None:
+        cursor = self.conn.execute(
+            """SELECT * FROM validation_eligibility_assessments
+               WHERE case_id=? AND stage_run_id=? AND phase=? AND input_sha256=?""",
+            (case_id, stage_run_id, phase, input_sha256),
+        )
+        row = cursor.fetchone()
+        if row is None:
+            return None
+        return dict(zip((column[0] for column in cursor.description), row, strict=True))
+
     def create_case(self, *, scan_id: str, stage_run_id: str, target_kind: str,
-                    target_id: str, case_id: str | None = None) -> str:
+                    target_id: str, scope_sha256: str | None = None,
+                    case_id: str | None = None) -> str:
         if target_kind not in {"finding", "chain"}:
             raise ValidationRepositoryError("target kind must be finding or chain")
         identifier = case_id or new_id("vcase")
@@ -50,24 +165,28 @@ class ValidationRepository:
                 f"SELECT 1 FROM {table} WHERE {column}=? AND scan_id=?", (target_id, scan_id)
             ).fetchone() is None:
                 raise ValidationRepositoryError("Validation target does not belong to scan")
+            resolved_scope = self._resolve_current_scope(scan_id, scope_sha256)
             self.conn.execute(
                 """INSERT INTO validation_cases
-                (case_id,scan_id,target_kind,finding_id,chain_id,latest_stage_run_id,processing_phase)
-                VALUES (?,?,?,?,?,?,'queued')""",
+                (case_id,scan_id,target_kind,finding_id,chain_id,latest_stage_run_id,
+                 processing_phase,scope_sha256)
+                VALUES (?,?,?,?,?,?,'queued',?)""",
                 (identifier, scan_id, target_kind, target_id if target_kind == "finding" else None,
-                 target_id if target_kind == "chain" else None, stage_run_id),
+                 target_id if target_kind == "chain" else None, stage_run_id, resolved_scope),
             )
         return identifier
 
-    def begin_revalidation(self, case_id: str, *, stage_run_id: str, expected_version: int) -> int:
+    def begin_revalidation(self, case_id: str, *, stage_run_id: str, expected_version: int,
+                           scope_sha256: str | None = None) -> int:
         with self.conn:
             stage = self._stage(stage_run_id)
+            resolved_scope = self._resolve_current_scope(stage[0], scope_sha256)
             cursor = self.conn.execute(
                 """UPDATE validation_cases SET latest_stage_run_id=?,processing_phase='queued',
-                   state_version=state_version+1,updated_at=?
+                   scope_sha256=?,state_version=state_version+1,updated_at=?
                    WHERE case_id=? AND scan_id=? AND state_version=?
                    AND processing_phase='completed'""",
-                (stage_run_id, now(), case_id, stage[0], expected_version),
+                (stage_run_id, resolved_scope, now(), case_id, stage[0], expected_version),
             )
             if cursor.rowcount != 1:
                 raise ConcurrentValidationUpdate("case changed or is not available for revalidation")

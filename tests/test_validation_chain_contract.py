@@ -11,7 +11,7 @@ from aidast.recon.policy import PolicyLimits, TargetPolicy, ToolPolicy
 from aidast.scope.models import AssetType
 from aidast.validation import (BlindCase, ChainReproductionPort,
                                ChainRuntimeContract, ReproductionObservation,
-                               ValidationRepository,
+                               ScopePolicySource, ValidationRepository,
                                validate_runtime_contract)
 from aidast.validation.browser_contract import BrowserRuntimeContract
 from aidast.validation.oob_contract import OobRuntimeContract
@@ -143,8 +143,11 @@ class ValidationChainContractTests(unittest.TestCase):
             conn.execute("INSERT INTO finding_chains(chain_id,scan_id,title,combined_severity,status) VALUES ('chain','scan','fixture','HIGH','demonstrated')")
             stage = start_stage_run(conn, scan_id="scan", stage="validation", stage_run_id="stage")
             repo = ValidationRepository(conn)
+            scope_sha256 = repo.bind_scope(
+                "scan", ScopePolicySource.from_text("# Policy\nRule", source_path="fixture")
+            )
             repo.create_case(scan_id="scan", stage_run_id=stage, target_kind="chain",
-                             target_id="chain", case_id="case")
+                             target_id="chain", scope_sha256=scope_sha256, case_id="case")
             repo.add_attempt(case_id="case", stage_run_id=stage, batch_no=1,
                              attempt_kind="target", ordinal=1, signal_type="response_diff",
                              outcome="error", finished=False, attempt_id="attempt")
@@ -208,9 +211,13 @@ class ValidationChainContractTests(unittest.TestCase):
                     conn, scan_id="scan", stage="validation", stage_run_id="stage",
                 )
                 repo = ValidationRepository(conn)
+                scope_sha256 = repo.bind_scope(
+                    "scan",
+                    ScopePolicySource.from_text("# Policy\nRule", source_path="fixture"),
+                )
                 repo.create_case(
                     scan_id="scan", stage_run_id=stage, target_kind="chain",
-                    target_id="chain", case_id="case",
+                    target_id="chain", scope_sha256=scope_sha256, case_id="case",
                 )
                 repo.add_attempt(
                     case_id="case", stage_run_id=stage, batch_no=1,
