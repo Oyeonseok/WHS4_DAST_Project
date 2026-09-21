@@ -1249,6 +1249,8 @@ def _run_validation(
     reviewer: object | None = None,
     coordinator: object | None = None,
 ) -> int:
+    if args.validation_command == "run" and args.scope is not None and not args.scan_id:
+        raise ValidationError("--scope requires --scan-id")
     if args.validation_command == "status" and (args.scan_id or args.case_id):
         result = shared_validation_status(
             args.database,

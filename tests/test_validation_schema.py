@@ -268,6 +268,12 @@ class ValidationSchemaTests(unittest.TestCase):
         self.assertEqual(self.conn.execute(
             "SELECT case_id,scope_sha256 FROM validation_cases"
         ).fetchall(), [("legacy", None)])
+        from aidast.validation import shared_validation_status
+        status = shared_validation_status(Path(self.temp.name) / "Pipeline.db", case_id="legacy")
+        self.assertEqual(status["scope_eligibility"], {
+            "scope_sha256": None, "phase": None, "eligibility": None,
+            "assessment_id": None, "matched_rule": None,
+        })
         self.assertEqual(
             self.conn.execute("SELECT type,name,sql FROM sqlite_master ORDER BY name").fetchall(),
             schema,

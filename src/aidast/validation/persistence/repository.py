@@ -312,6 +312,8 @@ class ValidationRepository:
 
         Omitting scope_sha256 is deprecated compatibility for direct callers;
         coordinators must always supply the resolved immutable scope digest.
+        Compatibility resolves only an existing scan binding; it never creates
+        a policy or grants eligibility to a legacy unbound case.
         """
         if target_kind not in {"finding", "chain"}:
             raise ValidationRepositoryError("target kind must be finding or chain")
@@ -342,6 +344,7 @@ class ValidationRepository:
         """Bind a new stage and invalidate previous-stage blind cache references.
 
         Omitting scope_sha256 is deprecated compatibility for direct callers.
+        It resolves only the scan's existing binding, never an implicit policy.
         Historical evidence and eligibility assessments remain append-only.
         """
         with self.conn:
@@ -829,13 +832,16 @@ def shared_validation_status(database: Path, *, scan_id: str | None = None,
                     ORDER BY ordinal""", (case_id, case["decision_stage_run_id"]),
                 ).fetchall() if case["current_status"] == "UNDERPOWERED" else []
                 case["impact_hypotheses"] = [_json_row(item) for item in hypotheses]
-                return {"database": str(path), "case": case}
+                return {"database": str(path), "case": case,
+                        "scope_eligibility": _scope_eligibility_status(conn, case)}
             rows = conn.execute(
                 "SELECT * FROM validation_cases WHERE scan_id=? ORDER BY case_id", (scan_id,)
             ).fetchall()
             if not rows and conn.execute("SELECT 1 FROM scans WHERE scan_id=?", (scan_id,)).fetchone() is None:
                 raise ValidationError("unknown scan")
             cases = [_case(dict(row)) for row in rows]
+            for case in cases:
+                case["scope_eligibility"] = _scope_eligibility_status(conn, case)
             owners = {name: 0 for name in ("validation", "chaining", "manual")}
             hypothesis_count = 0
             for owner, count in conn.execute(
@@ -855,7 +861,24 @@ def shared_validation_status(database: Path, *, scan_id: str | None = None,
         raise ValidationError("cannot read shared Validation status") from None
 
 
+def _scope_eligibility_status(conn: sqlite3.Connection, case: dict) -> dict:
+    digest = case.get("scope_sha256")
+    latest = None
+    if digest is not None:
+        latest = conn.execute(
+            """SELECT phase,eligibility,assessment_id,matched_rule
+            FROM validation_eligibility_assessments
+            WHERE case_id=? AND stage_run_id=? AND scope_sha256=?
+            ORDER BY rowid DESC LIMIT 1""",
+            (case["case_id"], case["latest_stage_run_id"], digest),
+        ).fetchone()
+    return {"scope_sha256": digest,
+            **{key: sanitize_metadata(latest[key]) if latest else None
+               for key in ("phase", "eligibility", "assessment_id", "matched_rule")}}
+
+
 def _case(case: dict) -> dict:
+    case.setdefault("scope_sha256", None)
     decision_json = case.pop("decision_json")
     if decision_json is not None:
         decision = json.loads(decision_json)

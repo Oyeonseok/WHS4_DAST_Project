@@ -92,8 +92,28 @@ class SharedValidationReportingTests(unittest.TestCase):
         self.complete()
         self.conn.execute("UPDATE validation_cases SET scope_sha256=NULL WHERE case_id='case'")
         self.conn.commit()
+        status = shared_validation_status(self.path, case_id="case")
+        self.assertIsNone(status["scope_eligibility"]["scope_sha256"])
+        self.assertIsNone(status["scope_eligibility"]["eligibility"])
         with self.assertRaisesRegex(ReportError, "current ELIGIBLE scope assessment"):
             ReportAgent().run(self.path, self.output, platform="hackerone", case_id="case")
+
+    def test_status_exposes_compact_current_scope_eligibility_without_raw_content(self):
+        self.complete()
+        identifier, _ = self.eligibility(phase="post_replay")
+        expected = {
+            "scope_sha256": self.scope.scope_sha256, "phase": "post_replay",
+            "eligibility": "ELIGIBLE", "assessment_id": identifier,
+            "matched_rule": "IDOR is in scope.",
+        }
+        status = shared_validation_status(self.path, case_id="case")
+        self.assertEqual(status["scope_eligibility"], expected)
+        scan = shared_validation_status(self.path, scan_id="scan")
+        self.assertEqual(scan["cases"][0]["scope_eligibility"], expected)
+        for output in (status, scan):
+            serialized = json.dumps(output)
+            for forbidden in ("scope_markdown", "scope_quote", "evidence_summaries", "raw_prompt", "Policy fixture"):
+                self.assertNotIn(forbidden, serialized)
 
     def test_latest_unknown_or_ineligible_preflight_overrides_eligible(self):
         self.complete()

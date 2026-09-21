@@ -6,6 +6,8 @@ import sqlite3
 import tempfile
 from pathlib import Path
 
+import pytest
+
 from aidast.attack.db_cli import transition_task
 from aidast.attack.models import AttackStageResult
 from aidast.orchestration.attack import AttackCoordinator
@@ -14,6 +16,72 @@ from aidast.pipeline.materialize import materialize_pipeline
 from aidast.pipeline.models import HandoffManifest, hash_artifact
 from aidast.recon import db
 from aidast.validation import ValidationCoordinator
+
+
+@pytest.mark.parametrize("eligibility,expected_status", [
+    ("ELIGIBLE", "CONFIRMED"), ("INELIGIBLE", "OUT_OF_SCOPE"),
+    ("UNKNOWN", "INCONCLUSIVE"),
+])
+def test_approved_handoff_scope_controls_validation_and_report(tmp_path, eligibility, expected_status):
+    from test_validation_coordinator import ValidationCoordinatorTests, FakeAgent, FakePort, FakeEligibilityAgent
+    from aidast.reporting import CaseReportAgent, CaseReportError, read_verified_case
+
+    fixture = ValidationCoordinatorTests()
+    fixture.setUp()
+    try:
+        # The source carries deterministic staged finding evidence; no Attack or network is executed.
+        recon = tmp_path / "Recon.db"
+        recon.write_bytes(fixture.path.read_bytes())
+        original = recon.read_bytes()
+        scope = tmp_path / "Scope.md"
+        policy_bytes = b"# Approved policy\r\nFixture IDOR validation is permitted.\r\n"
+        scope.write_bytes(policy_bytes)
+        approval = tmp_path / "Approval.json"
+        approval.write_text(json.dumps({
+            "scope_id": "scope", "approved_by": "fixture-reviewer",
+            "approved_at": "2026-09-18T00:00:00Z", "scope_json_sha256": "b" * 64,
+            "scope_markdown_sha256": hashlib.sha256(policy_bytes).hexdigest(),
+        }), encoding="utf-8")
+        approval_digest = hashlib.sha256(approval.read_bytes()).hexdigest()
+        handoff = tmp_path / "Handoff.json"
+        handoff.write_text(HandoffManifest(
+            scan_id="scan", db_path="Recon.db", artifacts=[
+                hash_artifact(recon, root=tmp_path, role="database"),
+                hash_artifact(scope, root=tmp_path, role="scope-markdown"),
+                hash_artifact(approval, root=tmp_path, role="scope-approval"),
+            ],
+        ).model_dump_json(), encoding="utf-8")
+        pipeline = tmp_path / "pipeline" / "Pipeline.db"
+        materialize_pipeline(handoff, pipeline)
+        scope.write_text("external policy changed after materialization", encoding="utf-8")
+        port = FakePort()
+        result = ValidationCoordinator(
+            db_path=pipeline, agent=FakeAgent(), reproduction=port,
+            eligibility_agent=FakeEligibilityAgent(eligibility),
+            policy_provider=lambda endpoint, method: fixture.policy,
+        ).run("scan")
+        assert result.summary["statuses"] == {expected_status: 1}
+        digest = hashlib.sha256(policy_bytes).hexdigest()
+        with sqlite3.connect(pipeline) as conn:
+            assert conn.execute("SELECT scope_sha256,approval_digest FROM validation_scope_bindings").fetchone() == (
+                digest, approval_digest,
+            )
+            assert conn.execute("SELECT scope_markdown FROM scope_policy_snapshots WHERE scope_sha256=?", (digest,)).fetchone()[0].encode() == policy_bytes
+        case_id, = result.case_ids
+        if eligibility == "ELIGIBLE":
+            source = read_verified_case(pipeline, case_id)
+            assert source["scope_sha256"] == digest
+            assert source["eligibility_assessment_id"]
+            prepared = CaseReportAgent().run(pipeline, tmp_path / "report", platform="hackerone", case_id=case_id)
+            assert prepared["status"] == "prepared"
+            assert prepared["source"]["scope_sha256"] == digest
+        else:
+            assert port.calls == []
+            with pytest.raises(CaseReportError, match="CONFIRMED"):
+                read_verified_case(pipeline, case_id)
+        assert recon.read_bytes() == original
+    finally:
+        fixture.doCleanups()
 
 
 class EmptyAttackAgent:

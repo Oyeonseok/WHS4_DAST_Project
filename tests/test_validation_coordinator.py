@@ -1361,6 +1361,128 @@ class ValidationCoordinatorTests(unittest.TestCase):
                 "SELECT count(*) FROM validation_attempts"
             ).fetchone()[0], 5)
 
+    def interrupt_after_preflight(self):
+        port = FakePort()
+        with patch.object(ValidationRepository, "stage_blind_case", side_effect=RuntimeError("interrupted")):
+            with self.assertRaises(ValidationCoordinatorError):
+                ValidationCoordinator(
+                    db_path=self.path, agent=FakeAgent(), reproduction=port,
+                    policy_provider=lambda endpoint, method: self.policy,
+                ).run("scan")
+        self.assertEqual(port.calls, [])
+        with db.connect(self.path) as conn:
+            return conn.execute("SELECT stage_run_id FROM stage_runs WHERE stage='validation'").fetchone()[0]
+
+    def test_resume_uses_embedded_scope_after_external_file_changes(self):
+        external = self.path.parent / "Scope.md"
+        external.write_text(self.scope.scope_markdown, encoding="utf-8")
+        with db.connect(self.path) as conn:
+            ValidationRepository(conn).bind_scope("scan", ScopePolicySource.from_text(
+                external.read_text(encoding="utf-8"), str(external),
+            ))
+        stage = self.interrupt_after_preflight()
+        external.write_text("changed outside database", encoding="utf-8")
+        result = ValidationCoordinator(
+            db_path=self.path, agent=FakeAgent(), reproduction=FakePort(),
+            policy_provider=lambda endpoint, method: self.policy,
+        ).resume(stage)
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(len(self.eligibility.requests), 1)
+        with db.connect(self.path) as conn:
+            self.assertEqual(conn.execute("SELECT scope_sha256 FROM validation_cases").fetchone()[0],
+                             self.scope.scope_sha256)
+
+    def test_resume_rejects_case_assessment_scope_mismatch_before_network(self):
+        stage = self.interrupt_after_preflight()
+        with db.connect(self.path) as conn:
+            replacement = ScopePolicySource.from_text("Other valid policy", "other.md")
+            ValidationRepository(conn).bind_scope("scan", replacement)
+            conn.execute("UPDATE validation_cases SET scope_sha256=?", (replacement.scope_sha256,))
+            conn.commit()
+        port = FakePort()
+        with self.assertRaisesRegex(ValidationCoordinatorError, "scope digest mismatch"):
+            ValidationCoordinator(
+                db_path=self.path, agent=FakeAgent(), reproduction=port,
+                policy_provider=lambda endpoint, method: self.policy,
+            ).resume(stage)
+        self.assertEqual(port.calls, [])
+        self.assertEqual(len(self.eligibility.requests), 1)
+
+    def test_resume_rejects_snapshot_content_digest_mismatch_before_network(self):
+        stage = self.interrupt_after_preflight()
+        with db.connect(self.path) as conn:
+            conn.execute("DROP TRIGGER scope_policy_snapshots_no_update")
+            conn.execute("UPDATE scope_policy_snapshots SET scope_markdown='corrupt'")
+            conn.commit()
+        port = FakePort()
+        with self.assertRaisesRegex(ValidationCoordinatorError, "scope snapshot digest mismatch"):
+            ValidationCoordinator(
+                db_path=self.path, agent=FakeAgent(), reproduction=port,
+                policy_provider=lambda endpoint, method: self.policy,
+            ).resume(stage)
+        self.assertEqual(port.calls, [])
+
+    def test_failed_eligibility_insert_cannot_authorize_replay_on_resume(self):
+        port = FakePort()
+        with db.connect(self.path) as conn:
+            conn.execute("""CREATE TRIGGER reject_eligibility_insert
+                BEFORE INSERT ON validation_eligibility_assessments
+                BEGIN SELECT RAISE(ABORT, 'fixture interrupted insert'); END""")
+            conn.commit()
+        coordinator = ValidationCoordinator(
+            db_path=self.path, agent=FakeAgent(), reproduction=port,
+            policy_provider=lambda endpoint, method: self.policy,
+        )
+        with self.assertRaises(ValidationCoordinatorError):
+            coordinator.run("scan")
+        self.assertEqual(port.calls, [])
+        with db.connect(self.path) as conn:
+            stage = conn.execute("SELECT stage_run_id FROM stage_runs WHERE stage='validation'").fetchone()[0]
+            self.assertEqual(conn.execute("SELECT count(*) FROM validation_eligibility_assessments").fetchone()[0], 0)
+            conn.execute("DROP TRIGGER reject_eligibility_insert")
+            conn.commit()
+        self.eligibility.eligibility = "UNKNOWN"
+        result = coordinator.resume(stage)
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(port.calls, [])
+        self.assertEqual(len(self.eligibility.requests), 2)
+        with db.connect(self.path) as conn:
+            self.assertEqual(conn.execute("SELECT current_status FROM validation_cases").fetchone()[0], "INCONCLUSIVE")
+
+    def test_resume_rejects_assessment_input_digest_mismatch_before_network(self):
+        stage = self.interrupt_after_preflight()
+        with db.connect(self.path) as conn:
+            conn.execute("DROP TRIGGER validation_eligibility_assessments_no_update")
+            conn.execute("UPDATE validation_eligibility_assessments SET input_sha256=?", ("f" * 64,))
+            conn.commit()
+        port = FakePort()
+        with self.assertRaisesRegex(ValidationCoordinatorError, "eligibility input digest mismatch"):
+            ValidationCoordinator(
+                db_path=self.path, agent=FakeAgent(), reproduction=port,
+                policy_provider=lambda endpoint, method: self.policy,
+            ).resume(stage)
+        self.assertEqual(port.calls, [])
+        self.assertEqual(len(self.eligibility.requests), 1)
+
+    def test_legacy_unbound_case_status_is_readable_but_resume_fails_closed(self):
+        from aidast.validation import shared_validation_status
+        stage = self.interrupt_after_preflight()
+        with db.connect(self.path) as conn:
+            conn.execute("UPDATE validation_cases SET scope_sha256=NULL")
+            conn.commit()
+            case_id = conn.execute("SELECT case_id FROM validation_cases").fetchone()[0]
+        status = shared_validation_status(self.path, case_id=case_id)
+        self.assertIsNone(status["case"]["scope_sha256"])
+        self.assertEqual(status["scope_eligibility"], {
+            "scope_sha256": None, "phase": None, "eligibility": None,
+            "assessment_id": None, "matched_rule": None,
+        })
+        port = FakePort()
+        with self.assertRaisesRegex(ValidationCoordinatorError, "scope_binding_missing"):
+            ValidationCoordinator(db_path=self.path, agent=FakeAgent(), reproduction=port,
+                                  policy_provider=lambda endpoint, method: self.policy).resume(stage)
+        self.assertEqual(port.calls, [])
+
     def test_resume_does_not_redispatch_an_outcome_unknown_attempt(self):
         with self.assertRaises(ValidationCoordinatorError):
             ValidationCoordinator(

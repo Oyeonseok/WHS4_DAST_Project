@@ -161,6 +161,12 @@ class ValidationCoordinator:
         for case_id in case_ids:
             case = repo.read_case(case_id)
             self._load_scope(conn, case.get("scope_sha256"))
+            if conn.execute(
+                """SELECT 1 FROM validation_eligibility_assessments
+                WHERE case_id=? AND stage_run_id=? AND scope_sha256<>? LIMIT 1""",
+                (case_id, stage_run_id, case["scope_sha256"]),
+            ).fetchone() is not None:
+                raise ValidationCoordinatorError("eligibility scope digest mismatch")
             if resume_interrupted and case["processing_phase"] == "interrupted":
                 conn.execute(
                     "UPDATE validation_cases SET processing_phase='queued' WHERE case_id=?",
@@ -252,10 +258,19 @@ class ValidationCoordinator:
             reproduction_summary=view, evidence_refs=evidence_ids,
             evidence_summaries=evidence_summaries,
         )
-        stored = repo.find_eligibility(
-            candidate.case_id, stage_run_id, phase, canonical_sha256(request.model_dump()),
-        )
-        if stored is not None and stored["scope_sha256"] == scope.scope_sha256:
+        input_digest = canonical_sha256(request.model_dump())
+        stored = conn.execute(
+            """SELECT * FROM validation_eligibility_assessments
+            WHERE case_id=? AND stage_run_id=? AND phase=? ORDER BY rowid DESC LIMIT 1""",
+            (candidate.case_id, stage_run_id, phase),
+        ).fetchone()
+        if stored is not None:
+            if stored["scope_sha256"] != scope.scope_sha256:
+                raise ValidationCoordinatorError("eligibility scope digest mismatch")
+            if stored["input_sha256"] != input_digest:
+                raise ValidationCoordinatorError("eligibility input digest mismatch")
+            if type(stored["replay_allowed"]) is not int or stored["replay_allowed"] not in (0, 1):
+                raise ValidationCoordinatorError("invalid stored eligibility replay permission")
             assessment = EligibilityAssessment.model_validate_json(canonical_json({
                 key: stored[key] for key in (
                     "case_id", "scope_sha256", "phase", "eligibility", "exclusion_kind",

@@ -123,6 +123,15 @@ class ValidationReportCliTests(unittest.TestCase):
                 "--scope", "Scope.md",
             ])
 
+    def test_scope_option_requires_shared_scan_selector(self):
+        with patch("aidast.cli.ValidationAgent") as legacy:
+            code, _, stderr = self.invoke([
+                "validate", "run", "Attack.db", "--scope", "Scope.md",
+            ])
+        self.assertEqual(code, 1)
+        self.assertIn("--scope requires --scan-id", stderr)
+        legacy.assert_not_called()
+
     def test_native_builder_injects_verified_scope_only_when_supplied(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
