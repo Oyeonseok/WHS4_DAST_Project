@@ -47,14 +47,14 @@ class SharedValidationReportingTests(unittest.TestCase):
         self.assessment_count = 0
         self.output = root / "reports" / "case"
 
-    def eligibility(self, value="ELIGIBLE", phase="preflight", case_id="case"):
+    def eligibility(self, value="ELIGIBLE", phase="preflight", case_id="case", evidence_refs=()):
         self.assessment_count += 1
         request = EligibilityRequest(
             case_id=case_id, scope_sha256=self.scope.scope_sha256, phase=phase,
             scope_markdown=self.scope.scope_markdown, target_kind="finding", vuln_class="idor",
             endpoint="https://test/", method="GET", title="Fixture", claimed_impact="Boundary crossed",
             reproduction_summary={"revision": self.assessment_count},
-            evidence_refs=(), evidence_summaries=(),
+            evidence_refs=evidence_refs, evidence_summaries=(),
         )
         assessment = EligibilityAssessment(
             case_id=case_id, scope_sha256=self.scope.scope_sha256, phase=phase,
@@ -62,7 +62,7 @@ class SharedValidationReportingTests(unittest.TestCase):
             required_impact=({"condition": "Boundary crossed", "evidence_needed": "Observation"},)
             if value == "CONDITIONAL" else (),
             replay_allowed=value in {"ELIGIBLE", "CONDITIONAL"}, reason="Policy fixture",
-            evidence_refs=(),
+            evidence_refs=evidence_refs,
         )
         identifier = self.repo.record_eligibility(request, assessment)
         return identifier, canonical_sha256(assessment.model_dump())
@@ -149,8 +149,10 @@ class SharedValidationReportingTests(unittest.TestCase):
             ReportAgent().run(self.path, self.output, platform="hackerone", case_id="case")
 
     def test_matching_eligible_assessment_is_bound_into_report_context(self):
-        self.complete(eligibility=None)
-        identifier, digest = self.eligibility()
+        evidence = self.complete(eligibility=None)
+        identifier, digest = self.eligibility(evidence_refs=(evidence,))
+        self.conn.execute("UPDATE stage_runs SET status='completed' WHERE stage_run_id=?", (self.run,))
+        self.conn.commit()
         result = ReportAgent().run(self.path, self.output, platform="hackerone", case_id="case")
         context = json.loads(Path(result["context_path"]).read_text())
         self.assertEqual(context["source"]["scope_sha256"], self.scope.scope_sha256)
@@ -198,6 +200,102 @@ class SharedValidationReportingTests(unittest.TestCase):
         self.assertTrue(report_status(Path(prepared["report_db"]))["stale"])
         with self.assertRaisesRegex(ReportError, "differs"):
             record_report(Path(prepared["report_db"]), self.draft(context, evidence))
+
+    def assert_invalid_policy_blocks_reports(self, prepared, evidence):
+        context = json.loads(Path(prepared["context_path"]).read_text())
+        artifacts = {path: path.read_bytes() for path in self.output.iterdir()}
+        self.assessment_count += 1
+        new_output = self.output.parent / ("new_" + str(self.assessment_count))
+        with self.subTest(check="new report"):
+            with self.assertRaisesRegex(ReportError, "scope assessment"):
+                ReportAgent().run(self.path, new_output, platform="hackerone", case_id="case")
+        with self.subTest(check="prepared report stale"):
+            self.assertTrue(report_status(Path(prepared["report_db"]))["stale"])
+        with self.subTest(check="record rejected"):
+            with self.assertRaisesRegex(ReportError, "differs"):
+                record_report(Path(prepared["report_db"]), self.draft(context, evidence))
+        with self.subTest(check="immutable artifacts"):
+            for path, contents in artifacts.items():
+                self.assertEqual(path.read_bytes(), contents)
+
+    def check_corrupted_assessment(self, *, conditional=False, phase="preflight"):
+        self.complete("foreign", "known_finding")
+        evidence = self.complete(eligibility="CONDITIONAL" if conditional else "ELIGIBLE")
+        if conditional:
+            self.eligibility(phase="post_replay")
+        prepared = ReportAgent().run(self.path, self.output, platform="hackerone", case_id="case")
+        record_report(Path(prepared["report_db"]), self.draft(
+            json.loads(Path(prepared["context_path"]).read_text()), evidence,
+        ))
+        row = dict(self.conn.execute(
+            "SELECT * FROM validation_eligibility_assessments WHERE case_id='case' AND phase=?",
+            (phase,),
+        ).fetchone())
+        # Model externally corrupted persisted input, without weakening production triggers.
+        self.conn.execute("DROP TRIGGER validation_eligibility_assessments_no_update")
+        for field, value, rehash in (
+            ("reason", "Altered assessment", False),
+            ("replay_allowed", 0, True),
+            ("required_impact_json", "{}", True),
+            ("scope_quote", "This rule was never in the policy.", True),
+            ("evidence_refs_json", '["missing_evidence"]', True),
+            ("evidence_refs_json", '["evidence_foreign"]', True),
+        ):
+            with self.subTest(phase=phase, field=field, rehash=rehash):
+                changed = row | {field: value}
+                if rehash:
+                    document = {key: changed[key] for key in (
+                        "case_id", "scope_sha256", "phase", "eligibility", "exclusion_kind",
+                        "matched_rule", "scope_quote", "reason",
+                    )} | {
+                        "replay_allowed": bool(changed["replay_allowed"]),
+                        "required_impact": json.loads(changed["required_impact_json"]),
+                        "evidence_refs": json.loads(changed["evidence_refs_json"]),
+                    }
+                    changed["output_sha256"] = canonical_sha256(document)
+                self.conn.execute(
+                    "UPDATE validation_eligibility_assessments SET "
+                    + ",".join(key + "=?" for key in changed) + " WHERE assessment_id=?",
+                    (*changed.values(), row["assessment_id"]),
+                )
+                self.conn.commit()
+                self.assert_invalid_policy_blocks_reports(prepared, evidence)
+
+    def test_corrupted_direct_preflight_fails_closed(self):
+        self.check_corrupted_assessment()
+
+    def test_corrupted_conditional_preflight_fails_closed_with_valid_post_replay(self):
+        self.check_corrupted_assessment(conditional=True)
+
+    def test_corrupted_selected_post_replay_fails_closed(self):
+        self.check_corrupted_assessment(conditional=True, phase="post_replay")
+
+    def check_later_mismatched_scope(self, *, conditional=False):
+        evidence = self.complete(eligibility="CONDITIONAL" if conditional else "ELIGIBLE")
+        phase = "post_replay" if conditional else "preflight"
+        if conditional:
+            self.eligibility(phase=phase)
+        prepared = ReportAgent().run(self.path, self.output, platform="hackerone", case_id="case")
+        replacement = ScopePolicySource.from_text("Different policy", "fixture/Scope.md")
+        self.repo.bind_scope("scan", replacement)
+        row = dict(self.conn.execute(
+            "SELECT * FROM validation_eligibility_assessments WHERE case_id='case' AND phase=?",
+            (phase,),
+        ).fetchone())
+        row.update(assessment_id="later_mismatched", scope_sha256=replacement.scope_sha256,
+                   input_sha256="f" * 64)
+        self.conn.execute(
+            "INSERT INTO validation_eligibility_assessments (" + ",".join(row) + ") VALUES ("
+            + ",".join("?" for _ in row) + ")", tuple(row.values()),
+        )
+        self.conn.commit()
+        self.assert_invalid_policy_blocks_reports(prepared, evidence)
+
+    def test_later_mismatched_scope_preflight_blocks_older_matching_approval(self):
+        self.check_later_mismatched_scope()
+
+    def test_later_mismatched_scope_post_replay_blocks_older_matching_approval(self):
+        self.check_later_mismatched_scope(conditional=True)
 
     def draft(self, context, evidence):
         def cited(text):
