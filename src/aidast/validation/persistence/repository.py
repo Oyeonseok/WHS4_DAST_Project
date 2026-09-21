@@ -154,6 +154,11 @@ class ValidationRepository:
     def create_case(self, *, scan_id: str, stage_run_id: str, target_kind: str,
                     target_id: str, scope_sha256: str | None = None,
                     case_id: str | None = None) -> str:
+        """Create a scope-bound case.
+
+        Omitting scope_sha256 is deprecated compatibility for direct callers;
+        coordinators must always supply the resolved immutable scope digest.
+        """
         if target_kind not in {"finding", "chain"}:
             raise ValidationRepositoryError("target kind must be finding or chain")
         identifier = case_id or new_id("vcase")
@@ -180,11 +185,17 @@ class ValidationRepository:
 
     def begin_revalidation(self, case_id: str, *, stage_run_id: str, expected_version: int,
                            scope_sha256: str | None = None) -> int:
+        """Bind a new stage and invalidate previous-stage blind cache references.
+
+        Omitting scope_sha256 is deprecated compatibility for direct callers.
+        Historical evidence and eligibility assessments remain append-only.
+        """
         with self.conn:
             stage = self._stage(stage_run_id)
             resolved_scope = self._resolve_current_scope(stage[0], scope_sha256)
             cursor = self.conn.execute(
                 """UPDATE validation_cases SET latest_stage_run_id=?,processing_phase='queued',
+                   blind_case_sha256=NULL,attack_claim_sha256=NULL,blind_assessment_sha256=NULL,
                    scope_sha256=?,state_version=state_version+1,updated_at=?
                    WHERE case_id=? AND scan_id=? AND state_version=?
                    AND processing_phase='completed'""",

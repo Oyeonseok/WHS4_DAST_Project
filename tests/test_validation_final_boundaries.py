@@ -498,3 +498,85 @@ class IncompleteBatchTests(unittest.TestCase):
 
     def test_failed_error_control_is_audit_only_before_decision(self):
         self.run_incomplete_control("error", "failed")
+
+
+class EligibilityPreflightBoundaryTests(unittest.TestCase):
+    setUp = coordinator_fixture.ValidationCoordinatorTests.setUp
+
+    def test_legacy_unbound_resume_fails_closed_without_eligibility_or_replay(self):
+        with self.assertRaises(coordinator_fixture.ValidationCoordinatorError):
+            coordinator_fixture.ValidationCoordinator(
+                db_path=self.path, agent=coordinator_fixture.CrashedAgent(),
+                reproduction=coordinator_fixture.FakePort(),
+                policy_provider=lambda endpoint, method: self.policy,
+            ).run("scan")
+        with sqlite3.connect(self.path) as conn:
+            stage = conn.execute("SELECT stage_run_id FROM stage_runs WHERE stage='validation'").fetchone()[0]
+            conn.execute("UPDATE validation_cases SET scope_sha256=NULL")
+        port = coordinator_fixture.FakePort()
+        eligibility = coordinator_fixture.FakeEligibilityAgent()
+        with self.assertRaisesRegex(coordinator_fixture.ValidationCoordinatorError, "scope_binding_missing"):
+            coordinator_fixture.ValidationCoordinator(
+                db_path=self.path, agent=coordinator_fixture.FakeAgent(), reproduction=port,
+                eligibility_agent=eligibility, scope_source=self.scope,
+                policy_provider=lambda endpoint, method: self.policy,
+            ).resume(stage)
+        self.assertEqual(port.calls, [])
+        self.assertEqual(eligibility.requests, [])
+
+    def test_conditional_eligibility_preserves_materialized_blind_contract(self):
+        test = self
+
+        class ConditionalAgent(coordinator_fixture.FakeEligibilityAgent):
+            def assess(self, request, correction=None):
+                result = super().assess(request, correction).model_dump()
+                return result | {"eligibility": "CONDITIONAL", "required_impact": ({
+                    "condition": "Show an authorization boundary.",
+                    "evidence_needed": "Existing replay observations.",
+                },)}
+
+        with sqlite3.connect(self.path) as conn:
+            conn.row_factory = sqlite3.Row
+            # Case IDs differ at staging; compare every other materialized field.
+            expected = coordinator_fixture.CandidateIntegrityGate(conn).validate_finding(
+                case_id="placeholder", scan_id="scan", finding_id="finding",
+            ).staged.blind_view()
+        expected.pop("case_id")
+        expected.pop("blind_case_sha256")
+
+        class InspectingPort(coordinator_fixture.FakePort):
+            def execute(self, blind_case, **context):
+                actual = blind_case.model_dump(mode="json")
+                actual.pop("case_id")
+                test.assertEqual(actual, expected)
+                with sqlite3.connect(test.path) as conn:
+                    test.assertEqual(conn.execute("SELECT eligibility,replay_allowed FROM validation_eligibility_assessments").fetchone(),
+                                     ("CONDITIONAL", 1))
+                return super().execute(blind_case, **context)
+
+        port = InspectingPort()
+        coordinator_fixture.ValidationCoordinator(
+            db_path=self.path, agent=coordinator_fixture.FakeAgent(), reproduction=port,
+            eligibility_agent=ConditionalAgent(),
+            policy_provider=lambda endpoint, method: self.policy,
+        ).run("scan")
+        self.assertEqual(len(port.calls), 5)
+
+    def test_corrected_eligibility_response_persists_only_valid_result(self):
+        class CorrectingAgent(coordinator_fixture.FakeEligibilityAgent):
+            def assess(self, request, correction=None):
+                result = super().assess(request, correction).model_dump()
+                return result if correction else result | {"scope_quote": "Ungrounded quote"}
+
+        eligibility = CorrectingAgent()
+        port = coordinator_fixture.FakePort()
+        coordinator_fixture.ValidationCoordinator(
+            db_path=self.path, agent=coordinator_fixture.FakeAgent(), reproduction=port,
+            eligibility_agent=eligibility,
+            policy_provider=lambda endpoint, method: self.policy,
+        ).run("scan")
+        self.assertEqual(len(eligibility.requests), 2)
+        self.assertEqual(len(port.calls), 5)
+        with sqlite3.connect(self.path) as conn:
+            self.assertEqual(conn.execute("SELECT eligibility,scope_quote FROM validation_eligibility_assessments").fetchall(),
+                             [("ELIGIBLE", self.scope.scope_markdown)])

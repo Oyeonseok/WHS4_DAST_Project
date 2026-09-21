@@ -260,6 +260,39 @@ class ValidationRepositoryTests(unittest.TestCase):
         audit = self.conn.execute("SELECT details_json FROM audit_events WHERE event_type='stage.resumed'").fetchone()[0]
         self.assertIn("worker stopped", audit)
 
+    def test_revalidation_clears_previous_blind_cache_but_preserves_evidence(self):
+        evidence = self.case_with_evidence()
+        version = self.repo.stage_blind_case(
+            "case", stage_run_id=self.run, expected_version=0,
+            attack_skill_name="hunt-idor", skill_sha256="a" * 64,
+            validation_profile_sha256="b" * 64, source_policy_sha256="c" * 64,
+            current_policy_sha256="d" * 64, blind_case_sha256="e" * 64,
+            attack_claim_sha256="f" * 64,
+        )
+        frozen_evidence = self.repo.add_evidence(
+            case_id="case", stage_run_id=self.run, evidence_kind="blind_assessment",
+            details={"frozen": True}, content_sha256="1" * 64, content_length=1,
+        )
+        version = self.repo.freeze_blind_assessment(
+            "case", stage_run_id=self.run, expected_version=version, assessment_sha256="1" * 64,
+        )
+        version = self.repo.finalize(
+            "case", stage_run_id=self.run, expected_version=version,
+            status="CONFIRMED", decision={"result": "confirmed"},
+            evidence_ids=(evidence, frozen_evidence), impact=(1, 1, 1),
+        )
+        finish_stage_run(self.conn, self.run)
+        stage = start_stage_run(self.conn, scan_id="scan", stage="validation")
+        revised = self.repo.bind_scope("scan", ScopePolicySource.from_text("New scope", "new.md"))
+        self.repo.begin_revalidation("case", stage_run_id=stage, expected_version=version, scope_sha256=revised)
+        case = self.repo.read_case("case")
+        self.assertIsNone(case["blind_case_sha256"])
+        self.assertIsNone(case["attack_claim_sha256"])
+        self.assertIsNone(case["blind_assessment_sha256"])
+        self.assertEqual(case["scope_sha256"], revised)
+        self.assertEqual(set(row[0] for row in self.conn.execute("SELECT evidence_id FROM validation_evidence")),
+                         {evidence, frozen_evidence})
+
     def test_validation_stage_cannot_complete_with_unfinished_case(self):
         self.repo.create_case(scan_id="scan", stage_run_id=self.run, target_kind="finding",
                               target_id="one", scope_sha256=self.scope_sha256,
