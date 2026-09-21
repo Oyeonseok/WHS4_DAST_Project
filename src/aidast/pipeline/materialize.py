@@ -40,6 +40,10 @@ def materialize_pipeline(
         manifest_path.read_text(encoding="utf-8")
     )
     verified = manifest.verify_artifacts(root=root)
+    scope_artifacts = [item for item in manifest.artifacts if item.role == "scope-markdown"]
+    approval_artifacts = [item for item in manifest.artifacts if item.role == "scope-approval"]
+    if len(scope_artifacts) != len(approval_artifacts) or len(scope_artifacts) > 1:
+        raise ValueError("handoff requires exactly one scope Markdown and one approval")
     recon_path = verified[manifest.db_path]
     source_digest = _sha256(recon_path)
     handoff_digest = _sha256(manifest_path)
@@ -77,6 +81,19 @@ def materialize_pipeline(
                     source_digest,
                 ),
             )
+            if scope_artifacts:
+                # A function-local import avoids initializing Validation while importing Pipeline.
+                from aidast.validation.contracts.eligibility import ScopePolicySource
+                from aidast.validation.persistence.repository import ValidationRepository
+
+                scope_artifact, approval_artifact = scope_artifacts[0], approval_artifacts[0]
+                source = ScopePolicySource.from_verified_artifacts(
+                    verified[scope_artifact.path], verified[approval_artifact.path],
+                )
+                if (source.scope_sha256 != scope_artifact.sha256
+                        or source.approval_digest != approval_artifact.sha256):
+                    raise ValueError("scope artifacts changed during pipeline materialization")
+                ValidationRepository(destination).bind_scope(manifest.scan_id, source)
             destination.commit()
         if _sha256(recon_path) != source_digest:
             raise RuntimeError("Recon database changed during pipeline materialization")

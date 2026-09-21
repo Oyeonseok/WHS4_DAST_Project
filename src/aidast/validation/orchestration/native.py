@@ -14,6 +14,7 @@ from ..execution.http_adapter import HttpReproductionPort
 from ..execution.http_oob_observer import HttpJsonOobObserver
 from ..execution.oob_adapter import OobObserver, OobReproductionPort
 from ..core.policy import TargetPolicyProvider
+from ..contracts.eligibility import ScopePolicySource
 from ..execution.playwright_browser import PlaywrightBrowserExecutor
 from ..contracts.models import PrerequisiteResolverPort
 from ..execution.runtime_adapter import RuntimeReproductionRouter
@@ -34,7 +35,7 @@ def _optional_adapter(module_name: str, class_name: str, *,
 
 
 def build_native_validation_coordinator(
-    *, db_path: Path, policy_path: Path,
+    *, db_path: Path, policy_path: Path, scope_path: Path | None = None,
     credential_resolver: Callable[[str], Mapping[str, str]] | None = None,
     credential_backends: Mapping[str, Callable[[str], object]] | None = None,
     browser_executor: BrowserExecutor | None = None,
@@ -102,6 +103,10 @@ def build_native_validation_coordinator(
             artifact_resolver=artifact_resolver,
         ),
     )
+    coordinator_options = (
+        {"scope_source": ScopePolicySource.from_path(scope_path)}
+        if scope_path is not None else {}
+    )
     return ValidationCoordinator(
         db_path=db_path,
         agent=None,
@@ -125,4 +130,5 @@ def build_native_validation_coordinator(
                 policy_provider=policy_provider,
             )
         ),
+        **coordinator_options,
     )

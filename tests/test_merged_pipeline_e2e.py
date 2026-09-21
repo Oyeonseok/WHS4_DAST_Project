@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import sqlite3
 import tempfile
 from pathlib import Path
@@ -109,6 +110,16 @@ def test_recon_snapshot_drives_downstream_pipeline_without_mutation() -> None:
             )
             connection.commit()
 
+        scope_path = root / "Scope.md"
+        policy_path = root / "TargetPolicy.json"
+        scope_path.write_text("# Approved", encoding="utf-8")
+        (root / "Approval.json").write_text(json.dumps({
+            "scope_id": "scope", "approved_by": "reviewer",
+            "approved_at": "2026-09-18T00:00:00Z",
+            "scope_json_sha256": "b" * 64,
+            "scope_markdown_sha256": hashlib.sha256(scope_path.read_bytes()).hexdigest(),
+        }), encoding="utf-8")
+        policy_path.write_text('{"schema_version":"1.0","policies":[]}', encoding="utf-8")
         handoff_path = root / "Handoff.json"
         handoff_path.write_text(
             HandoffManifest(
@@ -120,7 +131,9 @@ def test_recon_snapshot_drives_downstream_pipeline_without_mutation() -> None:
                         root=root,
                         role="database",
                         media_type="application/vnd.sqlite3",
-                    )
+                    ),
+                    hash_artifact(scope_path, root=root, role="scope-markdown"),
+                    hash_artifact(root / "Approval.json", root=root, role="scope-approval"),
                 ],
             ).model_dump_json(indent=2),
             encoding="utf-8",
@@ -128,10 +141,6 @@ def test_recon_snapshot_drives_downstream_pipeline_without_mutation() -> None:
         source_before = recon_path.read_bytes()
         pipeline_path = root / "Pipeline.db"
         materialize_pipeline(handoff_path, pipeline_path)
-        scope_path = root / "Scope.md"
-        policy_path = root / "TargetPolicy.json"
-        scope_path.write_text("# Approved", encoding="utf-8")
-        policy_path.write_text('{"schema_version":"1.0","policies":[]}', encoding="utf-8")
 
         attack = AttackCoordinator(
             agent=EmptyAttackAgent(),
@@ -161,7 +170,10 @@ def test_recon_snapshot_drives_downstream_pipeline_without_mutation() -> None:
             source_before
         ).hexdigest()
         with sqlite3.connect(pipeline_path) as connection:
-            assert connection.execute("PRAGMA user_version").fetchone()[0] == 10
+            assert connection.execute("PRAGMA user_version").fetchone()[0] == 11
+            assert connection.execute(
+                "SELECT scope_sha256 FROM validation_scope_bindings WHERE scan_id='scan'"
+            ).fetchone() == (hashlib.sha256(b"# Approved").hexdigest(),)
             selected_skills = connection.execute(
                 "SELECT skill_name FROM attack_tasks WHERE stage_run_id=?",
                 (attack.stage_run_id,),
