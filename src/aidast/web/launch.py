@@ -11,20 +11,27 @@ import re
 import subprocess
 import sys
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Sequence
+from typing import Any
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from aidast.orchestration.scope import CoordinatorError, ScopeCoordinator
 from aidast.recon.policy import validate_start_url_for_target
+from aidast.recon.profiles import EXECUTION_PROFILES, ProfileId
 from aidast.scope.models import AssetType
 from aidast.scope.paths import ScopePathError, resolve_scope_directory
 
 from .projection import DashboardProjector, ScanNotFoundError
+from .requirements import (
+    IdentityHeader,
+    ScopeExecutionRequirements,
+    build_scope_execution_requirements,
+)
 
 
 EXECUTABLE_TYPES = {
@@ -34,7 +41,6 @@ EXECUTABLE_TYPES = {
     AssetType.WILDCARD,
     AssetType.IP_ADDRESS,
 }
-PROFILE_MAX_REQUESTS = {"safe-recon": 500, "focused-discovery": 2000}
 _HANDLE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 
 
@@ -47,20 +53,17 @@ class ScanLaunchRequest(BaseModel):
 
     scope_id: str = Field(min_length=1, max_length=160)
     targets: list[str] = Field(min_length=1, max_length=64)
-    profile: str = "safe-recon"
+    profile: ProfileId = "safe-recon"
     max_requests: int = Field(default=500, ge=1, le=2000)
+    max_rps: float | None = Field(default=None, gt=0, le=50)
+    max_concurrency: int | None = Field(default=None, ge=1, le=20)
+    timeout_seconds: int | None = Field(default=None, ge=1, le=120)
+    max_depth: int | None = Field(default=None, ge=0, le=10)
     login_mode: str = "none"
     start_url: str | None = Field(default=None, max_length=2048)
     hackerone_username: str | None = None
     intigriti_username: str | None = None
     authorization_confirmed: bool = False
-
-    @field_validator("profile")
-    @classmethod
-    def valid_profile(cls, value: str) -> str:
-        if value not in PROFILE_MAX_REQUESTS:
-            raise ValueError("unsupported scan profile")
-        return value
 
     @field_validator("targets")
     @classmethod
@@ -104,8 +107,23 @@ class ScanLaunchRequest(BaseModel):
             raise ValueError("duplicate targets are not allowed")
         if self.hackerone_username and self.intigriti_username:
             raise ValueError("platform handles cannot be combined")
-        if self.max_requests > PROFILE_MAX_REQUESTS[self.profile]:
+        if self.max_requests > EXECUTION_PROFILES[self.profile].max_requests:
             raise ValueError("request budget exceeds the selected profile")
+        profile = EXECUTION_PROFILES[self.profile]
+        if self.max_rps is not None and self.max_rps > profile.requests_per_second:
+            raise ValueError("request rate exceeds the selected profile")
+        if (
+            self.max_concurrency is not None
+            and self.max_concurrency > profile.concurrency
+        ):
+            raise ValueError("concurrency exceeds the selected profile")
+        if (
+            self.timeout_seconds is not None
+            and self.timeout_seconds > profile.timeout_seconds
+        ):
+            raise ValueError("timeout exceeds the selected profile")
+        if self.max_depth is not None and self.max_depth > profile.max_depth:
+            raise ValueError("depth exceeds the selected profile")
         if self.start_url and len(self.targets) != 1:
             raise ValueError("a specific start URL requires exactly one target")
         return self
@@ -135,6 +153,7 @@ class ApprovedScope:
     targets: tuple[dict[str, str], ...]
     identity_header: str | None
     approved_by: str
+    execution_requirements: ScopeExecutionRequirements
     directory: Path | None = None
 
     def public(self) -> dict[str, Any]:
@@ -146,6 +165,9 @@ class ApprovedScope:
             "targets": list(self.targets),
             "identity_header": self.identity_header,
             "approved_by": self.approved_by,
+            "execution_requirements": self.execution_requirements.model_dump(
+                mode="json"
+            ),
         }
 
 
@@ -176,7 +198,7 @@ class ApprovedScopeCatalog:
                 )
                 if not targets:
                     continue
-                identity = (
+                identity: IdentityHeader | None = (
                     "hackerone"
                     if "X-HackerOne" in markdown
                     else "intigriti"
@@ -198,6 +220,10 @@ class ApprovedScopeCatalog:
                         targets=targets,
                         identity_header=identity,
                         approved_by=approval.approved_by[:160],
+                        execution_requirements=build_scope_execution_requirements(
+                            document.analysis,
+                            identity_header=identity,
+                        ),
                         directory=directory.resolve(),
                     )
                 )
@@ -282,6 +308,15 @@ class ScanLaunchManager:
                 )
             except ValueError as exc:
                 raise ValueError(f"start URL is outside the selected approved target: {exc}") from exc
+        scope_max_rps = (
+            scope.execution_requirements.scope_max_requests_per_second
+        )
+        if (
+            request.max_rps is not None
+            and scope_max_rps is not None
+            and request.max_rps > scope_max_rps
+        ):
+            raise ValueError("request rate exceeds the approved Scope")
         if scope.identity_header == "hackerone" and not request.hackerone_username:
             raise ValueError("this Scope requires a HackerOne username")
         if scope.identity_header == "intigriti" and not request.intigriti_username:
@@ -317,6 +352,14 @@ class ScanLaunchManager:
                 str(self.result_root / "AttackRuns"),
             )
         )
+        if request.max_rps is not None:
+            argv.extend(("--max-rps", str(request.max_rps)))
+        if request.max_depth is not None:
+            argv.extend(("--max-depth", str(request.max_depth)))
+        if request.max_concurrency is not None:
+            argv.extend(("--max-concurrency", str(request.max_concurrency)))
+        if request.timeout_seconds is not None:
+            argv.extend(("--timeout-seconds", str(request.timeout_seconds)))
         if request.hackerone_username:
             argv.extend(("--hackerone-username", request.hackerone_username))
         if request.intigriti_username:

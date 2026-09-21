@@ -10,6 +10,10 @@
           const theme = saved === 'system'
             ? (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')
             : saved;
+          const savedLanguage = localStorage.getItem('aidast-language');
+          document.documentElement.lang = savedLanguage === 'en' || savedLanguage === 'ko'
+            ? savedLanguage
+            : (navigator.language.toLowerCase().startsWith('ko') ? 'ko' : 'en');
           document.documentElement.dataset.theme = theme === 'light' ? 'light' : 'dark';
           document.documentElement.style.colorScheme = document.documentElement.dataset.theme;
         } catch { document.documentElement.dataset.theme = 'dark'; }

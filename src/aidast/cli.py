@@ -36,6 +36,7 @@ from aidast.recon.executor import ReconExecutionError, ReconExecutor
 from aidast.recon.agent import OfflineReconReview
 from aidast.recon.models import ReconPlanTarget, ReconStep
 from aidast.recon.policy import TargetPolicy, validate_policy_for_target
+from aidast.recon.profiles import EXECUTION_PROFILES
 from aidast.recon.surface import export_surface
 from aidast.pipeline.lifecycle import finish_stage_run, start_stage_run
 from aidast.pipeline.materialize import materialize_pipeline
@@ -66,23 +67,8 @@ from aidast.validation import (
 )
 
 
-EXECUTION_PROFILES = {
-    "safe-recon": {
-        "requests_per_second": 0.5,
-        "concurrency": 2,
-        "timeout_seconds": 15,
-        "max_depth": 2,
-        "max_requests": 500,
-    },
-    "focused-discovery": {
-        "requests_per_second": 1.0,
-        "concurrency": 3,
-        "timeout_seconds": 20,
-        "max_depth": 3,
-        "max_requests": 2000,
-    },
-}
-EXECUTION_PROFILES["focused-recon"] = EXECUTION_PROFILES["focused-discovery"]
+EXECUTION_PROFILE_CHOICES = (*EXECUTION_PROFILES, "focused-recon")
+
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="aidast")
@@ -163,7 +149,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     recon.add_argument(
         "--profile",
-        choices=tuple(EXECUTION_PROFILES),
+        choices=EXECUTION_PROFILE_CHOICES,
         default=None,
         help="optional execution cap profile; omitted by default to preserve Scope policy",
     )
@@ -241,7 +227,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     run.add_argument("--start-url")
     run.add_argument(
-        "--profile", choices=tuple(EXECUTION_PROFILES), default=None
+        "--profile", choices=EXECUTION_PROFILE_CHOICES, default=None
     )
     run.add_argument("--max-rps", type=_positive_float)
     run.add_argument("--max-requests", type=_positive_int)
@@ -1550,12 +1536,22 @@ def _apply_policy_caps(
     max_concurrency: int | None,
     timeout_seconds: int | None,
 ) -> dict[tuple[str, str], TargetPolicy]:
-    profile_limits = EXECUTION_PROFILES[profile] if profile else {}
+    profile_limits = (
+        EXECUTION_PROFILES[
+            "focused-discovery" if profile == "focused-recon" else profile
+        ]
+        if profile
+        else None
+    )
     capped: dict[tuple[str, str], TargetPolicy] = {}
     for key, policy in policies.items():
         effective_rps = min(
             policy.limits.requests_per_second,
-            profile_limits.get("requests_per_second", policy.limits.requests_per_second),
+            (
+                profile_limits.requests_per_second
+                if profile_limits is not None
+                else policy.limits.requests_per_second
+            ),
             max_rps if max_rps is not None else float("inf"),
         )
         limits = policy.limits.model_copy(
@@ -1563,23 +1559,39 @@ def _apply_policy_caps(
                 "requests_per_second": effective_rps,
                 "max_requests": min(
                     policy.limits.max_requests,
-                    profile_limits.get("max_requests", policy.limits.max_requests),
+                    (
+                        profile_limits.max_requests
+                        if profile_limits is not None
+                        else policy.limits.max_requests
+                    ),
                     max_requests if max_requests is not None else 100_000,
                 ),
                 "max_depth": min(
                     policy.limits.max_depth,
-                    profile_limits.get("max_depth", policy.limits.max_depth),
+                    (
+                        profile_limits.max_depth
+                        if profile_limits is not None
+                        else policy.limits.max_depth
+                    ),
                     max_depth if max_depth is not None else 10,
                 ),
                 "concurrency": min(
                     policy.limits.concurrency,
-                    profile_limits.get("concurrency", policy.limits.concurrency),
+                    (
+                        profile_limits.concurrency
+                        if profile_limits is not None
+                        else policy.limits.concurrency
+                    ),
                     max_concurrency if max_concurrency is not None else 20,
                     1 if effective_rps < 1 and (profile is not None or max_rps is not None) else policy.limits.concurrency,
                 ),
                 "timeout_seconds": min(
                     policy.limits.timeout_seconds,
-                    profile_limits.get("timeout_seconds", policy.limits.timeout_seconds),
+                    (
+                        profile_limits.timeout_seconds
+                        if profile_limits is not None
+                        else policy.limits.timeout_seconds
+                    ),
                     timeout_seconds if timeout_seconds is not None else 120,
                 ),
             }
