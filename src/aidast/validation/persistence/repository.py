@@ -160,6 +160,44 @@ class ValidationRepository:
             return None
         return dict(zip((column[0] for column in cursor.description), row, strict=True))
 
+    def current_report_eligibility(self, case_id: str) -> dict[str, str]:
+        """Select the current case/stage/scope policy approval, failing closed.
+
+        The append-only table's rowid orders assessments even when their
+        second-resolution timestamps match. A new preflight invalidates older
+        post-replay approvals.
+        """
+        rows = self.conn.execute(
+            """WITH ranked AS (
+                SELECT a.rowid AS sequence,a.phase,a.eligibility,a.assessment_id,
+                       a.output_sha256,a.scope_sha256,
+                       ROW_NUMBER() OVER (PARTITION BY a.phase ORDER BY a.rowid DESC) AS rank
+                FROM validation_eligibility_assessments AS a
+                JOIN validation_cases AS c ON c.case_id=a.case_id
+                WHERE c.case_id=? AND a.stage_run_id=c.latest_stage_run_id
+                  AND a.scope_sha256=c.scope_sha256
+            ) SELECT sequence,phase,eligibility,assessment_id,output_sha256,scope_sha256
+              FROM ranked WHERE rank=1""",
+            (case_id,),
+        ).fetchall()
+        phases = {row[1]: row for row in rows}
+        preflight = phases.get("preflight")
+        message = "report requires a current ELIGIBLE scope assessment"
+        if preflight is None or preflight[2] not in {"ELIGIBLE", "CONDITIONAL"}:
+            raise ValidationRepositoryError(message)
+        selected = preflight
+        post = phases.get("post_replay")
+        if preflight[2] == "CONDITIONAL":
+            if post is None or post[0] <= preflight[0] or post[2] != "ELIGIBLE":
+                raise ValidationRepositoryError("conditional report requires post-replay ELIGIBLE scope assessment")
+            selected = post
+        elif post is not None and post[0] > preflight[0]:
+            if post[2] != "ELIGIBLE":
+                raise ValidationRepositoryError(message)
+            selected = post
+        return {"scope_sha256": selected[5], "eligibility_assessment_id": selected[3],
+                "eligibility_output_sha256": selected[4]}
+
     def eligibility_evidence_summaries(
         self, *, case_id: str, stage_run_id: str, evidence_ids: tuple[str, ...],
     ) -> tuple[dict[str, Any], ...]:

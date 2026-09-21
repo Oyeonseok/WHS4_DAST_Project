@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from aidast.validation.models import canonical_json, canonical_sha256
+from aidast.validation.persistence.repository import ValidationRepository, ValidationRepositoryError
 
 from .models import ReportDraft, validate_draft
 from .render import render_report
@@ -71,6 +72,12 @@ def read_verified_case(path: Path, case_id: str) -> dict[str, Any]:
             raise ReportError("Validation decision is not valid JSON") from None
         if canonical_sha256(decision) != case["decision_sha256"]:
             raise ReportError("Validation decision digest mismatch")
+        if not case.get("scope_sha256"):
+            raise ReportError("report requires a current ELIGIBLE scope assessment")
+        try:
+            policy_binding = ValidationRepository(conn).current_report_eligibility(case_id)
+        except ValidationRepositoryError as exc:
+            raise ReportError(str(exc)) from exc
         cited = sorted(_references(decision))
         if not cited:
             raise ReportError("confirmed Validation decision has no evidence citations")
@@ -94,6 +101,7 @@ def read_verified_case(path: Path, case_id: str) -> dict[str, Any]:
         return {"eligibility": "confirmed", "scan_id": case["scan_id"], "case_id": case_id,
                 "target_kind": case["target_kind"], "target_id": case["finding_id"] or case["chain_id"],
                 "decision_sha256": case["decision_sha256"], "decision": decision,
+                **policy_binding,
                 "severity": case["severity"], "impact_score": case["impact_score"],
                 "evidence": evidence, "allowed_evidence_ids": cited,
                 "evidence_hashes": [
@@ -113,6 +121,7 @@ def _context(source: dict[str, Any], platform: str) -> dict[str, Any]:
     context = {"schema_version": SCHEMA_VERSION, "platform": platform,
                "source": {key: source[key] for key in (
                    "scan_id", "case_id", "target_kind", "target_id", "decision_sha256", "evidence_hashes",
+                   "scope_sha256", "eligibility_assessment_id", "eligibility_output_sha256",
                )},
                "validation": source, "allowed_evidence_ids": source["allowed_evidence_ids"],
                "skill": skill, "template": template, "skill_sha256": _sha(skill),
@@ -170,12 +179,31 @@ def _load(path: Path, *, verify_source: bool = True) -> tuple[dict, dict, dict |
     if verify_source:
         source_path = _path(report_db.parent / run["source_path"], existing=True)
         with closing(sqlite3.connect(source_path.as_uri() + "?mode=ro", uri=True)) as source_conn:
+            source_conn.row_factory = sqlite3.Row
+            source_conn.execute("PRAGMA query_only=ON")
+            source_conn.execute("PRAGMA trusted_schema=OFF")
+            source_conn.execute("BEGIN")
             current = source_conn.execute(
-                "SELECT decision_sha256 FROM validation_cases WHERE case_id=?", (run["case_id"],)
+                "SELECT * FROM validation_cases WHERE case_id=?", (run["case_id"],)
             ).fetchone()
-        if current is None:
-            raise ReportError("prepared report source case no longer exists")
-        stale = current[0] != run["decision_sha256"]
+            stale = current is None
+            if current is not None:
+                case = dict(current)
+                stale = (
+                    case["decision_sha256"] != run["decision_sha256"]
+                    or not case.get("scope_sha256")
+                    or case["scope_sha256"] != source_binding.get("scope_sha256")
+                    or case["current_status"] != "CONFIRMED"
+                    or case["processing_phase"] != "completed"
+                    or case["decision_stage_run_id"] != case["latest_stage_run_id"]
+                )
+                if not stale:
+                    try:
+                        policy_binding = ValidationRepository(source_conn).current_report_eligibility(run["case_id"])
+                    except ValidationRepositoryError:
+                        stale = True
+                    else:
+                        stale = any(source_binding.get(key) != value for key, value in policy_binding.items())
         if not stale:
             current_source = read_verified_case(source_path, run["case_id"])
             if _context(current_source, context["platform"]) != context:
@@ -240,7 +268,7 @@ def record_case_report(report_db: Path, document: dict) -> dict:
     path = _path(report_db, existing=True)
     run, context, stored, stale = _load(path)
     if stale:
-        raise ReportError("current Validation decision differs from prepared report source")
+        raise ReportError("current Validation decision or scope eligibility differs from prepared report source")
     draft = validate_draft(document, context)
     encoded = canonical_json(draft.model_dump())
     markdown = render_report(draft)

@@ -91,6 +91,28 @@ class ValidationReportCliTests(unittest.TestCase):
         self.assertEqual(json.loads(stdout), expected)
         status.assert_called_once_with(Path("Report.db"))
 
+    def test_shared_report_cli_rejects_missing_eligibility_before_calling_writer(self):
+        from test_shared_validation_reporting import SharedValidationReportingTests
+
+        fixture = SharedValidationReportingTests()
+        self.addCleanup(fixture.doCleanups)
+        fixture.setUp()
+        fixture.complete(eligibility=None)
+
+        class UnexpectedWriter:
+            def write(self, context):
+                raise AssertionError("ineligible case reached report writer")
+
+        code, stdout, stderr = self.invoke(
+            ["report", "run", str(fixture.path), "--platform", "hackerone",
+             "--output-dir", str(fixture.output), "--case-id", "case"],
+            report_writer=UnexpectedWriter(),
+        )
+        self.assertNotEqual(code, 0)
+        self.assertEqual(stdout, "")
+        self.assertIn("current ELIGIBLE scope assessment", stderr)
+        self.assertFalse(fixture.output.exists())
+
     def test_codex_adapters_use_the_packaged_native_skills(self):
         agent = Mock()
         assessment = ValidationAssessment.model_validate({

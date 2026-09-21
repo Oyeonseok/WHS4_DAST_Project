@@ -15,6 +15,9 @@ from aidast.reporting import (
     record_case_report as record_report,
 )
 from aidast.validation import ValidationRepository, shared_validation_status
+from aidast.validation.contracts.eligibility import (
+    EligibilityAssessment, EligibilityRequest, ScopePolicySource,
+)
 from aidast.validation.models import canonical_json, canonical_sha256
 
 
@@ -39,11 +42,36 @@ class SharedValidationReportingTests(unittest.TestCase):
         self.conn.commit()
         self.run = start_stage_run(self.conn, scan_id="scan", stage="validation", stage_run_id="run")
         self.repo = ValidationRepository(self.conn)
+        self.scope = ScopePolicySource.from_text("IDOR is in scope.", "fixture/Scope.md")
+        self.repo.bind_scope("scan", self.scope)
+        self.assessment_count = 0
         self.output = root / "reports" / "case"
 
-    def complete(self, case_id="case", finding="finding", status="CONFIRMED"):
+    def eligibility(self, value="ELIGIBLE", phase="preflight", case_id="case"):
+        self.assessment_count += 1
+        request = EligibilityRequest(
+            case_id=case_id, scope_sha256=self.scope.scope_sha256, phase=phase,
+            scope_markdown=self.scope.scope_markdown, target_kind="finding", vuln_class="idor",
+            endpoint="https://test/", method="GET", title="Fixture", claimed_impact="Boundary crossed",
+            reproduction_summary={"revision": self.assessment_count},
+            evidence_refs=(), evidence_summaries=(),
+        )
+        assessment = EligibilityAssessment(
+            case_id=case_id, scope_sha256=self.scope.scope_sha256, phase=phase,
+            eligibility=value, matched_rule="IDOR is in scope.", scope_quote="IDOR is in scope.",
+            required_impact=({"condition": "Boundary crossed", "evidence_needed": "Observation"},)
+            if value == "CONDITIONAL" else (),
+            replay_allowed=value in {"ELIGIBLE", "CONDITIONAL"}, reason="Policy fixture",
+            evidence_refs=(),
+        )
+        identifier = self.repo.record_eligibility(request, assessment)
+        return identifier, canonical_sha256(assessment.model_dump())
+
+    def complete(self, case_id="case", finding="finding", status="CONFIRMED", eligibility="ELIGIBLE"):
         self.repo.create_case(scan_id="scan", stage_run_id=self.run, target_kind="finding",
                               target_id=finding, case_id=case_id)
+        if eligibility is not None:
+            self.eligibility(eligibility, case_id=case_id)
         attempt = self.repo.add_attempt(case_id=case_id, stage_run_id=self.run, batch_no=1,
             attempt_kind="target", ordinal=1, signal_type="response_diff", outcome="observed")
         evidence = self.repo.add_evidence(case_id=case_id, stage_run_id=self.run, attempt_id=attempt,
@@ -53,6 +81,123 @@ class SharedValidationReportingTests(unittest.TestCase):
             decision={"summary": "confirmed fixture", "evidence_ids": [evidence]},
             evidence_ids=[evidence], impact=(1, 1, 1) if status == "CONFIRMED" else None)
         return evidence
+
+    def test_confirmed_case_without_eligibility_is_not_reportable(self):
+        self.complete(eligibility=None)
+        with self.assertRaisesRegex(ReportError, "current ELIGIBLE scope assessment"):
+            ReportAgent().run(self.path, self.output, platform="hackerone", case_id="case")
+        self.assertFalse(self.output.exists())
+
+    def test_legacy_unbound_confirmed_case_is_not_reportable(self):
+        self.complete()
+        self.conn.execute("UPDATE validation_cases SET scope_sha256=NULL WHERE case_id='case'")
+        self.conn.commit()
+        with self.assertRaisesRegex(ReportError, "current ELIGIBLE scope assessment"):
+            ReportAgent().run(self.path, self.output, platform="hackerone", case_id="case")
+
+    def test_latest_unknown_or_ineligible_preflight_overrides_eligible(self):
+        self.complete()
+        for value in ("UNKNOWN", "INELIGIBLE"):
+            with self.subTest(value=value):
+                self.eligibility(value)
+                with self.assertRaisesRegex(ReportError, "current ELIGIBLE scope assessment"):
+                    ReportAgent().run(self.path, self.output, platform="hackerone", case_id="case")
+
+    def test_conditional_case_requires_latest_post_replay_eligible(self):
+        self.complete(eligibility="CONDITIONAL")
+        with self.assertRaisesRegex(ReportError, "post-replay ELIGIBLE"):
+            ReportAgent().run(self.path, self.output, platform="hackerone", case_id="case")
+        identifier, digest = self.eligibility(phase="post_replay")
+        prepared = ReportAgent().run(self.path, self.output, platform="hackerone", case_id="case")
+        self.assertEqual(prepared["source"]["eligibility_assessment_id"], identifier)
+        self.assertEqual(prepared["source"]["eligibility_output_sha256"], digest)
+        self.eligibility("UNKNOWN", phase="post_replay")
+        with self.assertRaisesRegex(ReportError, "post-replay ELIGIBLE"):
+            ReportAgent().run(self.path, self.output, platform="hackerone", case_id="case")
+        self.assertTrue(report_status(Path(prepared["report_db"]))["stale"])
+
+    def test_new_conditional_preflight_cannot_reuse_older_post_replay(self):
+        self.complete(eligibility="CONDITIONAL")
+        self.eligibility(phase="post_replay")
+        self.eligibility("CONDITIONAL")
+        with self.assertRaisesRegex(ReportError, "post-replay ELIGIBLE"):
+            ReportAgent().run(self.path, self.output, platform="hackerone", case_id="case")
+
+    def test_stale_scope_assessment_does_not_authorize_current_case(self):
+        self.complete()
+        replacement = ScopePolicySource.from_text("Updated policy", "fixture/Scope.md")
+        self.repo.bind_scope("scan", replacement)
+        self.conn.execute("UPDATE validation_cases SET scope_sha256=? WHERE case_id='case'",
+                          (replacement.scope_sha256,))
+        self.conn.commit()
+        with self.assertRaisesRegex(ReportError, "current ELIGIBLE scope assessment"):
+            ReportAgent().run(self.path, self.output, platform="hackerone", case_id="case")
+
+    def test_foreign_case_and_previous_stage_assessments_do_not_authorize_case(self):
+        self.complete("foreign", "known_finding")
+        self.complete(eligibility=None)
+        with self.assertRaisesRegex(ReportError, "current ELIGIBLE scope assessment"):
+            ReportAgent().run(self.path, self.output, platform="hackerone", case_id="case")
+        self.eligibility()
+        self.conn.execute("UPDATE stage_runs SET status='completed' WHERE stage_run_id=?", (self.run,))
+        self.conn.commit()
+        stage = start_stage_run(self.conn, scan_id="scan", stage="validation", stage_run_id="next_run")
+        self.conn.execute("UPDATE validation_cases SET latest_stage_run_id=?,decision_stage_run_id=? WHERE case_id='case'",
+                          (stage, stage))
+        self.conn.commit()
+        with self.assertRaisesRegex(ReportError, "current ELIGIBLE scope assessment"):
+            ReportAgent().run(self.path, self.output, platform="hackerone", case_id="case")
+
+    def test_matching_eligible_assessment_is_bound_into_report_context(self):
+        self.complete(eligibility=None)
+        identifier, digest = self.eligibility()
+        result = ReportAgent().run(self.path, self.output, platform="hackerone", case_id="case")
+        context = json.loads(Path(result["context_path"]).read_text())
+        self.assertEqual(context["source"]["scope_sha256"], self.scope.scope_sha256)
+        self.assertEqual(context["source"]["eligibility_assessment_id"], identifier)
+        self.assertEqual(context["source"]["eligibility_output_sha256"], digest)
+
+    def test_changed_assessment_marks_report_stale_without_changing_artifacts(self):
+        evidence = self.complete()
+        prepared = ReportAgent().run(self.path, self.output, platform="hackerone", case_id="case")
+        context = json.loads(Path(prepared["context_path"]).read_text())
+        record_report(Path(prepared["report_db"]), self.draft(context, evidence))
+        artifacts = {path: path.read_bytes() for path in self.output.iterdir()}
+        identifier, digest = self.eligibility()
+        self.assertEqual(digest, context["source"]["eligibility_output_sha256"])
+        self.assertNotEqual(identifier, context["source"]["eligibility_assessment_id"])
+        self.assertTrue(report_status(Path(prepared["report_db"]))["stale"])
+        with self.assertRaisesRegex(ReportError, "differs"):
+            record_report(Path(prepared["report_db"]), self.draft(context, evidence))
+        for path, contents in artifacts.items():
+            self.assertEqual(path.read_bytes(), contents)
+
+    def test_changed_scope_marks_prepared_report_stale(self):
+        self.complete()
+        prepared = ReportAgent().run(self.path, self.output, platform="hackerone", case_id="case")
+        replacement = ScopePolicySource.from_text("Updated policy", "fixture/Scope.md")
+        self.repo.bind_scope("scan", replacement)
+        self.conn.execute("UPDATE validation_cases SET scope_sha256=? WHERE case_id='case'",
+                          (replacement.scope_sha256,))
+        self.conn.commit()
+        self.assertTrue(report_status(Path(prepared["report_db"]))["stale"])
+
+    def test_legacy_prepared_context_without_policy_binding_is_readable_but_stale(self):
+        evidence = self.complete()
+        prepared = ReportAgent().run(self.path, self.output, platform="hackerone", case_id="case")
+        context = json.loads(Path(prepared["context_path"]).read_text())
+        for key in ("scope_sha256", "eligibility_assessment_id", "eligibility_output_sha256"):
+            context["source"].pop(key)
+            context["validation"].pop(key)
+        context.pop("context_sha256")
+        context["context_sha256"] = canonical_sha256(context)
+        import sqlite3
+        with sqlite3.connect(prepared["report_db"]) as report_conn:
+            report_conn.execute("UPDATE report_runs SET context_json=?,context_sha256=?",
+                                (canonical_json(context), context["context_sha256"]))
+        self.assertTrue(report_status(Path(prepared["report_db"]))["stale"])
+        with self.assertRaisesRegex(ReportError, "differs"):
+            record_report(Path(prepared["report_db"]), self.draft(context, evidence))
 
     def draft(self, context, evidence):
         def cited(text):
