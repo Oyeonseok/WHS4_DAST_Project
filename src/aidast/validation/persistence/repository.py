@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
-from contextlib import closing
+from contextlib import closing, nullcontext
 from pathlib import Path
 from typing import Any, Iterable, get_args
 
@@ -44,11 +44,11 @@ class ValidationRepository:
             raise ValidationRepositoryError("a running Validation stage is required")
         return row
 
-    def bind_scope(self, scan_id: str, source: ScopePolicySource) -> str:
+    def bind_scope(self, scan_id: str, source: ScopePolicySource, *, commit: bool = True) -> str:
         digest = hashlib.sha256(source.scope_markdown.encode("utf-8")).hexdigest()
         if digest != source.scope_sha256:
             raise ValidationRepositoryError("scope snapshot digest does not match Markdown")
-        with self.conn:
+        with self.conn if commit else nullcontext():
             self.conn.execute(
                 """INSERT INTO scope_policy_snapshots(scope_sha256,scope_markdown)
                    VALUES (?,?) ON CONFLICT(scope_sha256) DO NOTHING""",
@@ -125,6 +125,7 @@ class ValidationRepository:
             if assessment.scope_quote and assessment.scope_quote not in snapshot[0]:
                 raise ValidationRepositoryError("eligibility scope quote is not grounded")
             if request.phase == "post_replay":
+                self.validate_conditional_context(request, stage_run_id=case[1])
                 self.eligibility_evidence_summaries(
                     case_id=request.case_id, stage_run_id=case[1],
                     evidence_ids=request.evidence_refs,
@@ -148,6 +149,22 @@ class ValidationRepository:
                 ),
             )
         return identifier
+
+    def validate_conditional_context(self, request: EligibilityRequest, *, stage_run_id: str) -> None:
+        """Bind post policy input to the latest durable preflight in this case/run."""
+        context = request.conditional_context
+        row = self.conn.execute(
+            """SELECT assessment_id,output_sha256,required_impact_json,eligibility,scope_sha256
+               FROM validation_eligibility_assessments
+               WHERE case_id=? AND stage_run_id=? AND phase='preflight'
+               ORDER BY rowid DESC LIMIT 1""",
+            (request.case_id, stage_run_id),
+        ).fetchone()
+        if (context is None or row is None or row[0] != context.assessment_id
+                or row[1] != context.output_sha256 or row[3] != "CONDITIONAL"
+                or row[4] != request.scope_sha256
+                or json.loads(row[2]) != [item.model_dump() for item in context.required_impact]):
+            raise ValidationRepositoryError("post-replay conditional context does not match persisted preflight")
 
     def find_eligibility(self, case_id: str, stage_run_id: str, phase: str,
                          input_sha256: str) -> dict[str, Any] | None:

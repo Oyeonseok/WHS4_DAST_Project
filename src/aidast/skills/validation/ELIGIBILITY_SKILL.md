@@ -25,3 +25,10 @@ evidence would demonstrate them. Express conditions without execution guidance:
 never generate payloads or steps. Do not create endpoints, methods, credentials,
 reproduction instructions, or new evidence. Set `replay_allowed` only according to
 the eligibility contract; the coordinator determines whether replay actually runs.
+
+For post-replay classification, evaluate the original `conditional_context.required_impact`
+conditions linked to the persisted preflight assessment. Do not replace or relax them.
+Use only the supplied sealed evidence to establish whether those conditions hold.
+If the authorized existing evidence cannot establish a condition, return `UNKNOWN`;
+unavailable evidence is not proof that an impact is absent. Do not request additional
+execution or invent new steps to resolve the condition.

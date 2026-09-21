@@ -85,6 +85,14 @@ class RequiredImpactCondition(StrictContract):
     evidence_needed: Annotated[str, Field(min_length=1, max_length=1000)]
 
 
+class ConditionalEligibilityContext(StrictContract):
+    """The durable preflight conditions that authorized this bounded replay."""
+
+    assessment_id: Identifier
+    output_sha256: Digest
+    required_impact: tuple[RequiredImpactCondition, ...] = Field(min_length=1, max_length=16)
+
+
 class EligibilityRequest(StrictContract):
     case_id: Identifier
     scope_sha256: Digest
@@ -99,6 +107,15 @@ class EligibilityRequest(StrictContract):
     reproduction_summary: dict[str, Any]
     evidence_refs: tuple[Identifier, ...] = Field(max_length=128)
     evidence_summaries: tuple[dict[str, Any], ...] = Field(max_length=128)
+    conditional_context: ConditionalEligibilityContext | None = None
+
+    @model_validator(mode="after")
+    def conditional_phase(self) -> "EligibilityRequest":
+        if (self.phase == "post_replay") != (self.conditional_context is not None):
+            raise ValueError("conditional context is required only for post-replay")
+        if self.phase == "post_replay" and not (self.evidence_refs and self.evidence_summaries):
+            raise ValueError("post-replay requires existing sealed evidence")
+        return self
 
 
 class EligibilityAssessment(StrictContract):

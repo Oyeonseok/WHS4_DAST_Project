@@ -1874,6 +1874,171 @@ class ValidationCoordinatorTests(unittest.TestCase):
 class ConditionalEligibilityTests(unittest.TestCase):
     setUp = ValidationCoordinatorTests.setUp
 
+    def test_conditional_blind_unknown_cannot_be_policy_excluded(self):
+        self.assert_conditional_uncertainty("environment_topology")
+
+    def test_conditional_unknown_without_blocker_cannot_be_policy_excluded(self):
+        self.assert_conditional_uncertainty(None)
+
+    def test_conditional_setup_blocker_cannot_be_policy_excluded(self):
+        self.assert_conditional_uncertainty("state_setup")
+
+    def assert_conditional_uncertainty(self, blocker):
+        class UnknownAgent(FakeAgent):
+            def assess(self, *args, **kwargs):
+                result = super().assess(*args, **kwargs)
+                return result | {"reproduced": None, "blocker_axis": blocker,
+                                 "blocker_reason": "Environment evidence is unavailable." if blocker else None}
+
+        result = self.run_conditional("INELIGIBLE", agent=UnknownAgent())
+        self.assertEqual(result.summary["statuses"], {"INCONCLUSIVE": 1})
+        self.assertEqual(self.decision["reason"], "conditional_evidence_unavailable")
+        self.assertEqual(self.phases, ["preflight"])
+
+    def test_conditional_failed_control_cannot_be_policy_excluded(self):
+        class FailedControlPort(FakePort):
+            def execute(self, *args, **kwargs):
+                result = super().execute(*args, **kwargs)
+                if kwargs["attempt_kind"] == "positive_control":
+                    return result.model_copy(update={"outcome": "not_observed", "signal_observed": False})
+                return result
+
+        result = self.run_conditional("INELIGIBLE", port=FailedControlPort())
+        self.assertEqual(result.summary["statuses"], {"INCONCLUSIVE": 1})
+        self.assertEqual(self.decision["reason"], "conditional_controls_failed")
+        self.assertEqual(self.phases, ["preflight"])
+
+    def test_conditional_unresolved_auth_blocker_cannot_be_policy_excluded(self):
+        class AuthAgent(FakeAgent):
+            def assess(self, *args, **kwargs):
+                result = super().assess(*args, **kwargs)
+                return result | {"reproduced": None, "blocker_axis": "identity_auth",
+                                 "blocker_reason": "Required identity is unavailable."}
+
+        result = self.run_conditional("INELIGIBLE", agent=AuthAgent())
+        self.assertEqual(result.summary["statuses"], {"INCONCLUSIVE": 1})
+        self.assertEqual(self.decision["reason"], "conditional_evidence_unavailable")
+        self.assertEqual(self.phases, ["preflight"])
+
+    def test_post_receives_persisted_conditions_without_blind_contamination(self):
+        class CapturingAgent(FakeAgent):
+            def assess(self, blind_case, *args, **kwargs):
+                self.blind_case = blind_case
+                return super().assess(blind_case, *args, **kwargs)
+
+        agent = CapturingAgent()
+        self.run_conditional(agent=agent)
+        post = self.conditional.requests[-1].model_dump()
+        self.assertIn("conditional_context", post)
+        context = post["conditional_context"]
+        with db.connect(self.path) as conn:
+            row = conn.execute("SELECT assessment_id,output_sha256,required_impact_json FROM validation_eligibility_assessments WHERE phase='preflight'").fetchone()
+        self.assertEqual(context["assessment_id"], row[0])
+        self.assertEqual(context["output_sha256"], row[1])
+        self.assertEqual(list(context["required_impact"]), json.loads(row[2]))
+        self.assertNotIn("conditional_context", agent.blind_case)
+        self.assertNotIn("Additional account impact", json.dumps(agent.blind_case))
+
+    def test_post_rejects_changed_conditions_or_preflight_provenance_and_cannot_reuse(self):
+        from aidast.validation import canonical_sha256
+        from aidast.validation.contracts.eligibility import EligibilityRequest
+        from aidast.validation.persistence.repository import ValidationRepositoryError
+
+        self.run_conditional()
+        request = self.conditional.requests[-1]
+        with db.connect(self.path) as conn:
+            repo = ValidationRepository(conn)
+            stage = conn.execute("SELECT latest_stage_run_id FROM validation_cases").fetchone()[0]
+            repo.validate_conditional_context(request, stage_run_id=stage)
+            self.assertIsNotNone(repo.find_eligibility(request.case_id, stage, "post_replay",
+                                                     canonical_sha256(request.model_dump())))
+            for change in ({"assessment_id": "foreign"}, {"output_sha256": "d" * 64},
+                           {"required_impact": ({"condition": "Different impact", "evidence_needed": "Other proof"},)}):
+                with self.subTest(change=change):
+                    document = request.model_dump()
+                    document["conditional_context"].update(change)
+                    changed = EligibilityRequest.model_validate(document)
+                    with self.assertRaisesRegex(ValidationRepositoryError, "persisted preflight"):
+                        repo.validate_conditional_context(changed, stage_run_id=stage)
+                    self.assertIsNone(repo.find_eligibility(request.case_id, stage, "post_replay",
+                                                          canonical_sha256(changed.model_dump())))
+
+    def test_rejected_active_run_preserves_scope_and_materialized_case(self):
+        with db.connect(self.path) as conn:
+            stage = start_stage_run(conn, scan_id="scan", stage="validation")
+            repo = ValidationRepository(conn)
+            repo.create_case(scan_id="scan", stage_run_id=stage, target_kind="finding", target_id="finding")
+            tables = ("validation_scope_bindings", "scope_policy_snapshots", "validation_cases", "stage_runs", "audit_events")
+            before = {table: tuple(conn.execute(f"SELECT * FROM {table} ORDER BY rowid")) for table in tables}
+        replacement = ScopePolicySource.from_text("Different approved policy", "replacement.md", "e" * 64)
+        port = FakePort()
+        coordinator = ValidationCoordinator(db_path=self.path, agent=FakeAgent(), reproduction=port,
+            policy_provider=lambda endpoint, method: self.policy, scope_source=replacement)
+        with self.assertRaises((sqlite3.IntegrityError, ValidationCoordinatorError)):
+            coordinator.run("scan")
+        with db.connect(self.path) as conn:
+            after = {table: tuple(conn.execute(f"SELECT * FROM {table} ORDER BY rowid")) for table in tables}
+        self.assertEqual(after, before)
+        self.assertEqual(port.calls, [])
+
+    def test_scope_binding_failure_rolls_back_stage_acquisition(self):
+        source = self.scope.model_copy(update={"scope_sha256": "e" * 64})
+        coordinator = ValidationCoordinator(db_path=self.path, agent=FakeAgent(), reproduction=FakePort(),
+            policy_provider=lambda endpoint, method: self.policy, scope_source=source)
+        with self.assertRaises(ValueError):
+            coordinator.run("scan")
+        with db.connect(self.path) as conn:
+            self.assertEqual(conn.execute("SELECT count(*) FROM stage_runs WHERE stage='validation'").fetchone()[0], 0)
+
+    def test_scope_validation_failure_rolls_back_binding_and_stage_together(self):
+        tables = ("validation_scope_bindings", "scope_policy_snapshots", "stage_runs", "audit_events")
+        with db.connect(self.path) as conn:
+            before = {table: tuple(conn.execute(f"SELECT * FROM {table} ORDER BY rowid")) for table in tables}
+        coordinator = ValidationCoordinator(db_path=self.path, agent=FakeAgent(), reproduction=FakePort(),
+            policy_provider=lambda endpoint, method: self.policy,
+            scope_source=ScopePolicySource.from_text("Replacement policy", "replacement.md"))
+        with patch.object(coordinator, "_load_scope", side_effect=ValidationCoordinatorError("scope unavailable")):
+            with self.assertRaisesRegex(ValidationCoordinatorError, "scope unavailable"):
+                coordinator.run("scan")
+        with db.connect(self.path) as conn:
+            self.assertEqual({table: tuple(conn.execute(f"SELECT * FROM {table} ORDER BY rowid"))
+                              for table in tables}, before)
+
+    def test_overlapping_scope_runs_cannot_mutate_running_case(self):
+        from concurrent.futures import ThreadPoolExecutor
+        from threading import Event
+
+        entered, release = Event(), Event()
+
+        class PausedEligibility(FakeEligibilityAgent):
+            def assess(self, *args, **kwargs):
+                entered.set()
+                if not release.wait(10):
+                    raise AssertionError("test did not release the active run")
+                return super().assess(*args, **kwargs)
+
+        winner = ValidationCoordinator(db_path=self.path, agent=FakeAgent(), reproduction=FakePort(),
+            policy_provider=lambda endpoint, method: self.policy, eligibility_agent=PausedEligibility(),
+            scope_source=self.scope)
+        loser = ValidationCoordinator(db_path=self.path, agent=FakeAgent(), reproduction=FakePort(),
+            policy_provider=lambda endpoint, method: self.policy,
+            scope_source=ScopePolicySource.from_text("Concurrent replacement", "concurrent.md", "c" * 64))
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(winner.run, "scan")
+            try:
+                self.assertTrue(entered.wait(10))
+                tables = ("validation_scope_bindings", "scope_policy_snapshots", "validation_cases", "stage_runs", "audit_events")
+                with db.connect(self.path) as conn:
+                    before = {table: tuple(conn.execute(f"SELECT * FROM {table} ORDER BY rowid")) for table in tables}
+                with self.assertRaises((sqlite3.IntegrityError, ValidationCoordinatorError)):
+                    loser.run("scan")
+                with db.connect(self.path) as conn:
+                    self.assertEqual({table: tuple(conn.execute(f"SELECT * FROM {table} ORDER BY rowid"))
+                                      for table in tables}, before)
+            finally:
+                release.set()
+            self.assertEqual(future.result(timeout=10).summary["statuses"], {"CONFIRMED": 1})
+
     def run_conditional(self, post="ELIGIBLE", *, agent=None, port=None, mutation=None):
         self.conditional = ConditionalEligibilityAgent(post, mutation)
         self.port = port or FakePort()

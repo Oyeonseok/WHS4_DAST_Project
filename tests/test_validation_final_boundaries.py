@@ -786,7 +786,11 @@ class EligibilityEvidenceRepositoryTests(unittest.TestCase):
             case_id="case", scope_sha256=self.scope_sha256, phase="post_replay",
             scope_markdown="# Policy\nRule", target_kind="finding", vuln_class="idor",
             endpoint="https://test/", method="GET", title="fixture", claimed_impact="Account impact",
-            reproduction_summary={}, evidence_refs=("cited",), evidence_summaries=(),
+            reproduction_summary={}, evidence_refs=("cited",),
+            evidence_summaries=self.repo.eligibility_evidence_summaries(
+                case_id="case", stage_run_id=self.run, evidence_ids=("cited",)),
+            conditional_context={"assessment_id": "preflight", "output_sha256": "b" * 64,
+                "required_impact": ({"condition": "Account impact", "evidence_needed": "Sealed proof"},)},
         )
         for ref in ("uncited", "foreign", "missing"):
             assessment = repository_fixture.EligibilityAssessment(

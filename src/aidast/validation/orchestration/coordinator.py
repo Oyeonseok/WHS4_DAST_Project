@@ -17,7 +17,7 @@ from ..core.decision import DecisionEngine, DecisionInput
 from ..core.integrity import CandidateIntegrityError, CandidateIntegrityGate, ValidatedCandidate
 from ..core.matching import KnownCandidate, KnownMatcher, MATCHER_VERSION
 from ..contracts.eligibility import (
-    EligibilityAssessment, EligibilityPhase, EligibilityRequest, ScopePolicySource,
+    ConditionalEligibilityContext, EligibilityAssessment, EligibilityPhase, EligibilityRequest, ScopePolicySource,
 )
 from ..core.scope_eligibility import unknown_assessment, validate_grounding
 from .eligibility_runner import EligibilityAgentRunner
@@ -82,13 +82,17 @@ class ValidationCoordinator:
             conn.row_factory = sqlite3.Row
             self._require_scan_ready(conn, scan_id)
             repo = ValidationRepository(conn)
-            if self.scope_source is not None:
-                scope_digest = repo.bind_scope(scan_id, self.scope_source)
-            else:
-                scope_digest = repo.current_scope_sha256(scan_id)
-            self._load_scope(conn, scope_digest)
+            # Hold the write lock until acquisition and policy binding both commit.
+            # A competing invocation cannot mutate the winning run's provenance.
+            with conn:
+                conn.execute("BEGIN IMMEDIATE")
+                stage_run_id = start_stage_run(conn, scan_id=scan_id, stage="validation", commit=False)
+                if self.scope_source is not None:
+                    scope_digest = repo.bind_scope(scan_id, self.scope_source, commit=False)
+                else:
+                    scope_digest = repo.current_scope_sha256(scan_id)
+                self._load_scope(conn, scope_digest)
             self._used_agent_ids = []
-            stage_run_id = start_stage_run(conn, scan_id=scan_id, stage="validation")
             try:
                 case_ids = self._select_cases(
                     conn, repo, scan_id=scan_id, stage_run_id=stage_run_id,
@@ -246,6 +250,7 @@ class ValidationCoordinator:
         candidate: ValidatedCandidate, stage_run_id: str, phase: EligibilityPhase,
         scope: ScopePolicySource, evidence_ids: tuple[str, ...],
         evidence_summaries: tuple[dict[str, Any], ...],
+        conditional_context: ConditionalEligibilityContext | None = None,
     ) -> tuple[EligibilityAssessment, str]:
         view = candidate.staged.eligibility_view()
         claim = view.pop("attack_claim")
@@ -257,7 +262,10 @@ class ValidationCoordinator:
             title=claim["title"], claimed_impact=claim["claimed_impact"],
             reproduction_summary=view, evidence_refs=evidence_ids,
             evidence_summaries=evidence_summaries,
+            conditional_context=conditional_context,
         )
+        if phase == "post_replay":
+            repo.validate_conditional_context(request, stage_run_id=stage_run_id)
         input_digest = canonical_sha256(request.model_dump())
         stored = conn.execute(
             """SELECT * FROM validation_eligibility_assessments
@@ -650,6 +658,24 @@ class ValidationCoordinator:
                     evidence_ids=evidence_ids,
                 )
                 return True
+            positive = all(item["signal_observed"] is True for item in observations
+                           if item["attempt_kind"] == "positive_control")
+            negative = all(item["signal_observed"] is False for item in observations
+                           if item["attempt_kind"] == "negative_control")
+            targets = [item for item in observations if item["attempt_kind"] == "target"]
+            reason = None
+            if not positive or not negative:
+                reason = "conditional_controls_failed"
+            elif (assessment.reproduced is None or assessment.blocker_axis is not None
+                  or len(targets) not in {3, 5}
+                  or any(item["signal_observed"] is None for item in targets)):
+                reason = "conditional_evidence_unavailable"
+            if reason is not None:
+                return self._finalize_eligibility_result(
+                    repo, case_id=case["case_id"], stage_run_id=stage_run_id,
+                    expected_version=version, status="INCONCLUSIVE", reason=reason,
+                    assessment_id=eligibility_id, evidence_ids=tuple(evidence_ids),
+                )
             # Recovery can load the same sealed rows in a different attempt order.
             post_evidence_ids = tuple(sorted(evidence_ids))
             summaries = repo.eligibility_evidence_summaries(
@@ -660,6 +686,11 @@ class ValidationCoordinator:
                 conn=conn, repo=repo, candidate=candidate, stage_run_id=stage_run_id,
                 phase="post_replay", scope=self._load_scope(conn, case.get("scope_sha256")),
                 evidence_ids=post_evidence_ids, evidence_summaries=summaries,
+                conditional_context=ConditionalEligibilityContext(
+                    assessment_id=eligibility_id,
+                    output_sha256=canonical_sha256(preflight.model_dump()),
+                    required_impact=preflight.required_impact,
+                ),
             )
             reasons = {
                 "INELIGIBLE": "conditional_impact_absent",

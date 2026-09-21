@@ -49,12 +49,25 @@ class SharedValidationReportingTests(unittest.TestCase):
 
     def eligibility(self, value="ELIGIBLE", phase="preflight", case_id="case", evidence_refs=()):
         self.assessment_count += 1
+        context = None
+        summaries = ()
+        if phase == "post_replay":
+            preflight = self.conn.execute(
+                """SELECT assessment_id,output_sha256,required_impact_json
+                   FROM validation_eligibility_assessments WHERE case_id=? AND phase='preflight'
+                   ORDER BY rowid DESC LIMIT 1""", (case_id,),
+            ).fetchone()
+            context = {"assessment_id": preflight[0], "output_sha256": preflight[1],
+                       "required_impact": tuple(json.loads(preflight[2]))}
+            evidence_refs = evidence_refs or ("evidence_" + case_id,)
+            summaries = self.repo.eligibility_evidence_summaries(
+                case_id=case_id, stage_run_id=self.run, evidence_ids=evidence_refs)
         request = EligibilityRequest(
             case_id=case_id, scope_sha256=self.scope.scope_sha256, phase=phase,
             scope_markdown=self.scope.scope_markdown, target_kind="finding", vuln_class="idor",
             endpoint="https://test/", method="GET", title="Fixture", claimed_impact="Boundary crossed",
             reproduction_summary={"revision": self.assessment_count},
-            evidence_refs=evidence_refs, evidence_summaries=(),
+            evidence_refs=evidence_refs, evidence_summaries=summaries, conditional_context=context,
         )
         assessment = EligibilityAssessment(
             case_id=case_id, scope_sha256=self.scope.scope_sha256, phase=phase,
@@ -99,7 +112,7 @@ class SharedValidationReportingTests(unittest.TestCase):
             ReportAgent().run(self.path, self.output, platform="hackerone", case_id="case")
 
     def test_status_exposes_compact_current_scope_eligibility_without_raw_content(self):
-        self.complete()
+        self.complete(eligibility="CONDITIONAL")
         identifier, _ = self.eligibility(phase="post_replay")
         expected = {
             "scope_sha256": self.scope.scope_sha256, "phase": "post_replay",
