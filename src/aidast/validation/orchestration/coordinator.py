@@ -458,6 +458,18 @@ class ValidationCoordinator:
             observations, evidence_ids = self._observations_for_assessment(
                 conn, case["case_id"], stage_run_id, assessment
             )
+            if preflight.eligibility == "CONDITIONAL":
+                # _develop() includes its sealed observations in the original
+                # decision input even when the final blind assessment omits them.
+                development_evidence = conn.execute(
+                    """SELECT evidence_id FROM validation_evidence
+                       WHERE case_id=? AND stage_run_id=?
+                         AND development_action_id IS NOT NULL
+                       ORDER BY created_at,evidence_id""",
+                    (case["case_id"], stage_run_id),
+                ).fetchall()
+                evidence_ids.extend(row[0] for row in development_evidence
+                                    if row[0] not in evidence_ids)
             evidence_ids.append(assessment_evidence)
             development_used = bool(conn.execute(
                 "SELECT 1 FROM validation_development_actions WHERE case_id=? AND stage_run_id=? LIMIT 1",

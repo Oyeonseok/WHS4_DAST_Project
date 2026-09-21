@@ -7,7 +7,7 @@ import json
 import sqlite3
 from contextlib import closing
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, get_args
 
 from aidast.recon.db import new_id, now
 
@@ -16,7 +16,9 @@ from ..contracts.eligibility import (
     EligibilityRequest,
     ScopePolicySource,
 )
-from ..contracts.models import ValidationError, TerminalStatus, canonical_json, canonical_sha256
+from ..contracts.models import (
+    BlockerAxis, SignalType, ValidationError, TerminalStatus, canonical_json, canonical_sha256,
+)
 from ..core.decision import evaluate_impact
 from .evidence_policy import sanitize_metadata
 
@@ -175,20 +177,54 @@ class ValidationRepository:
         if set(rows) != set(evidence_ids):
             raise ValidationRepositoryError("eligibility cites evidence outside the current case and stage")
 
-        def omit_reasoning(value: Any) -> Any:
-            if isinstance(value, dict):
-                return {key: omit_reasoning(child) for key, child in value.items()
-                        if not any(part in key.casefold()
-                                   for part in ("reasoning", "thought", "analysis", "scratchpad"))}
-            if isinstance(value, list):
-                return [omit_reasoning(child) for child in value]
-            return value
-
         return tuple({
             "evidence_id": rows[identifier][0], "evidence_kind": rows[identifier][1],
             "content_sha256": rows[identifier][2], "content_length": rows[identifier][3],
-            "details": omit_reasoning(sanitize_metadata(json.loads(rows[identifier][4]))),
+            "details": self._eligibility_proof_details(
+                rows[identifier][1], json.loads(rows[identifier][4]),
+            ),
         } for identifier in evidence_ids)
+
+    @staticmethod
+    def _eligibility_proof_details(kind: str, details: Any) -> dict[str, Any]:
+        """Project bounded typed proof; producer text and unknown containers never cross."""
+        if not isinstance(details, dict):
+            return {}
+        proof: dict[str, Any] = {}
+        boolean = {
+            "observation": "signal_observed", "blind_assessment": "reproduced",
+            "development_observation": "succeeded",
+        }.get(kind)
+        if boolean is not None and type(details.get(boolean)) is bool:
+            proof[boolean] = details[boolean]
+        if kind == "observation":
+            status = details.get("response_status")
+            if type(status) is int and 100 <= status <= 599:
+                proof["response_status"] = status
+        elif kind == "blind_assessment":
+            for name in ("impact_boundary", "impact_sensitivity", "impact_actor_requirements"):
+                axis = details.get(name)
+                score = axis.get("score") if isinstance(axis, dict) else None
+                if type(score) is int and 0 <= score <= 3:
+                    proof[name] = {"score": score}
+            blocker = details.get("blocker_axis")
+            if type(blocker) is str and blocker in get_args(BlockerAxis):
+                proof["blocker_axis"] = blocker
+        elif kind == "claim_comparison":
+            alignment = details.get("alignment")
+            if type(alignment) is str and alignment in {"aligned", "conflicting"}:
+                proof["alignment"] = alignment
+        enum_list = {
+            "blind_assessment": ("signal_types", get_args(SignalType)),
+            "claim_comparison": ("conflict_axes", ("vuln_class", "boundary", "sensitivity")),
+        }.get(kind)
+        if enum_list is not None:
+            name, choices = enum_list
+            values = details.get(name)
+            if (isinstance(values, list) and len(values) <= len(choices)
+                    and all(type(value) is str and value in choices for value in values)):
+                proof[name] = values
+        return sanitize_metadata(proof)
 
     def create_case(self, *, scan_id: str, stage_run_id: str, target_kind: str,
                     target_id: str, scope_sha256: str | None = None,

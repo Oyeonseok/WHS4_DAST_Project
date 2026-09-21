@@ -707,7 +707,8 @@ class EligibilityEvidenceRepositoryTests(unittest.TestCase):
 
     def test_conditional_post_summaries_remove_bodies_secrets_and_hidden_reasoning_recursively(self):
         self.prepare_evidence()
-        details = {"response_body": "body-canary", "headers": {"Cookie": "cookie-canary"},
+        details = {"signal_observed": True,
+                   "response_body": "body-canary", "headers": {"Cookie": "cookie-canary"},
                    "nested": [{"password": "password-canary", "chain_of_thought": "thought-canary",
                                "hidden_reasoning": "reasoning-canary", "analysis": "analysis-canary",
                                "signal_observed": True}]}
@@ -718,7 +719,66 @@ class EligibilityEvidenceRepositoryTests(unittest.TestCase):
         rows = self.repo.eligibility_evidence_summaries(case_id="case", stage_run_id=self.run, evidence_ids=("raw",))
         serialized = json.dumps(rows)
         self.assertNotIn("canary", serialized)
-        self.assertTrue(rows[0]["details"]["nested"][0]["signal_observed"])
+        self.assertEqual(rows[0]["details"], {"signal_observed": True})
+
+    def test_conditional_summary_projects_only_typed_proof_for_each_evidence_kind(self):
+        self.prepare_evidence()
+        unrestricted = {"raw_response": "raw-canary", "cot": "thought-canary", "auth": "auth-canary",
+                        "nested": [{"producer_specific": {"value": "nested-canary"}}]}
+        cases = (
+            ("observation", {"signal_observed": True, "response_status": 200,
+                             "evaluation": unrestricted},
+             {"signal_observed": True, "response_status": 200}),
+            ("blind_assessment", {"reproduced": True,
+                                  "impact_boundary": {"score": 2, **unrestricted},
+                                  "impact_sensitivity": {"score": 1, "reason": "reason-canary"},
+                                  "impact_actor_requirements": {"score": 0},
+                                  "signal_types": ["authorization_boundary"],
+                                  "conclusion": "conclusion-canary"},
+             {"reproduced": True, "impact_boundary": {"score": 2},
+              "impact_sensitivity": {"score": 1}, "impact_actor_requirements": {"score": 0},
+              "signal_types": ["authorization_boundary"]}),
+            ("claim_comparison", {"alignment": "conflicting", "conflict_axes": ["boundary"],
+                                  "reason": "comparison-canary"},
+             {"alignment": "conflicting", "conflict_axes": ["boundary"]}),
+            ("development_observation", {"succeeded": True, "result": unrestricted}, {"succeeded": True}),
+            ("unrecognized_producer", {"signal_observed": True}, {}),
+        )
+        for index, (kind, proof, expected) in enumerate(cases):
+            identifier = f"projection-{index}"
+            self.conn.execute("""INSERT INTO validation_evidence
+                (evidence_id,case_id,stage_run_id,evidence_kind,details_json,content_sha256,content_length)
+                VALUES (?,'case',?,?,?, ?,1)""",
+                (identifier, self.run, kind, json.dumps(proof | unrestricted), "d" * 64))
+            with self.subTest(kind=kind):
+                rows = self.repo.eligibility_evidence_summaries(
+                    case_id="case", stage_run_id=self.run, evidence_ids=(identifier,))
+                self.assertEqual(rows[0]["details"], expected)
+                self.assertNotIn("canary", json.dumps(rows))
+
+    def test_conditional_summary_rejects_secret_values_disguised_as_allowed_fields(self):
+        self.prepare_evidence()
+        invalid = (
+            ("observation", {"signal_observed": "true-canary", "response_status": True}),
+            ("observation", {"response_status": 600}),
+            ("blind_assessment", {"reproduced": 1, "signal_types": ["signal-canary"],
+                                  "blocker_axis": "blocker-canary",
+                                  "impact_boundary": {"score": "score-canary"},
+                                  "impact_sensitivity": {"score": 4},
+                                  "impact_actor_requirements": {"score": True}}),
+            ("claim_comparison", {"alignment": "alignment-canary", "conflict_axes": [{"auth": "canary"}]}),
+            ("development_observation", {"succeeded": {"value": "canary"}}),
+        )
+        for index, (kind, details) in enumerate(invalid):
+            identifier = f"invalid-projection-{index}"
+            self.conn.execute("""INSERT INTO validation_evidence
+                (evidence_id,case_id,stage_run_id,evidence_kind,details_json,content_sha256,content_length)
+                VALUES (?,'case',?,?,?,?,1)""",
+                (identifier, self.run, kind, json.dumps(details), "e" * 64))
+            with self.subTest(kind=kind, index=index):
+                rows = self.repo.eligibility_evidence_summaries(
+                    case_id="case", stage_run_id=self.run, evidence_ids=(identifier,))
+                self.assertEqual(rows[0]["details"], {})
 
     def test_conditional_repository_rejects_post_assessment_evidence_outside_request(self):
         self.prepare_evidence()

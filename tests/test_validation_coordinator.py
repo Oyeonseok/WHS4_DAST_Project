@@ -1849,6 +1849,51 @@ class ConditionalEligibilityTests(unittest.TestCase):
         with db.connect(self.path) as conn:
             self.assertEqual(conn.execute("SELECT current_status FROM validation_cases").fetchone()[0], "CONFIRMED")
 
+    def test_conditional_resume_preserves_uncited_prerequisite_development_evidence(self):
+        class CountingBlockerAgent(BlockerAgent):
+            def __init__(self):
+                self.assess_calls = 0
+                self.compare_calls = 0
+
+            def assess(self, blind_case, observations, correction=None):
+                self.assess_calls += 1
+                return super().assess(blind_case, observations, correction)
+
+            def compare(self, claim, assessment, correction=None):
+                self.compare_calls += 1
+                return super().compare(claim, assessment, correction)
+
+        eligibility = ConditionalEligibilityAgent()
+        agent, port = CountingBlockerAgent(), BlockThenPassPort()
+        coordinator = ValidationCoordinator(
+            db_path=self.path, agent=agent, reproduction=port,
+            policy_provider=lambda endpoint, method: self.policy, eligibility_agent=eligibility,
+            prerequisite_resolver=SuccessfulPrerequisite(),
+        )
+        with patch.object(coordinator.engine, "decide", side_effect=RuntimeError("interrupted after development post")):
+            with self.assertRaisesRegex(ValidationCoordinatorError, "interrupted after development post"):
+                coordinator.run("scan")
+        original_refs = eligibility.requests[-1].evidence_refs
+        self.assertEqual(len(original_refs), 8)
+        with db.connect(self.path) as conn:
+            stage = conn.execute("SELECT latest_stage_run_id FROM validation_cases").fetchone()[0]
+            development = conn.execute("SELECT evidence_id FROM validation_evidence WHERE evidence_kind='development_observation'").fetchone()[0]
+            frozen = json.loads(conn.execute("SELECT details_json FROM validation_evidence WHERE evidence_kind='blind_assessment'").fetchone()[0])
+        self.assertIn(development, original_refs)
+        self.assertNotIn(development, frozen["evidence_ids"])
+
+        coordinator.resume(stage)
+
+        self.assertEqual(len(port.calls), 10)
+        self.assertEqual((agent.assess_calls, agent.compare_calls), (2, 1))
+        self.assertEqual([request.phase for request in eligibility.requests], ["preflight", "post_replay"])
+        with db.connect(self.path) as conn:
+            status, decision = conn.execute("SELECT current_status,decision_json FROM validation_cases").fetchone()
+            self.assertEqual(status, "CONFIRMED")
+            self.assertEqual(set(json.loads(decision)["evidence_ids"]), set(original_refs))
+            self.assertEqual(conn.execute("SELECT count(*) FROM validation_eligibility_assessments WHERE phase='post_replay'").fetchone()[0], 1)
+            self.assertEqual(conn.execute("SELECT count(*) FROM validation_development_actions").fetchone()[0], 1)
+
 
 class ValidationOperationLedgerTests(unittest.TestCase):
     RUNTIME_KINDS = ("multipart", "websocket", "grpc", "concurrent")
