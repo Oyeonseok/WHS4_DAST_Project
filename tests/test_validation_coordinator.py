@@ -533,6 +533,81 @@ class ValidationCoordinatorTests(unittest.TestCase):
                              "eligibility_unknown")
             self.assertEqual(conn.execute("SELECT eligibility FROM validation_eligibility_assessments").fetchone()[0], "UNKNOWN")
 
+    def test_long_accepted_description_reaches_durable_eligibility_without_truncation(self):
+        self.eligibility.eligibility = "INELIGIBLE"
+        for length in (4001, 8000, 20_000):
+            with self.subTest(length=length):
+                description = "x" * (length - 20) + "Policy impact at end"
+                with db.connect(self.path) as conn:
+                    conn.execute("UPDATE findings SET description=? WHERE finding_id='finding'", (description,))
+                    conn.commit()
+                port = FakePort()
+                result = ValidationCoordinator(
+                    db_path=self.path, agent=FakeAgent(), reproduction=port,
+                    policy_provider=lambda endpoint, method: self.policy,
+                ).run("scan")
+                self.assertEqual(result.summary["statuses"], {"OUT_OF_SCOPE": 1})
+                self.assertEqual(port.calls, [])
+                self.assertEqual(self.eligibility.requests[-1].claimed_impact, description)
+                with db.connect(self.path) as conn:
+                    self.assertEqual(conn.execute(
+                        "SELECT eligibility FROM validation_eligibility_assessments WHERE stage_run_id=?",
+                        (result.stage_run_id,),
+                    ).fetchone()[0], "INELIGIBLE")
+
+    def test_real_structured_schema_errors_retry_once_then_persist_unknown(self):
+        from aidast.agents.main import CodexMainAgent
+        from test_validation_eligibility_runner import structured_output_cli
+
+        # setUp patches the default factory; exercise the actual runner class here.
+        from aidast.validation import CodexEligibilityRunner as RealEligibilityRunner
+        port = FakePort()
+        with structured_output_cli(["not-json", "{}"]) as prompts:
+            result = ValidationCoordinator(
+                db_path=self.path, agent=FakeAgent(), reproduction=port,
+                eligibility_agent=RealEligibilityRunner(CodexMainAgent()),
+                policy_provider=lambda endpoint, method: self.policy,
+            ).run("scan")
+        self.assertEqual(len(prompts), 2)
+        self.assertNotIn("<correction_request>", prompts[0])
+        self.assertIn("<correction_request>", prompts[1])
+        self.assertEqual(port.calls, [])
+        self.assertEqual(result.summary["statuses"], {"INCONCLUSIVE": 1})
+        with db.connect(self.path) as conn:
+            self.assertEqual(conn.execute("SELECT eligibility,replay_allowed FROM validation_eligibility_assessments").fetchall(),
+                             [("UNKNOWN", 0)])
+
+    def test_real_structured_schema_error_can_be_corrected_before_replay(self):
+        from aidast.agents.main import CodexMainAgent
+        from aidast.validation import CodexEligibilityRunner as RealEligibilityRunner
+        from test_validation_eligibility_runner import structured_output_cli
+
+        def corrected(prompt):
+            request = json.loads(prompt.split("<candidate_context_json>\n", 1)[1].split(
+                "\n</candidate_context_json>", 1,
+            )[0])
+            return EligibilityAssessment(
+                case_id=request["case_id"], scope_sha256=request["scope_sha256"],
+                phase="preflight", eligibility="ELIGIBLE", matched_rule="Fixture policy rule",
+                scope_quote=self.scope.scope_markdown, required_impact=(),
+                replay_allowed=True, reason="Corrected policy result.", evidence_refs=(),
+            ).model_dump_json()
+
+        port = FakePort()
+        with structured_output_cli(["{}", corrected]) as prompts:
+            result = ValidationCoordinator(
+                db_path=self.path, agent=FakeAgent(), reproduction=port,
+                eligibility_agent=RealEligibilityRunner(CodexMainAgent()),
+                policy_provider=lambda endpoint, method: self.policy,
+            ).run("scan")
+        self.assertEqual(len(prompts), 2)
+        self.assertIn("<correction_request>", prompts[1])
+        self.assertEqual(len(port.calls), 5)
+        self.assertEqual(result.summary["statuses"], {"CONFIRMED": 1})
+        with db.connect(self.path) as conn:
+            self.assertEqual(conn.execute("SELECT eligibility FROM validation_eligibility_assessments").fetchall(),
+                             [("ELIGIBLE",)])
+
     def test_candidate_gate_carries_the_verified_persisted_reproduction_digest(self):
         with db.connect(self.path) as conn:
             persisted_digest = conn.execute(

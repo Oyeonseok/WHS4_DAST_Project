@@ -95,7 +95,7 @@ class EligibilityRequest(StrictContract):
     endpoint: Annotated[str, Field(min_length=1, max_length=4096)]
     method: Annotated[str, Field(min_length=1, max_length=32)]
     title: Annotated[str, Field(min_length=1, max_length=1000)]
-    claimed_impact: Annotated[str, Field(min_length=1, max_length=4000)]
+    claimed_impact: Annotated[str, Field(min_length=1, max_length=20_000)]
     reproduction_summary: dict[str, Any]
     evidence_refs: tuple[Identifier, ...] = Field(max_length=128)
     evidence_summaries: tuple[dict[str, Any], ...] = Field(max_length=128)

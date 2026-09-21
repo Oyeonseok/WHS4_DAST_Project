@@ -3,7 +3,14 @@
 from __future__ import annotations
 
 import json
-from unittest.mock import Mock
+from contextlib import contextmanager
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
+
+import pytest
+
+from aidast.agents.main import CodexMainAgent, MainAgentError
 
 from aidast.validation import (
     CodexEligibilityRunner,
@@ -35,6 +42,43 @@ def eligible_assessment() -> EligibilityAssessment:
         replay_allowed=True, reason="The policy includes this class.",
         evidence_refs=("evidence",),
     )
+
+
+@contextmanager
+def structured_output_cli(outputs):
+    """Exercise the real structured parser, replacing only external CLI I/O."""
+    prompts = []
+    remaining = iter(outputs)
+
+    def run(command, *, input, **kwargs):
+        prompts.append(input)
+        output = next(remaining)
+        output = output(input) if callable(output) else output
+        result_path = Path(command[command.index("--output-last-message") + 1])
+        result_path.write_text(output, encoding="utf-8")
+        return SimpleNamespace(returncode=0, stderr="")
+
+    with patch("aidast.agents.main.shutil.which", return_value="fixture-codex"), \
+            patch.object(CodexMainAgent, "_require_login"), \
+            patch("aidast.agents.main.subprocess.run", side_effect=run):
+        yield prompts
+
+
+@pytest.mark.parametrize("output", ["not-json", "{}"])
+def test_runner_preserves_retryable_real_structured_output_errors(output):
+    runner = CodexEligibilityRunner(CodexMainAgent())
+    with structured_output_cli([output]):
+        with pytest.raises(ValueError) as error:
+            runner.assess(request_fixture())
+    assert isinstance(error.value.__cause__, MainAgentError)
+    assert error.value.__cause__.__cause__ is not None
+
+
+def test_runner_does_not_reclassify_cli_availability_as_schema_error():
+    runner = CodexEligibilityRunner(CodexMainAgent())
+    with patch("aidast.agents.main.shutil.which", return_value=None):
+        with pytest.raises(MainAgentError, match="executable not found"):
+            runner.assess(request_fixture())
 
 
 def test_runner_delimits_scope_and_candidate_as_untrusted_data():

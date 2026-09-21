@@ -8,9 +8,11 @@ from importlib.resources import files
 from typing import Protocol
 from uuid import uuid4
 
-from aidast.agents.main import CodexMainAgent
+from pydantic import ValidationError
 
-from ..contracts.eligibility import EligibilityAssessment, EligibilityRequest
+from aidast.agents.main import CodexMainAgent, MainAgentError
+
+from ..contracts.eligibility import EligibilityAssessment, EligibilityRequest, ScopeEligibilityError
 
 
 class EligibilityAgentRunner(Protocol):
@@ -62,9 +64,16 @@ Return only EligibilityAssessment and no final Validation status.
 {candidate_json}
 </candidate_context_json>{correction_text}
 """
-        return self._agent._run_structured(
-            prompt=prompt,
-            model_type=EligibilityAssessment,
-            artifact_name="eligibility-assessment",
-            operation="Validation scope eligibility assessment",
-        )
+        try:
+            return self._agent._run_structured(
+                prompt=prompt,
+                model_type=EligibilityAssessment,
+                artifact_name="eligibility-assessment",
+                operation="Validation scope eligibility assessment",
+            )
+        except MainAgentError as exc:
+            # The CLI wrapper retains the parser failure as its explicit cause.
+            # Preserve correction retries without retrying operational failures.
+            if isinstance(exc.__cause__, (ValidationError, json.JSONDecodeError)):
+                raise ScopeEligibilityError("eligibility output failed schema validation") from exc
+            raise

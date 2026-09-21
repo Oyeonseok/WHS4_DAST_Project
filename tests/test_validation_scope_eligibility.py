@@ -53,6 +53,18 @@ def test_conditional_requires_impact_and_replay_permission():
         )
 
 
+@pytest.mark.parametrize("length", [4001, 8000, 20_000])
+def test_eligibility_request_preserves_accepted_upstream_description(length):
+    description = "x" * (length - 20) + "Policy impact at end"
+    request = eligibility_request(claimed_impact=description)
+    assert request.claimed_impact == description
+
+
+def test_eligibility_request_rejects_description_above_upstream_limit():
+    with pytest.raises(ValueError):
+        eligibility_request(claimed_impact="x" * 20_001)
+
+
 def test_grounding_rejects_quote_not_present_in_snapshot():
     assessment = eligible_assessment(scope_quote="invented policy text")
     with pytest.raises(ScopeEligibilityError, match="scope quote is not grounded"):
