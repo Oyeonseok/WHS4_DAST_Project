@@ -137,7 +137,7 @@ class ValidationStageResult(StrictContract):
     db_path: str
     stage_run_id: Identifier
     case_ids: tuple[Identifier, ...]
-    validation_agent_ids: tuple[Identifier, ...] = Field(max_length=1)
+    validation_agent_ids: tuple[Identifier, ...] = Field(max_length=2)
     summary: dict[str, Any]
 
 
@@ -235,7 +235,7 @@ class StagedBlindCase:
             "injection_location": self._blind_case.injection_location,
             "parameter_name": self._blind_case.parameter_name,
             "payload_structure_sha256": payload_structure_sha256(
-                self._blind_case.payload_template
+                self._blind_case.model_dump(mode="json")["payload_template"]
             ),
             "runtime_kind": (self._blind_case.runtime_contract or {}).get(
                 "runtime_kind", "http"

@@ -209,6 +209,20 @@ CREATE TABLE IF NOT EXISTS chain_execution_bindings (
         REFERENCES chain_execution_steps(execution_id, position)
 );
 
+CREATE TABLE IF NOT EXISTS scope_policy_snapshots (
+    scope_sha256 TEXT PRIMARY KEY CHECK(length(scope_sha256)=64),
+    scope_markdown TEXT NOT NULL CHECK(length(scope_markdown) > 0),
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS validation_scope_bindings (
+    scan_id TEXT PRIMARY KEY REFERENCES scans(scan_id),
+    scope_sha256 TEXT NOT NULL REFERENCES scope_policy_snapshots(scope_sha256),
+    source_path TEXT,
+    approval_digest TEXT CHECK(approval_digest IS NULL OR length(approval_digest)=64),
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE TABLE IF NOT EXISTS validation_cases (
     case_id TEXT PRIMARY KEY NOT NULL,
     scan_id TEXT NOT NULL REFERENCES scans(scan_id),
@@ -239,6 +253,7 @@ CREATE TABLE IF NOT EXISTS validation_cases (
     severity TEXT CHECK(severity IS NULL OR severity IN ('CRITICAL','HIGH','MEDIUM','LOW','INFO')),
     decision_json TEXT CHECK(decision_json IS NULL OR json_valid(decision_json)),
     decision_sha256 TEXT CHECK(decision_sha256 IS NULL OR length(decision_sha256)=64),
+    scope_sha256 TEXT REFERENCES scope_policy_snapshots(scope_sha256),
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CHECK((target_kind='finding' AND finding_id IS NOT NULL AND chain_id IS NULL)
@@ -256,6 +271,29 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_validation_case_chain
     ON validation_cases(scan_id, chain_id) WHERE chain_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_validation_cases_stage
     ON validation_cases(latest_stage_run_id, processing_phase);
+
+CREATE TABLE IF NOT EXISTS validation_eligibility_assessments (
+    assessment_id TEXT PRIMARY KEY,
+    case_id TEXT NOT NULL REFERENCES validation_cases(case_id),
+    stage_run_id TEXT NOT NULL REFERENCES stage_runs(stage_run_id),
+    phase TEXT NOT NULL CHECK(phase IN ('preflight','post_replay')),
+    scope_sha256 TEXT NOT NULL REFERENCES scope_policy_snapshots(scope_sha256),
+    eligibility TEXT NOT NULL CHECK(eligibility IN
+        ('ELIGIBLE','INELIGIBLE','CONDITIONAL','UNKNOWN')),
+    exclusion_kind TEXT,
+    matched_rule TEXT NOT NULL,
+    scope_quote TEXT NOT NULL,
+    required_impact_json TEXT NOT NULL CHECK(json_valid(required_impact_json)),
+    replay_allowed INTEGER NOT NULL CHECK(replay_allowed IN (0,1)),
+    reason TEXT NOT NULL,
+    evidence_refs_json TEXT NOT NULL CHECK(json_valid(evidence_refs_json)),
+    input_sha256 TEXT NOT NULL CHECK(length(input_sha256)=64),
+    output_sha256 TEXT NOT NULL CHECK(length(output_sha256)=64),
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(case_id,stage_run_id,phase,input_sha256)
+);
+CREATE INDEX IF NOT EXISTS idx_validation_eligibility_case_stage_phase_created
+    ON validation_eligibility_assessments(case_id,stage_run_id,phase,created_at);
 
 CREATE TABLE IF NOT EXISTS validation_attempts (
     attempt_id TEXT PRIMARY KEY NOT NULL,
@@ -459,6 +497,18 @@ BEGIN SELECT RAISE(ABORT, 'validation evidence is append-only'); END;
 CREATE TRIGGER IF NOT EXISTS validation_evidence_no_delete
 BEFORE DELETE ON validation_evidence
 BEGIN SELECT RAISE(ABORT, 'validation evidence is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS scope_policy_snapshots_no_update
+BEFORE UPDATE ON scope_policy_snapshots
+BEGIN SELECT RAISE(ABORT, 'scope snapshots are append-only'); END;
+CREATE TRIGGER IF NOT EXISTS scope_policy_snapshots_no_delete
+BEFORE DELETE ON scope_policy_snapshots
+BEGIN SELECT RAISE(ABORT, 'scope snapshots are append-only'); END;
+CREATE TRIGGER IF NOT EXISTS validation_eligibility_assessments_no_update
+BEFORE UPDATE ON validation_eligibility_assessments
+BEGIN SELECT RAISE(ABORT, 'eligibility assessments are append-only'); END;
+CREATE TRIGGER IF NOT EXISTS validation_eligibility_assessments_no_delete
+BEFORE DELETE ON validation_eligibility_assessments
+BEGIN SELECT RAISE(ABORT, 'eligibility assessments are append-only'); END;
 CREATE TRIGGER IF NOT EXISTS validation_attempts_completed_no_update
 BEFORE UPDATE ON validation_attempts
 WHEN OLD.finished_at IS NOT NULL
@@ -597,6 +647,15 @@ def _add_live_columns(conn: sqlite3.Connection) -> None:
                 f"ALTER TABLE validation_impact_hypotheses ADD COLUMN {name} {declaration}"
             )
 
+    case_columns = {
+        row[1] for row in conn.execute("PRAGMA table_info(validation_cases)")
+    }
+    if "scope_sha256" not in case_columns:
+        conn.execute(
+            "ALTER TABLE validation_cases ADD COLUMN scope_sha256 TEXT "
+            "REFERENCES scope_policy_snapshots(scope_sha256)"
+        )
+
 
 def _remove_known_similarity(conn: sqlite3.Connection) -> None:
     columns = {
@@ -607,7 +666,7 @@ def _remove_known_similarity(conn: sqlite3.Connection) -> None:
 
 
 def migrate_live_pipeline_schema(conn: sqlite3.Connection) -> None:
-    """Upgrade only a writable Recon snapshot copy to shared pipeline v10."""
+    """Upgrade only a writable Recon snapshot copy to shared pipeline v11."""
     from aidast.pipeline.schema import migrate_pipeline_schema
 
     migrate_pipeline_schema(conn)
@@ -615,4 +674,4 @@ def migrate_live_pipeline_schema(conn: sqlite3.Connection) -> None:
     _remove_known_similarity(conn)
     _add_attack_attempt_columns(conn)
     _add_live_columns(conn)
-    conn.execute("PRAGMA user_version=10")
+    conn.execute("PRAGMA user_version=11")

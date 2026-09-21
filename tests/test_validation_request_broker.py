@@ -12,6 +12,7 @@ from aidast.recon.policy import PolicyLimits, TargetPolicy, ToolPolicy
 from aidast.scope.models import AssetType
 from aidast.validation import (BlindCase, HttpReproductionPort, HttpRuntimeContract,
                                OobReproductionPort, OobRuntimeContract,
+                               ScopePolicySource,
                                ValidationRepository, ValidationRequestBroker,
                                ValidationRequestError)
 
@@ -58,8 +59,11 @@ class ValidationRequestBrokerTests(unittest.TestCase):
         self.conn.execute("INSERT INTO findings(finding_id,scan_id,endpoint_id,vuln_type,severity,title) VALUES ('finding','scan','endpoint','idor','LOW','fixture')")
         self.stage = start_stage_run(self.conn, scan_id="scan", stage="validation", stage_run_id="stage")
         repo = ValidationRepository(self.conn)
+        scope_sha256 = repo.bind_scope(
+            "scan", ScopePolicySource.from_text("# Policy\nRule", source_path="fixture")
+        )
         repo.create_case(scan_id="scan", stage_run_id=self.stage, target_kind="finding",
-                         target_id="finding", case_id="case")
+                         target_id="finding", scope_sha256=scope_sha256, case_id="case")
         self.attempt = repo.add_attempt(
             case_id="case", stage_run_id=self.stage, batch_no=1, attempt_kind="target",
             ordinal=1, signal_type="response_diff", outcome="error", finished=False,

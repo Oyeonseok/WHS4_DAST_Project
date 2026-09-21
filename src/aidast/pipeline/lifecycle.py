@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from contextlib import nullcontext
 from typing import Any
 
 from aidast.recon.db import new_id, now
@@ -45,9 +46,10 @@ def audit_event(
 def start_stage_run(
     conn: sqlite3.Connection, *, scan_id: str, stage: str,
     stage_run_id: str | None = None, manifest_path: str | None = None,
+    commit: bool = True,
 ) -> str:
     identifier = stage_run_id or new_id("stage")
-    with conn:
+    with conn if commit else nullcontext():
         conn.execute(
             """INSERT INTO stage_runs
             (stage_run_id, scan_id, stage, status, manifest_path, started_at)

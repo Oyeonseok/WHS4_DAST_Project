@@ -14,6 +14,8 @@ from aidast.pipeline.live_schema import migrate_live_pipeline_schema
 from aidast.recon import db
 from aidast.recon.policy import PolicyLimits, TargetPolicy, ToolPolicy
 from aidast.scope.models import AssetType
+from aidast.validation.contracts.eligibility import EligibilityAssessment, ScopePolicySource
+from aidast.validation.persistence.repository import ValidationRepository
 from aidast.validation import (CandidateIntegrityError, CandidateIntegrityGate,
                                ClaimComparison, HttpReproductionPort,
                                NativePrerequisiteResolver,
@@ -22,6 +24,29 @@ from aidast.validation import (CandidateIntegrityError, CandidateIntegrityGate,
                                ValidationCoordinator, ValidationCoordinatorError,
                                build_native_validation_coordinator,
                                canonical_reproduction_spec)
+
+
+class FakeEligibilityAgent:
+    agent_id = "eligibility_agent_fixture"
+
+    def __init__(self, eligibility="ELIGIBLE", invalid=False):
+        self.eligibility = eligibility
+        self.invalid = invalid
+        self.requests = []
+        self.corrections = []
+
+    def assess(self, request, correction=None):
+        self.requests.append(request)
+        self.corrections.append(correction)
+        if self.invalid:
+            raise ValueError("malformed output")
+        return EligibilityAssessment(
+            case_id=request.case_id, scope_sha256=request.scope_sha256,
+            phase=request.phase, eligibility=self.eligibility,
+            matched_rule="Fixture scope rule", scope_quote=request.scope_markdown,
+            required_impact=(), replay_allowed=self.eligibility == "ELIGIBLE",
+            reason="Fixture policy rationale.", evidence_refs=(),
+        )
 
 
 class FakePort:
@@ -37,6 +62,28 @@ class FakePort:
             details={"kind": attempt_kind, "ordinal": ordinal},
             content_sha256=(str(ordinal) * 64)[:64], content_length=1,
         )
+
+
+class ConditionalEligibilityAgent(FakeEligibilityAgent):
+    def __init__(self, post="ELIGIBLE", mutation=None):
+        super().__init__()
+        self.post = post
+        self.mutation = mutation or {}
+
+    def assess(self, request, correction=None):
+        result = super().assess(request, correction).model_dump()
+        eligibility = "CONDITIONAL" if request.phase == "preflight" else self.post
+        result.update(
+            eligibility=eligibility,
+            replay_allowed=eligibility in {"CONDITIONAL", "ELIGIBLE"},
+            required_impact=({"condition": "Additional account impact",
+                              "evidence_needed": "Sealed replay observations"},)
+            if eligibility == "CONDITIONAL" else (),
+            evidence_refs=request.evidence_refs,
+        )
+        if request.phase == "post_replay":
+            result.update(self.mutation)
+        return result
 
 
 class RoutingPort:
@@ -358,7 +405,230 @@ class ValidationCoordinatorTests(unittest.TestCase):
         finish_stage_run(conn, attack)
         chaining = start_stage_run(conn, scan_id="scan", stage="chaining", stage_run_id="chain_stage")
         finish_stage_run(conn, chaining, status="skipped")
+        self.scope = ScopePolicySource.from_text("Fixture policy permits IDOR validation.", "fixture.md")
+        ValidationRepository(conn).bind_scope("scan", self.scope)
         conn.close()
+        self.eligibility = FakeEligibilityAgent()
+        eligibility_patch = patch(
+            "aidast.validation.orchestration.eligibility_runner.CodexEligibilityRunner",
+            return_value=self.eligibility,
+        )
+        eligibility_patch.start()
+        self.addCleanup(eligibility_patch.stop)
+
+    def test_ineligible_preflight_never_invokes_reproduction(self):
+        self.eligibility.eligibility = "INELIGIBLE"
+        port = FakePort()
+        result = ValidationCoordinator(
+            db_path=self.path, agent=FakeAgent(), reproduction=port,
+            policy_provider=lambda endpoint, method: self.policy,
+        ).run("scan")
+        self.assertEqual(port.calls, [])
+        self.assertEqual(result.summary["statuses"], {"OUT_OF_SCOPE": 1})
+        self.assertEqual(result.validation_agent_ids, ("eligibility_agent_fixture",))
+        with db.connect(self.path) as conn:
+            decision = json.loads(conn.execute("SELECT decision_json FROM validation_cases").fetchone()[0])
+            self.assertEqual(decision["reason"], "finding_eligibility_excluded")
+            self.assertEqual(conn.execute("SELECT assessment_id FROM validation_eligibility_assessments").fetchone()[0],
+                             decision["eligibility_assessment_id"])
+
+    def test_unknown_preflight_is_inconclusive_without_replay(self):
+        self.eligibility.invalid = True
+        port = FakePort()
+        result = ValidationCoordinator(
+            db_path=self.path, agent=FakeAgent(), reproduction=port,
+            policy_provider=lambda endpoint, method: self.policy,
+        ).run("scan")
+        self.assertEqual(port.calls, [])
+        self.assertEqual(result.summary["statuses"], {"INCONCLUSIVE": 1})
+        self.assertEqual(len(self.eligibility.requests), 2)
+        self.assertIsNone(self.eligibility.corrections[0])
+        self.assertTrue(self.eligibility.corrections[1])
+        with db.connect(self.path) as conn:
+            self.assertEqual(conn.execute("SELECT eligibility,replay_allowed FROM validation_eligibility_assessments").fetchone(),
+                             ("UNKNOWN", 0))
+            self.assertEqual(json.loads(conn.execute("SELECT decision_json FROM validation_cases").fetchone()[0])["reason"],
+                             "eligibility_unknown")
+
+    def test_target_policy_rejection_occurs_before_eligibility(self):
+        port = FakePort()
+        result = ValidationCoordinator(
+            db_path=self.path, agent=FakeAgent(), reproduction=port,
+            policy_provider=lambda endpoint, method: self.policy.model_copy(update={"allowed_hosts": ["other"]}),
+        ).run("scan")
+        self.assertEqual(result.summary["statuses"], {"OUT_OF_SCOPE": 1})
+        self.assertEqual(self.eligibility.requests, [])
+        self.assertEqual(port.calls, [])
+
+    def test_preflight_is_durable_before_replay_and_blind_input_stays_isolated(self):
+        test = self
+
+        class ObservingPort(FakePort):
+            def execute(self, blind_case, **context):
+                with db.connect(test.path) as conn:
+                    row = conn.execute("SELECT eligibility,scope_sha256 FROM validation_eligibility_assessments").fetchone()
+                test.assertEqual(row, ("ELIGIBLE", test.scope.scope_sha256))
+                serialized = blind_case.model_dump_json()
+                for secret in ("Fixture policy", "Fixture policy rationale", "Cross-user read", "IDOR fixture"):
+                    test.assertNotIn(secret, serialized)
+                return super().execute(blind_case, **context)
+
+        result = ValidationCoordinator(
+            db_path=self.path, agent=FakeAgent(), reproduction=ObservingPort(),
+            policy_provider=lambda endpoint, method: self.policy,
+        ).run("scan")
+        self.assertEqual(result.summary["statuses"], {"CONFIRMED": 1})
+        self.assertEqual(result.validation_agent_ids, ("eligibility_agent_fixture", "validation_agent_fixture"))
+        request = self.eligibility.requests[0]
+        self.assertEqual(request.title, "IDOR fixture")
+        self.assertEqual(request.claimed_impact, "Cross-user read")
+
+    def test_missing_scope_binding_refused_before_starting_stage(self):
+        with db.connect(self.path) as conn:
+            conn.execute("DELETE FROM validation_scope_bindings")
+            conn.commit()
+        with self.assertRaisesRegex(ValidationCoordinatorError, "scope_binding_missing"):
+            ValidationCoordinator(db_path=self.path, agent=FakeAgent(), reproduction=FakePort(),
+                                  policy_provider=lambda endpoint, method: self.policy).run("scan")
+        with db.connect(self.path) as conn:
+            self.assertEqual(conn.execute("SELECT count(*) FROM stage_runs WHERE stage='validation'").fetchone()[0], 0)
+
+    def test_explicit_scope_revalidation_gets_fresh_assessment_and_replay(self):
+        first = ValidationCoordinator(
+            db_path=self.path, agent=FakeAgent(), reproduction=FakePort(),
+            policy_provider=lambda endpoint, method: self.policy,
+        ).run("scan")
+        scope = ScopePolicySource.from_text("New program policy permits IDOR.", "missing-new.md")
+        eligibility = FakeEligibilityAgent()
+        port = FakePort()
+        second = ValidationCoordinator(
+            db_path=self.path, agent=FakeAgent(), reproduction=port,
+            policy_provider=lambda endpoint, method: self.policy,
+            eligibility_agent=eligibility, scope_source=scope,
+        ).run("scan")
+        self.assertEqual(second.case_ids, first.case_ids)
+        self.assertEqual(second.summary["statuses"], {"CONFIRMED": 1})
+        self.assertEqual(len(port.calls), 5)
+        self.assertEqual(eligibility.requests[0].scope_sha256, scope.scope_sha256)
+        with db.connect(self.path) as conn:
+            self.assertEqual(conn.execute("SELECT scope_sha256 FROM validation_cases").fetchone()[0], scope.scope_sha256)
+            self.assertEqual(set(conn.execute("SELECT stage_run_id,scope_sha256 FROM validation_eligibility_assessments")),
+                             {(first.stage_run_id, self.scope.scope_sha256), (second.stage_run_id, scope.scope_sha256)})
+
+    def test_invalid_eligibility_binding_grounding_and_status_all_fail_closed(self):
+        test = self
+        for mutation in (
+            {"scope_quote": "This quote is invented."}, {"case_id": "foreign"},
+            {"phase": "post_replay"}, {"scope_sha256": "f" * 64},
+            {"evidence_refs": ("foreign",)}, {"status": "CONFIRMED"},
+            {"replay_allowed": False},
+        ):
+            with self.subTest(mutation=mutation):
+                class InvalidAgent(FakeEligibilityAgent):
+                    def assess(self, request, correction=None):
+                        return super().assess(request, correction).model_dump() | mutation
+
+                port = FakePort()
+                eligibility = InvalidAgent()
+                result = ValidationCoordinator(
+                    db_path=test.path, agent=FakeAgent(), reproduction=port,
+                    policy_provider=lambda endpoint, method: test.policy,
+                    eligibility_agent=eligibility,
+                ).run("scan")
+                test.assertEqual(result.summary["statuses"], {"INCONCLUSIVE": 1})
+                test.assertEqual(port.calls, [])
+                test.assertEqual(len(eligibility.requests), 2)
+
+    def test_eligibility_unavailable_is_persisted_unknown_before_adapter_check(self):
+        class UnavailableAgent(FakeEligibilityAgent):
+            def assess(self, request, correction=None):
+                raise RuntimeError("unavailable")
+
+        result = ValidationCoordinator(
+            db_path=self.path, agent=FakeAgent(), reproduction=HttpReproductionPort(),
+            policy_provider=lambda endpoint, method: self.policy,
+            eligibility_agent=UnavailableAgent(),
+        ).run("scan")
+        self.assertEqual(result.summary["statuses"], {"INCONCLUSIVE": 1})
+        with db.connect(self.path) as conn:
+            self.assertEqual(json.loads(conn.execute("SELECT decision_json FROM validation_cases").fetchone()[0])["reason"],
+                             "eligibility_unknown")
+            self.assertEqual(conn.execute("SELECT eligibility FROM validation_eligibility_assessments").fetchone()[0], "UNKNOWN")
+
+    def test_long_accepted_description_reaches_durable_eligibility_without_truncation(self):
+        self.eligibility.eligibility = "INELIGIBLE"
+        for length in (4001, 8000, 20_000):
+            with self.subTest(length=length):
+                description = "x" * (length - 20) + "Policy impact at end"
+                with db.connect(self.path) as conn:
+                    conn.execute("UPDATE findings SET description=? WHERE finding_id='finding'", (description,))
+                    conn.commit()
+                port = FakePort()
+                result = ValidationCoordinator(
+                    db_path=self.path, agent=FakeAgent(), reproduction=port,
+                    policy_provider=lambda endpoint, method: self.policy,
+                ).run("scan")
+                self.assertEqual(result.summary["statuses"], {"OUT_OF_SCOPE": 1})
+                self.assertEqual(port.calls, [])
+                self.assertEqual(self.eligibility.requests[-1].claimed_impact, description)
+                with db.connect(self.path) as conn:
+                    self.assertEqual(conn.execute(
+                        "SELECT eligibility FROM validation_eligibility_assessments WHERE stage_run_id=?",
+                        (result.stage_run_id,),
+                    ).fetchone()[0], "INELIGIBLE")
+
+    def test_real_structured_schema_errors_retry_once_then_persist_unknown(self):
+        from aidast.agents.main import CodexMainAgent
+        from test_validation_eligibility_runner import structured_output_cli
+
+        # setUp patches the default factory; exercise the actual runner class here.
+        from aidast.validation import CodexEligibilityRunner as RealEligibilityRunner
+        port = FakePort()
+        with structured_output_cli(["not-json", "{}"]) as prompts:
+            result = ValidationCoordinator(
+                db_path=self.path, agent=FakeAgent(), reproduction=port,
+                eligibility_agent=RealEligibilityRunner(CodexMainAgent()),
+                policy_provider=lambda endpoint, method: self.policy,
+            ).run("scan")
+        self.assertEqual(len(prompts), 2)
+        self.assertNotIn("<correction_request>", prompts[0])
+        self.assertIn("<correction_request>", prompts[1])
+        self.assertEqual(port.calls, [])
+        self.assertEqual(result.summary["statuses"], {"INCONCLUSIVE": 1})
+        with db.connect(self.path) as conn:
+            self.assertEqual(conn.execute("SELECT eligibility,replay_allowed FROM validation_eligibility_assessments").fetchall(),
+                             [("UNKNOWN", 0)])
+
+    def test_real_structured_schema_error_can_be_corrected_before_replay(self):
+        from aidast.agents.main import CodexMainAgent
+        from aidast.validation import CodexEligibilityRunner as RealEligibilityRunner
+        from test_validation_eligibility_runner import structured_output_cli
+
+        def corrected(prompt):
+            request = json.loads(prompt.split("<candidate_context_json>\n", 1)[1].split(
+                "\n</candidate_context_json>", 1,
+            )[0])
+            return EligibilityAssessment(
+                case_id=request["case_id"], scope_sha256=request["scope_sha256"],
+                phase="preflight", eligibility="ELIGIBLE", matched_rule="Fixture policy rule",
+                scope_quote=self.scope.scope_markdown, required_impact=(),
+                replay_allowed=True, reason="Corrected policy result.", evidence_refs=(),
+            ).model_dump_json()
+
+        port = FakePort()
+        with structured_output_cli(["{}", corrected]) as prompts:
+            result = ValidationCoordinator(
+                db_path=self.path, agent=FakeAgent(), reproduction=port,
+                eligibility_agent=RealEligibilityRunner(CodexMainAgent()),
+                policy_provider=lambda endpoint, method: self.policy,
+            ).run("scan")
+        self.assertEqual(len(prompts), 2)
+        self.assertIn("<correction_request>", prompts[1])
+        self.assertEqual(len(port.calls), 5)
+        self.assertEqual(result.summary["statuses"], {"CONFIRMED": 1})
+        with db.connect(self.path) as conn:
+            self.assertEqual(conn.execute("SELECT eligibility FROM validation_eligibility_assessments").fetchall(),
+                             [("ELIGIBLE",)])
 
     def test_candidate_gate_carries_the_verified_persisted_reproduction_digest(self):
         with db.connect(self.path) as conn:
@@ -586,7 +856,7 @@ class ValidationCoordinatorTests(unittest.TestCase):
             policy_provider=lambda endpoint, method: self.policy,
         ).run("scan")
         self.assertEqual(result.status, "completed")
-        self.assertEqual(result.validation_agent_ids, ("validation_agent_fixture",))
+        self.assertEqual(result.validation_agent_ids, ("eligibility_agent_fixture", "validation_agent_fixture"))
         self.assertEqual([kind for kind, _, _ in port.calls],
                          ["positive_control", "negative_control", "target", "target", "target"])
         with db.connect(self.path) as conn:
@@ -601,7 +871,7 @@ class ValidationCoordinatorTests(unittest.TestCase):
             policy_provider=lambda endpoint, method: self.policy,
         ).run("scan")
         self.assertEqual(result.status, "completed")
-        self.assertEqual(result.validation_agent_ids, ())
+        self.assertEqual(result.validation_agent_ids, ("eligibility_agent_fixture",))
         with db.connect(self.path) as conn:
             case = conn.execute(
                 "SELECT current_status,decision_json FROM validation_cases"
@@ -628,7 +898,7 @@ class ValidationCoordinatorTests(unittest.TestCase):
             ).run("scan")
 
         factory.assert_called_once_with()
-        self.assertEqual(result.validation_agent_ids, ("validation_agent_fixture",))
+        self.assertEqual(result.validation_agent_ids, ("eligibility_agent_fixture", "validation_agent_fixture"))
         self.assertEqual(len(port.calls), 5)
 
     def test_integrity_failure_sends_no_requests_and_finishes_inconclusive(self):
@@ -1071,17 +1341,147 @@ class ValidationCoordinatorTests(unittest.TestCase):
             stage_id = conn.execute(
                 "SELECT stage_run_id FROM stage_runs WHERE stage='validation'"
             ).fetchone()[0]
+            # Resume must use the case snapshot even if a newer scan binding exists.
+            ValidationRepository(conn).bind_scope("scan", ScopePolicySource.from_text(
+                "A new unrelated scope.", "missing-new-scope.md",
+            ))
+        self.eligibility.invalid = True
         resumed_port = FakePort()
         result = ValidationCoordinator(
             db_path=self.path, agent=FakeAgent(), reproduction=resumed_port,
             policy_provider=lambda endpoint, method: self.policy,
+            scope_source=ScopePolicySource.from_text("Ignored resume scope.", "missing.md"),
         ).resume(stage_id)
         self.assertEqual(result.status, "completed")
         self.assertEqual(resumed_port.calls, [])
+        self.assertEqual(len(self.eligibility.requests), 1)
+        self.assertEqual(result.validation_agent_ids, ("validation_agent_fixture",))
         with db.connect(self.path) as conn:
             self.assertEqual(conn.execute(
                 "SELECT count(*) FROM validation_attempts"
             ).fetchone()[0], 5)
+
+    def interrupt_after_preflight(self):
+        port = FakePort()
+        with patch.object(ValidationRepository, "stage_blind_case", side_effect=RuntimeError("interrupted")):
+            with self.assertRaises(ValidationCoordinatorError):
+                ValidationCoordinator(
+                    db_path=self.path, agent=FakeAgent(), reproduction=port,
+                    policy_provider=lambda endpoint, method: self.policy,
+                ).run("scan")
+        self.assertEqual(port.calls, [])
+        with db.connect(self.path) as conn:
+            return conn.execute("SELECT stage_run_id FROM stage_runs WHERE stage='validation'").fetchone()[0]
+
+    def test_resume_uses_embedded_scope_after_external_file_changes(self):
+        external = self.path.parent / "Scope.md"
+        external.write_text(self.scope.scope_markdown, encoding="utf-8")
+        with db.connect(self.path) as conn:
+            ValidationRepository(conn).bind_scope("scan", ScopePolicySource.from_text(
+                external.read_text(encoding="utf-8"), str(external),
+            ))
+        stage = self.interrupt_after_preflight()
+        external.write_text("changed outside database", encoding="utf-8")
+        result = ValidationCoordinator(
+            db_path=self.path, agent=FakeAgent(), reproduction=FakePort(),
+            policy_provider=lambda endpoint, method: self.policy,
+        ).resume(stage)
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(len(self.eligibility.requests), 1)
+        with db.connect(self.path) as conn:
+            self.assertEqual(conn.execute("SELECT scope_sha256 FROM validation_cases").fetchone()[0],
+                             self.scope.scope_sha256)
+
+    def test_resume_rejects_case_assessment_scope_mismatch_before_network(self):
+        stage = self.interrupt_after_preflight()
+        with db.connect(self.path) as conn:
+            replacement = ScopePolicySource.from_text("Other valid policy", "other.md")
+            ValidationRepository(conn).bind_scope("scan", replacement)
+            conn.execute("UPDATE validation_cases SET scope_sha256=?", (replacement.scope_sha256,))
+            conn.commit()
+        port = FakePort()
+        with self.assertRaisesRegex(ValidationCoordinatorError, "scope digest mismatch"):
+            ValidationCoordinator(
+                db_path=self.path, agent=FakeAgent(), reproduction=port,
+                policy_provider=lambda endpoint, method: self.policy,
+            ).resume(stage)
+        self.assertEqual(port.calls, [])
+        self.assertEqual(len(self.eligibility.requests), 1)
+
+    def test_resume_rejects_snapshot_content_digest_mismatch_before_network(self):
+        stage = self.interrupt_after_preflight()
+        with db.connect(self.path) as conn:
+            conn.execute("DROP TRIGGER scope_policy_snapshots_no_update")
+            conn.execute("UPDATE scope_policy_snapshots SET scope_markdown='corrupt'")
+            conn.commit()
+        port = FakePort()
+        with self.assertRaisesRegex(ValidationCoordinatorError, "scope snapshot digest mismatch"):
+            ValidationCoordinator(
+                db_path=self.path, agent=FakeAgent(), reproduction=port,
+                policy_provider=lambda endpoint, method: self.policy,
+            ).resume(stage)
+        self.assertEqual(port.calls, [])
+
+    def test_failed_eligibility_insert_cannot_authorize_replay_on_resume(self):
+        port = FakePort()
+        with db.connect(self.path) as conn:
+            conn.execute("""CREATE TRIGGER reject_eligibility_insert
+                BEFORE INSERT ON validation_eligibility_assessments
+                BEGIN SELECT RAISE(ABORT, 'fixture interrupted insert'); END""")
+            conn.commit()
+        coordinator = ValidationCoordinator(
+            db_path=self.path, agent=FakeAgent(), reproduction=port,
+            policy_provider=lambda endpoint, method: self.policy,
+        )
+        with self.assertRaises(ValidationCoordinatorError):
+            coordinator.run("scan")
+        self.assertEqual(port.calls, [])
+        with db.connect(self.path) as conn:
+            stage = conn.execute("SELECT stage_run_id FROM stage_runs WHERE stage='validation'").fetchone()[0]
+            self.assertEqual(conn.execute("SELECT count(*) FROM validation_eligibility_assessments").fetchone()[0], 0)
+            conn.execute("DROP TRIGGER reject_eligibility_insert")
+            conn.commit()
+        self.eligibility.eligibility = "UNKNOWN"
+        result = coordinator.resume(stage)
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(port.calls, [])
+        self.assertEqual(len(self.eligibility.requests), 2)
+        with db.connect(self.path) as conn:
+            self.assertEqual(conn.execute("SELECT current_status FROM validation_cases").fetchone()[0], "INCONCLUSIVE")
+
+    def test_resume_rejects_assessment_input_digest_mismatch_before_network(self):
+        stage = self.interrupt_after_preflight()
+        with db.connect(self.path) as conn:
+            conn.execute("DROP TRIGGER validation_eligibility_assessments_no_update")
+            conn.execute("UPDATE validation_eligibility_assessments SET input_sha256=?", ("f" * 64,))
+            conn.commit()
+        port = FakePort()
+        with self.assertRaisesRegex(ValidationCoordinatorError, "eligibility input digest mismatch"):
+            ValidationCoordinator(
+                db_path=self.path, agent=FakeAgent(), reproduction=port,
+                policy_provider=lambda endpoint, method: self.policy,
+            ).resume(stage)
+        self.assertEqual(port.calls, [])
+        self.assertEqual(len(self.eligibility.requests), 1)
+
+    def test_legacy_unbound_case_status_is_readable_but_resume_fails_closed(self):
+        from aidast.validation import shared_validation_status
+        stage = self.interrupt_after_preflight()
+        with db.connect(self.path) as conn:
+            conn.execute("UPDATE validation_cases SET scope_sha256=NULL")
+            conn.commit()
+            case_id = conn.execute("SELECT case_id FROM validation_cases").fetchone()[0]
+        status = shared_validation_status(self.path, case_id=case_id)
+        self.assertIsNone(status["case"]["scope_sha256"])
+        self.assertEqual(status["scope_eligibility"], {
+            "scope_sha256": None, "phase": None, "eligibility": None,
+            "assessment_id": None, "matched_rule": None,
+        })
+        port = FakePort()
+        with self.assertRaisesRegex(ValidationCoordinatorError, "scope_binding_missing"):
+            ValidationCoordinator(db_path=self.path, agent=FakeAgent(), reproduction=port,
+                                  policy_provider=lambda endpoint, method: self.policy).resume(stage)
+        self.assertEqual(port.calls, [])
 
     def test_resume_does_not_redispatch_an_outcome_unknown_attempt(self):
         with self.assertRaises(ValidationCoordinatorError):
@@ -1469,6 +1869,317 @@ class ValidationCoordinatorTests(unittest.TestCase):
                 table: tuple(conn.execute(f"SELECT * FROM {table} ORDER BY rowid"))
                 for table in chaining_tables
             }, chaining_before)
+
+
+class ConditionalEligibilityTests(unittest.TestCase):
+    setUp = ValidationCoordinatorTests.setUp
+
+    def test_conditional_blind_unknown_cannot_be_policy_excluded(self):
+        self.assert_conditional_uncertainty("environment_topology")
+
+    def test_conditional_unknown_without_blocker_cannot_be_policy_excluded(self):
+        self.assert_conditional_uncertainty(None)
+
+    def test_conditional_setup_blocker_cannot_be_policy_excluded(self):
+        self.assert_conditional_uncertainty("state_setup")
+
+    def assert_conditional_uncertainty(self, blocker):
+        class UnknownAgent(FakeAgent):
+            def assess(self, *args, **kwargs):
+                result = super().assess(*args, **kwargs)
+                return result | {"reproduced": None, "blocker_axis": blocker,
+                                 "blocker_reason": "Environment evidence is unavailable." if blocker else None}
+
+        result = self.run_conditional("INELIGIBLE", agent=UnknownAgent())
+        self.assertEqual(result.summary["statuses"], {"INCONCLUSIVE": 1})
+        self.assertEqual(self.decision["reason"], "conditional_evidence_unavailable")
+        self.assertEqual(self.phases, ["preflight"])
+
+    def test_conditional_failed_control_cannot_be_policy_excluded(self):
+        class FailedControlPort(FakePort):
+            def execute(self, *args, **kwargs):
+                result = super().execute(*args, **kwargs)
+                if kwargs["attempt_kind"] == "positive_control":
+                    return result.model_copy(update={"outcome": "not_observed", "signal_observed": False})
+                return result
+
+        result = self.run_conditional("INELIGIBLE", port=FailedControlPort())
+        self.assertEqual(result.summary["statuses"], {"INCONCLUSIVE": 1})
+        self.assertEqual(self.decision["reason"], "conditional_controls_failed")
+        self.assertEqual(self.phases, ["preflight"])
+
+    def test_conditional_unresolved_auth_blocker_cannot_be_policy_excluded(self):
+        class AuthAgent(FakeAgent):
+            def assess(self, *args, **kwargs):
+                result = super().assess(*args, **kwargs)
+                return result | {"reproduced": None, "blocker_axis": "identity_auth",
+                                 "blocker_reason": "Required identity is unavailable."}
+
+        result = self.run_conditional("INELIGIBLE", agent=AuthAgent())
+        self.assertEqual(result.summary["statuses"], {"INCONCLUSIVE": 1})
+        self.assertEqual(self.decision["reason"], "conditional_evidence_unavailable")
+        self.assertEqual(self.phases, ["preflight"])
+
+    def test_post_receives_persisted_conditions_without_blind_contamination(self):
+        class CapturingAgent(FakeAgent):
+            def assess(self, blind_case, *args, **kwargs):
+                self.blind_case = blind_case
+                return super().assess(blind_case, *args, **kwargs)
+
+        agent = CapturingAgent()
+        self.run_conditional(agent=agent)
+        post = self.conditional.requests[-1].model_dump()
+        self.assertIn("conditional_context", post)
+        context = post["conditional_context"]
+        with db.connect(self.path) as conn:
+            row = conn.execute("SELECT assessment_id,output_sha256,required_impact_json FROM validation_eligibility_assessments WHERE phase='preflight'").fetchone()
+        self.assertEqual(context["assessment_id"], row[0])
+        self.assertEqual(context["output_sha256"], row[1])
+        self.assertEqual(list(context["required_impact"]), json.loads(row[2]))
+        self.assertNotIn("conditional_context", agent.blind_case)
+        self.assertNotIn("Additional account impact", json.dumps(agent.blind_case))
+
+    def test_post_rejects_changed_conditions_or_preflight_provenance_and_cannot_reuse(self):
+        from aidast.validation import canonical_sha256
+        from aidast.validation.contracts.eligibility import EligibilityRequest
+        from aidast.validation.persistence.repository import ValidationRepositoryError
+
+        self.run_conditional()
+        request = self.conditional.requests[-1]
+        with db.connect(self.path) as conn:
+            repo = ValidationRepository(conn)
+            stage = conn.execute("SELECT latest_stage_run_id FROM validation_cases").fetchone()[0]
+            repo.validate_conditional_context(request, stage_run_id=stage)
+            self.assertIsNotNone(repo.find_eligibility(request.case_id, stage, "post_replay",
+                                                     canonical_sha256(request.model_dump())))
+            for change in ({"assessment_id": "foreign"}, {"output_sha256": "d" * 64},
+                           {"required_impact": ({"condition": "Different impact", "evidence_needed": "Other proof"},)}):
+                with self.subTest(change=change):
+                    document = request.model_dump()
+                    document["conditional_context"].update(change)
+                    changed = EligibilityRequest.model_validate(document)
+                    with self.assertRaisesRegex(ValidationRepositoryError, "persisted preflight"):
+                        repo.validate_conditional_context(changed, stage_run_id=stage)
+                    self.assertIsNone(repo.find_eligibility(request.case_id, stage, "post_replay",
+                                                          canonical_sha256(changed.model_dump())))
+
+    def test_rejected_active_run_preserves_scope_and_materialized_case(self):
+        with db.connect(self.path) as conn:
+            stage = start_stage_run(conn, scan_id="scan", stage="validation")
+            repo = ValidationRepository(conn)
+            repo.create_case(scan_id="scan", stage_run_id=stage, target_kind="finding", target_id="finding")
+            tables = ("validation_scope_bindings", "scope_policy_snapshots", "validation_cases", "stage_runs", "audit_events")
+            before = {table: tuple(conn.execute(f"SELECT * FROM {table} ORDER BY rowid")) for table in tables}
+        replacement = ScopePolicySource.from_text("Different approved policy", "replacement.md", "e" * 64)
+        port = FakePort()
+        coordinator = ValidationCoordinator(db_path=self.path, agent=FakeAgent(), reproduction=port,
+            policy_provider=lambda endpoint, method: self.policy, scope_source=replacement)
+        with self.assertRaises((sqlite3.IntegrityError, ValidationCoordinatorError)):
+            coordinator.run("scan")
+        with db.connect(self.path) as conn:
+            after = {table: tuple(conn.execute(f"SELECT * FROM {table} ORDER BY rowid")) for table in tables}
+        self.assertEqual(after, before)
+        self.assertEqual(port.calls, [])
+
+    def test_scope_binding_failure_rolls_back_stage_acquisition(self):
+        source = self.scope.model_copy(update={"scope_sha256": "e" * 64})
+        coordinator = ValidationCoordinator(db_path=self.path, agent=FakeAgent(), reproduction=FakePort(),
+            policy_provider=lambda endpoint, method: self.policy, scope_source=source)
+        with self.assertRaises(ValueError):
+            coordinator.run("scan")
+        with db.connect(self.path) as conn:
+            self.assertEqual(conn.execute("SELECT count(*) FROM stage_runs WHERE stage='validation'").fetchone()[0], 0)
+
+    def test_scope_validation_failure_rolls_back_binding_and_stage_together(self):
+        tables = ("validation_scope_bindings", "scope_policy_snapshots", "stage_runs", "audit_events")
+        with db.connect(self.path) as conn:
+            before = {table: tuple(conn.execute(f"SELECT * FROM {table} ORDER BY rowid")) for table in tables}
+        coordinator = ValidationCoordinator(db_path=self.path, agent=FakeAgent(), reproduction=FakePort(),
+            policy_provider=lambda endpoint, method: self.policy,
+            scope_source=ScopePolicySource.from_text("Replacement policy", "replacement.md"))
+        with patch.object(coordinator, "_load_scope", side_effect=ValidationCoordinatorError("scope unavailable")):
+            with self.assertRaisesRegex(ValidationCoordinatorError, "scope unavailable"):
+                coordinator.run("scan")
+        with db.connect(self.path) as conn:
+            self.assertEqual({table: tuple(conn.execute(f"SELECT * FROM {table} ORDER BY rowid"))
+                              for table in tables}, before)
+
+    def test_overlapping_scope_runs_cannot_mutate_running_case(self):
+        from concurrent.futures import ThreadPoolExecutor
+        from threading import Event
+
+        entered, release = Event(), Event()
+
+        class PausedEligibility(FakeEligibilityAgent):
+            def assess(self, *args, **kwargs):
+                entered.set()
+                if not release.wait(10):
+                    raise AssertionError("test did not release the active run")
+                return super().assess(*args, **kwargs)
+
+        winner = ValidationCoordinator(db_path=self.path, agent=FakeAgent(), reproduction=FakePort(),
+            policy_provider=lambda endpoint, method: self.policy, eligibility_agent=PausedEligibility(),
+            scope_source=self.scope)
+        loser = ValidationCoordinator(db_path=self.path, agent=FakeAgent(), reproduction=FakePort(),
+            policy_provider=lambda endpoint, method: self.policy,
+            scope_source=ScopePolicySource.from_text("Concurrent replacement", "concurrent.md", "c" * 64))
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(winner.run, "scan")
+            try:
+                self.assertTrue(entered.wait(10))
+                tables = ("validation_scope_bindings", "scope_policy_snapshots", "validation_cases", "stage_runs", "audit_events")
+                with db.connect(self.path) as conn:
+                    before = {table: tuple(conn.execute(f"SELECT * FROM {table} ORDER BY rowid")) for table in tables}
+                with self.assertRaises((sqlite3.IntegrityError, ValidationCoordinatorError)):
+                    loser.run("scan")
+                with db.connect(self.path) as conn:
+                    self.assertEqual({table: tuple(conn.execute(f"SELECT * FROM {table} ORDER BY rowid"))
+                                      for table in tables}, before)
+            finally:
+                release.set()
+            self.assertEqual(future.result(timeout=10).summary["statuses"], {"CONFIRMED": 1})
+
+    def run_conditional(self, post="ELIGIBLE", *, agent=None, port=None, mutation=None):
+        self.conditional = ConditionalEligibilityAgent(post, mutation)
+        self.port = port or FakePort()
+        coordinator = ValidationCoordinator(
+            db_path=self.path, agent=agent or FakeAgent(), reproduction=self.port,
+            policy_provider=lambda endpoint, method: self.policy,
+            eligibility_agent=self.conditional,
+        )
+        result = coordinator.run("scan")
+        with db.connect(self.path) as conn:
+            self.decision = json.loads(conn.execute("SELECT decision_json FROM validation_cases").fetchone()[0])
+            self.phases = [row[0] for row in conn.execute(
+                "SELECT phase FROM validation_eligibility_assessments ORDER BY rowid")]
+        return result
+
+    def test_conditional_without_required_impact_becomes_out_of_scope(self):
+        result = self.run_conditional("INELIGIBLE")
+        self.assertEqual(result.summary["statuses"], {"OUT_OF_SCOPE": 1})
+        self.assertEqual(self.decision["reason"], "conditional_impact_absent")
+        self.assertEqual(self.phases, ["preflight", "post_replay"])
+        with db.connect(self.path) as conn:
+            post_id = conn.execute("SELECT assessment_id FROM validation_eligibility_assessments WHERE phase='post_replay'").fetchone()[0]
+            self.assertEqual(self.decision["eligibility_assessment_id"], post_id)
+            self.assertEqual(set(self.decision["evidence_ids"]),
+                             {row[0] for row in conn.execute("SELECT evidence_id FROM validation_evidence")})
+            self.assertEqual(conn.execute("SELECT impact_score FROM validation_cases").fetchone()[0], None)
+
+    def test_conditional_with_qualifying_impact_uses_existing_decision_path(self):
+        result = self.run_conditional()
+        self.assertEqual(result.summary["statuses"], {"CONFIRMED": 1})
+        self.assertEqual(self.phases, ["preflight", "post_replay"])
+        self.assertEqual(len(self.port.calls), 5)
+
+    def test_conditional_eligible_preserves_underpowered_technical_decision(self):
+        result = self.run_conditional(agent=UnderpoweredAgent())
+        self.assertEqual(result.summary["statuses"], {"UNDERPOWERED": 1})
+        self.assertEqual(self.phases, ["preflight", "post_replay"])
+
+    def test_conditional_unresolved_never_reaches_decision_engine(self):
+        with patch("aidast.validation.core.decision.DecisionEngine.decide",
+                   side_effect=AssertionError("unresolved policy reached technical decision")):
+            result = self.run_conditional("CONDITIONAL")
+        self.assertEqual(result.summary["statuses"], {"INCONCLUSIVE": 1})
+        self.assertEqual(self.decision["reason"], "conditional_impact_unresolved")
+
+    def test_conditional_unknown_never_reaches_decision_engine(self):
+        with patch("aidast.validation.core.decision.DecisionEngine.decide",
+                   side_effect=AssertionError("unknown policy reached technical decision")):
+            result = self.run_conditional("UNKNOWN")
+        self.assertEqual(result.summary["statuses"], {"INCONCLUSIVE": 1})
+        self.assertEqual(self.decision["reason"], "eligibility_post_replay_unknown")
+
+    def test_conditional_foreign_post_evidence_fails_closed(self):
+        result = self.run_conditional(mutation={"evidence_refs": ("foreign-evidence",)})
+        self.assertEqual(result.summary["statuses"], {"INCONCLUSIVE": 1})
+        self.assertEqual(self.decision["reason"], "eligibility_post_replay_unknown")
+        self.assertEqual([request.phase for request in self.conditional.requests],
+                         ["preflight", "post_replay", "post_replay"])
+        self.assertEqual(self.phases, ["preflight", "post_replay"])
+
+    def test_conditional_unavailable_post_is_durable_unknown(self):
+        class UnavailablePost(ConditionalEligibilityAgent):
+            def assess(self, request, correction=None):
+                if request.phase == "post_replay":
+                    raise RuntimeError("fixture backend unavailable")
+                return super().assess(request, correction)
+
+        coordinator = ValidationCoordinator(
+            db_path=self.path, agent=FakeAgent(), reproduction=FakePort(),
+            policy_provider=lambda endpoint, method: self.policy,
+            eligibility_agent=UnavailablePost(),
+        )
+        result = coordinator.run("scan")
+        self.assertEqual(result.summary["statuses"], {"INCONCLUSIVE": 1})
+        with db.connect(self.path) as conn:
+            self.assertEqual(conn.execute("SELECT eligibility FROM validation_eligibility_assessments WHERE phase='post_replay'").fetchone()[0], "UNKNOWN")
+
+    def test_conditional_resume_reuses_post_assessment_without_more_replay(self):
+        eligibility = ConditionalEligibilityAgent()
+        agent, port = CountingAgent(), FakePort()
+        coordinator = ValidationCoordinator(
+            db_path=self.path, agent=agent, reproduction=port,
+            policy_provider=lambda endpoint, method: self.policy, eligibility_agent=eligibility,
+        )
+        with patch.object(coordinator.engine, "decide", side_effect=RuntimeError("interrupted after post assessment")):
+            with self.assertRaisesRegex(ValidationCoordinatorError, "interrupted after post assessment"):
+                coordinator.run("scan")
+        with db.connect(self.path) as conn:
+            stage = conn.execute("SELECT latest_stage_run_id FROM validation_cases").fetchone()[0]
+        result = coordinator.resume(stage)
+        self.assertTrue(result.summary["resumed"])
+        self.assertEqual(len(port.calls), 5)
+        self.assertEqual((agent.assess_calls, agent.compare_calls), (1, 1))
+        self.assertEqual([request.phase for request in eligibility.requests], ["preflight", "post_replay"])
+        with db.connect(self.path) as conn:
+            self.assertEqual(conn.execute("SELECT current_status FROM validation_cases").fetchone()[0], "CONFIRMED")
+
+    def test_conditional_resume_preserves_uncited_prerequisite_development_evidence(self):
+        class CountingBlockerAgent(BlockerAgent):
+            def __init__(self):
+                self.assess_calls = 0
+                self.compare_calls = 0
+
+            def assess(self, blind_case, observations, correction=None):
+                self.assess_calls += 1
+                return super().assess(blind_case, observations, correction)
+
+            def compare(self, claim, assessment, correction=None):
+                self.compare_calls += 1
+                return super().compare(claim, assessment, correction)
+
+        eligibility = ConditionalEligibilityAgent()
+        agent, port = CountingBlockerAgent(), BlockThenPassPort()
+        coordinator = ValidationCoordinator(
+            db_path=self.path, agent=agent, reproduction=port,
+            policy_provider=lambda endpoint, method: self.policy, eligibility_agent=eligibility,
+            prerequisite_resolver=SuccessfulPrerequisite(),
+        )
+        with patch.object(coordinator.engine, "decide", side_effect=RuntimeError("interrupted after development post")):
+            with self.assertRaisesRegex(ValidationCoordinatorError, "interrupted after development post"):
+                coordinator.run("scan")
+        original_refs = eligibility.requests[-1].evidence_refs
+        self.assertEqual(len(original_refs), 8)
+        with db.connect(self.path) as conn:
+            stage = conn.execute("SELECT latest_stage_run_id FROM validation_cases").fetchone()[0]
+            development = conn.execute("SELECT evidence_id FROM validation_evidence WHERE evidence_kind='development_observation'").fetchone()[0]
+            frozen = json.loads(conn.execute("SELECT details_json FROM validation_evidence WHERE evidence_kind='blind_assessment'").fetchone()[0])
+        self.assertIn(development, original_refs)
+        self.assertNotIn(development, frozen["evidence_ids"])
+
+        coordinator.resume(stage)
+
+        self.assertEqual(len(port.calls), 10)
+        self.assertEqual((agent.assess_calls, agent.compare_calls), (2, 1))
+        self.assertEqual([request.phase for request in eligibility.requests], ["preflight", "post_replay"])
+        with db.connect(self.path) as conn:
+            status, decision = conn.execute("SELECT current_status,decision_json FROM validation_cases").fetchone()
+            self.assertEqual(status, "CONFIRMED")
+            self.assertEqual(set(json.loads(decision)["evidence_ids"]), set(original_refs))
+            self.assertEqual(conn.execute("SELECT count(*) FROM validation_eligibility_assessments WHERE phase='post_replay'").fetchone()[0], 1)
+            self.assertEqual(conn.execute("SELECT count(*) FROM validation_development_actions").fetchone()[0], 1)
 
 
 class ValidationOperationLedgerTests(unittest.TestCase):

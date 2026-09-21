@@ -2,17 +2,26 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
-from contextlib import closing
+from contextlib import closing, nullcontext
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, get_args
 
 from aidast.recon.db import new_id, now
 
+from ..contracts.eligibility import (
+    EligibilityAssessment,
+    EligibilityRequest,
+    ScopePolicySource,
+)
+from ..contracts.models import (
+    BlockerAxis, SignalType, ValidationError, TerminalStatus, canonical_json, canonical_sha256,
+)
 from ..core.decision import evaluate_impact
+from ..core.scope_eligibility import validate_grounding
 from .evidence_policy import sanitize_metadata
-from ..contracts.models import ValidationError, TerminalStatus, canonical_json, canonical_sha256
 
 
 class ValidationRepositoryError(ValueError):
@@ -35,8 +44,294 @@ class ValidationRepository:
             raise ValidationRepositoryError("a running Validation stage is required")
         return row
 
+    def bind_scope(self, scan_id: str, source: ScopePolicySource, *, commit: bool = True) -> str:
+        digest = hashlib.sha256(source.scope_markdown.encode("utf-8")).hexdigest()
+        if digest != source.scope_sha256:
+            raise ValidationRepositoryError("scope snapshot digest does not match Markdown")
+        with self.conn if commit else nullcontext():
+            self.conn.execute(
+                """INSERT INTO scope_policy_snapshots(scope_sha256,scope_markdown)
+                   VALUES (?,?) ON CONFLICT(scope_sha256) DO NOTHING""",
+                (source.scope_sha256, source.scope_markdown),
+            )
+            row = self.conn.execute(
+                "SELECT scope_markdown FROM scope_policy_snapshots WHERE scope_sha256=?",
+                (source.scope_sha256,),
+            ).fetchone()
+            if row is None or row[0] != source.scope_markdown:
+                raise ValidationRepositoryError("scope snapshot digest collision")
+            self.conn.execute(
+                """INSERT INTO validation_scope_bindings
+                   (scan_id,scope_sha256,source_path,approval_digest)
+                   VALUES (?,?,?,?)
+                   ON CONFLICT(scan_id) DO UPDATE SET
+                       scope_sha256=excluded.scope_sha256,
+                       source_path=excluded.source_path,
+                       approval_digest=excluded.approval_digest,
+                       updated_at=CURRENT_TIMESTAMP""",
+                (scan_id, source.scope_sha256, source.source_path, source.approval_digest),
+            )
+        return source.scope_sha256
+
+    def current_scope_sha256(self, scan_id: str) -> str | None:
+        row = self.conn.execute(
+            "SELECT scope_sha256 FROM validation_scope_bindings WHERE scan_id=?",
+            (scan_id,),
+        ).fetchone()
+        return None if row is None else row[0]
+
+    def _resolve_current_scope(self, scan_id: str, scope_sha256: str | None) -> str:
+        current = self.current_scope_sha256(scan_id)
+        if current is None:
+            raise ValidationRepositoryError("scan has no current scope binding")
+        if scope_sha256 is not None and scope_sha256 != current:
+            raise ValidationRepositoryError("scope digest is not the current scope binding")
+        return current
+
+    def record_eligibility(self, request: EligibilityRequest,
+                           assessment: EligibilityAssessment) -> str:
+        if (
+            assessment.case_id != request.case_id
+            or assessment.phase != request.phase
+            or assessment.scope_sha256 != request.scope_sha256
+        ):
+            raise ValidationRepositoryError("eligibility assessment binding mismatch")
+        if not set(assessment.evidence_refs) <= set(request.evidence_refs):
+            raise ValidationRepositoryError("eligibility assessment cites evidence outside its request")
+        identifier = new_id("veligibility")
+        request_document = request.model_dump()
+        assessment_document = assessment.model_dump()
+        with self.conn:
+            case = self.conn.execute(
+                """SELECT scan_id,latest_stage_run_id,target_kind,scope_sha256
+                   FROM validation_cases WHERE case_id=?""",
+                (request.case_id,),
+            ).fetchone()
+            if case is None:
+                raise ValidationRepositoryError("unknown Validation case")
+            stage = self._stage(case[1])
+            if stage[0] != case[0]:
+                raise ValidationRepositoryError("case and stage scan do not match")
+            if case[2] != request.target_kind:
+                raise ValidationRepositoryError("eligibility target kind does not match case")
+            if case[3] != request.scope_sha256:
+                raise ValidationRepositoryError("eligibility scope does not match case scope")
+            snapshot = self.conn.execute(
+                "SELECT scope_markdown FROM scope_policy_snapshots WHERE scope_sha256=?",
+                (request.scope_sha256,),
+            ).fetchone()
+            if snapshot is None or snapshot[0] != request.scope_markdown:
+                raise ValidationRepositoryError("eligibility scope snapshot does not match request")
+            if assessment.scope_quote and assessment.scope_quote not in snapshot[0]:
+                raise ValidationRepositoryError("eligibility scope quote is not grounded")
+            if request.phase == "post_replay":
+                self.validate_conditional_context(request, stage_run_id=case[1])
+                self.eligibility_evidence_summaries(
+                    case_id=request.case_id, stage_run_id=case[1],
+                    evidence_ids=request.evidence_refs,
+                )
+            self.conn.execute(
+                """INSERT INTO validation_eligibility_assessments
+                   (assessment_id,case_id,stage_run_id,phase,scope_sha256,eligibility,
+                    exclusion_kind,matched_rule,scope_quote,required_impact_json,
+                    replay_allowed,reason,evidence_refs_json,input_sha256,output_sha256)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    identifier, request.case_id, case[1], request.phase,
+                    request.scope_sha256, assessment.eligibility,
+                    assessment.exclusion_kind, assessment.matched_rule,
+                    assessment.scope_quote,
+                    canonical_json(assessment_document["required_impact"]),
+                    assessment.replay_allowed, assessment.reason,
+                    canonical_json(assessment_document["evidence_refs"]),
+                    canonical_sha256(request_document),
+                    canonical_sha256(assessment_document),
+                ),
+            )
+        return identifier
+
+    def validate_conditional_context(self, request: EligibilityRequest, *, stage_run_id: str) -> None:
+        """Bind post policy input to the latest durable preflight in this case/run."""
+        context = request.conditional_context
+        row = self.conn.execute(
+            """SELECT assessment_id,output_sha256,required_impact_json,eligibility,scope_sha256
+               FROM validation_eligibility_assessments
+               WHERE case_id=? AND stage_run_id=? AND phase='preflight'
+               ORDER BY rowid DESC LIMIT 1""",
+            (request.case_id, stage_run_id),
+        ).fetchone()
+        if (context is None or row is None or row[0] != context.assessment_id
+                or row[1] != context.output_sha256 or row[3] != "CONDITIONAL"
+                or row[4] != request.scope_sha256
+                or json.loads(row[2]) != [item.model_dump() for item in context.required_impact]):
+            raise ValidationRepositoryError("post-replay conditional context does not match persisted preflight")
+
+    def find_eligibility(self, case_id: str, stage_run_id: str, phase: str,
+                         input_sha256: str) -> dict[str, Any] | None:
+        cursor = self.conn.execute(
+            """SELECT * FROM validation_eligibility_assessments
+               WHERE case_id=? AND stage_run_id=? AND phase=? AND input_sha256=?""",
+            (case_id, stage_run_id, phase, input_sha256),
+        )
+        row = cursor.fetchone()
+        if row is None:
+            return None
+        return dict(zip((column[0] for column in cursor.description), row, strict=True))
+
+    def current_report_eligibility(self, case_id: str) -> dict[str, str]:
+        """Select the current case/stage/scope policy approval, failing closed.
+
+        The append-only table's rowid orders assessments even when their
+        second-resolution timestamps match. A new preflight invalidates older
+        post-replay approvals.
+        """
+        cursor = self.conn.execute(
+            """WITH ranked AS (
+                SELECT a.*,a.rowid AS sequence,
+                       ROW_NUMBER() OVER (PARTITION BY a.phase ORDER BY a.rowid DESC) AS rank
+                FROM validation_eligibility_assessments AS a
+                JOIN validation_cases AS c ON c.case_id=a.case_id
+                WHERE c.case_id=? AND a.stage_run_id=c.latest_stage_run_id
+            ) SELECT r.*,c.scope_sha256 AS current_scope_sha256,s.scope_markdown,
+                     (SELECT json_group_array(e.evidence_id) FROM validation_evidence AS e
+                      WHERE e.case_id=c.case_id AND e.stage_run_id=c.latest_stage_run_id)
+                     AS current_evidence_json
+              FROM ranked AS r
+              JOIN validation_cases AS c ON c.case_id=r.case_id
+              LEFT JOIN scope_policy_snapshots AS s ON s.scope_sha256=r.scope_sha256
+              WHERE r.rank=1""",
+            (case_id,),
+        )
+        columns = tuple(column[0] for column in cursor.description)
+        phases = {row["phase"]: row for row in (
+            dict(zip(columns, values, strict=True)) for values in cursor
+        )}
+        preflight = phases.get("preflight")
+        message = "report requires a current ELIGIBLE scope assessment"
+        if preflight is None:
+            raise ValidationRepositoryError(message)
+        self._validate_report_assessment(preflight)
+        if preflight["eligibility"] not in {"ELIGIBLE", "CONDITIONAL"}:
+            raise ValidationRepositoryError(message)
+        selected = preflight
+        post = phases.get("post_replay")
+        if preflight["eligibility"] == "CONDITIONAL":
+            if (post is None or post["sequence"] <= preflight["sequence"]
+                    or post["eligibility"] != "ELIGIBLE"):
+                raise ValidationRepositoryError("conditional report requires post-replay ELIGIBLE scope assessment")
+            selected = post
+        elif post is not None and post["sequence"] > preflight["sequence"]:
+            if post["eligibility"] != "ELIGIBLE":
+                raise ValidationRepositoryError(message)
+            selected = post
+        if selected is not preflight:
+            self._validate_report_assessment(selected)
+        return {"scope_sha256": selected["scope_sha256"],
+                "eligibility_assessment_id": selected["assessment_id"],
+                "eligibility_output_sha256": selected["output_sha256"]}
+
+    @staticmethod
+    def _validate_report_assessment(stored: dict[str, Any]) -> None:
+        """Revalidate persisted policy content, not just its approval label."""
+        try:
+            if stored["scope_sha256"] != stored["current_scope_sha256"]:
+                raise ValueError("scope does not match the current case")
+            if type(stored["replay_allowed"]) is not int or stored["replay_allowed"] not in (0, 1):
+                raise ValueError("invalid replay permission")
+            assessment = EligibilityAssessment.model_validate_json(canonical_json({
+                key: stored[key] for key in (
+                    "case_id", "scope_sha256", "phase", "eligibility", "exclusion_kind",
+                    "matched_rule", "scope_quote", "reason",
+                )
+            } | {
+                "replay_allowed": bool(stored["replay_allowed"]),
+                "required_impact": json.loads(stored["required_impact_json"]),
+                "evidence_refs": json.loads(stored["evidence_refs_json"]),
+            }))
+            validate_grounding(assessment, stored["scope_markdown"])
+            if canonical_sha256(assessment.model_dump()) != stored["output_sha256"]:
+                raise ValueError("assessment digest mismatch")
+            if not set(assessment.evidence_refs) <= set(json.loads(stored["current_evidence_json"])):
+                raise ValueError("assessment cites evidence outside the current case and stage")
+        except (TypeError, ValueError) as exc:
+            raise ValidationRepositoryError("report requires a valid current ELIGIBLE scope assessment") from exc
+
+    def eligibility_evidence_summaries(
+        self, *, case_id: str, stage_run_id: str, evidence_ids: tuple[str, ...],
+    ) -> tuple[dict[str, Any], ...]:
+        """Read only cited, append-only evidence in the current case and stage."""
+        self._assert_current_case(case_id, stage_run_id)
+        if len(evidence_ids) > 128 or len(evidence_ids) != len(set(evidence_ids)):
+            raise ValidationRepositoryError("invalid eligibility evidence set")
+        cursor = self.conn.execute(
+            """SELECT evidence_id,evidence_kind,content_sha256,content_length,details_json
+               FROM validation_evidence WHERE case_id=? AND stage_run_id=?
+               AND evidence_id IN (%s)""" % (",".join("?" for _ in evidence_ids) or "NULL"),
+            (case_id, stage_run_id, *evidence_ids),
+        )
+        rows = {row[0]: row for row in cursor}
+        if set(rows) != set(evidence_ids):
+            raise ValidationRepositoryError("eligibility cites evidence outside the current case and stage")
+
+        return tuple({
+            "evidence_id": rows[identifier][0], "evidence_kind": rows[identifier][1],
+            "content_sha256": rows[identifier][2], "content_length": rows[identifier][3],
+            "details": self._eligibility_proof_details(
+                rows[identifier][1], json.loads(rows[identifier][4]),
+            ),
+        } for identifier in evidence_ids)
+
+    @staticmethod
+    def _eligibility_proof_details(kind: str, details: Any) -> dict[str, Any]:
+        """Project bounded typed proof; producer text and unknown containers never cross."""
+        if not isinstance(details, dict):
+            return {}
+        proof: dict[str, Any] = {}
+        boolean = {
+            "observation": "signal_observed", "blind_assessment": "reproduced",
+            "development_observation": "succeeded",
+        }.get(kind)
+        if boolean is not None and type(details.get(boolean)) is bool:
+            proof[boolean] = details[boolean]
+        if kind == "observation":
+            status = details.get("response_status")
+            if type(status) is int and 100 <= status <= 599:
+                proof["response_status"] = status
+        elif kind == "blind_assessment":
+            for name in ("impact_boundary", "impact_sensitivity", "impact_actor_requirements"):
+                axis = details.get(name)
+                score = axis.get("score") if isinstance(axis, dict) else None
+                if type(score) is int and 0 <= score <= 3:
+                    proof[name] = {"score": score}
+            blocker = details.get("blocker_axis")
+            if type(blocker) is str and blocker in get_args(BlockerAxis):
+                proof["blocker_axis"] = blocker
+        elif kind == "claim_comparison":
+            alignment = details.get("alignment")
+            if type(alignment) is str and alignment in {"aligned", "conflicting"}:
+                proof["alignment"] = alignment
+        enum_list = {
+            "blind_assessment": ("signal_types", get_args(SignalType)),
+            "claim_comparison": ("conflict_axes", ("vuln_class", "boundary", "sensitivity")),
+        }.get(kind)
+        if enum_list is not None:
+            name, choices = enum_list
+            values = details.get(name)
+            if (isinstance(values, list) and len(values) <= len(choices)
+                    and all(type(value) is str and value in choices for value in values)):
+                proof[name] = values
+        return sanitize_metadata(proof)
+
     def create_case(self, *, scan_id: str, stage_run_id: str, target_kind: str,
-                    target_id: str, case_id: str | None = None) -> str:
+                    target_id: str, scope_sha256: str | None = None,
+                    case_id: str | None = None) -> str:
+        """Create a scope-bound case.
+
+        Omitting scope_sha256 is deprecated compatibility for direct callers;
+        coordinators must always supply the resolved immutable scope digest.
+        Compatibility resolves only an existing scan binding; it never creates
+        a policy or grants eligibility to a legacy unbound case.
+        """
         if target_kind not in {"finding", "chain"}:
             raise ValidationRepositoryError("target kind must be finding or chain")
         identifier = case_id or new_id("vcase")
@@ -50,24 +345,35 @@ class ValidationRepository:
                 f"SELECT 1 FROM {table} WHERE {column}=? AND scan_id=?", (target_id, scan_id)
             ).fetchone() is None:
                 raise ValidationRepositoryError("Validation target does not belong to scan")
+            resolved_scope = self._resolve_current_scope(scan_id, scope_sha256)
             self.conn.execute(
                 """INSERT INTO validation_cases
-                (case_id,scan_id,target_kind,finding_id,chain_id,latest_stage_run_id,processing_phase)
-                VALUES (?,?,?,?,?,?,'queued')""",
+                (case_id,scan_id,target_kind,finding_id,chain_id,latest_stage_run_id,
+                 processing_phase,scope_sha256)
+                VALUES (?,?,?,?,?,?,'queued',?)""",
                 (identifier, scan_id, target_kind, target_id if target_kind == "finding" else None,
-                 target_id if target_kind == "chain" else None, stage_run_id),
+                 target_id if target_kind == "chain" else None, stage_run_id, resolved_scope),
             )
         return identifier
 
-    def begin_revalidation(self, case_id: str, *, stage_run_id: str, expected_version: int) -> int:
+    def begin_revalidation(self, case_id: str, *, stage_run_id: str, expected_version: int,
+                           scope_sha256: str | None = None) -> int:
+        """Bind a new stage and invalidate previous-stage blind cache references.
+
+        Omitting scope_sha256 is deprecated compatibility for direct callers.
+        It resolves only the scan's existing binding, never an implicit policy.
+        Historical evidence and eligibility assessments remain append-only.
+        """
         with self.conn:
             stage = self._stage(stage_run_id)
+            resolved_scope = self._resolve_current_scope(stage[0], scope_sha256)
             cursor = self.conn.execute(
                 """UPDATE validation_cases SET latest_stage_run_id=?,processing_phase='queued',
-                   state_version=state_version+1,updated_at=?
+                   blind_case_sha256=NULL,attack_claim_sha256=NULL,blind_assessment_sha256=NULL,
+                   scope_sha256=?,state_version=state_version+1,updated_at=?
                    WHERE case_id=? AND scan_id=? AND state_version=?
                    AND processing_phase='completed'""",
-                (stage_run_id, now(), case_id, stage[0], expected_version),
+                (stage_run_id, resolved_scope, now(), case_id, stage[0], expected_version),
             )
             if cursor.rowcount != 1:
                 raise ConcurrentValidationUpdate("case changed or is not available for revalidation")
@@ -543,13 +849,16 @@ def shared_validation_status(database: Path, *, scan_id: str | None = None,
                     ORDER BY ordinal""", (case_id, case["decision_stage_run_id"]),
                 ).fetchall() if case["current_status"] == "UNDERPOWERED" else []
                 case["impact_hypotheses"] = [_json_row(item) for item in hypotheses]
-                return {"database": str(path), "case": case}
+                return {"database": str(path), "case": case,
+                        "scope_eligibility": _scope_eligibility_status(conn, case)}
             rows = conn.execute(
                 "SELECT * FROM validation_cases WHERE scan_id=? ORDER BY case_id", (scan_id,)
             ).fetchall()
             if not rows and conn.execute("SELECT 1 FROM scans WHERE scan_id=?", (scan_id,)).fetchone() is None:
                 raise ValidationError("unknown scan")
             cases = [_case(dict(row)) for row in rows]
+            for case in cases:
+                case["scope_eligibility"] = _scope_eligibility_status(conn, case)
             owners = {name: 0 for name in ("validation", "chaining", "manual")}
             hypothesis_count = 0
             for owner, count in conn.execute(
@@ -569,7 +878,24 @@ def shared_validation_status(database: Path, *, scan_id: str | None = None,
         raise ValidationError("cannot read shared Validation status") from None
 
 
+def _scope_eligibility_status(conn: sqlite3.Connection, case: dict) -> dict:
+    digest = case.get("scope_sha256")
+    latest = None
+    if digest is not None:
+        latest = conn.execute(
+            """SELECT phase,eligibility,assessment_id,matched_rule
+            FROM validation_eligibility_assessments
+            WHERE case_id=? AND stage_run_id=? AND scope_sha256=?
+            ORDER BY rowid DESC LIMIT 1""",
+            (case["case_id"], case["latest_stage_run_id"], digest),
+        ).fetchone()
+    return {"scope_sha256": digest,
+            **{key: sanitize_metadata(latest[key]) if latest else None
+               for key in ("phase", "eligibility", "assessment_id", "matched_rule")}}
+
+
 def _case(case: dict) -> dict:
+    case.setdefault("scope_sha256", None)
     decision_json = case.pop("decision_json")
     if decision_json is not None:
         decision = json.loads(decision_json)

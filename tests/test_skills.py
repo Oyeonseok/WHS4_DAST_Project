@@ -9,6 +9,15 @@ from aidast.agents.main import CodexMainAgent
 
 
 class NativeSkillTests(unittest.TestCase):
+    def test_eligibility_skill_is_packaged_with_policy_only_contract(self) -> None:
+        content = files("aidast.skills.validation").joinpath(
+            "ELIGIBILITY_SKILL.md"
+        ).read_text(encoding="utf-8")
+
+        for value in ("ELIGIBLE", "INELIGIBLE", "CONDITIONAL", "UNKNOWN"):
+            self.assertIn(value, content)
+        self.assertIn("no final Validation status", content)
+
     def test_scope_skill_uses_codex_standard_frontmatter(self) -> None:
         content = files("aidast.skills.scope").joinpath("SKILL.md").read_text(
             encoding="utf-8"

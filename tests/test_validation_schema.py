@@ -1,4 +1,4 @@
-"""Shared Pipeline.db v10 Validation storage constraints."""
+"""Shared Pipeline.db v11 Validation storage constraints."""
 
 import sqlite3
 import tempfile
@@ -26,16 +26,19 @@ class ValidationSchemaTests(unittest.TestCase):
         self.conn.commit()
 
     def test_schema_version_and_tables(self):
-        self.assertEqual(self.conn.execute("PRAGMA user_version").fetchone()[0], 10)
+        self.assertEqual(self.conn.execute("PRAGMA user_version").fetchone()[0], 11)
         columns = {row[1] for row in self.conn.execute("PRAGMA table_info(validation_cases)")}
         self.assertNotIn("known_similarity", columns)
+        self.assertIn("scope_sha256", columns)
         binding_columns = {
             row[1] for row in self.conn.execute("PRAGMA table_info(chain_execution_bindings)")
         }
         self.assertTrue({
             "source_kind", "source_path_json", "target_kind", "target_path_json",
         }.issubset(binding_columns))
-        expected = {"validation_cases", "validation_attempts", "validation_evidence",
+        expected = {"scope_policy_snapshots", "validation_scope_bindings",
+                    "validation_eligibility_assessments",
+                    "validation_cases", "validation_attempts", "validation_evidence",
                     "validation_development_actions", "validation_impact_hypotheses",
                     "validation_http_requests", "validation_transport_operations",
                     "finding_reproduction_specs"}
@@ -64,6 +67,46 @@ class ValidationSchemaTests(unittest.TestCase):
             "status", "agent_id", "plan_json", "plan_sha256",
             "observation_json", "observation_sha256", "started_at", "finished_at",
         }.issubset(hypothesis_columns))
+
+    def test_scope_snapshots_and_eligibility_assessments_are_append_only(self):
+        names = {
+            row[0]
+            for row in self.conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+        self.assertIn("scope_policy_snapshots", names)
+        self.assertIn("validation_eligibility_assessments", names)
+        digest = "a" * 64
+        self.conn.execute(
+            "INSERT INTO scope_policy_snapshots(scope_sha256,scope_markdown) VALUES (?,?)",
+            (digest, "# Policy\nRule"),
+        )
+        self.conn.execute(
+            """INSERT INTO validation_scope_bindings(scan_id,scope_sha256,source_path)
+               VALUES ('scan',?,'fixture')""",
+            (digest,),
+        )
+        self.conn.execute("""INSERT INTO validation_cases
+            (case_id,scan_id,target_kind,finding_id,latest_stage_run_id,processing_phase,
+             scope_sha256)
+            VALUES ('case','scan','finding','finding','validation_run','queued',?)""", (digest,))
+        self.conn.execute("""INSERT INTO validation_eligibility_assessments
+            (assessment_id,case_id,stage_run_id,phase,scope_sha256,eligibility,
+             matched_rule,scope_quote,required_impact_json,replay_allowed,reason,
+             evidence_refs_json,input_sha256,output_sha256)
+            VALUES ('assessment','case','validation_run','preflight',?,'ELIGIBLE',
+                    'rule','Rule','[]',1,'allowed','[]',?,?)""",
+            (digest, "b" * 64, "c" * 64),
+        )
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "scope snapshots are append-only"):
+            self.conn.execute(
+                "UPDATE scope_policy_snapshots SET scope_markdown='changed'"
+            )
+        with self.assertRaisesRegex(
+            sqlite3.IntegrityError, "eligibility assessments are append-only"
+        ):
+            self.conn.execute("DELETE FROM validation_eligibility_assessments")
 
     def test_target_and_active_stage_uniqueness(self):
         self.conn.execute("""INSERT INTO validation_cases
@@ -141,7 +184,7 @@ class ValidationSchemaTests(unittest.TestCase):
                 PRAGMA user_version=8;
             """)
             migrate_live_pipeline_schema(connection)
-            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 10)
+            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 11)
             self.assertEqual(connection.execute(
                 "SELECT request_id,policy_sha256,result_json FROM attack_http_requests"
             ).fetchone(), ("request", None, "{}"))
@@ -171,10 +214,10 @@ class ValidationSchemaTests(unittest.TestCase):
         self.assertEqual(self.conn.execute(
             "SELECT attempt_id,case_id FROM validation_attempts"
         ).fetchall(), [("attempt", "case")])
-        self.assertEqual(self.conn.execute("PRAGMA user_version").fetchone()[0], 10)
+        self.assertEqual(self.conn.execute("PRAGMA user_version").fetchone()[0], 11)
         self.assertEqual(self.conn.execute("PRAGMA foreign_key_check").fetchall(), [])
 
-    def test_v9_to_v10_migration_preserves_legacy_rows_and_is_idempotent(self):
+    def test_v9_to_latest_migration_preserves_legacy_rows_and_is_idempotent(self):
         self.conn.execute("DROP TABLE IF EXISTS validation_transport_operations")
         self.conn.execute("""INSERT INTO validation_cases
             (case_id,scan_id,target_kind,finding_id,latest_stage_run_id,processing_phase)
@@ -194,8 +237,45 @@ class ValidationSchemaTests(unittest.TestCase):
         migrate_live_pipeline_schema(self.conn)
         schema = self.conn.execute("SELECT type,name,sql FROM sqlite_master ORDER BY name").fetchall()
         migrate_live_pipeline_schema(self.conn)
-        self.assertEqual(self.conn.execute("PRAGMA user_version").fetchone()[0], 10)
+        self.assertEqual(self.conn.execute("PRAGMA user_version").fetchone()[0], 11)
         self.assertEqual(self.conn.execute("SELECT * FROM validation_http_requests").fetchall(), before)
         self.assertEqual(self.conn.execute("SELECT type,name,sql FROM sqlite_master ORDER BY name").fetchall(), schema)
         self.assertEqual(self.conn.execute("PRAGMA foreign_key_check").fetchall(), [])
         self.assertEqual(self.conn.execute("SELECT count(*) FROM validation_transport_operations").fetchone()[0], 0)
+
+    def test_v10_to_v11_migration_preserves_nullable_legacy_case_and_is_idempotent(self):
+        self.conn.execute("DROP TABLE IF EXISTS validation_eligibility_assessments")
+        self.conn.execute("DROP TABLE IF EXISTS validation_scope_bindings")
+        self.conn.execute("DROP TABLE IF EXISTS scope_policy_snapshots")
+        columns = {
+            row[1] for row in self.conn.execute("PRAGMA table_info(validation_cases)")
+        }
+        if "scope_sha256" in columns:
+            self.conn.execute("ALTER TABLE validation_cases DROP COLUMN scope_sha256")
+        self.conn.execute("""INSERT INTO validation_cases
+            (case_id,scan_id,target_kind,finding_id,latest_stage_run_id,processing_phase)
+            VALUES ('legacy','scan','finding','finding','validation_run','queued')""")
+        self.conn.execute("PRAGMA user_version=10")
+        self.conn.commit()
+
+        migrate_live_pipeline_schema(self.conn)
+        schema = self.conn.execute(
+            "SELECT type,name,sql FROM sqlite_master ORDER BY name"
+        ).fetchall()
+        migrate_live_pipeline_schema(self.conn)
+
+        self.assertEqual(self.conn.execute("PRAGMA user_version").fetchone()[0], 11)
+        self.assertEqual(self.conn.execute(
+            "SELECT case_id,scope_sha256 FROM validation_cases"
+        ).fetchall(), [("legacy", None)])
+        from aidast.validation import shared_validation_status
+        status = shared_validation_status(Path(self.temp.name) / "Pipeline.db", case_id="legacy")
+        self.assertEqual(status["scope_eligibility"], {
+            "scope_sha256": None, "phase": None, "eligibility": None,
+            "assessment_id": None, "matched_rule": None,
+        })
+        self.assertEqual(
+            self.conn.execute("SELECT type,name,sql FROM sqlite_master ORDER BY name").fetchall(),
+            schema,
+        )
+        self.assertEqual(self.conn.execute("PRAGMA foreign_key_check").fetchall(), [])

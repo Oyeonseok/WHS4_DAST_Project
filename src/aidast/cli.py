@@ -336,6 +336,10 @@ def _parser() -> argparse.ArgumentParser:
         type=Path,
         help="current TargetPolicy.json for shared Validation",
     )
+    validation_run.add_argument(
+        "--scope", type=Path,
+        help="approved Scope.md to bind for a standalone shared Validation run",
+    )
     validation_resume = validation_commands.add_parser(
         "resume", help="resume one failed shared Validation stage"
     )
@@ -1231,6 +1235,8 @@ def _run_validation(
     reviewer: object | None = None,
     coordinator: object | None = None,
 ) -> int:
+    if args.validation_command == "run" and args.scope is not None and not args.scan_id:
+        raise ValidationError("--scope requires --scan-id")
     if args.validation_command == "status" and (args.scan_id or args.case_id):
         result = shared_validation_status(
             args.database,
@@ -1257,10 +1263,13 @@ def _run_validation(
         from aidast.validation import build_native_validation_coordinator
 
         if coordinator is None:
-            coordinator = build_native_validation_coordinator(
-                db_path=args.database,
-                policy_path=args.policy or args.database.parent / "TargetPolicy.json",
-            )
+            builder_args = {
+                "db_path": args.database,
+                "policy_path": args.policy or args.database.parent / "TargetPolicy.json",
+            }
+            if args.scope is not None:
+                builder_args["scope_path"] = args.scope
+            coordinator = build_native_validation_coordinator(**builder_args)
         shared_result = coordinator.run(
             args.scan_id,
             finding_id=args.finding_id,

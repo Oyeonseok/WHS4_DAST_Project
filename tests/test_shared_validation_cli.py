@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import io
+import hashlib
 import json
+import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
@@ -9,6 +11,7 @@ from unittest.mock import Mock, patch
 
 from aidast.agents.main import CodexReportWriter
 from aidast.cli import _parser, main
+from aidast.validation.orchestration.native import build_native_validation_coordinator
 from aidast.reporting import CaseReportDraft as ReportDraft
 
 
@@ -96,6 +99,65 @@ class ValidationReportCliTests(unittest.TestCase):
             "scan", finding_id=None, chain_id=None,
         )
         self.assertEqual(json.loads(stdout)["status"], "completed")
+
+    def test_shared_validation_run_passes_optional_scope_to_native_builder(self):
+        coordinator = Mock()
+        coordinator.run.return_value = {"status": "completed", "stage_run_id": "stage"}
+        with patch("aidast.validation.build_native_validation_coordinator",
+                   return_value=coordinator) as factory:
+            code, _, stderr = self.invoke([
+                "validate", "run", "Pipeline.db", "--scan-id", "scan",
+                "--scope", "Scope.md",
+            ])
+
+        self.assertEqual(code, 0, stderr)
+        factory.assert_called_once_with(
+            db_path=Path("Pipeline.db"), policy_path=Path("TargetPolicy.json"),
+            scope_path=Path("Scope.md"),
+        )
+
+    def test_shared_validation_resume_has_no_replacement_scope_option(self):
+        with self.assertRaises(SystemExit):
+            _parser().parse_args([
+                "validate", "resume", "Pipeline.db", "--stage-run-id", "stage",
+                "--scope", "Scope.md",
+            ])
+
+    def test_scope_option_requires_shared_scan_selector(self):
+        with patch("aidast.cli.ValidationAgent") as legacy:
+            code, _, stderr = self.invoke([
+                "validate", "run", "Attack.db", "--scope", "Scope.md",
+            ])
+        self.assertEqual(code, 1)
+        self.assertIn("--scope requires --scan-id", stderr)
+        legacy.assert_not_called()
+
+    def test_native_builder_injects_verified_scope_only_when_supplied(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            scope = root / "Scope.md"
+            scope.write_bytes(b"# Approved\nRule")
+            (root / "Approval.json").write_text(json.dumps({
+                "scope_id": "scope", "approved_by": "reviewer",
+                "approved_at": "2026-09-18T00:00:00Z",
+                "scope_json_sha256": "b" * 64,
+                "scope_markdown_sha256": hashlib.sha256(scope.read_bytes()).hexdigest(),
+            }), encoding="utf-8")
+            policy = root / "TargetPolicy.json"
+            policy.write_text('{"schema_version":"1.0","policies":[]}', encoding="utf-8")
+            with patch("aidast.validation.orchestration.native.TargetPolicyProvider"), patch(
+                "aidast.validation.orchestration.native.ValidationCoordinator"
+            ) as factory:
+                build_native_validation_coordinator(
+                    db_path=root / "Pipeline.db", policy_path=policy, scope_path=scope,
+                    credential_resolver=lambda _: {}, browser_executor=Mock(),
+                    oob_observer=Mock(),
+                )
+
+            source = factory.call_args.kwargs["scope_source"]
+            self.assertEqual(source.scope_markdown, "# Approved\nRule")
+            self.assertEqual(source.scope_sha256, hashlib.sha256(scope.read_bytes()).hexdigest())
+            self.assertIsNotNone(source.approval_digest)
 
     def test_report_run_accepts_only_three_platforms_and_injected_writer(self):
         writer, agent = Mock(), Mock()

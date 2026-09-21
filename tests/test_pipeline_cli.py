@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import hashlib
 import json
 import sqlite3
 import tempfile
@@ -41,8 +42,13 @@ class PipelineCliTests(unittest.TestCase):
             program_dir = root / "scope"
             program_dir.mkdir()
             (program_dir / "Scope.md").write_text("# Approved\n", encoding="utf-8")
-            for name in ("Scope.json", "Approval.json"):
-                (program_dir / name).write_text("{}\n", encoding="utf-8")
+            (program_dir / "Scope.json").write_text("{}\n", encoding="utf-8")
+            (program_dir / "Approval.json").write_text(json.dumps({
+                "scope_id": "pipeline-fixture", "approved_by": "fixture-reviewer",
+                "approved_at": "2026-09-18T00:00:00Z",
+                "scope_json_sha256": hashlib.sha256((program_dir / "Scope.json").read_bytes()).hexdigest(),
+                "scope_markdown_sha256": hashlib.sha256((program_dir / "Scope.md").read_bytes()).hexdigest(),
+            }), encoding="utf-8")
             scope = SimpleNamespace(
                 scope_id="pipeline-fixture", analysis=SimpleNamespace(in_scope_assets=[]),
             )
@@ -110,8 +116,14 @@ class PipelineCliTests(unittest.TestCase):
             run_dir.mkdir()
             program_dir.mkdir()
             (program_dir / "Scope.md").write_text("# Approved\n", encoding="utf-8")
-            for name in ("Scope.json", "Approval.json", "TargetPolicy.json"):
+            for name in ("Scope.json", "TargetPolicy.json"):
                 (program_dir / name).write_text("{}\n", encoding="utf-8")
+            (program_dir / "Approval.json").write_text(json.dumps({
+                "scope_id": "scope_cli", "approved_by": "fixture-reviewer",
+                "approved_at": "2026-09-18T00:00:00Z",
+                "scope_json_sha256": hashlib.sha256((program_dir / "Scope.json").read_bytes()).hexdigest(),
+                "scope_markdown_sha256": hashlib.sha256((program_dir / "Scope.md").read_bytes()).hexdigest(),
+            }), encoding="utf-8")
             surface_path = run_dir / "Surface.json"
             review_path = run_dir / "ReconReview.json"
             surface_path.write_text("{}\n", encoding="utf-8")

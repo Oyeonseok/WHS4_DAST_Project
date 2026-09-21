@@ -544,7 +544,7 @@ class NativeAttackDatabaseCliTests(unittest.TestCase):
                 stored_runtime[5], canonical_sha256(normalized_impact)
             )
             self.assertTrue(all(len(value) == 64 for value in stored_runtime[1::2]))
-            self.assertEqual(schema_version, 10)
+            self.assertEqual(schema_version, 11)
 
             second_attempt = root / "second-attempt.json"
             second_attempt.write_text(json.dumps({

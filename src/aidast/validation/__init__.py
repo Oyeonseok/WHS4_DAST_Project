@@ -41,6 +41,7 @@ from .orchestration.coordinator import (
     ValidationCoordinatorError,
 )
 from .orchestration.codex_runner import CodexBlindValidationRunner
+from .orchestration.eligibility_runner import CodexEligibilityRunner, EligibilityAgentRunner
 from .orchestration.impact_runner import CodexImpactDevelopmentRunner
 from .execution.credentials import KeyringCredentialBackend, PipelineCredentialResolver
 from .core.decision import DecisionEngine, DecisionInput
@@ -182,6 +183,7 @@ __all__ = [
     "ClaimComparison",
     "CloseFrame",
     "CodexBlindValidationRunner",
+    "CodexEligibilityRunner",
     "CodexImpactDevelopmentRunner",
     "ConcurrentValidationUpdate",
     "ConcurrentAggregateAssertion",
@@ -197,6 +199,7 @@ __all__ = [
     "DevelopmentRuntimeContract",
     "DescriptorMethod",
     "EligibilityAssessment",
+    "EligibilityAgentRunner",
     "EligibilityRequest",
     "EvidenceOnlyReviewer",
     "HttpAttemptContract",

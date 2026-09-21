@@ -58,6 +58,7 @@ where = ["src"]
 "aidast.skills.validation" = [
   "SKILL.md",
   "BASE_SKILL.md",
+  "ELIGIBILITY_SKILL.md",
   "catalog/*.json",
   "library/*/SKILL.md",
   "library/*/contract.json",

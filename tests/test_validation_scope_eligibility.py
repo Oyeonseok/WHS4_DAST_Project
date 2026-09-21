@@ -53,6 +53,60 @@ def test_conditional_requires_impact_and_replay_permission():
         )
 
 
+def conditional_context(**overrides):
+    return {
+        "assessment_id": "preflight", "output_sha256": "b" * 64,
+        "required_impact": ({"condition": "Account impact", "evidence_needed": "Sealed observations"},),
+    } | overrides
+
+
+def test_post_request_requires_original_conditional_context():
+    with pytest.raises(ValueError, match="conditional context"):
+        eligibility_request(phase="post_replay")
+
+
+def test_post_conditions_and_provenance_change_request_hash():
+    from aidast.validation import canonical_sha256
+
+    request = eligibility_request(phase="post_replay", conditional_context=conditional_context())
+    original = canonical_sha256(request.model_dump())
+    for change in (
+        {"assessment_id": "different-preflight"}, {"output_sha256": "c" * 64},
+        {"required_impact": ({"condition": "Different impact", "evidence_needed": "Sealed observations"},)},
+    ):
+        updated = eligibility_request(phase="post_replay", conditional_context=conditional_context(**change))
+        assert canonical_sha256(updated.model_dump()) != original
+
+
+@pytest.mark.parametrize("conditions", [(), tuple({"condition": "impact", "evidence_needed": "proof"} for _ in range(17))])
+def test_post_conditions_are_nonempty_and_bounded(conditions):
+    with pytest.raises(ValueError):
+        eligibility_request(phase="post_replay", conditional_context=conditional_context(required_impact=conditions))
+
+
+def test_conditional_context_is_rejected_in_preflight():
+    with pytest.raises(ValueError, match="conditional context"):
+        eligibility_request(conditional_context=conditional_context())
+
+
+def test_post_request_without_existing_evidence_fails_closed():
+    with pytest.raises(ValueError, match="existing sealed evidence"):
+        eligibility_request(phase="post_replay", conditional_context=conditional_context(),
+                            evidence_refs=(), evidence_summaries=())
+
+
+@pytest.mark.parametrize("length", [4001, 8000, 20_000])
+def test_eligibility_request_preserves_accepted_upstream_description(length):
+    description = "x" * (length - 20) + "Policy impact at end"
+    request = eligibility_request(claimed_impact=description)
+    assert request.claimed_impact == description
+
+
+def test_eligibility_request_rejects_description_above_upstream_limit():
+    with pytest.raises(ValueError):
+        eligibility_request(claimed_impact="x" * 20_001)
+
+
 def test_grounding_rejects_quote_not_present_in_snapshot():
     assessment = eligible_assessment(scope_quote="invented policy text")
     with pytest.raises(ScopeEligibilityError, match="scope quote is not grounded"):
