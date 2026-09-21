@@ -117,6 +117,8 @@ class ValidationRepository:
             ).fetchone()
             if snapshot is None or snapshot[0] != request.scope_markdown:
                 raise ValidationRepositoryError("eligibility scope snapshot does not match request")
+            if assessment.scope_quote and assessment.scope_quote not in snapshot[0]:
+                raise ValidationRepositoryError("eligibility scope quote is not grounded")
             self.conn.execute(
                 """INSERT INTO validation_eligibility_assessments
                    (assessment_id,case_id,stage_run_id,phase,scope_sha256,eligibility,

@@ -155,6 +155,33 @@ class ValidationRepositoryTests(unittest.TestCase):
         with self.assertRaisesRegex(ValidationRepositoryError, "scope"):
             self.repo.record_eligibility(request, assessment)
 
+    def test_record_eligibility_rejects_quote_not_in_persisted_snapshot(self):
+        self.repo.create_case(
+            scan_id="scan", stage_run_id=self.run, target_kind="finding",
+            target_id="one", scope_sha256=self.scope_sha256, case_id="case",
+        )
+        request = EligibilityRequest(
+            case_id="case", scope_sha256=self.scope_sha256, phase="preflight",
+            scope_markdown="# Policy\nRule", target_kind="finding", vuln_class="idor",
+            endpoint="https://test/", method="GET", title="fixture",
+            claimed_impact="read another user's record", reproduction_summary={},
+            evidence_refs=(), evidence_summaries=(),
+        )
+        assessment = EligibilityAssessment(
+            case_id="case", scope_sha256=self.scope_sha256, phase="preflight",
+            eligibility="ELIGIBLE", matched_rule="Rule",
+            scope_quote="Fabricated policy quote", required_impact=(),
+            replay_allowed=True, reason="The invented rule permits replay.",
+            evidence_refs=(),
+        )
+
+        with self.assertRaisesRegex(ValidationRepositoryError, "scope quote"):
+            self.repo.record_eligibility(request, assessment)
+
+        self.assertEqual(self.conn.execute(
+            "SELECT count(*) FROM validation_eligibility_assessments"
+        ).fetchone()[0], 0)
+
     def case_with_evidence(self, identifier="case", finding="one"):
         self.repo.create_case(scan_id="scan", stage_run_id=self.run, target_kind="finding",
                               target_id=finding, scope_sha256=self.scope_sha256,
