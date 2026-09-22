@@ -552,6 +552,17 @@ def test_scope_dashboard_requires_explicit_yes_or_no(tmp_path: Path) -> None:
             assert "content_sha256" not in scope
             approved_scope = (await client.get("/api/v1/scopes")).json()["scopes"][0]
             assert approved_scope["program_name"] == "Example Program"
+            catalog_detail = await client.get(
+                f"/api/v1/scopes/{approved_scope['scope_id']}"
+            )
+            assert catalog_detail.status_code == 200
+            assert catalog_detail.json()["scope"]["in_scope_assets"][0]["asset"] == "*.example.test"
+            assert catalog_detail.json()["scope"]["allowed_activities"] == [
+                "Non-destructive testing"
+            ]
+            assert catalog_detail.json()["approval"]["approved_by"] == "reviewer"
+            missing_detail = await client.get("/api/v1/scopes/missing")
+            assert missing_detail.status_code == 404
             requirements = approved_scope["execution_requirements"]
             assert requirements["scope_max_requests_per_second"] == 10
             assert requirements["required_header"] == {
@@ -559,9 +570,20 @@ def test_scope_dashboard_requires_explicit_yes_or_no(tmp_path: Path) -> None:
                 "input_field": "intigriti_username",
             }
             assert requirements["profiles"][0]["limits"]["max_requests"] == 500
+            with sqlite3.connect(tmp_path / ".webui" / "programs.db") as connection:
+                connection.execute("DELETE FROM registered_programs")
+            assert (await client.get("/api/v1/programs")).json()["programs"] == []
+            assert (await client.get(f"/api/v1/scopes/{approved_scope['scope_id']}")).status_code == 200
+            restored = await client.post(
+                "/api/v1/programs",
+                headers=headers,
+                json={"program_url": "https://bugcrowd.com/engagements/example", "visibility": "public"},
+            )
+            assert restored.status_code == 201
             (output / "Scope.json").write_text("{}", encoding="utf-8")
             compromised = await client.get(f"/api/v1/programs/{program_id}/approved-scope")
             assert compromised.status_code == 400
+            assert (await client.get(f"/api/v1/scopes/{approved_scope['scope_id']}")).status_code == 404
 
     asyncio.run(exercise())
 

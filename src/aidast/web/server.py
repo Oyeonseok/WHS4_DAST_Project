@@ -14,7 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 
-from aidast.orchestration.scope import CoordinatorError
+from aidast.orchestration.scope import CoordinatorError, ScopeCoordinator
 from aidast.paths import RESULT_ROOT
 
 from .projection import DashboardProjector, ProjectionError, ScanNotFoundError
@@ -85,6 +85,28 @@ def create_app(
     @app.get("/api/v1/scopes")
     async def scopes() -> dict[str, Any]:
         return {"scopes": manager.list_scopes()}
+
+    @app.get("/api/v1/scopes/{scope_id}")
+    async def scope_detail(scope_id: str) -> dict[str, Any]:
+        try:
+            approved = manager.catalog.get(scope_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        if approved.directory is None:
+            raise HTTPException(status_code=404, detail="approved scope not found")
+        try:
+            coordinator = ScopeCoordinator(approved.directory)
+            document, _markdown = coordinator.load_approved_scope()
+            approval = coordinator.verify_approval()
+        except (CoordinatorError, OSError, ValueError) as exc:
+            raise HTTPException(status_code=404, detail="approved scope is no longer valid") from exc
+        return {
+            "scope": ScopeWorkflowManager._review_payload(document),
+            "approval": {
+                "approved_by": approval.approved_by,
+                "approved_at": approval.approved_at.isoformat(),
+            },
+        }
 
     @app.get("/api/v1/programs")
     async def programs() -> dict[str, Any]:
