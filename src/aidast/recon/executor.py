@@ -270,6 +270,10 @@ class ReconExecutor:
 
     def _execute(self, task: ReconTask) -> None:
         task.status = ReconTaskStatus.RUNNING
+        dbmod.log_pipeline_run(
+            self.conn, scan_id=self.scan_id, task_id=task.task_id,
+            stage=task.task_type.value, status="running",
+        )
         handler = {
             ReconStep.ASSET_DISCOVERY: self._handle_asset_discovery,
             ReconStep.DNS_RESOLUTION: self._handle_dns_resolution,

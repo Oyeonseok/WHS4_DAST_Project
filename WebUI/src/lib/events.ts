@@ -3,11 +3,18 @@ export type Stage = typeof stages[number];
 export type Level = 'info' | 'success' | 'warning' | 'error';
 export type Finding = { id: string; title: string; severity: 'HIGH' | 'MEDIUM' | 'LOW' | 'INFO' | 'CRITICAL'; status: 'unreviewed' | 'confirmed' | 'rejected' | 'resolved'; endpoint: string; cwe: string };
 export type Log = { id: number; time: string; stage: Stage; level: Level; message: string };
-export type Snapshot = { version: 1; scan_id: string; last_event_id: number; status: 'running' | 'completed' | 'failed' | 'cancelled' | 'pending'; stage: Stage; progress: number; requests: number; budget: number; endpoints: number; findings: Finding[]; logs: Log[]; scope_approved?: boolean; scope_id?: string; program_id?: string; program_name?: string };
+export type Snapshot = { version: 1; scan_id: string; last_event_id: number; status: 'running' | 'completed' | 'failed' | 'cancelled' | 'pending'; stage: Stage; progress: number; activity?: string | null; requests: number; budget: number; endpoints: number; findings: Finding[]; logs: Log[]; scope_approved?: boolean; scope_id?: string; program_id?: string; program_name?: string };
+export function pipelineStageState(stage: Stage, snapshot: Pick<Snapshot, 'stage' | 'status'>): 'done' | 'current' | 'pending' | 'separate' {
+  if (stage === 'Report' && snapshot.stage !== 'Report') return 'separate';
+  const index = stages.indexOf(snapshot.stage);
+  const position = stages.indexOf(stage);
+  if (position < index || (position === index && snapshot.status === 'completed')) return 'done';
+  return position === index ? 'current' : 'pending';
+}
 export type ScanEvent = { version: 1; event_id: number; scan_id: string; occurred_at: string } & (
   | { type: 'heartbeat'; payload: Record<string, unknown> }
   | { type: 'log.appended'; payload: Omit<Log, 'id' | 'time'> }
-  | { type: 'task.progress.updated'; payload: { progress: number; requests: number } }
+  | { type: 'task.progress.updated'; payload: { progress: number; requests: number; activity?: string | null } }
   | { type: 'stage.status.changed'; payload: { stage: Stage } }
   | { type: 'scan.status.changed'; payload: { status: Snapshot['status'] } }
   | { type: 'finding.updated'; payload: Finding }
@@ -25,13 +32,14 @@ export function parseEvent(raw: unknown, scanId: string): ScanEvent | null {
     const e = typeof raw === 'string' ? JSON.parse(raw) : raw;
     if (!record(e) || e.version !== 1 || e.scan_id !== scanId || !integer(e.event_id) || !text(e.occurred_at) || !Number.isFinite(Date.parse(e.occurred_at)) || !record(e.payload)) return null;
     const p = e.payload;
-    const valid = e.type === 'heartbeat' || (e.type === 'log.appended' && stage(p.stage) && level(p.level) && text(p.message)) || (e.type === 'task.progress.updated' && progress(p.progress) && integer(p.requests)) || (e.type === 'stage.status.changed' && stage(p.stage)) || (e.type === 'scan.status.changed' && status(p.status)) || (e.type === 'finding.updated' && finding(p));
+    const valid = e.type === 'heartbeat' || (e.type === 'log.appended' && stage(p.stage) && level(p.level) && text(p.message)) || (e.type === 'task.progress.updated' && progress(p.progress) && integer(p.requests) && (p.activity === undefined || p.activity === null || text(p.activity))) || (e.type === 'stage.status.changed' && stage(p.stage)) || (e.type === 'scan.status.changed' && status(p.status)) || (e.type === 'finding.updated' && finding(p));
     return valid ? e as ScanEvent : null;
   } catch { return null; }
 }
 export function parseSnapshot(value: unknown, scanId: string): Snapshot | null {
   if (!record(value) || value.version !== 1 || value.scan_id !== scanId || !integer(value.last_event_id) || !status(value.status) || !stage(value.stage) || !progress(value.progress) || !integer(value.requests) || !integer(value.budget) || !integer(value.endpoints) || !Array.isArray(value.findings) || !value.findings.every(finding) || !Array.isArray(value.logs)) return null;
   if ((value.scope_approved !== undefined && typeof value.scope_approved !== 'boolean') || (value.scope_id !== undefined && !text(value.scope_id)) || (value.program_id !== undefined && !text(value.program_id)) || (value.program_name !== undefined && !text(value.program_name))) return null;
+  if (value.activity !== undefined && value.activity !== null && !text(value.activity)) return null;
   if (!value.logs.every(l => record(l) && integer(l.id) && l.id <= (value.last_event_id as number) && text(l.time) && Number.isFinite(Date.parse(l.time)) && stage(l.stage) && level(l.level) && text(l.message))) return null;
   return { ...value, logs: [...new Map((value.logs as Log[]).map(l => [l.id, l])).values()].sort((a,b) => a.id-b.id).slice(-500) } as Snapshot;
 }

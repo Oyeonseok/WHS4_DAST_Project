@@ -149,6 +149,7 @@ GET /api/v1/scans/{scan_id}
   "status": "running",
   "stage": "Attack",
   "progress": 62,
+  "activity": null,
   "requests": 391,
   "budget": 2000,
   "endpoints": 218,
@@ -159,6 +160,10 @@ GET /api/v1/scans/{scan_id}
 ```
 
 스캔 단계는 `Scope`, `Recon`, `Attack`, `Chaining`, `Validation`, `Report` 순서입니다.
+Recon 실행 중에는 진행률 아래에 현재 작업 종류(자산 탐색, DNS 확인, HTTP 응답 확인 등)를 표시합니다.
+작업명은 서버가 고정된 목록에서 선택하며 대상 URL이나 요청 내용은 포함하지 않습니다.
+확정된 Validation case가 있으면 지원 플랫폼의 Report 초안이 자동 생성됩니다.
+초안이 없으면 Report 단계는 완료로 표시되지 않습니다.
 스캔 상태는 `pending`, `running`, `completed`, `failed`, `cancelled` 중 하나입니다.
 
 ### WebSocket 실시간 이벤트

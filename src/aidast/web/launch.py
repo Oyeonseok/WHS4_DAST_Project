@@ -402,9 +402,16 @@ class ScanLaunchManager:
         with self._lock:
             job.finished_at = _now()
             job.status = "completed" if code == 0 else "failed"
-        message = "AI DAST pipeline completed." if code == 0 else "AI DAST pipeline exited with an error."
+        try:
+            stage = self.projector.snapshot(job.scan_id)["stage"]
+        except ScanNotFoundError:
+            stage = "Validation" if code == 0 else "Recon"
+        message = (
+            f"AI DAST pipeline completed through {stage}." if code == 0
+            else "AI DAST pipeline exited with an error."
+        )
         level = "success" if code == 0 else "error"
-        self._log(job.scan_id, "launch.finished", "Report" if code == 0 else "Recon", message, level)
+        self._log(job.scan_id, "launch.finished", stage, message, level)
 
     def _log(self, scan_id: str, key: str, stage: str, message: str, level: str = "info") -> None:
         self.projector.record_event(
@@ -435,6 +442,7 @@ class ScanLaunchManager:
             "status": job.status,
             "stage": "Recon" if job.status != "pending" else "Scope",
             "progress": 0,
+            "activity": "Preparing Recon" if job.status == "running" else None,
             "requests": 0,
             "budget": job.max_requests,
             "endpoints": 0,

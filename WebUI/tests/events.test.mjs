@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseEvent, parseSnapshot, applyEvent, applyOrderedEvent, stages } from '../src/lib/events.ts';
+import { parseEvent, parseSnapshot, applyEvent, applyOrderedEvent, stages, pipelineStageState } from '../src/lib/events.ts';
 import { demoSnapshot, DEMO_SCAN } from '../src/data/demo.ts';
 import { translate } from '../src/lib/i18n.ts';
 import { resolveExecutionLimits } from '../src/lib/scan.ts';
@@ -46,6 +46,26 @@ test('scan limits use the stricter Scope request rate', () => {
   );
 });
 test('pipeline includes report and preserves the real stage order', () => assert.deepEqual(stages, ['Scope','Recon','Attack','Chaining','Validation','Report']));
+test('Validation completion does not imply a generated report', () => {
+  const snapshot = { stage: 'Validation', status: 'completed' };
+  assert.equal(pipelineStageState('Validation', snapshot), 'done');
+  assert.equal(pipelineStageState('Report', snapshot), 'separate');
+});
+test('completion only marks stages through the last observed stage', () => {
+  const snapshot = { stage: 'Recon', status: 'completed' };
+  assert.equal(pipelineStageState('Scope', snapshot), 'done');
+  assert.equal(pipelineStageState('Recon', snapshot), 'done');
+  assert.equal(pipelineStageState('Attack', snapshot), 'pending');
+});
+test('running, failed and cancelled stages remain distinct from completed stages', () => {
+  for (const status of ['running', 'failed', 'cancelled']) {
+    const snapshot = { stage: 'Chaining', status };
+    assert.equal(pipelineStageState('Attack', snapshot), 'done');
+    assert.equal(pipelineStageState('Chaining', snapshot), 'current');
+    assert.equal(pipelineStageState('Validation', snapshot), 'pending');
+  }
+  assert.equal(pipelineStageState('Report', { stage: 'Report', status: 'completed' }), 'done');
+});
 test('snapshot validates the synthetic scan independently', () => {
   const data = demoSnapshot();
   assert.deepEqual(parseSnapshot(data, DEMO_SCAN), data);
@@ -64,6 +84,13 @@ test('malformed JSON, foreign scans, versions, and unknown events are rejected',
 test('valid event payload is preserved', () => assert.deepEqual(parseEvent(JSON.stringify(event()), DEMO_SCAN), event()));
 test('progress payloads reject NaN, negative requests and values beyond 100', () => {
   for (const payload of [{progress:NaN,requests:1},{progress:101,requests:1},{progress:20,requests:-1}]) assert.equal(parseEvent(event(8,{type:'task.progress.updated',payload}), DEMO_SCAN), null);
+});
+test('activity updates reach the live snapshot without changing progress', () => {
+  const start = demoSnapshot();
+  const update = event(8, { type: 'task.progress.updated', payload: { progress: start.progress, requests: start.requests, activity: 'DNS resolution' } });
+  assert.deepEqual(parseEvent(update, DEMO_SCAN), update);
+  assert.equal(applyEvent(start, update).activity, 'DNS resolution');
+  assert.equal(parseEvent(event(8, { type: 'task.progress.updated', payload: { progress: 0, requests: 0, activity: 42 } }), DEMO_SCAN), null);
 });
 test('duplicate or old events never duplicate logs or regress the cursor', () => {
   const next = applyEvent(demoSnapshot(), event());

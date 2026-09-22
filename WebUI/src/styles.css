@@ -208,6 +208,28 @@ th{font-size:11px;line-height:1.3}td{line-height:1.5}
 .top-actions .connection{font-size:11px}
 .boundary-note strong{font-size:12px}.boundary-note p{font-size:11px}
 .notice p{font-size:12px}
+
+.scan-focus{border-color:#638a70;box-shadow:0 0 0 1px #45634e55,0 18px 48px #060e0a30}
+.scan-focus .panel-heading{padding:24px 26px 20px;background:linear-gradient(110deg,#1d2c24,var(--panel) 72%)}
+.scan-focus .panel-heading h2{font-size:18px}
+.scan-focus .pipeline{padding:24px 26px 28px}
+.scan-focus .pipeline .current strong{font-size:14px;font-weight:650;color:var(--accent)}
+.scan-focus .scan-stats{grid-template-columns:repeat(3,minmax(0,1fr));gap:20px;padding:24px 26px 26px}
+.scan-focus .scan-stats>div>span{font-size:11px}
+.scan-focus .scan-stats strong{font-size:16px;font-weight:600}
+.scan-focus .scan-stats strong.mono{font-size:12px;overflow-wrap:anywhere}
+.scan-focus .progress-stat{grid-column:1/-1;padding:19px 22px 22px;border:1px solid #52775c;border-radius:8px;background:#203128}
+.scan-focus .progress-stat span{align-items:baseline;gap:12px;color:#c8dfd0;font-size:14px;font-weight:600}
+.scan-focus .progress-stat b{color:#b9ebc9;font-size:34px;line-height:1;font-variant-numeric:tabular-nums;font-weight:700}
+.scan-focus .progress-stat progress{height:10px;margin-top:17px}
+.scan-current-activity{display:flex;align-items:baseline;gap:8px;margin-top:15px;font-size:12px;color:var(--muted);flex-wrap:wrap}
+.scan-current-activity strong{font-size:13px!important;font-weight:600;color:var(--accent)}
+:root[data-theme=light] .scan-focus{border-color:#8db39a;box-shadow:0 0 0 1px #8db39a44,0 18px 48px #405b4720}
+:root[data-theme=light] .scan-focus .panel-heading{background:linear-gradient(110deg,#edf6ef,var(--panel) 72%)}
+:root[data-theme=light] .scan-focus .progress-stat{border-color:#a7cbb2;background:#e8f3eb}
+:root[data-theme=light] .scan-focus .progress-stat span{color:#315d40}
+:root[data-theme=light] .scan-focus .progress-stat b{color:#216341}
+@media(max-width:660px){.scan-focus .panel-heading,.scan-focus .pipeline,.scan-focus .scan-stats{padding-inline:16px}.scan-focus .scan-stats{grid-template-columns:repeat(2,minmax(0,1fr))}.scan-focus .scan-stats>div:first-child{grid-column:1/-1}.scan-focus .progress-stat{padding:17px 16px}.scan-focus .progress-stat b{font-size:30px}}
 .program-card footer{font-size:11px}
 .activity-footer p{font-size:11px}
 .stream-start,.log-entry time,.log-entry>div>span{font-size:11px}

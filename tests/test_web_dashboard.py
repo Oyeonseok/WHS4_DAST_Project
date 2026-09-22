@@ -252,6 +252,54 @@ def test_projection_rejects_unknown_and_unsafe_scan_ids(tmp_path: Path) -> None:
             raise AssertionError(f"unsafe scan id accepted: {scan_id}")
 
 
+def test_report_stage_status_overrides_completed_recon_scan(tmp_path: Path) -> None:
+    database = _fixture(tmp_path)
+    with sqlite3.connect(database) as conn:
+        conn.execute("UPDATE scans SET status='completed' WHERE scan_id=?", (SCAN_ID,))
+        conn.execute(
+            "INSERT INTO stage_runs VALUES (?,?,?,?,?,?,?,?)",
+            ("report-stage", SCAN_ID, "report", "running", None, "2026-09-20T01:06:00Z", None, "2026-09-20 01:06:00"),
+        )
+    projector = DashboardProjector(tmp_path)
+    assert (projector.snapshot(SCAN_ID)["stage"], projector.snapshot(SCAN_ID)["status"]) == ("Report", "running")
+    assert projector.list_scans()[0]["status"] == "running"
+    with sqlite3.connect(database) as conn:
+        conn.execute("UPDATE stage_runs SET status='failed' WHERE stage_run_id='report-stage'")
+    assert (projector.snapshot(SCAN_ID)["stage"], projector.snapshot(SCAN_ID)["status"]) == ("Report", "failed")
+    assert projector.list_scans()[0]["status"] == "failed"
+
+
+def test_recon_activity_tracks_started_task_and_clears_on_completion(tmp_path: Path) -> None:
+    database = _fixture(tmp_path)
+    with sqlite3.connect(database) as conn:
+        conn.execute("UPDATE scans SET status='running' WHERE scan_id=?", (SCAN_ID,))
+        conn.execute("UPDATE stage_runs SET status='running' WHERE stage_run_id='stage'")
+        conn.execute(
+            """CREATE TABLE pipeline_runs (
+            pipeline_run_id TEXT PRIMARY KEY, scan_id TEXT, task_id TEXT,
+            stage TEXT, status TEXT, started_at TEXT, ended_at TEXT)"""
+        )
+    projector = DashboardProjector(tmp_path)
+    assert projector.snapshot(SCAN_ID)["activity"] == "Preparing Recon"
+    with sqlite3.connect(database) as conn:
+        conn.execute(
+            "INSERT INTO pipeline_runs VALUES (?,?,?,?,?,?,?)",
+            ("started", SCAN_ID, "task-1", "dns_resolution", "running", "2026-09-20T01:01:00Z", None),
+        )
+    assert projector.snapshot(SCAN_ID)["activity"] == "DNS resolution"
+    events = projector.stored_events_after(SCAN_ID, 0)
+    assert any(
+        event["type"] == "task.progress.updated" and event["payload"].get("activity") == "DNS resolution"
+        for event in events
+    )
+    with sqlite3.connect(database) as conn:
+        conn.execute(
+            "INSERT INTO pipeline_runs VALUES (?,?,?,?,?,?,?)",
+            ("completed", SCAN_ID, "task-1", "dns_resolution", "success", "2026-09-20T01:02:00Z", "2026-09-20T01:02:00Z"),
+        )
+    assert projector.snapshot(SCAN_ID)["activity"] == "Processing Recon results"
+
+
 def test_api_snapshot_listing_and_websocket_replay(tmp_path: Path) -> None:
     _fixture(tmp_path)
     app = create_app(result_root=tmp_path, poll_interval=0.01)
@@ -603,6 +651,47 @@ def test_scan_launcher_builds_fixed_argv_and_streams_pre_database_logs(tmp_path:
     with pytest.raises(ValueError, match="outside the selected approved target"):
         manager.launch(request.model_copy(update={"start_url": "https://outside.example/"}))
     waiting.set()
+
+
+def test_scan_completion_log_does_not_claim_report_generation(tmp_path: Path) -> None:
+    from types import SimpleNamespace
+
+    projector = DashboardProjector(tmp_path)
+    manager = ScanLaunchManager(tmp_path, projector, project_root=tmp_path)
+    job = SimpleNamespace(
+        scan_id=SCAN_ID,
+        process=SimpleNamespace(wait=lambda: 0),
+        status="running",
+        finished_at=None,
+    )
+    manager._monitor(job)
+    events = projector.stored_events_after(SCAN_ID, 0)
+    assert job.status == "completed"
+    assert events[-1]["payload"]["stage"] == "Validation"
+
+
+def test_scan_completion_log_reports_persisted_report_stage(tmp_path: Path) -> None:
+    from types import SimpleNamespace
+
+    database = _fixture(tmp_path)
+    with sqlite3.connect(database) as conn:
+        conn.execute("UPDATE scans SET status='completed' WHERE scan_id=?", (SCAN_ID,))
+        conn.execute(
+            "INSERT INTO stage_runs VALUES (?,?,?,?,?,?,?,?)",
+            ("report-stage", SCAN_ID, "report", "completed", None, "2026-09-20T01:06:00Z", "2026-09-20T01:07:00Z", "2026-09-20 01:06:00"),
+        )
+    projector = DashboardProjector(tmp_path)
+    manager = ScanLaunchManager(tmp_path, projector, project_root=tmp_path)
+    job = SimpleNamespace(
+        scan_id=SCAN_ID,
+        process=SimpleNamespace(wait=lambda: 0),
+        status="running",
+        finished_at=None,
+    )
+    manager._monitor(job)
+    events = projector.stored_events_after(SCAN_ID, 0)
+    assert events[-1]["payload"]["stage"] == "Report"
+    assert "through Report" in events[-1]["payload"]["message"]
 
 
 def test_scan_request_rejects_unconfirmed_or_excessive_budget() -> None:
