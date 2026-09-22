@@ -332,6 +332,10 @@ class ReconExecutor:
         )
         if explicit is not None:
             return explicit
+        if task.target.asset_type in {AssetType.URL, AssetType.API} and task.target.asset.startswith(
+            ("http://", "https://")
+        ):
+            return task.target.asset
         # A discovered child host inherits the narrowed policy's scheme. This
         # matters for URL-form wildcard scopes that explicitly allow HTTP;
         # falling back to the global HTTPS default would make the subsequent
