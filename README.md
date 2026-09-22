@@ -294,17 +294,18 @@ aidast run "<HACKERONE_PROGRAM_URL>" \
 ```
 
 `aidast run`은 Recon, 태깅, Handoff, Native Attack, Chaining,
-Shared Validation 순서로 실행합니다. Report는 검토할 Validation case를 선택한 뒤
-별도 명령으로 생성합니다.
+Shared Validation 순서로 실행한 뒤 현재 확정된 `CONFIRMED` case마다 Report 로컬 초안을 자동 생성합니다.
+지원 플랫폼은 HackerOne, Intigriti, Bugcrowd입니다. 확정된 case가 없거나 다른 플랫폼이면
+Report를 생성하지 않습니다. 플랫폼에 자동 제출하지 않습니다.
 
-### 4. 검증된 case로 Report 초안 생성
+### 4. 검증된 case의 Report 초안 수동 생성·재실행
 
 ```bash
 aidast report run \
   result/AttackRuns/<scan_id>/Pipeline.db \
   --case-id <case_id> \
   --platform hackerone \
-  --output-dir result/ReportRun/<scan_id>
+  --output-dir result/ReportRun/<scan_id>/<case_id>
 ```
 
 지원 플랫폼은 `hackerone`, `intigriti`, `bugcrowd`입니다.
@@ -417,7 +418,7 @@ Report는 해당 Validation case가 허용한 evidence만 인용합니다. 생�
 | `aidast scope` | 프로그램 Scope 수집 또는 상태 확인 |
 | `aidast recon` | Recon 계획, 정책 확인, 선택적 실행 |
 | `aidast tag` | 저장된 Recon 관측 태깅 재개 |
-| `aidast run` | Recon부터 Shared Validation까지 통합 실행 |
+| `aidast run` | Recon부터 Validation 및 확정 case의 로컬 Report 초안까지 통합 실행 |
 | `aidast attack` | 오프라인 계획·상태 관리와 주입된 신뢰 워크플로 실행 경계 |
 | `aidast validate` | Shared 또는 Legacy Validation 실행·재개·조회 |
 | `aidast report` | 로컬 Report 초안 생성 및 상태 확인 |

@@ -14,6 +14,8 @@ from aidast.reporting import (
     case_report_status as report_status,
     record_case_report as record_report,
 )
+from aidast.reporting.auto import generate_scan_reports, report_platform_for_program_url
+from aidast.web.reports import ReportCatalog
 from aidast.validation import ValidationRepository, shared_validation_status
 from aidast.validation.contracts.eligibility import (
     EligibilityAssessment, EligibilityRequest, ScopePolicySource,
@@ -359,6 +361,65 @@ class SharedValidationReportingTests(unittest.TestCase):
         self.conn.execute("CREATE TABLE unrelated_after_report(value TEXT)")
         self.conn.commit()
         self.assertFalse(report_status(Path(result["report_db"]))["stale"])
+
+    def test_auto_reports_draft_only_current_confirmed_cases(self):
+        self.complete(case_id="case", finding="finding")
+        self.complete(case_id="disproven", finding="known_finding", status="DISPROVEN")
+        self.conn.commit()
+
+        class Writer:
+            def write(inner, context):
+                return self.draft(context, "evidence_" + context["source"]["case_id"])
+
+        output_root = self.path.parent.parent / "ReportRun" / "scan"
+        results = generate_scan_reports(
+            self.path, output_root, scan_id="scan", platform="hackerone", writer=Writer(),
+        )
+        self.assertEqual([item["case_id"] for item in results], ["case"])
+        self.assertEqual(results[0]["status"], "drafted")
+        self.assertTrue((output_root / "case" / "Report.md").is_file())
+        self.assertFalse((output_root / "disproven").exists())
+        self.assertEqual(
+            [item["case_id"] for item in ReportCatalog(self.path.parent.parent).list(scan_id="scan")],
+            ["case"],
+        )
+        self.assertEqual(
+            tuple(self.conn.execute("SELECT stage,status FROM stage_runs ORDER BY rowid DESC LIMIT 1").fetchone()),
+            ("report", "completed"),
+        )
+
+    def test_auto_reports_skip_when_no_confirmed_case(self):
+        self.complete(case_id="disproven", finding="finding", status="DISPROVEN")
+        self.conn.commit()
+        output_root = self.path.parent.parent / "ReportRun" / "scan"
+        self.assertEqual(generate_scan_reports(self.path, output_root, scan_id="scan", platform="hackerone"), [])
+        self.assertFalse(output_root.exists())
+        self.assertEqual(self.conn.execute("SELECT count(*) FROM stage_runs WHERE stage='report'").fetchone()[0], 0)
+
+    def test_auto_report_failure_marks_report_stage_failed(self):
+        self.complete()
+        self.conn.commit()
+
+        class Writer:
+            def write(inner, context):
+                raise RuntimeError("writer failed")
+
+        with self.assertRaisesRegex(RuntimeError, "writer failed"):
+            generate_scan_reports(
+                self.path, self.path.parent.parent / "ReportRun" / "scan",
+                scan_id="scan", platform="hackerone", writer=Writer(),
+            )
+        self.assertEqual(
+            tuple(self.conn.execute("SELECT stage,status FROM stage_runs ORDER BY rowid DESC LIMIT 1").fetchone()),
+            ("report", "failed"),
+        )
+
+    def test_report_platform_detects_supported_hosts_only(self):
+        self.assertEqual(report_platform_for_program_url("https://hackerone.com/example"), "hackerone")
+        self.assertEqual(report_platform_for_program_url("https://bugcrowd.com/engagements/example"), "bugcrowd")
+        self.assertEqual(report_platform_for_program_url("https://app.intigriti.com/programs/example"), "intigriti")
+        self.assertIsNone(report_platform_for_program_url("https://yeswehack.com/programs/example"))
+        self.assertIsNone(report_platform_for_program_url("https://fakehackerone.com/example"))
 
     def test_report_uses_only_validation_evidence_from_mixed_decision_namespaces(self):
         evidence = self.complete()
