@@ -141,6 +141,10 @@ def create_app(
     async def scope_draft(program_id: str) -> dict[str, Any]:
         return {"draft": scope_action(lambda: workflow.draft(program_id))}
 
+    @app.get("/api/v1/programs/{program_id}/approved-scope")
+    async def approved_scope(program_id: str) -> dict[str, Any]:
+        return scope_action(lambda: workflow.approved_scope(program_id))
+
     @app.post("/api/v1/programs/{program_id}/scope-decision")
     async def scope_decision(
         program_id: str, payload: ScopeDecisionRequest, request: Request

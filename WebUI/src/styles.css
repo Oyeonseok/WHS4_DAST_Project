@@ -161,6 +161,38 @@ html[lang=ko] :where(.demo-strip>span,.page-heading p,.notice p,.panel-copy,.bou
 .report-list>.report-card{border-top:1px solid var(--line);padding-top:22px}.report-list>.report-card:first-child{border-top:0}.report-list>.report-card>div:last-child{min-width:0}.report-list .mono{overflow-wrap:anywhere}
 
 /* Operator readability floor: primary copy >=12px, metadata >=11px. */
+.scope-review-meta,.scope-evidence blockquote{overflow-wrap:anywhere}
+.scope-meta,.scope-rule-item{border:1px solid var(--line);border-radius:7px;overflow:hidden}
+.scope-rule-item{min-width:0}
+.scope-meta>summary,.scope-review-section>summary,.scope-rule-item>summary,.scope-evidence>summary{display:flex;align-items:center;gap:8px;list-style:none;cursor:pointer;font-size:14px;font-weight:600;line-height:1.4}
+.scope-meta>summary::-webkit-details-marker,.scope-review-section>summary::-webkit-details-marker,.scope-rule-item>summary::-webkit-details-marker,.scope-evidence>summary::-webkit-details-marker{display:none}
+.scope-meta>summary:focus-visible,.scope-review-section>summary:focus-visible,.scope-rule-item>summary:focus-visible,.scope-evidence>summary:focus-visible{outline:2px solid var(--accent);outline-offset:-3px}
+.scope-meta>summary::after,.scope-review-section>summary::after,.scope-rule-item>summary::after,.scope-evidence>summary::after{content:"";width:7px;height:7px;flex:none;margin-left:auto;border-right:1.5px solid currentColor;border-bottom:1.5px solid currentColor;transform:rotate(45deg);transition:transform .15s}
+.scope-meta[open]>summary::after,.scope-review-section[open]>summary::after,.scope-rule-item[open]>summary::after,.scope-evidence[open]>summary::after{transform:rotate(225deg)}
+.scope-review-section>summary,.scope-meta>summary,.scope-rule-item>summary{padding:14px 15px;background:#141a20}
+.scope-review-section>summary span,.scope-rule-item>summary span,.scope-evidence>summary span{font-size:12px;font-weight:500;color:var(--muted)}
+.scope-meta>div{display:grid;gap:7px;padding:14px 15px;color:var(--muted);font-size:12px;line-height:1.6;overflow-wrap:anywhere}
+.scope-rule-item ul{padding:0 15px 0 30px;margin:0 0 14px;color:var(--muted);font-size:12px;line-height:1.6;overflow-wrap:anywhere}
+:root[data-theme=light] .scope-meta>summary,:root[data-theme=light] .scope-review-section>summary,:root[data-theme=light] .scope-rule-item>summary{background:#f6f8f7}
+.scope-event-list{max-height:none;overflow:hidden;background:var(--panel)}
+.scope-event-list>summary{display:grid;grid-template-columns:minmax(0,1fr) 8px;gap:12px;padding:12px 14px;list-style:none;cursor:pointer}
+.scope-event-list>summary::-webkit-details-marker{display:none}
+.scope-event-list>summary:focus-visible{outline:2px solid var(--accent);outline-offset:-3px}
+.scope-event-title{grid-column:1;grid-row:1;font-size:12px;color:var(--text)}
+.scope-event-title small{margin-left:5px;color:var(--muted);font-size:11px;font-weight:500}
+.scope-event-history time{color:var(--muted);font:11px/1.5 Consolas,monospace;white-space:nowrap;text-align:left}
+.scope-event-list>summary::after{content:"";grid-column:2;grid-row:1;align-self:center;width:7px;height:7px;border-right:1.5px solid var(--muted);border-bottom:1.5px solid var(--muted);transform:rotate(45deg);transition:transform .15s}
+.scope-event-list[open]>summary::after{transform:rotate(225deg)}
+.scope-event-list>.scope-event-history{display:block;max-height:220px;overflow:auto;border-top:1px solid var(--line)}
+.scope-event-history>div{display:grid;grid-template-columns:74px minmax(0,1fr);gap:12px;padding:10px 14px;border-bottom:1px solid var(--line);color:var(--muted);font:12px/1.5 Consolas,monospace}
+.scope-event-history>div:last-child{border-bottom:0}
+.scope-event-history>div>span{min-width:0;text-align:right;word-break:keep-all;overflow-wrap:anywhere}
+:root[data-theme=light] .scope-event-list{background:var(--panel)}
+@media(max-width:660px){.scope-event-history>div{grid-template-columns:66px minmax(0,1fr);gap:8px}}
+.scope-evidence-section{padding-top:14px;overflow-wrap:anywhere}
+.scope-evidence-section+.scope-evidence-section{margin-top:14px;border-top:1px solid var(--line)}
+.scope-evidence-section>strong{display:block;color:var(--text);font-size:12px}
+.scope-evidence-section>p{margin-top:6px;line-height:1.6}
 body{line-height:1.55}
 .brand small,.nav-label,.eyebrow,.heading-tag{font-size:10px}
 .workspace-label small,.operator small{font-size:11px}
