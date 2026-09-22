@@ -54,32 +54,29 @@ class CodexAuthTests(unittest.TestCase):
 
 
 class LoginCliTests(unittest.TestCase):
-    def test_recon_defaults_to_unauthenticated_mode_on_wsl(self) -> None:
+    def test_recon_defaults_to_automatic_login_detection(self) -> None:
         from aidast.cli import _default_login_mode, _parser
 
-        with patch("aidast.cli.os.name", "posix"), patch(
-            "aidast.cli.platform.release", return_value="microsoft-standard-WSL2"
-        ):
-            self.assertIsNone(_default_login_mode())
-            args = _parser().parse_args([
-                "recon", "https://example.com/program", "--target", "example.com"
-            ])
-            self.assertIsNone(args.login_mode)
-            never = _parser().parse_args([
-                "recon", "https://example.com/program", "--target", "example.com",
-                "--login-mode", "none",
-            ])
-            self.assertEqual(never.login_mode, "none")
-            interactive = _parser().parse_args([
-                "recon", "https://example.com/program", "--target", "example.com",
-                "--login-mode", "runtime-browser",
-            ])
-            self.assertEqual(interactive.login_mode, "runtime-browser")
-            explicit = _parser().parse_args([
-                "recon", "https://example.com/program", "--target", "example.com",
-                "--login-mode", "system-browser",
-            ])
-            self.assertEqual(explicit.login_mode, "system-browser")
+        self.assertIsNone(_default_login_mode())
+        args = _parser().parse_args([
+            "recon", "https://example.com/program", "--target", "example.com"
+        ])
+        self.assertIsNone(args.login_mode)
+        never = _parser().parse_args([
+            "recon", "https://example.com/program", "--target", "example.com",
+            "--login-mode", "none",
+        ])
+        self.assertEqual(never.login_mode, "none")
+        interactive = _parser().parse_args([
+            "recon", "https://example.com/program", "--target", "example.com",
+            "--login-mode", "runtime-browser",
+        ])
+        self.assertEqual(interactive.login_mode, "runtime-browser")
+        explicit = _parser().parse_args([
+            "recon", "https://example.com/program", "--target", "example.com",
+            "--login-mode", "system-browser",
+        ])
+        self.assertEqual(explicit.login_mode, "system-browser")
 
     def test_windows_login_uses_an_explicit_loopback_debug_port(self) -> None:
         script = files("aidast.auth").joinpath("browser_login_windows.ps1").read_text()
