@@ -147,13 +147,17 @@ def is_sensitive_header(name: str) -> bool:
     )
 
 
-def validate_hackerone_username(value: str) -> str:
+def validate_platform_username(value: str, platform: str) -> str:
     candidate = value.strip()
     if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", candidate) is None:
         raise ValueError(
-            "must be a 1-64 character HackerOne handle using letters, digits, ., _, or -"
+            f"must be a 1-64 character {platform} handle using letters, digits, ., _, or -"
         )
     return candidate
+
+
+def validate_hackerone_username(value: str) -> str:
+    return validate_platform_username(value, "HackerOne")
 
 
 def merge_hackerone_identity(

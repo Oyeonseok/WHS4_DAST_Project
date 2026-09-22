@@ -258,6 +258,14 @@ class TargetPolicyTests(unittest.TestCase):
                 "--intigriti-username", "alice\r\nInjected: yes",
             ])
 
+    def test_platform_usernames_share_validation_rules(self) -> None:
+        from aidast.core.http_safety import validate_platform_username
+
+        for platform in ("Intigriti", "HackerOne"):
+            self.assertEqual(validate_platform_username(" alice_1 ", platform), "alice_1")
+            with self.assertRaisesRegex(ValueError, platform):
+                validate_platform_username("alice\r\nInjected: yes", platform)
+
     def test_fractional_tool_rates_are_converted_without_rounding_up(self) -> None:
         self.assertEqual(_tool_rate_args("katana", 0.2), ["-delay", "5"])
         self.assertEqual(_tool_rate_args("ffuf", 0.2), ["-p", "5"])
