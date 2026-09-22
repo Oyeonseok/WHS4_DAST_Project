@@ -29,10 +29,12 @@ _BROWSER_USER_AGENT = (
 )
 
 
+# 프로그램 페이지 수집이나 검증에 실패했을 때 발생하는 오류
 class ProgramPageError(RuntimeError):
     pass
 
 
+# 호스트가 공개 인터넷 주소로만 해석되는지 확인
 def _host_is_public(host: str) -> bool:
     if host.lower() == "localhost":
         return False
@@ -51,6 +53,7 @@ def _host_is_public(host: str) -> bool:
     return bool(addresses) and all(address.is_global for address in addresses)
 
 
+# URL이 공개 호스트를 가리키는 HTTPS 주소인지 검증
 def _validate_public_https_url(url: str) -> None:
     parsed = urlsplit(url)
     if parsed.scheme != "https" or not parsed.hostname:
@@ -59,6 +62,7 @@ def _validate_public_https_url(url: str) -> None:
         raise ProgramPageError(f"program URL resolves to a non-public address: {parsed.hostname}")
 
 
+# URL에서 스킴, 호스트, 포트로 구성된 출처를 만듬
 def _url_origin(url: str) -> str:
     parsed = urlsplit(url)
     scheme = parsed.scheme.lower()
@@ -71,6 +75,7 @@ def _url_origin(url: str) -> str:
     )
 
 
+# 현재 URL이 요청한 프로그램 페이지나 그 하위 화면인지 확인
 def _same_program_url(expected: str, actual: str) -> bool:
     expected_parts = urlsplit(expected)
     actual_parts = urlsplit(actual)
@@ -94,7 +99,9 @@ def _same_program_url(expected: str, actual: str) -> bool:
     )
 
 
+# 헤드리스 Chromium으로 공개 프로그램 페이지의 내용을 수집
 class PlaywrightProgramPageReader:
+    # 페이지 로딩 시간과 수집할 최대 글자 수를 설정
     def __init__(
         self, *, timeout_seconds: float = 45.0, max_content_chars: int = 250_000
     ) -> None:
@@ -105,6 +112,7 @@ class PlaywrightProgramPageReader:
         self._timeout_seconds = timeout_seconds
         self._max_content_chars = max_content_chars
 
+    # URL을 검증하고 브라우저에서 프로그램 페이지를 읽음
     def read(self, url: str) -> ProgramPage:
         _validate_public_https_url(url)
         try:
@@ -119,6 +127,7 @@ class PlaywrightProgramPageReader:
         except Exception as exc:
             raise ProgramPageError(f"failed to render program page: {exc}") from exc
 
+    # 페이지 수집에 사용할 헤드리스 Chromium을 실행
     @staticmethod
     def _launch_browser(playwright: Playwright) -> Browser:
         try:
@@ -131,6 +140,7 @@ class PlaywrightProgramPageReader:
                 "Chromium is unavailable; run `python -m playwright install chromium`"
             ) from exc
 
+    # 브라우저 컨텍스트를 만들고 대상 페이지로 이동
     def _read_page(self, browser: Browser, url: str) -> ProgramPage:
         context = browser.new_context(
             locale="en-US",
@@ -157,6 +167,7 @@ class PlaywrightProgramPageReader:
         finally:
             context.close()
 
+    # 열린 페이지의 본문과 Scope 화면을 수집해 결과 모델로 만듬
     def _capture_loaded_page(
         self,
         page: Page,
@@ -208,6 +219,7 @@ class PlaywrightProgramPageReader:
             text=normalized_text,
         )
 
+    # 프로그램 페이지에서 별도의 Scope 화면을 찾아 읽음
     def _read_scope_view(
         self, page: Page, landing_url: str, landing_text: str
     ) -> tuple[str, str] | None:
@@ -231,6 +243,7 @@ class PlaywrightProgramPageReader:
             return scope_url, scope_text
         return None
 
+    # 페이지 본문이 안정될 때까지 기다린 뒤 텍스트를 반환
     def _wait_for_stable_text(self, page: Page) -> str:
         deadline = time.monotonic() + self._timeout_seconds
         latest = ""
@@ -252,6 +265,7 @@ class PlaywrightProgramPageReader:
 
         return latest
 
+    # 공개되지 않은 주소로 향하는 브라우저 요청을 차단
     @staticmethod
     def _guard_request(route: Route) -> None:
         url = route.request.url
@@ -267,6 +281,7 @@ class PlaywrightProgramPageReader:
             return
         route.continue_()
 
+    # 수집한 내용이 완전한지 또는 차단됐는지 판별
     @staticmethod
     def _classify_capture(
         text: str, *, final_url: str, has_scope_view: bool
@@ -300,9 +315,11 @@ class PlaywrightProgramPageReader:
         return CaptureStatus.COMPLETE, CaptureReason.NONE
 
 
+# 사용자가 로그인하는 지속 브라우저에서 프로그램 페이지를 수집
 class RuntimeBrowserProgramPageReader(PlaywrightProgramPageReader):
     """Capture one authenticated program page in an isolated persistent browser."""
 
+    # 로그인 계정과 브라우저 세션 저장 위치를 설정
     def __init__(
         self,
         *,
@@ -326,6 +343,7 @@ class RuntimeBrowserProgramPageReader(PlaywrightProgramPageReader):
         self._input = input_fn or input
         self._output = output_fn or print
 
+    # 로그인 브라우저를 열고 사용자가 확인한 프로그램 페이지를 읽음
     def read(self, url: str) -> ProgramPage:
         _validate_public_https_url(url)
         session_dir = self._prepare_session_directory(url)
@@ -397,6 +415,7 @@ class RuntimeBrowserProgramPageReader(PlaywrightProgramPageReader):
                 f"failed to render authenticated program page: {exc}"
             ) from exc
 
+    # 프로그램 출처와 계정에 묶인 브라우저 세션 디렉터리를 준비
     def _prepare_session_directory(self, url: str) -> Path:
         root_candidate = self._session_root.expanduser()
         if root_candidate.exists() and root_candidate.is_symlink():
@@ -444,6 +463,7 @@ class RuntimeBrowserProgramPageReader(PlaywrightProgramPageReader):
                 pass
         return directory
 
+    # 열린 탭 중 요청한 프로그램 URL에 해당하는 페이지를 고름
     @staticmethod
     def _select_program_page(pages: list[Page], expected_url: str) -> Page:
         for page in reversed(pages):

@@ -23,29 +23,33 @@ from aidast.scope.models import (
 )
 
 
+# Scope 수집과 승인 과정에서 발생하는 오류를 나타냄
 class CoordinatorError(RuntimeError):
     pass
 
 
+# Scope 페이지 수집과 해석에 필요한 에이전트 인터페이스를 정의
 class ScopeCollector(Protocol):
+    # 프로그램 URL에서 페이지와 Scope 분석 결과를 함께 수집
     def collect_scope(self, program_url: str) -> tuple[ProgramPage, ScopeAnalysis]: ...
 
+    # 이미 수집한 페이지 내용을 Scope 분석 결과로 해석
     def interpret_captured_scope(self, page: ProgramPage) -> ScopeAnalysis: ...
 
 
+# 프로그램 페이지를 읽는 객체의 인터페이스를 정의
 class ProgramPageReader(Protocol):
+    # 지정한 URL에서 프로그램 페이지를 읽음
     def read(self, url: str) -> ProgramPage: ...
 
 
+# Scope 초안 생성, 승인, 저장 및 검증을 조정
 class ScopeCoordinator:
+    # 승인된 Scope 산출물을 저장할 경로를 설정
     def __init__(self, output_dir: Path | str = "result/Scope") -> None:
-        # tempfile.mkdtemp() returns an absolute path.  Keep the publication
-        # destination absolute as well: on WSL/Windows-mounted workspaces an
-        # absolute source plus a relative destination can otherwise be
-        # classified as a cross-device rename even though both names resolve
-        # to the same mounted filesystem.
         self.output_dir = Path(output_dir).resolve(strict=False)
 
+    # Scope 초안을 수집하고 검토 결과에 따라 승인해 게시
     def collect(
         self,
         program_url: str,
@@ -70,6 +74,7 @@ class ScopeCoordinator:
         finally:
             shutil.rmtree(staging, ignore_errors=True)
 
+    # 프로그램 페이지를 분석해 아직 승인되지 않은 Scope 초안을 만듬
     def collect_draft(
         self,
         program_url: str,
@@ -115,6 +120,7 @@ class ScopeCoordinator:
         staging = self._create_scope_draft(document, draft_root=draft_root)
         return document, staging
 
+    # 초안의 무결성을 확인하고 승인된 Scope로 게시
     def approve_draft(
         self, draft_dir: Path | str, *, approved_by: str
     ) -> ScopeDocument:
@@ -133,6 +139,7 @@ class ScopeCoordinator:
         self._publish_scope(staging, document, approved_by)
         return document
 
+    # 승인자 이름이 비어 있거나 너무 길지 않은지 확인
     @staticmethod
     def _validate_approver(value: str) -> str:
         approved_by = value.strip()
@@ -142,6 +149,7 @@ class ScopeCoordinator:
             raise CoordinatorError("approved_by must be at most 160 characters")
         return approved_by
 
+    # 프로그램 페이지가 완전히 수집됐는지 확인
     @staticmethod
     def _require_complete_capture(page: ProgramPage) -> None:
         if page.capture_status is CaptureStatus.BLOCKED:
@@ -155,14 +163,17 @@ class ScopeCoordinator:
                 f"({page.capture_reason.value}); no Scope.md was generated"
             )
 
+    # 저장된 Scope의 승인 정보를 검증하고 반환
     def verify_approval(self) -> ScopeApproval:
         approval, _, _ = self._load_verified_snapshot()
         return approval
 
+    # 검증된 Scope 문서와 Markdown을 읽어 반환
     def load_approved_scope(self) -> tuple[ScopeDocument, str]:
         _, document, markdown = self._load_verified_snapshot()
         return document, markdown
 
+    # 저장된 Scope 파일과 승인 정보의 내용 및 해시를 함께 검증
     def _load_verified_snapshot(
         self,
     ) -> tuple[ScopeApproval, ScopeDocument, str]:
@@ -204,6 +215,7 @@ class ScopeCoordinator:
             raise CoordinatorError("scope files have changed since approval")
         return approval, document, markdown
 
+    # Scope 초안 파일과 해시 명세를 임시 디렉터리에 작성
     def _create_scope_draft(
         self, document: ScopeDocument, *, draft_root: Path | str | None = None
     ) -> Path:
@@ -237,6 +249,7 @@ class ScopeCoordinator:
             shutil.rmtree(staging, ignore_errors=True)
             raise
 
+    # 승인 정보를 기록하고 초안 디렉터리를 최종 위치에 게시
     def _publish_scope(
         self, staging: Path, document: ScopeDocument, approved_by: str
     ) -> None:
@@ -280,6 +293,7 @@ class ScopeCoordinator:
                 raise
             self._publish_cross_device(staging)
 
+    # 파일시스템이 달라 이동할 수 없을 때 복사 후 게시
     def _publish_cross_device(self, staging: Path) -> None:
         """Publish through a sibling copy when rename(2) reports EXDEV."""
         sibling = self.output_dir.parent / (
@@ -291,6 +305,7 @@ class ScopeCoordinator:
         finally:
             shutil.rmtree(sibling, ignore_errors=True)
 
+    # Scope JSON과 Markdown이 명세에 기록된 해시와 일치하는지 확인
     @staticmethod
     def _verify_content_hashes(
         manifest: ScopeManifest, paths: dict[str, Path]
@@ -302,6 +317,7 @@ class ScopeCoordinator:
         if markdown_hash != manifest.scope_markdown_sha256:
             raise CoordinatorError("Scope.md has changed since generation")
 
+    # JSON 파일을 지정한 모델로 읽고 유효성을 검사
     @staticmethod
     def _load_model(path: Path, model_type):
         if not path.is_file():
@@ -311,10 +327,12 @@ class ScopeCoordinator:
         except (OSError, ValidationError, ValueError) as exc:
             raise CoordinatorError(f"invalid {path.name}: {exc}") from exc
 
+    # 파일 내용의 SHA-256 해시를 계산
     @staticmethod
     def _sha256(content: bytes) -> str:
         return hashlib.sha256(content).hexdigest()
 
+    # Markdown에 넣을 텍스트의 공백과 특수문자를 정리
     @staticmethod
     def _clean(value: str) -> str:
         return (
@@ -331,6 +349,7 @@ class ScopeCoordinator:
             .replace("]", "\\]")
         )
 
+    # Scope 문서를 검토용 Markdown으로 변환
     @classmethod
     def _render_markdown(cls, document: ScopeDocument) -> str:
         analysis = document.analysis
@@ -387,6 +406,7 @@ class ScopeCoordinator:
         )
         return "\n".join(lines)
 
+    # Scope 자산 목록을 Markdown 표로 변환
     @classmethod
     def _render_asset_table(cls, assets) -> list[str]:
         if not assets:
@@ -411,6 +431,7 @@ class ScopeCoordinator:
             )
         return lines
 
+    # 문자열 목록을 Markdown 제목과 항목으로 변환
     @classmethod
     def _render_list_section(cls, title: str, values: list[str]) -> list[str]:
         lines = ["", f"## {title}", ""]
