@@ -20,6 +20,14 @@ from typing import Any
 
 
 STAGES = ("Scope", "Recon", "Attack", "Chaining", "Validation", "Report")
+_RECON_ACTIVITY = {
+    "ASSET_DISCOVERY": "Asset discovery",
+    "DNS_RESOLUTION": "DNS resolution",
+    "HOST_PORT_DISCOVERY": "Host and port discovery",
+    "HTTP_PROBE": "HTTP probing",
+    "ORIGIN_DISCOVERY": "Origin discovery",
+    "ENDPOINT_DISCOVERY": "Endpoint discovery",
+}
 _SCAN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 _STAGE_MAP = {
     "scope": "Scope",
@@ -286,6 +294,27 @@ class DashboardProjector:
         active = next((row for row in reversed(stages) if row["status"] == "running"), None)
         current = active or (stages[-1] if stages else None)
         stage_name = _stage(current["stage"] if current else "recon")
+        activity: str | None = None
+        if stage_name == "Recon" and current is not None and current["status"] == "running":
+            activity = "Preparing Recon"
+            if "pipeline_runs" in tables:
+                active_task = conn.execute(
+                    """SELECT p.stage FROM pipeline_runs p
+                    WHERE p.scan_id=? AND p.status='running' AND p.task_id IS NOT NULL
+                    AND NOT EXISTS (
+                        SELECT 1 FROM pipeline_runs terminal
+                        WHERE terminal.scan_id=p.scan_id AND terminal.task_id=p.task_id
+                        AND terminal.rowid>p.rowid
+                        AND terminal.status IN ('success','failed','skipped','completed')
+                    ) ORDER BY p.rowid DESC LIMIT 1""",
+                    (scan_id,),
+                ).fetchone()
+                if active_task is not None:
+                    activity = _RECON_ACTIVITY.get(str(active_task["stage"]).upper(), "Running Recon task")
+                elif conn.execute(
+                    "SELECT 1 FROM pipeline_runs WHERE scan_id=? LIMIT 1", (scan_id,)
+                ).fetchone():
+                    activity = "Processing Recon results"
 
         task_total = task_done = 0
         if current is not None and "attack_tasks" in tables:
@@ -386,9 +415,13 @@ class DashboardProjector:
         state = {
             "version": 1,
             "scan_id": scan_id,
-            "status": _status(scan["status"] if "status" in scan_columns else "pending"),
+            "status": _status(
+                current["status"] if current is not None and stage_name == "Report"
+                else scan["status"] if "status" in scan_columns else "pending"
+            ),
             "stage": stage_name,
             "progress": progress,
+            "activity": activity,
             "requests": requests,
             "budget": scope.budget,
             "endpoints": endpoints,
@@ -525,13 +558,13 @@ class DashboardProjector:
                 changes.append(("stage.status.changed", {"stage": state["stage"]}))
             if state["status"] != previous.get("status"):
                 changes.append(("scan.status.changed", {"status": state["status"]}))
-            if (state["progress"], state["requests"]) != (
-                previous.get("progress"), previous.get("requests")
+            if (state["progress"], state["requests"], state["activity"]) != (
+                previous.get("progress"), previous.get("requests"), previous.get("activity")
             ):
                 changes.append(
                     (
                         "task.progress.updated",
-                        {"progress": state["progress"], "requests": state["requests"]},
+                        {"progress": state["progress"], "requests": state["requests"], "activity": state["activity"]},
                     )
                 )
             old_findings = {item.get("id"): item for item in previous.get("findings", [])}
@@ -626,11 +659,21 @@ class DashboardProjector:
                                 (directory.name,),
                             ).fetchone()
                             if row:
+                                report_row = None
+                                if "stage_runs" in _tables(conn):
+                                    report_row = conn.execute(
+                                        """SELECT status,finished_at FROM stage_runs
+                                        WHERE scan_id=? AND lower(stage)='report'
+                                        ORDER BY rowid DESC LIMIT 1""",
+                                        (directory.name,),
+                                    ).fetchone()
+                                status = report_row["status"] if report_row else row["status"]
+                                finished_at = report_row["finished_at"] if report_row else row["finished_at"]
                                 found[row["scan_id"]] = {
                                     "scan_id": row["scan_id"],
-                                    "status": _status(row["status"]),
+                                    "status": _status(status),
                                     "started_at": _utc(row["started_at"]),
-                                    "finished_at": _utc(row["finished_at"]) if row["finished_at"] else None,
+                                    "finished_at": _utc(finished_at) if finished_at else None,
                                 }
                                 break
                     except sqlite3.Error:

@@ -377,8 +377,9 @@ result/AttackRuns/<scan_id>/
 └── Pipeline.db
 ```
 
-통합 `aidast run`의 종료 지점은 Shared Validation입니다. Report는 Validation case를
-검토한 뒤 별도 명령으로 생성합니다. `CodexMainAgent`는 단계별 adapter 이름이며
+통합 `aidast run`은 Shared Validation 이후 현재 확정된 `CONFIRMED` case마다
+Report 로컬 초안을 자동 생성합니다. 확정된 case가 없거나 지원하지 않는 플랫폼이면
+Report 단계를 건너뜁니다. `CodexMainAgent`는 단계별 adapter 이름이며
 전체 순서와 gate를 결정하는 상위 Agent가 아닙니다.
 
 ## Legacy Attack 경로
@@ -458,6 +459,7 @@ history를 유지해 재개합니다.
 ## Case 기반 Report
 
 Report는 `Pipeline.db`의 Validation `case_id`를 선택해 로컬 초안을 만듭니다.
+통합 실행에서는 case별로 `result/ReportRun/<scan_id>/<case_id>/`에 자동 저장합니다.
 `CONFIRMED`만 draft 대상이고, `KNOWN`은 원본 case를 가리키며 `CONTESTED`는
 review-only로 남습니다. HackerOne, Intigriti, Bugcrowd를 지원하며 자동 제출하지 않습니다.
 
@@ -466,10 +468,10 @@ aidast report run \
   <PIPELINE_DB> \
   --case-id <case_id> \
   --platform hackerone \
-  --output-dir result/ReportRun/<scan_id>
+  --output-dir result/ReportRun/<scan_id>/<case_id>
 
 aidast report status \
-  result/ReportRun/<scan_id>/Report.db
+  result/ReportRun/<scan_id>/<case_id>/Report.db
 ```
 
 `Report.db`, `Report.json`, `Report.md`는 Validation decision과 인용 evidence에
@@ -522,7 +524,7 @@ result/
 ├── AttackRuns/<scan_id>/Pipeline.db
 ├── AttackRun/                     # legacy
 ├── ValidationRun/                 # legacy
-├── ReportRun/
+├── ReportRun/<scan_id>/<case_id>/
 └── .aidast_sessions/
 ```
 

@@ -50,6 +50,7 @@ from aidast.reporting import (
     case_report_status,
     report_status,
 )
+from aidast.reporting.auto import generate_scan_reports, report_platform_for_program_url
 from aidast.scope.paths import ScopePathError, resolve_scope_directory
 from aidast.scope.reader import (
     PlaywrightProgramPageReader,
@@ -575,6 +576,7 @@ def main(
                 args,
                 prepare_attack=True,
                 validation_coordinator=validation_coordinator,
+                report_writer=report_writer,
             )
         if args.command == "attack":
             return _run_attack(args, workflow=attack_workflow)
@@ -713,6 +715,7 @@ def _run_recon(
     *,
     prepare_attack: bool = False,
     validation_coordinator: object | None = None,
+    report_writer: object | None = None,
 ) -> int:
     recon_failures = 0
     auth_hosts = getattr(args, "auth_host", [])
@@ -1082,6 +1085,19 @@ def _run_recon(
                         policy_path=run_dir / "TargetPolicy.json",
                     )
                 validation_result = coordinator.run(scan_id)
+                report_results: list[dict] = []
+                report_platform = report_platform_for_program_url(program_url)
+                if validation_result.status == "completed" and report_platform is not None:
+                    report_results = generate_scan_reports(
+                        pipeline_path,
+                        args.run_root.parent / "ReportRun" / scan_id,
+                        scan_id=scan_id,
+                        platform=report_platform,
+                        writer=report_writer,
+                    )
+                    print(f"Report drafts generated: {len(report_results)}")
+                elif validation_result.status == "completed":
+                    print("Automatic reports unavailable for this program platform.")
                 print(f"Recon handoff saved: {handoff_path}")
                 print(
                     f"Legacy Attack plan saved: {legacy_plan['database']} "

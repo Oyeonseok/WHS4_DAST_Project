@@ -270,6 +270,10 @@ class ReconExecutor:
 
     def _execute(self, task: ReconTask) -> None:
         task.status = ReconTaskStatus.RUNNING
+        dbmod.log_pipeline_run(
+            self.conn, scan_id=self.scan_id, task_id=task.task_id,
+            stage=task.task_type.value, status="running",
+        )
         handler = {
             ReconStep.ASSET_DISCOVERY: self._handle_asset_discovery,
             ReconStep.DNS_RESOLUTION: self._handle_dns_resolution,
@@ -328,6 +332,10 @@ class ReconExecutor:
         )
         if explicit is not None:
             return explicit
+        if task.target.asset_type in {AssetType.URL, AssetType.API} and task.target.asset.startswith(
+            ("http://", "https://")
+        ):
+            return task.target.asset
         # A discovered child host inherits the narrowed policy's scheme. This
         # matters for URL-form wildcard scopes that explicitly allow HTTP;
         # falling back to the global HTTPS default would make the subsequent
