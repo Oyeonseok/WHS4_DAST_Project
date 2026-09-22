@@ -189,6 +189,26 @@ class ScopeWorkflowManager:
         document = ScopeDocument.model_validate_json(
             (draft / "Scope.json").read_text(encoding="utf-8")
         )
+        return self._review_payload(document)
+
+    def approved_scope(self, program_id: str) -> dict[str, Any]:
+        program = self.registry.get(program_id)
+        directory = identify_program(str(program["program_url"])).under(
+            self.result_root / "Scope"
+        ).resolve(strict=False)
+        coordinator = ScopeCoordinator(directory)
+        document, _markdown = coordinator.load_approved_scope()
+        approval = coordinator.verify_approval()
+        return {
+            "scope": self._review_payload(document),
+            "approval": {
+                "approved_by": approval.approved_by,
+                "approved_at": approval.approved_at.isoformat(),
+            },
+        }
+
+    @staticmethod
+    def _review_payload(document: ScopeDocument) -> dict[str, Any]:
         analysis = document.analysis
         return {
             "scope_id": document.scope_id,

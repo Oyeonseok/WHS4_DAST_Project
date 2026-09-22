@@ -450,6 +450,8 @@ def test_scope_dashboard_requires_explicit_yes_or_no(tmp_path: Path) -> None:
             draft = await client.get(f"/api/v1/programs/{program_id}/scope-draft")
             assert draft.status_code == 200
             assert draft.json()["draft"]["in_scope_assets"][0]["asset"] == "*.example.test"
+            unavailable = await client.get(f"/api/v1/programs/{program_id}/approved-scope")
+            assert unavailable.status_code == 400
             assert not (tmp_path / "Scope" / "bugcrowd" / "example").exists()
 
             rejected = await client.post(
@@ -488,6 +490,18 @@ def test_scope_dashboard_requires_explicit_yes_or_no(tmp_path: Path) -> None:
             assert (output / "Scope.md").is_file()
             assert (output / "Manifest.json").is_file()
             assert (output / "Approval.json").is_file()
+            detail = await client.get(f"/api/v1/programs/{program_id}/approved-scope")
+            assert detail.status_code == 200
+            scope = detail.json()["scope"]
+            assert detail.json()["approval"]["approved_by"] == "reviewer"
+            assert scope["program_name"] == "Example Program"
+            assert scope["in_scope_assets"][0]["asset"] == "*.example.test"
+            assert scope["allowed_activities"] == ["Non-destructive testing"]
+            assert scope["prohibited_activities"] == ["Denial of service"]
+            assert scope["submission_requirements"] == ["Reproducible steps"]
+            assert scope["source_evidence"][0]["quote"] == "*.example.test is in scope"
+            assert "text" not in scope
+            assert "content_sha256" not in scope
             approved_scope = (await client.get("/api/v1/scopes")).json()["scopes"][0]
             assert approved_scope["program_name"] == "Example Program"
             requirements = approved_scope["execution_requirements"]
@@ -497,6 +511,9 @@ def test_scope_dashboard_requires_explicit_yes_or_no(tmp_path: Path) -> None:
                 "input_field": "intigriti_username",
             }
             assert requirements["profiles"][0]["limits"]["max_requests"] == 500
+            (output / "Scope.json").write_text("{}", encoding="utf-8")
+            compromised = await client.get(f"/api/v1/programs/{program_id}/approved-scope")
+            assert compromised.status_code == 400
 
     asyncio.run(exercise())
 
