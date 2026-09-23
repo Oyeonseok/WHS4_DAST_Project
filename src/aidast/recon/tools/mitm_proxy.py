@@ -191,7 +191,16 @@ def ingest_mitm_capture(conn: sqlite3.Connection, jsonl_path: Path, *, origin_id
                 conn.execute("UPDATE http_transactions SET origin_id=? WHERE http_transaction_id=?",
                              (origin_id, transaction_id))
                 if endpoint_id is not None:
-                    from aidast.recon.annotations import safe_url
+                    from aidast.recon.annotations import persist_url_parameters, safe_url
+                    from aidast.recon.judgment import query_signature
+                    dbmod.upsert_endpoint(
+                        conn, origin_id=origin_id, method=record["method"].upper(),
+                        path=urlsplit(record["url"]).path,
+                        normalized_path=normalize_path(urlsplit(record["url"]).path),
+                        query_signature=query_signature(record["url"]),
+                        source_tool="mitmproxy",
+                    )
+                    persist_url_parameters(conn, endpoint_id, record["url"])
                     conn.execute("""INSERT INTO endpoint_observations
                         (observation_id,endpoint_id,http_transaction_id,source_tool,
                          discovery_kind,observed_url,association_method,observed_at)

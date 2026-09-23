@@ -112,7 +112,7 @@ def select_relevant_attack_skills(
             (scan_id,),
         ).fetchall()
         parameters = conn.execute(
-            """SELECT p.name,p.location,p.data_type,p.is_identifier
+            """SELECT p.name,p.location,p.data_type,p.is_identifier,p.role
                FROM parameters p JOIN endpoints e ON e.endpoint_id=p.endpoint_id
                JOIN origins o ON o.origin_id=e.origin_id
                JOIN assets a ON a.asset_id=o.asset_id
@@ -207,19 +207,19 @@ def select_relevant_attack_skills(
         if auth_required:
             match("hunt-auth-bypass", 15, "authenticated endpoint")
 
-    for name, location, data_type, is_identifier in parameters:
+    for name, location, data_type, is_identifier, role in parameters:
         value = _text(name, location, data_type)
-        if is_identifier or any(token in value for token in (
+        if is_identifier or role == "identifier" or any(token in value for token in (
             "user_id", "account_id", "object_id", "resource_id", "order_id", "profile_id"
         )):
             match("hunt-idor", 100, "identifier parameter")
         if any(token in value for token in ("redirect", "return_url", "next", "continue")):
             match("hunt-open-redirect", 85, "redirect parameter")
-        if any(token in value for token in ("url", "uri", "webhook", "callback", "host")):
+        if role == "url" or any(token in value for token in ("url", "uri", "webhook", "callback", "host")):
             match("hunt-ssrf", 75, "URL parameter")
-        if any(token in value for token in ("file", "path", "folder", "template")):
+        if role == "file" or any(token in value for token in ("file", "path", "folder", "template")):
             match("hunt-lfi", 75, "file path parameter")
-        if any(token in value for token in ("search", "query", "filter", "sort", "where")):
+        if role == "search" or any(token in value for token in ("search", "query", "filter", "sort", "where")):
             match("hunt-sqli", 65, "query parameter")
             match("hunt-xss", 45, "reflectable parameter")
         if any(token in value for token in ("role", "admin", "permission", "privilege")):

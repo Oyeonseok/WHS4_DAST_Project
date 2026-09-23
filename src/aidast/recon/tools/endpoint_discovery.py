@@ -63,6 +63,7 @@ from aidast.paths import RESULT_ROOT
 
 from .api_secondary_discovery import (
     discover_api_secondary,
+    discover_adaptive_js_api_candidates,
 )
 
 from .playwright_driver import (
@@ -76,6 +77,7 @@ from .ffuf_root_selector import (
     select_ffuf_roots_from_endpoints,
 )
 from aidast.recon.policy import TargetPolicy
+from aidast.recon.judgment import is_probable_redirect_loop_path
 
 
 ALLOWED_SCHEMES = {
@@ -291,6 +293,9 @@ def _deduplicate_results(
         )
 
         if not path:
+            continue
+
+        if is_probable_redirect_loop_path(path):
             continue
 
         key = (
@@ -1968,6 +1973,25 @@ def discover_endpoints(
 
         observe_browser("playwright_interaction")
 
+        # Recover literal API routes from a few first-party bundles when
+        # normal browser and crawler observations leave the API surface sparse.
+        adaptive_js_results: list[dict] = []
+        try:
+            adaptive_js_results = discover_adaptive_js_api_candidates(
+                base_url,
+                _deduplicate_results(katana_results + login_results + playwright_results),
+                headers=driver.get_auth_headers(),
+                target_policy=target_policy,
+                proxy_url=mitm_proxy_url,
+                diagnostic_callback=diagnostic_callback,
+            )
+        except Exception as exc:
+            diagnose(
+                "phase_error", phase="adaptive_js",
+                error_type=type(exc).__name__, message=str(exc),
+            )
+        observe("adaptive_js", adaptive_js_results)
+
         # =================================================
         # PHASE 4
         # Authenticated ffuf
@@ -1985,12 +2009,13 @@ def discover_endpoints(
         auth_headers = driver.get_auth_headers()
         # Feed ffuf with crawler, login, and browser-observed paths.
         ffuf_seed_results = _deduplicate_results(
-            katana_results + login_results + playwright_results
+            katana_results + login_results + playwright_results + adaptive_js_results
         )
         diagnose(
             "deduplication", phase="ffuf_seeds",
             input_count=(
                 len(katana_results) + len(login_results) + len(playwright_results)
+                + len(adaptive_js_results)
             ),
             unique_count=len(ffuf_seed_results),
             endpoints=endpoint_rows(ffuf_seed_results),
@@ -2030,6 +2055,7 @@ def discover_endpoints(
                 katana_results
                 + ffuf_results
                 + playwright_results
+                + adaptive_js_results
             )
         )
         diagnose(

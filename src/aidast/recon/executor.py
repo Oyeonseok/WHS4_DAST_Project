@@ -176,6 +176,7 @@ class ReconExecutor:
         self.asset_discovery_batch_size = max(1, int(asset_discovery_batch_size))
         self._explicit_hosts: set[str] = set()
         self._candidate_task_hosts: dict[str, tuple[str, str, str]] = {}
+        self._discovered_parent: dict[str, tuple[str, str]] = {}
         self._diagnostic(
             "scan_initialized", scan_id=scan_id, scope_type=scope_type,
             policy_count=len(self.target_policies),
@@ -529,6 +530,7 @@ class ReconExecutor:
         if scheduled_key in self._scheduled_hosts:
             return
         self._scheduled_hosts.add(scheduled_key)
+        self._discovered_parent[hostname] = (parent.scope_id, parent.target.asset)
         child_policy = wildcard_policy.model_copy(
             update={
                 "asset_type": AssetType.DOMAIN,
@@ -609,16 +611,29 @@ class ReconExecutor:
         policy = self._policy_for(task)
         if policy is not None and not policy.allows_url(url):
             raise ReconExecutionError(f"TargetPolicy가 HTTP 요청을 허용하지 않음: {url}")
+        probe_timeout = policy.limits.timeout_seconds if policy else 30.0
+        if task.target.asset in self._discovered_parent:
+            probe_timeout = min(probe_timeout, 8.0)
         result = probe(
-            url,
-            timeout=policy.limits.timeout_seconds if policy else 30.0,
-            policy=policy,
+            url, timeout=probe_timeout, policy=policy,
             headers=self._probe_headers(task),
             broker=self._broker_for(task, policy) if policy is not None else None,
         )
         self._probe_cache[task.target.asset] = result
         if not result.ok:
+            self._record_discovered_probe(task.target.asset, "dead")
             raise ReconExecutionError(f"{url} 응답 없음")
+        self._record_discovered_probe(task.target.asset, "active")
+
+    def _record_discovered_probe(self, hostname: str, state: str) -> None:
+        parent = self._discovered_parent.get(hostname)
+        if parent is None:
+            return
+        dbmod.set_asset_candidate_probe_state(
+            self.candidate_conn, scope_id=parent[0], wildcard_asset=parent[1],
+            hostname=hostname, probe_state=state, scan_id=self.scan_id,
+        )
+        self.candidate_conn.commit()
 
     @_stage("origin_discovery")
     def _handle_origin_discovery(self, task: ReconTask) -> None:
@@ -762,10 +777,12 @@ class ReconExecutor:
             dbmod.upsert_endpoint(
                 self.conn, origin_id=origin_id, method=item["method"],
                 path=item["path"], normalized_path=item["normalized_path"],
+                query_signature=item.get("query_signature", ""),
                 content_type=item.get("content_type"),
                 source_tool=",".join(sorted(item["source_tools"])),
                 is_excluded=item["is_excluded"], exclude_reason=item["exclude_reason"],
             )
+        dbmod.reconcile_observed_endpoints(self.conn, origin_id=origin_id, raw_endpoints=raw)
 
         included = [e for e in merged if not e["is_excluded"]]
         print(f"   발견 {len(included)}건 (제외 {len(merged) - len(included)}건)")

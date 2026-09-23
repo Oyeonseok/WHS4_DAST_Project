@@ -55,3 +55,6 @@ docs/design/AGENT_ORCHESTRATION_REFACTOR.md
 # superpowers
 
 docs/superpowers
+
+# Teammate source checkout used only for the verified merge
+/AI-DAST-ALL/

@@ -31,6 +31,12 @@ class ReconBrowserTransportTests(unittest.TestCase):
         self.driver = PlaywrightDriver(self.policy.asset, self.config, target_policy=self.policy,
                                        proxy_url="http://127.0.0.1:8080")
 
+    def test_redirect_loop_page_is_not_visited_as_endpoint(self):
+        page = Mock(url="https://example.com/api/login/login/login")
+        page.goto.return_value = Mock(status=200, headers={"content-type": "text/html"})
+        with patch.object(self.driver, "_ensure_page", return_value=page):
+            self.assertFalse(self.driver.visit_path("/api/login"))
+
     @unittest.skipIf(os.name == "nt", "POSIX select fallback")
     def test_manual_login_wait_continues_if_stdin_is_not_selectable(self):
         output = io.StringIO()

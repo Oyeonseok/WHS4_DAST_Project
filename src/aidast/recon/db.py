@@ -16,6 +16,8 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
+RECON_SCHEMA_VERSION = 8
+
 SCHEMA = """
 -- WAL은 -wal/-shm 보조 파일에 mmap 기반 공유 락이 필요한데, WSL에서
 -- Windows 드라이브를 마운트한 경로(/mnt/c/...)의 DrvFs는 이걸 지원하지
@@ -40,6 +42,8 @@ CREATE TABLE IF NOT EXISTS asset_discovery_candidates (
     hostname TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'pending'
         CHECK(status IN ('pending','in_progress','completed')),
+    probe_state TEXT NOT NULL DEFAULT 'unknown'
+        CHECK(probe_state IN ('unknown','active','dead')),
     first_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     last_scan_id TEXT,
     UNIQUE(scope_id, wildcard_asset, hostname)
@@ -88,6 +92,7 @@ CREATE TABLE IF NOT EXISTS endpoints (
     method TEXT,
     path TEXT,
     normalized_path TEXT NOT NULL,
+    query_signature TEXT NOT NULL DEFAULT '',
     content_type TEXT,
     auth_required INTEGER,
     source_tools TEXT,
@@ -105,10 +110,20 @@ CREATE TABLE IF NOT EXISTS parameters (
     name TEXT NOT NULL,
     location TEXT NOT NULL,
     data_type TEXT,
+    role TEXT,
     example_value TEXT,
     is_identifier INTEGER DEFAULT 0,
     FOREIGN KEY (endpoint_id) REFERENCES endpoints(endpoint_id),
     UNIQUE(endpoint_id, name, location)
+);
+
+CREATE TABLE IF NOT EXISTS endpoint_query_signatures (
+    endpoint_id TEXT NOT NULL,
+    query_signature TEXT NOT NULL,
+    observation_count INTEGER NOT NULL DEFAULT 1,
+    last_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (endpoint_id) REFERENCES endpoints(endpoint_id),
+    PRIMARY KEY(endpoint_id, query_signature)
 );
 
 CREATE TABLE IF NOT EXISTS dns_resolutions (
@@ -253,6 +268,21 @@ def set_asset_candidate_status(
     )
 
 
+def set_asset_candidate_probe_state(
+    conn: sqlite3.Connection, *, scope_id: str, wildcard_asset: str,
+    hostname: str, probe_state: str, scan_id: str | None = None,
+) -> None:
+    """Finish a candidate while retaining its independent probe outcome."""
+    if probe_state not in {"unknown", "active", "dead"}:
+        raise ValueError(f"invalid probe_state: {probe_state}")
+    conn.execute(
+        """UPDATE asset_discovery_candidates
+           SET status='completed', probe_state=?, last_scan_id=?
+           WHERE scope_id=? AND wildcard_asset=? AND hostname=?""",
+        (probe_state, scan_id, scope_id, wildcard_asset, hostname),
+    )
+
+
 def now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -266,6 +296,8 @@ def init_db(db_path: Path) -> sqlite3.Connection:
     from aidast.pipeline.schema import migrate_pipeline_schema
 
     migrate_pipeline_schema(conn)
+    if conn.execute("PRAGMA user_version").fetchone()[0] < RECON_SCHEMA_VERSION:
+        conn.execute(f"PRAGMA user_version={RECON_SCHEMA_VERSION}")
     conn.commit()
     return conn
 
@@ -367,6 +399,7 @@ def upsert_endpoint(
     method: str,
     path: str,
     normalized_path: str,
+    query_signature: str = "",
     content_type: str | None = None,
     auth_required: bool | None = None,
     source_tool: str = "",
@@ -382,22 +415,23 @@ def upsert_endpoint(
         tools = set(filter(None, (existing_tools or "").split(",")))
         tools.update(filter(None, source_tool.split(",")))
         conn.execute(
-            "UPDATE endpoints SET source_tools=? WHERE endpoint_id=?",
-            (",".join(sorted(tools)), endpoint_id),
+            "UPDATE endpoints SET source_tools=?, query_signature=CASE WHEN query_signature='' THEN ? ELSE query_signature END WHERE endpoint_id=?",
+            (",".join(sorted(tools)), query_signature, endpoint_id),
         )
     else:
         endpoint_id = new_id("endpoint")
         conn.execute(
             """INSERT INTO endpoints
-               (endpoint_id, origin_id, method, path, normalized_path, content_type,
+               (endpoint_id, origin_id, method, path, normalized_path, query_signature, content_type,
                 auth_required, source_tools, is_excluded, exclude_reason)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 endpoint_id,
                 origin_id,
                 method,
                 path,
                 normalized_path,
+                query_signature,
                 content_type,
                 int(bool(auth_required)) if auth_required is not None else None,
                 source_tool,
@@ -405,8 +439,155 @@ def upsert_endpoint(
                 exclude_reason,
             ),
         )
+    if query_signature:
+        conn.execute(
+            """INSERT INTO endpoint_query_signatures(endpoint_id,query_signature)
+               VALUES (?,?) ON CONFLICT(endpoint_id,query_signature) DO UPDATE SET
+               observation_count=observation_count+1,last_seen_at=CURRENT_TIMESTAMP""",
+            (endpoint_id, query_signature),
+        )
     conn.commit()
     return endpoint_id
+
+
+def upsert_parameter(
+    conn: sqlite3.Connection, *, endpoint_id: str, name: str, location: str,
+    data_type: str | None = None, role: str | None = None,
+    is_identifier: bool = False,
+) -> str:
+    """Record a parameter's shape without persisting its observed value."""
+    name = str(name or "").strip()[:256]
+    location = str(location or "").strip().lower()
+    if not name or location not in {"query", "path", "header", "json", "form"}:
+        raise ValueError("invalid parameter candidate")
+    row = conn.execute(
+        "SELECT parameter_id FROM parameters WHERE endpoint_id=? AND name=? AND location=?",
+        (endpoint_id, name, location),
+    ).fetchone()
+    if row:
+        parameter_id = row[0]
+        conn.execute(
+            """UPDATE parameters SET data_type=COALESCE(?,data_type),
+               role=COALESCE(?,role),is_identifier=MAX(is_identifier,?)
+               WHERE parameter_id=?""",
+            (data_type, role, int(is_identifier), parameter_id),
+        )
+    else:
+        parameter_id = new_id("param")
+        conn.execute(
+            """INSERT INTO parameters
+               (parameter_id,endpoint_id,name,location,data_type,role,is_identifier)
+               VALUES (?,?,?,?,?,?,?)""",
+            (parameter_id, endpoint_id, name, location, data_type, role, int(is_identifier)),
+        )
+    conn.commit()
+    return parameter_id
+
+
+def reconcile_observed_endpoints(
+    conn: sqlite3.Connection, *, origin_id: str, raw_endpoints: list[dict],
+) -> None:
+    """Move streamed observations onto the learned endpoint surface.
+
+    ObservationRecorder persists each observation before the complete crawler
+    batch is available. Once adaptive normalization has learned a route, the
+    provisional endpoint IDs must be folded into its canonical endpoint.
+    """
+    from aidast.recon.judgment import (
+        adaptive_path_fingerprints, is_probable_redirect_loop_path, normalize_path,
+    )
+
+    learned = adaptive_path_fingerprints(raw_endpoints, per_method=True)
+    remap: dict[tuple[str, str], str] = {}
+    loops: set[tuple[str, str]] = set()
+    for item in raw_endpoints:
+        path = str(item.get("path") or "")
+        if not path:
+            continue
+        method = str(item.get("method", "GET")).upper()
+        old_path = normalize_path(path)
+        if is_probable_redirect_loop_path(path):
+            loops.add((method, old_path))
+            continue
+        target_path = normalize_path(learned.get((method, path), path))
+        key = (method, old_path)
+        if key in remap and remap[key] != target_path:
+            raise ValueError("one observed endpoint maps to conflicting learned routes")
+        remap[key] = target_path
+
+    with conn:
+        for method, path in loops:
+            conn.execute(
+                """UPDATE endpoints SET is_excluded=1,exclude_reason='redirect_loop'
+                   WHERE origin_id=? AND method=? AND normalized_path=?""",
+                (origin_id, method, path),
+            )
+        for (method, old_path), target_path in remap.items():
+            if old_path == target_path:
+                continue
+            old = conn.execute(
+                """SELECT endpoint_id,source_tools,content_type,auth_required,query_signature
+                   FROM endpoints WHERE origin_id=? AND method=? AND normalized_path=?""",
+                (origin_id, method, old_path),
+            ).fetchone()
+            target = conn.execute(
+                """SELECT endpoint_id,source_tools FROM endpoints
+                   WHERE origin_id=? AND method=? AND normalized_path=?""",
+                (origin_id, method, target_path),
+            ).fetchone()
+            if old is None or target is None or old[0] == target[0]:
+                continue
+            old_id, target_id = old[0], target[0]
+            # Recon reconciliation runs before Attack. Never silently rewrite
+            # an endpoint already referenced by a later stage.
+            for table, column in (
+                ("attack_tasks", "endpoint_id"), ("findings", "endpoint_id"),
+                ("attack_attempts", "endpoint_id"), ("attack_facts", "source_endpoint_id"),
+            ):
+                if conn.execute(f"SELECT 1 FROM {table} WHERE {column}=? LIMIT 1", (old_id,)).fetchone():
+                    raise RuntimeError("cannot reconcile an endpoint used by Attack")
+            tools = ",".join(sorted(set(filter(None, (old[1] or "").split(","))) |
+                                    set(filter(None, (target[1] or "").split(",")))))
+            conn.execute(
+                """UPDATE endpoints SET source_tools=?,
+                   content_type=COALESCE(content_type,?),
+                   auth_required=CASE WHEN auth_required=1 OR ?=1 THEN 1
+                                      WHEN auth_required=0 OR ?=0 THEN 0
+                                      ELSE NULL END,
+                   query_signature=CASE WHEN query_signature='' THEN ? ELSE query_signature END
+                   WHERE endpoint_id=?""",
+                (tools, old[2], old[3], old[3], old[4], target_id),
+            )
+            for name, location, data_type, role, identifier in conn.execute(
+                """SELECT name,location,data_type,role,is_identifier FROM parameters
+                   WHERE endpoint_id=?""", (old_id,),
+            ).fetchall():
+                conn.execute(
+                    """INSERT INTO parameters
+                       (parameter_id,endpoint_id,name,location,data_type,role,is_identifier)
+                       VALUES (?,?,?,?,?,?,?)
+                       ON CONFLICT(endpoint_id,name,location) DO UPDATE SET
+                       data_type=COALESCE(parameters.data_type,excluded.data_type),
+                       role=CASE WHEN parameters.role IS NULL OR parameters.role='unknown'
+                                 THEN excluded.role ELSE parameters.role END,
+                       is_identifier=MAX(parameters.is_identifier,excluded.is_identifier)""",
+                    (new_id("param"), target_id, name, location, data_type, role, identifier),
+                )
+            for signature, count in conn.execute(
+                "SELECT query_signature,observation_count FROM endpoint_query_signatures WHERE endpoint_id=?",
+                (old_id,),
+            ).fetchall():
+                conn.execute(
+                    """INSERT INTO endpoint_query_signatures(endpoint_id,query_signature,observation_count)
+                       VALUES (?,?,?) ON CONFLICT(endpoint_id,query_signature) DO UPDATE SET
+                       observation_count=endpoint_query_signatures.observation_count+excluded.observation_count""",
+                    (target_id, signature, count),
+                )
+            conn.execute("UPDATE http_transactions SET endpoint_id=? WHERE endpoint_id=?", (target_id, old_id))
+            conn.execute("UPDATE endpoint_observations SET endpoint_id=? WHERE endpoint_id=?", (target_id, old_id))
+            conn.execute("DELETE FROM parameters WHERE endpoint_id=?", (old_id,))
+            conn.execute("DELETE FROM endpoint_query_signatures WHERE endpoint_id=?", (old_id,))
+            conn.execute("DELETE FROM endpoints WHERE endpoint_id=?", (old_id,))
 
 
 def insert_dns_resolution(
@@ -621,3 +802,25 @@ def _migrate_context_schema(conn: sqlite3.Connection) -> None:
     version = conn.execute("PRAGMA user_version").fetchone()[0]
     if version < 3:
         conn.execute("PRAGMA user_version=3")
+    # Recon metadata is additive to the shared pipeline schema. Its columns
+    # are detected directly so reopening a v6/v11 database cannot downgrade it.
+    for table, columns in (
+        ("parameters", {"role": "TEXT"}),
+        ("endpoints", {"query_signature": "TEXT NOT NULL DEFAULT ''"}),
+        ("asset_discovery_candidates", {
+            "probe_state": "TEXT NOT NULL DEFAULT 'unknown' CHECK(probe_state IN ('unknown','active','dead'))"
+        }),
+    ):
+        existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+        for name, ddl in columns.items():
+            if name not in existing:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_parameters_role ON parameters(role)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_endpoints_query_signature ON endpoints(origin_id,method,query_signature)")
+    conn.execute("""CREATE TABLE IF NOT EXISTS endpoint_query_signatures (
+        endpoint_id TEXT NOT NULL REFERENCES endpoints(endpoint_id),
+        query_signature TEXT NOT NULL,
+        observation_count INTEGER NOT NULL DEFAULT 1,
+        last_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY(endpoint_id,query_signature)
+    )""")

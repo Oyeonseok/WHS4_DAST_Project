@@ -54,12 +54,13 @@ class MitmAddonBudgetTests(unittest.TestCase):
         return addon
 
     @staticmethod
-    def _flow(path: str, *, headers=None, method="GET"):
+    def _flow(path: str, *, headers=None, method="GET", content=b""):
         return SimpleNamespace(
             request=SimpleNamespace(
                 pretty_url=f"https://example.com{path}",
                 method=method,
                 headers=dict(headers or {}),
+                content=content,
             ),
             metadata={},
             response=None,
@@ -120,6 +121,39 @@ class MitmAddonBudgetTests(unittest.TestCase):
         addon.request(static)
         self.assertEqual(static.metadata["aidast_priority"], 6)
         self.assertTrue(static.metadata["aidast_static_resource"])
+
+    def test_different_query_or_post_body_is_not_budget_deduplicated(self):
+        addon = self._addon()
+        addon.rules["allowed_methods"].append("POST")
+        requests = (
+            self._flow("/api/items?id=1"),
+            self._flow("/api/items?id=2"),
+            self._flow("/api/items", method="POST", content=b'{"value":1}'),
+            self._flow("/api/items", method="POST", content=b'{"value":2}'),
+        )
+
+        for request in requests:
+            addon.request(request)
+
+        self.assertEqual(addon.request_count, 4)
+        self.assertTrue(all(not request.metadata["aidast_duplicate"] for request in requests))
+
+    def test_repeated_query_key_order_is_distinct_for_budget(self):
+        addon = self._addon()
+        requests = (
+            self._flow("/api?step=one&step=two"),
+            self._flow("/api?step=two&step=one"),
+        )
+        for request in requests:
+            addon.request(request)
+        self.assertEqual(addon.request_count, 2)
+        self.assertTrue(all(not request.metadata["aidast_duplicate"] for request in requests))
+
+    def test_get_body_changes_request_identity(self):
+        addon = self._addon()
+        for content in (b"first", b"second"):
+            addon.request(self._flow("/api/items", content=content))
+        self.assertEqual(addon.request_count, 2)
 
 
 class MitmProxyStartupTests(unittest.TestCase):

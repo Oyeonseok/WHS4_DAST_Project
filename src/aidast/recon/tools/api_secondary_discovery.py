@@ -22,6 +22,8 @@ GraphQL
 from __future__ import annotations
 
 import json
+import hashlib
+import re
 import subprocess
 import tempfile
 from pathlib import Path
@@ -59,6 +61,14 @@ GRAPHQL_COMMON_PATHS = {
     "/api/graphql",
     "/gql",
 }
+
+ADAPTIVE_API_THRESHOLD = 10
+ADAPTIVE_MAX_SCRIPTS = 5
+ADAPTIVE_MAX_CANDIDATES = 30
+_JS_API_PATH = re.compile(
+    r"[\"'](?P<path>/(?:api|rest)(?:/[^\"'\\\s?#]{0,160})?)[\"']",
+    re.IGNORECASE,
+)
 
 
 # =========================================================
@@ -947,6 +957,124 @@ def _deduplicate(
 # =========================================================
 # Secondary API Discovery
 # =========================================================
+
+def _fingerprint(
+    status: int | None, headers: dict[str, str], body: bytes, *, request_url: str = "",
+) -> tuple:
+    if request_url:
+        # Missing-route handlers often reflect the requested URL in a 200
+        # JSON response. Compare response templates, not just exact bytes.
+        normalized = body.decode("utf-8", errors="replace")
+        normalized = normalized.replace(request_url, "{requested_url}")
+        normalized = normalized.replace(urlparse(request_url).path, "{requested_path}")
+        body = normalized.encode("utf-8")
+    content_type = next(
+        (value for key, value in headers.items() if key.lower() == "content-type"), ""
+    ).split(";", 1)[0].strip().lower()
+    return status, content_type, len(body), hashlib.sha256(body).hexdigest()
+
+
+def discover_adaptive_js_api_candidates(
+    base_url: str,
+    endpoints: list[dict],
+    *,
+    headers: dict[str, str] | None = None,
+    target_policy: TargetPolicy | None = None,
+    proxy_url: str | None = None,
+    broker: RequestBroker | None = None,
+    diagnostic_callback=None,
+    api_threshold: int = ADAPTIVE_API_THRESHOLD,
+    max_scripts: int = ADAPTIVE_MAX_SCRIPTS,
+    max_candidates: int = ADAPTIVE_MAX_CANDIDATES,
+) -> list[dict]:
+    """Inspect a few first-party JS bundles when the observed API surface is sparse."""
+    if target_policy is not None and not proxy_url:
+        raise ValueError("adaptive JS discovery requires a policy proxy")
+    api_count = sum(
+        str(item.get("path", "")).lower().startswith(("/api/", "/rest/", "/graphql"))
+        for item in endpoints
+    )
+    if api_count >= max(1, int(api_threshold)):
+        return []
+
+    scripts: list[str] = []
+    for item in endpoints:
+        path = str(item.get("path") or "")
+        candidate = str(item.get("url") or urljoin(base_url, path))
+        if not urlparse(candidate).path.lower().endswith(".js"):
+            continue
+        if _same_origin(candidate, base_url) and candidate not in scripts:
+            scripts.append(candidate)
+        if len(scripts) >= max(1, int(max_scripts)):
+            break
+    if not scripts:
+        return []
+
+    if broker is None and target_policy is not None:
+        broker = _request_broker(target_policy, proxy_url)
+
+    candidates: set[str] = set()
+    for script_url in scripts:
+        status, _, body = _http_request(
+            script_url, headers=headers, target_policy=target_policy,
+            proxy_url=proxy_url, broker=broker, timeout=5.0,
+        )
+        if status is None or not body:
+            continue
+        for match in _JS_API_PATH.finditer(body.decode("utf-8", errors="replace")):
+            path = match.group("path")
+            if "{" not in path and "}" not in path:
+                candidates.add(urljoin(base_url, path))
+            if len(candidates) >= max(1, int(max_candidates)):
+                break
+        if len(candidates) >= max(1, int(max_candidates)):
+            break
+
+    controls: dict[str, tuple[int, dict[str, str], bytes, str]] = {}
+    for prefix in ("/api", "/rest"):
+        control_url = urljoin(base_url, prefix + "/__aidast_missing_control__")
+        status, response_headers, body = _http_request(
+            control_url, headers=headers, target_policy=target_policy,
+            proxy_url=proxy_url, broker=broker, timeout=5.0,
+        )
+        if status is not None and status < 500:
+            controls[prefix] = (status, response_headers, body, control_url)
+
+    results: list[dict] = []
+    for url in sorted(candidates):
+        if not _same_origin(url, base_url):
+            continue
+        if target_policy is not None and not target_policy.allows_url(url, method="GET"):
+            continue
+        status, response_headers, body = _http_request(
+            url, headers=headers, target_policy=target_policy,
+            proxy_url=proxy_url, broker=broker, timeout=5.0,
+        )
+        if status is None or status == 404 or status >= 500:
+            continue
+        content_type = next(
+            (value for key, value in response_headers.items() if key.lower() == "content-type"), ""
+        ).split(";", 1)[0].strip().lower()
+        if content_type == "text/html":
+            continue
+        prefix = "/api" if urlparse(url).path.lower().startswith("/api") else "/rest"
+        if prefix not in controls:
+            continue
+        control_status, control_headers, control_body, control_url = controls[prefix]
+        if (_fingerprint(status, response_headers, body, request_url=url) ==
+                _fingerprint(control_status, control_headers, control_body,
+                             request_url=control_url)):
+            continue
+        results.append({
+            "method": "GET", "path": urlparse(url).path or "/", "url": url,
+            "source": "adaptive_js", "discovery_kind": "js_api_candidate",
+            "content_type": next((v for k, v in response_headers.items() if k.lower() == "content-type"), None),
+            "evidence": {"response_status": status, "source_scripts": scripts},
+        })
+    if diagnostic_callback is not None:
+        diagnostic_callback("completed", component="adaptive_js", accepted_count=len(results))
+    return results
+
 
 def discover_api_secondary(
     base_url: str,

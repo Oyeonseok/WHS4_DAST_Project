@@ -322,6 +322,8 @@ Scope 산출물은 `result/Scope/<platform>/<program>/` 아래에 프로그램�
 
 ### Recon
 
+팀원 `AI-DAST-ALL`의 Recon/Attack 기능 병합 내용과 검증 범위는 [병합 기록](docs/changes/AI_DAST_ALL_RECON_ATTACK_PARITY.md)에 정리했습니다.
+
 ```bash
 aidast recon "<PROGRAM_URL>"
 ```
