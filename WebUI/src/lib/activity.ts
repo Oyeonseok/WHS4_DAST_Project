@@ -21,6 +21,7 @@ export type ActivityLog = {
   message: string;
   message_code?: string | null;
   message_params?: Record<string, string | number>;
+  audit_id?: string;
 };
 
 export type ScopeActivityStatus =
@@ -213,6 +214,7 @@ export function mergeActivityLogs(
     message: log.message,
     message_code: log.message_code,
     message_params: log.message_params,
+    audit_id: log.audit_id,
   }));
   return [...scopeLogs, ...normalizedScanLogs]
     .sort((left, right) => {
@@ -224,4 +226,8 @@ export function mergeActivityLogs(
       return left.stream.localeCompare(right.stream);
     })
     .slice(-500);
+}
+
+export function hideAcknowledgedActivity(logs: readonly ActivityLog[], acknowledgedIds: ReadonlySet<string>): ActivityLog[] {
+  return logs.filter(log => !log.audit_id || !acknowledgedIds.has(log.audit_id));
 }

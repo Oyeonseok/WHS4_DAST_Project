@@ -3,6 +3,7 @@ import { DEMO_SCAN } from './data/demo';
 import { transportMode, useScanSocket } from './hooks/useScanSocket';
 import {
   formatActivityElapsed,
+  hideAcknowledgedActivity,
   initialScopeActivityState,
   isScopeActivityActive,
   mergeActivityLogs,
@@ -14,6 +15,7 @@ import {
 } from './lib/activity';
 import { displayStageStatus, stages, type Finding, type ReportDraftStatus, type Snapshot } from './lib/events';
 import { localizeActivityMessage, localizeAuditEventType } from './lib/activityMessages';
+import { auditLevel, readAuditAcknowledgements, saveAuditAcknowledgements, type AuditEntry } from './lib/audit';
 import { initialLanguage, translate, type Language } from './lib/i18n';
 import {
   resolveExecutionLimits,
@@ -34,7 +36,6 @@ type RegisteredProgram = { id: string; platform: string; program: string; visibi
 type ScopeDraftAsset = ScopeTarget & { eligibility: string };
 type ScopeDraft = { scope_id: string; created_at: string; source_url: string; program_name: string; program_description: string; in_scope_assets: ScopeDraftAsset[]; out_of_scope_assets: ScopeDraftAsset[]; allowed_activities: string[]; prohibited_activities: string[]; submission_requirements: string[]; operational_constraints: string[]; safe_harbor: string; ambiguities: string[]; source_evidence: { section: string; quote: string }[] };
 type ScopeApproval = { approved_by: string; approved_at: string };
-type AuditEntry = { id: string; event_type: string; stage: string; created_at: string };
 type ReportSummary = { report_id: string; scan_id: string; case_id: string; platform: string; title: string; created_at: string };
 type ThemeChoice = 'system' | 'dark' | 'light';
 const scopeStatusLabel: Record<ScopeStatus, string> = { scope_required: 'Scope required', collecting: 'Collecting', awaiting_browser: 'Login required', paused: 'Paused', cancelling: 'Cancelling', cancelled: 'Cancelled', review_required: 'Review Yes / No', approved: 'Approved', rejected: 'Rejected', failed: 'Failed' };
@@ -58,6 +59,19 @@ const attackOutcomeLabels: Record<string, string> = { negative: '취약점 징�
 const attackOutcomeLabelsEn: Record<string, string> = { negative: 'No vulnerability signal', confirmed: 'Confirmed', lead: 'Needs further review', inconclusive: 'Inconclusive', blocked: 'Blocked', error: 'Error' };
 const attackSkillLabelsEn: Record<string, string> = { 'hunt-auth-bypass': 'Authentication bypass check', 'hunt-cors': 'CORS configuration check', 'hunt-session': 'Session management check' };
 const attackReasonLabelsEn: Record<string, string> = { 'authentication endpoint': 'Authentication endpoint found', 'authenticated endpoint': 'Authenticated endpoint found', 'CORS response signal': 'CORS response header found', 'session response signal': 'Session response header found', 'session endpoint': 'Session endpoint found' };
+const demoAuditEntries: AuditEntry[] = [
+  { id: 'demo-4', created_at: '2026-09-20T05:28:24Z', event_type: 'finding.created', stage: 'Attack' },
+  { id: 'demo-3', created_at: '2026-09-20T05:28:12Z', event_type: 'request.authorized', stage: 'Attack' },
+  { id: 'demo-2', created_at: '2026-09-20T05:28:09Z', event_type: 'pipeline.materialized', stage: 'Recon' },
+  { id: 'demo-1', created_at: '2026-09-20T05:28:00Z', event_type: 'scope.verified', stage: 'Scope' },
+];
+const auditFailureLabels: Record<string, [string, string]> = {
+  timeout: ['시간 초과', 'Timed out'],
+  rate_limit: ['요청 제한 또는 예산 초과', 'Rate limit or request budget reached'],
+  access_denied: ['접근 권한 거부', 'Access denied'],
+  network: ['네트워크 또는 DNS 연결 문제', 'Network or DNS connection problem'],
+  tool_unavailable: ['실행 도구를 찾을 수 없음', 'Required tool unavailable'],
+};
 function savedTheme(): ThemeChoice {
   const value = localStorage.getItem(THEME_KEY);
   return value === 'dark' || value === 'light' || value === 'system' ? value : 'system';
@@ -205,6 +219,12 @@ export default function App() {
   const [attackTaskRevision, setAttackTaskRevision] = useState(0);
   const [auditEntries, setAuditEntries] = useState<AuditEntry[]>([]);
   const [auditError, setAuditError] = useState('');
+  const [auditSearch, setAuditSearch] = useState('');
+  const [auditLevelFilter, setAuditLevelFilter] = useState('all');
+  const [showAcknowledgedAudit, setShowAcknowledgedAudit] = useState(false);
+  const [acknowledgedAudit, setAcknowledgedAudit] = useState(() => readAuditAcknowledgements(localStorage, scanId));
+  const [auditAckError, setAuditAckError] = useState('');
+  const [auditRevision, setAuditRevision] = useState(0);
   const [reports, setReports] = useState<ReportSummary[]>([]);
   const [reportError, setReportError] = useState('');
   const [reportScanId, setReportScanId] = useState<string | null>(null);
@@ -240,7 +260,30 @@ export default function App() {
   }, [workflowProgram?.scope_status]);
   const tr = (text: string) => translate(language, text);
   const tk = (ko: string, en: string) => language === 'ko' ? ko : en;
+  const acknowledgeAudit = (id: string) => {
+    const next = new Set(acknowledgedAudit);
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
+    setAcknowledgedAudit(next);
+    setAuditAckError(saveAuditAcknowledgements(localStorage, scanId, next) ? '' : tk('확인 상태를 이 브라우저에 저장하지 못했습니다.', 'Could not save the acknowledgement in this browser.'));
+  };
   const findingTitle = (finding: Finding) => demo && language === 'en' ? demoFindingTitleEn[finding.id] || finding.title : finding.title;
+  const auditMessage = (item: AuditEntry) => item.message_code === 'recon.activity' && item.message_params?.phase
+    ? localizeActivityMessage(language, { message: 'Recon activity', message_code: item.message_code, message_params: item.message_params })
+    : localizeAuditEventType(language, item.event_type);
+  const auditProblem = (item: AuditEntry) => auditLevel(item) === 'error'
+    ? item.failure_code && auditFailureLabels[item.failure_code]
+      ? auditFailureLabels[item.failure_code][language === 'ko' ? 0 : 1]
+      : tk('상세 원인은 이 기록에 남지 않았습니다.', 'The detailed cause was not recorded in this entry.')
+    : '';
+  const auditItems = demo ? demoAuditEntries : auditEntries;
+  const auditPendingCount = auditItems.filter(item => !acknowledgedAudit.has(item.id)).length;
+  const visibleAuditEntries = auditItems.filter(item => {
+    if (acknowledgedAudit.has(item.id) !== showAcknowledgedAudit) return false;
+    if (auditLevelFilter !== 'all' && auditLevel(item) !== auditLevelFilter) return false;
+    const text = `${auditMessage(item)} ${auditProblem(item)} ${item.event_type} ${item.stage} ${item.task_id || ''}`;
+    return text.toLowerCase().includes(auditSearch.trim().toLowerCase());
+  });
   const pageLabel = (value: Page) => tr(value);
   const go = (destination: Page) => { location.hash = slugs[pages.indexOf(destination)]; setPage(destination); setSearch(''); };
   const refreshRegisteredPrograms = async (signal?: AbortSignal) => {
@@ -286,7 +329,7 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem('aidast-language', language);
     document.documentElement.lang = language;
-    document.title = language === 'ko' ? 'AI DAST — 보안 운영 워크스페이스' : 'AI DAST — Security Operations Workspace';
+    document.title = language === 'ko' ? 'DDalGak — AI DAST 도구' : 'DDalGak — AI DAST tool';
   }, [language]);
   useEffect(() => {
     if (demo) return;
@@ -410,9 +453,15 @@ export default function App() {
   }, [demo, modal, workflowProgram?.id, workflowProgram?.scope_status]);
   useEffect(() => { if (modal && !dialog.current?.open) dialog.current?.showModal(); else if (!modal && dialog.current?.open) dialog.current.close(); }, [modal]);
   useEffect(() => {
+    setAcknowledgedAudit(readAuditAcknowledgements(localStorage, scanId));
+    setAuditAckError('');
+    setShowAcknowledgedAudit(false);
+  }, [scanId]);
+  useEffect(() => {
     if (demo || page !== 'Audit log' || !scanId) return;
     const abort = new AbortController();
     setAuditError('');
+    setAuditEntries([]);
     void (async () => {
       try {
         const base = import.meta.env.VITE_API_BASE_URL || location.origin;
@@ -423,7 +472,7 @@ export default function App() {
       } catch (e) { if (!abort.signal.aborted) setAuditError(e instanceof Error ? e.message : 'The audit log could not be loaded.'); }
     })();
     return () => abort.abort();
-  }, [demo, page, scanId]);
+  }, [demo, page, scanId, auditRevision]);
   useEffect(() => {
     if (demo || (!scanId && page !== 'Reports')) return;
     const abort = new AbortController();
@@ -678,8 +727,9 @@ export default function App() {
       setCancelRequest(null);
     }
   }, [cancelRequest, snapshot]);
-  const activityLogs = mergeActivityLogs(snapshot?.logs || [], scopeEvents);
-  const hasActivity = activityLogs.length > 0 || scopeActive;
+  const activityLogs = hideAcknowledgedActivity(mergeActivityLogs(snapshot?.logs || [], scopeEvents), acknowledgedAudit);
+  const hasDashboardError = Boolean(error && state !== 'idle');
+  const hasActivity = activityLogs.length > 0 || scopeActive || hasDashboardError;
   const visibleLogs = activityLogs.filter(log => {
     const sourceLabel = log.source === 'scope' ? tk("스코프 수집", "Scope collection") : `${tk("스캔", "Scan")} ${tr(log.stage)}`;
     return (level === 'All levels' || log.level === level)
@@ -690,7 +740,11 @@ export default function App() {
     && (level === 'All levels' || level === 'info')
     && (stageFilter === 'All stages' || stageFilter === 'Scope')
     && `${tk("스코프 수집", "Scope collection")} ${scopeWorkLabel} ${scopeElapsedLabel}`.includes(logSearch);
-  useEffect(() => { if (!paused && stream.current) stream.current.scrollTop = stream.current.scrollHeight; }, [activityLogs.at(-1)?.key, scopeClock, paused, logSearch, level, stageFilter, collapsed]);
+  const showDashboardError = hasDashboardError
+    && (level === 'All levels' || level === 'error')
+    && stageFilter === 'All stages'
+    && `${tk('대시보드 연결', 'Dashboard connection')} ${tr(error)}`.toLowerCase().includes(logSearch.toLowerCase());
+  useEffect(() => { if (!paused && stream.current) stream.current.scrollTop = stream.current.scrollHeight; }, [activityLogs.at(-1)?.key, error, scopeClock, paused, logSearch, level, stageFilter, collapsed]);
   const findings = snapshot?.findings || [];
   const shownFindings = findings.filter(f => `${f.id} ${f.title} ${findingTitle(f)} ${f.endpoint}`.toLowerCase().includes(search.toLowerCase()) && (severity === 'All severities' || f.severity === severity));
   const reviewCount = findings.filter(f => f.status === 'unreviewed').length;
@@ -749,8 +803,8 @@ export default function App() {
     <button className="secondary-button" onClick={() => void changePause(snapshot.status === 'running' ? 'pause' : 'continue')} disabled={!!pauseBusy || cancelling}>{pauseBusy === 'pause' ? tk("일시정지 처리 중…", "Pausing…") : pauseBusy === 'continue' ? tk("계속 처리 중…", "Continuing…") : snapshot.status === 'running' ? tk("일시정지", "Pause") : tk("계속", "Continue")}</button>
     <button className="secondary-button" onClick={() => void cancelScan()} disabled={cancelling || !!pauseBusy}>{cancelPhase === 'requesting' ? tk("취소 요청 전달 중…", "Sending cancellation request…") : cancelling ? tk("취소 확인 중…", "Confirming cancellation…") : tk("스캔 취소", "Cancel scan")}</button>
   </> : null;
-  const scanPanel = <Panel title={demo ? tr('Local lab · API assessment') : scanTargetLabel} subtitle={demo ? tr('Synthetic fixture · isolated from program inventory') : `${snapshot?.program_name ? `${snapshot.program_name} · ` : ''}${scanId}`} action={<div className="scan-panel-actions"><Badge tone={snapshot?.status === 'failed' ? 'critical' : snapshot?.status === 'completed' ? 'success' : 'warning'}><span className="dot"/>{cancelling ? tk("취소 처리 중", "Cancelling") : tr(snapshot?.status || state)}</Badge>{scanControls}{!demo && snapshot?.status === 'failed' && <button className="secondary-button" onClick={resumeScan} disabled={resuming}>{resuming ? tk("재실행 요청 중…", "Requesting rerun…") : tk("실패 단계부터 재실행", "Rerun from failed stage")}</button>}{!demo && (snapshot?.status === 'completed' || snapshot?.status === 'cancelled') && <button className="secondary-button" onClick={openRepeatScan}>{tk("정찰부터 다시 스캔", "Rescan from recon")}</button>}{!demo && scanId && <button className="secondary-button" onClick={() => setModal('scan-progress')}>{tk("진행 창 열기", "Open progress window")}</button>}</div>}>
-    {snapshot ? <><Pipeline snapshot={snapshot} language={language} reportDraft={reportDraftStatus}/>{cancelling && <p className="scan-stop-status" role="status">{cancelPhase === 'requesting' ? tk("취소 요청을 서버에 전달하고 있습니다.", "Sending the cancellation request to the server.") : tk("취소 요청을 접수했습니다. 실행 프로세스 종료와 저장된 상태 갱신을 확인하고 있습니다.", "Cancellation requested. Checking the process exit and saved status.")}</p>}{snapshot.status === 'paused' && !cancelling && <p className="scan-stop-status" role="status">{tk("스캔 일시정지 중 · 같은 실행을 이어가려면 ‘계속’을 누르세요.", "Scan paused. Select Continue to resume the same run.")}</p>}{snapshot.status === 'cancelled' && <p className="scan-stop-status is-done" role="status">{tk("스캔 취소 완료 · 실행 프로세스가 종료됐고 스캔 상태가 취소됨으로 저장됐습니다.", "Scan cancelled. The process exited and the cancelled status was saved.")}</p>}<div className="scan-stats"><div><span>{tr('Scan ID')}</span><strong className="mono">{snapshot.scan_id}</strong></div><div><span>{tr('Endpoints')}</span><strong>{snapshot.endpoints}</strong></div><div><span>{tr('Request budget')}</span><strong>{snapshot.requests} <small>/ {snapshot.budget.toLocaleString()}</small></strong></div><div className="progress-stat"><span>{tr(snapshot.stage)} {tr('progress')} <b>{snapshot.progress}%</b></span><progress max="100" value={snapshot.progress} aria-label={`${tr(snapshot.stage)} ${tr('progress')}`}/></div></div>{snapshot.service_endpoints !== undefined && <p className="scan-recon-summary"><strong>{tk("서비스 URL 후보", "Candidate service URLs")}</strong> {tk(`${snapshot.service_endpoints}개`, `${snapshot.service_endpoints} candidates`)} <span>{tk(`· 실제 HTTP 응답 관측 ${snapshot.live_endpoints ?? 0}개`, `· ${snapshot.live_endpoints ?? 0} observed HTTP responses`)}</span></p>}{snapshot.stage === 'Recon' && <p className="scan-recon-summary"><strong>{tk("최근 정찰 작업", "Latest recon task")}</strong> {latestReconActivity ? localizeActivityMessage(language, latestReconActivity) : tk('이 실행에는 도구별 정찰 기록이 아직 없습니다.', 'This run has no tool-level recon records yet.')}</p>}{resumeError && <p className="form-error" role="alert">{resumeError}</p>}{pauseError && <p className="form-error" role="alert">{pauseError}</p>}{cancelError && <p className="form-error" role="alert">{cancelError}</p>}</> : <Empty title={tr(state === 'offline' ? 'Backend unavailable' : state === 'idle' ? 'No scan selected' : 'Loading scan snapshot')}>{tr(state === 'idle' ? 'Start a scan from an approved Scope to show its snapshot and activity here.' : 'Connect the REST snapshot endpoint to display scan state. Demo data is never substituted in live mode.')}</Empty>}
+  const scanPanel = <Panel className="scan-summary-panel" title={demo ? tr('Local lab · API assessment') : scanTargetLabel} subtitle={demo ? tr('Synthetic fixture · isolated from program inventory') : `${snapshot?.program_name ? `${snapshot.program_name} · ` : ''}${scanId}`} action={<div className="scan-panel-actions"><Badge tone={snapshot?.status === 'failed' ? 'critical' : snapshot?.status === 'completed' ? 'success' : 'warning'}><span className="dot"/>{cancelling ? tk("취소 처리 중", "Cancelling") : tr(snapshot?.status || state)}</Badge>{scanControls}{!demo && snapshot?.status === 'failed' && <button className="secondary-button" onClick={resumeScan} disabled={resuming}>{resuming ? tk("재실행 요청 중…", "Requesting rerun…") : tk("실패 단계부터 재실행", "Rerun from failed stage")}</button>}{!demo && (snapshot?.status === 'completed' || snapshot?.status === 'cancelled') && <button className="secondary-button" onClick={openRepeatScan}>{tk("정찰부터 다시 스캔", "Rescan from recon")}</button>}{!demo && scanId && <button className="secondary-button" onClick={() => setModal('scan-progress')}>{tk("진행 창 열기", "Open progress window")}</button>}</div>}>
+    {snapshot ? <><Pipeline snapshot={snapshot} language={language} reportDraft={reportDraftStatus}/>{cancelling && <p className="scan-stop-status" role="status">{cancelPhase === 'requesting' ? tk("취소 요청을 서버에 전달하고 있습니다.", "Sending the cancellation request to the server.") : tk("취소 요청을 접수했습니다. 실행 프로세스 종료와 저장된 상태 갱신을 확인하고 있습니다.", "Cancellation requested. Checking the process exit and saved status.")}</p>}{snapshot.status === 'paused' && !cancelling && <p className="scan-stop-status" role="status">{tk("스캔 일시정지 중 · 같은 실행을 이어가려면 ‘계속’을 누르세요.", "Scan paused. Select Continue to resume the same run.")}</p>}{snapshot.status === 'cancelled' && <p className="scan-stop-status is-done" role="status">{tk("스캔 취소 완료 · 실행 프로세스가 종료됐고 스캔 상태가 취소됨으로 저장됐습니다.", "Scan cancelled. The process exited and the cancelled status was saved.")}</p>}<div className="scan-stats"><div><span>{tr('Scan ID')}</span><strong className="mono">{snapshot.scan_id}</strong></div><div><span>{tr('Endpoints')}</span><strong>{snapshot.endpoints}</strong></div><div><span>{tk('기록된 HTTP 요청', 'Recorded HTTP requests')}</span><strong>{snapshot.requests.toLocaleString()}</strong>{snapshot.per_target_budget != null && <small>{tk('대상별 상한', 'Per-target limit')} {snapshot.per_target_budget.toLocaleString()}</small>}</div><div className="progress-stat"><span>{tr(snapshot.stage)} {tr('progress')} <b>{snapshot.progress}%</b></span><progress max="100" value={snapshot.progress} aria-label={`${tr(snapshot.stage)} ${tr('progress')}`}/></div></div>{snapshot.service_endpoints !== undefined && <p className="scan-recon-summary"><strong>{tk("서비스 URL 후보", "Candidate service URLs")}</strong> {tk(`${snapshot.service_endpoints}개`, `${snapshot.service_endpoints} candidates`)} <span>{tk(`· 실제 HTTP 응답 관측 ${snapshot.live_endpoints ?? 0}개`, `· ${snapshot.live_endpoints ?? 0} observed HTTP responses`)}</span></p>}{snapshot.stage === 'Recon' && <p className="scan-recon-summary"><strong>{tk("최근 정찰 작업", "Latest recon task")}</strong> {latestReconActivity ? localizeActivityMessage(language, latestReconActivity) : tk('이 실행에는 도구별 정찰 기록이 아직 없습니다.', 'This run has no tool-level recon records yet.')}</p>}{resumeError && <p className="form-error" role="alert">{resumeError}</p>}{pauseError && <p className="form-error" role="alert">{pauseError}</p>}{cancelError && <p className="form-error" role="alert">{cancelError}</p>}</> : <Empty title={tr(state === 'offline' ? 'Backend unavailable' : state === 'idle' ? 'No scan selected' : 'Loading scan snapshot')}>{tr(state === 'idle' ? 'Start a scan from an approved Scope to show its snapshot and activity here.' : 'Connect the REST snapshot endpoint to display scan state. Demo data is never substituted in live mode.')}</Empty>}
   </Panel>;
   const scanProgressContent = <div className="scan-progress-dialog">
     {cancelError && <p className="scan-progress-failed" role="alert"><strong>{tk("스캔 취소 실패 ·", "Scan cancellation failed ·")} </strong>{cancelError}</p>}
@@ -759,7 +813,7 @@ export default function App() {
       <div><span>{tk("스캔 대상", "Scan target")}</span><strong>{scanTargetLabel || tk("불러오는 중", "Loading")}</strong><small>{snapshot?.program_name} <span className="mono">· {scanId}</span></small></div>
       <Badge tone={snapshot?.status === 'failed' ? 'critical' : snapshot?.status === 'completed' ? 'success' : 'warning'}>{cancelling ? tk("취소 처리 중", "Cancelling") : tr(snapshot?.status || state)}</Badge>
     </div>
-    <div className="scan-progress-stats"><div><span>{tk("현재 단계", "Current stage")}</span><strong>{tr(snapshot?.stage || 'Waiting')}</strong></div><div><span>{tk("단계 진행률", "Stage progress")}</span><strong>{snapshot?.progress ?? 0}%</strong></div><div><span>{tk("경과 시간", "Elapsed time")}</span><strong role="timer">{formatActivityElapsed(scanElapsedSeconds, language)}</strong></div><div><span>{tk("요청 수 / 예산", "Requests / budget")}</span><strong>{snapshot?.requests ?? 0} / {snapshot?.budget ?? '—'}</strong></div></div>
+    <div className="scan-progress-stats"><div><span>{tk("현재 단계", "Current stage")}</span><strong>{tr(snapshot?.stage || 'Waiting')}</strong></div><div><span>{tk("단계 진행률", "Stage progress")}</span><strong>{snapshot?.progress ?? 0}%</strong></div><div><span>{tk("경과 시간", "Elapsed time")}</span><strong role="timer">{formatActivityElapsed(scanElapsedSeconds, language)}</strong></div><div><span>{tk("기록된 HTTP 요청", "Recorded HTTP requests")}</span><strong>{snapshot?.requests.toLocaleString() ?? 0}</strong>{snapshot?.per_target_budget != null && <small>{tk("대상별 상한", "Per-target limit")} {snapshot.per_target_budget.toLocaleString()}</small>}</div></div>
     {snapshot?.service_endpoints !== undefined && <p className="scan-recon-summary"><strong>{tk("정찰 URL", "Recon URLs")}</strong> {tk(`전체 ${snapshot.endpoints}개 · 서비스 후보 ${snapshot.service_endpoints}개 · 실제 HTTP 응답 관측 ${snapshot.live_endpoints ?? 0}개`, `${snapshot.endpoints} total · ${snapshot.service_endpoints} service candidates · ${snapshot.live_endpoints ?? 0} observed HTTP responses`)}</p>}
     <progress aria-label={tk("스캔 단계 진행률", "Scan stage progress")} max="100" value={snapshot?.progress ?? 0}/>
     {cancelling && <p className="scan-stop-status" role="status">{cancelPhase === 'requesting' ? tk("취소 요청을 서버에 전달하고 있습니다.", "Sending the cancellation request to the server.") : tk("취소 요청 접수됨 · 실행 프로세스 종료와 저장된 상태 갱신을 확인하는 중입니다.", "Cancellation requested. Checking that the process exited and the saved status updated.")}</p>}
@@ -894,18 +948,16 @@ export default function App() {
 
   return <div className={`app-shell ${compact ? 'compact-mode' : ''}`}>
     <a className="skip-link" href="#main-content">{tr('Skip to content')}</a>
-    <aside className="sidebar"><div className="brand"><div className="brand-mark"><Icon name="shield" size={22}/></div><div><strong>AI DAST<span className="brand-period">.</span></strong><small>{tr('SECURITY WORKSPACE')}</small></div></div>
-      <div className="workspace-label"><span className="workspace-avatar">W</span><div>{tr('Local workspace')}<small>{tk("AI DAST 프로젝트", "AI DAST project")}</small></div></div>
+    <aside className="sidebar"><div className="brand" aria-label="DDalGak"><div className="brand-copy"><strong>DDalGak</strong><small>{tr('AI DAST tool')}</small></div><span className="brand-mobile" aria-hidden="true">DD</span></div>
       <nav ref={navigation} aria-label={tr('Main navigation')}><p className="nav-label">{tr('OPERATIONS')}</p>{pages.map((p,i) => <button key={p} aria-label={pageLabel(p)} title={pageLabel(p)} className={`nav-item ${p === 'Settings' ? 'mobile-settings-nav' : ''} ${page === p ? 'active' : ''}`} onClick={() => go(p)} aria-current={page === p ? 'page' : undefined}><Icon name={symbols[i]}/><span>{p === 'Scopes / Programs' ? <><span className="desktop-nav-label">{pageLabel(p)}</span><span className="mobile-nav-label">{tk("스코프", "Scope")}</span></> : pageLabel(p)}</span>{i === 1 && <em>{totalProgramCount}</em>}{i === 3 && snapshot && <em>{findings.length}</em>}</button>)}</nav>
-      <div className="sidebar-bottom"><div className="boundary-note"><Icon name="lock" size={16}/><strong>{tr('Scope comes first.')}</strong><p>{tr('Every request stays inside verified approval and policy boundaries.')}</p></div><button aria-label={tr('Settings')} title={tr('Settings')} className={`nav-item ${page === 'Settings' ? 'active' : ''}`} aria-current={page === 'Settings' ? 'page' : undefined} onClick={() => go('Settings')}><Icon name="settings"/><span>{tr('Settings')}</span></button><div className="operator"><div className="avatar">LO</div><div><strong>{tr('Local operator')}</strong><small>{tr(demo ? 'Demo workspace' : 'Backend session')}</small></div><span className="dot"/></div></div>
+      <div className="sidebar-bottom"><button aria-label={tr('Settings')} title={tr('Settings')} className={`nav-item ${page === 'Settings' ? 'active' : ''}`} aria-current={page === 'Settings' ? 'page' : undefined} onClick={() => go('Settings')}><Icon name="settings"/><span>{tr('Settings')}</span></button><div className="operator"><div className="avatar">LO</div><div><strong>{tr('Local operator')}</strong><small>{tr(demo ? 'Demo workspace' : 'Backend session')}</small></div><span className="dot"/></div></div>
     </aside>
-      <div className="main-shell"><header className="topbar"><div className="breadcrumb">{tr('Workspace')} <span>/</span> <strong>{pageLabel(page)}</strong></div><div className="top-actions"><span className={`connection ${demo ? 'demo' : state}`} role="status"><span className="dot"/>{tr(demo ? 'Demo environment' : state)}</span><label className="language-select"><span className="sr-only">{tr('Language')}</span><select aria-label={tr('Language')} value={language} onChange={event => setLanguage(event.target.value as Language)}><option value="ko">한국어</option><option value="en">English</option></select></label><button className="icon-button theme-toggle" title={tr(`Switch to ${resolvedTheme === 'dark' ? 'light' : 'dark'} mode`)} aria-label={tr(`Switch to ${resolvedTheme === 'dark' ? 'light' : 'dark'} mode`)} onClick={() => setTheme(resolvedTheme === 'dark' ? 'light' : 'dark')}><Icon name={resolvedTheme === 'dark' ? 'sun' : 'moon'} size={16}/></button></div></header>
-      <div className="demo-strip"><Icon name={demo ? 'terminal' : 'lock'} size={14}/><span>{tr(demo ? 'DEMO DATA' : 'LOCAL OPERATOR')}<b>·</b>{tr(demo ? 'A synthetic workflow. No network scans or program activity.' : 'Approved-scope scan controls + live REST and WebSocket status.')}</span><button onClick={() => go('Settings')}>{tr('Connection details')} <Icon name="arrow" size={13}/></button></div>
+      <div className="main-shell"><header className="topbar"><div className="breadcrumb">{tr('Workspace')} <span>/</span> <strong>{pageLabel(page)}</strong></div><div className="top-actions"><label className="language-select"><span className="sr-only">{tr('Language')}</span><select aria-label={tr('Language')} value={language} onChange={event => setLanguage(event.target.value as Language)}><option value="ko">한국어</option><option value="en">English</option></select></label><button className="icon-button theme-toggle" title={tr(`Switch to ${resolvedTheme === 'dark' ? 'light' : 'dark'} mode`)} aria-label={tr(`Switch to ${resolvedTheme === 'dark' ? 'light' : 'dark'} mode`)} onClick={() => setTheme(resolvedTheme === 'dark' ? 'light' : 'dark')}><Icon name={resolvedTheme === 'dark' ? 'sun' : 'moon'} size={16}/></button></div></header>
+      {demo && <div className="demo-strip"><Icon name="terminal" size={14}/><span>{tr('DEMO DATA')}<b>·</b>{tr('A synthetic workflow. No network scans or program activity.')}</span><button onClick={() => go('Settings')}>{tr('Connection details')} <Icon name="arrow" size={13}/></button></div>}
       <div className={`workspace-grid ${collapsed ? 'activity-collapsed' : ''}`}><main id="main-content" tabIndex={-1} className="content-column">
         <div className="page-heading"><div><p className="eyebrow">{tr(page === 'Overview' ? 'YOUR OPERATIONS, AT A GLANCE' : 'AI DAST / WORKSPACE')}</p><h1>{tr(page === 'Overview' ? 'Security overview' : page)}</h1><p>{tr(page === 'Overview' ? 'From approved scope to evidence you can stand behind.' : page === 'Scopes / Programs' ? 'Program inventory is a starting point. Approved scope defines execution.' : page === 'Scans' ? 'One deterministic pipeline. Traceable decisions at every stage.' : page === 'Findings' ? 'Signals become findings. Validation establishes the verdict.' : page === 'Validation' ? 'Reproduction, controls, and evidence before confirmation.' : page === 'Reports' ? 'Reviewable local drafts. Nothing is submitted automatically.' : page === 'Audit log' ? 'Trace the decisions and provenance behind each run.' : 'Connection, privacy, and display preferences.')}</p></div><span className="heading-tag">{demo ? tk("데모 / 042", "Demo / 042") : tk("라이브 / V1", "Live / V1")}</span></div>
         {page === 'Scopes / Programs' && <div className="scope-page-actions"><div><strong>{tr('Scope intake')}</strong><p>{tr('Register a bug bounty program before collecting and approving its executable Scope.')}</p></div><button className="primary-button" onClick={() => { setScopeError(''); setModal('scope'); }}><Icon name="plus" size={15}/>{tr('Add program')}</button></div>}
         {page === 'Scans' && <div className="scope-page-actions"><div><strong>{tr('Start scan')}</strong><p>{tr('Choose a verified approved Scope and configure a new scan.')}</p></div><button className="primary-button" onClick={openNewScan}><Icon name="plus" size={15}/>{tr('New scan')}</button></div>}
-        {error && !(state === 'idle' && !scanId && (page === 'Overview' || page === 'Scans')) && (page === 'Overview' || page === 'Scans' || page === 'Findings' || page === 'Validation') && <div className="error-banner" role="status"><span>{tr(error)}</span><button onClick={!scanId ? (approvedScopeCount ? openNewScan : () => go('Scopes / Programs')) : refresh}>{!scanId ? (approvedScopeCount ? tk("승인된 스코프로 스캔 시작", "Start scan with approved Scope") : tk("스코프 준비하기", "Prepare Scope")) : tr('Reload snapshot')}</button></div>}
         {page === 'Overview' && <>
           <section className="operator-next" aria-labelledby="operator-next-title"><div><p className="eyebrow">{tk("권장 작업", "Recommended action")}</p><h2 id="operator-next-title">{demo ? tk("데모 흐름을 따라 기능을 확인하세요", "Explore the demo workflow") : tk(`${journeyIndex + 1}단계 · ${journeySteps[journeyIndex].title}`, `Step ${journeyIndex + 1} · ${journeySteps[journeyIndex].title}`)}</h2><p>{demo ? tk("합성 데이터로 스캔·검증·보고서 화면을 안전하게 둘러볼 수 있습니다.", "Explore scan, validation, and report screens with synthetic data.") : journeySteps[journeyIndex].description}</p></div><button className="primary-button" onClick={journeyAction.run}>{journeyAction.label}<Icon name="arrow" size={14}/></button><ol className="journey-steps">{journeySteps.map((step, index) => <li key={step.title} className={index < journeyIndex ? 'complete' : index === journeyIndex ? 'current' : 'upcoming'}><span className="journey-marker">{index < journeyIndex ? <Icon name="check" size={13}/> : index + 1}</span><div><strong>{step.title}</strong><small>{index < journeyIndex ? tk("완료", "Completed") : index === journeyIndex ? tk("현재 단계", "Current stage") : tk("다음 단계", "Next step")}</small></div></li>)}</ol></section>
           <section className="metrics" aria-label={tr('Workspace metrics')}>{[{ label: tr('Active scans'), value: snapshot?.status === 'running' ? '1' : '0', note: demo ? tr('1 synthetic workflow') : tr('Selected scan'), icon: 'pulse', color: 'green' },{ label: tr('Programs'), value: String(totalProgramCount), note: tk(`승인된 스코프 ${approvedScopeCount}개`, `${approvedScopeCount} approved Scopes`), icon: 'scope', color: 'blue' },{ label: tr('Awaiting review'), value: String(reviewCount), note: tr('Candidates, not verdicts'), icon: 'shield', color: 'amber' },{ label: tr('Confirmed findings'), value: String(findings.filter(f => f.status === 'confirmed').length), note: tr(demo ? 'Synthetic evidence only' : 'From backend snapshot'), icon: 'check', color: 'purple' }].map(m => <article className={`metric ${m.color}`} key={m.label}><div><span>{m.label}</span><Icon name={m.icon}/></div><strong>{m.value}</strong><small><span className="mini-line"/>{m.note}</small></article>)}</section>
@@ -927,7 +979,36 @@ export default function App() {
         {page === 'Findings' && <><div className="toolbar"><label className="search-field"><Icon name="search" size={16}/><input aria-label={tr('Search findings')} value={search} onChange={e => setSearch(e.target.value)} placeholder={tr('Search finding, ID, or endpoint…')}/></label><select aria-label={tr('Filter severity')} value={severity} onChange={e => setSeverity(e.target.value)}>{['All severities','CRITICAL','HIGH','MEDIUM','LOW','INFO'].map(s => <option key={s} value={s}>{tr(s)}</option>)}</select></div><Panel title={tr('Scan findings')} subtitle={language === 'ko' ? `${shownFindings.length}개 결과 · ${demo ? '합성 데이터' : scanId}` : `${shownFindings.length} results · ${demo ? 'synthetic data' : scanId}`}>{findingTable(shownFindings)}</Panel><p className="muted footnote">{tr('Review statuses follow Pipeline.db: unreviewed, confirmed, rejected, resolved.')}</p></>}
         {page === 'Validation' && <><div className="notice"><Icon name="check"/><div><strong>{language === 'ko' ? `${reviewCount}개 후보가 증거 검토를 기다리고 있습니다` : `${reviewCount} candidates await evidence review`}</strong><p>{tr('Validation requires reproduction, a meaningful control, and redacted evidence. UI actions cannot confirm a vulnerability.')}</p></div></div><Panel title={tr('Validation queue')} subtitle={tr('Finding candidates awaiting a final verdict')}>{findingTable(findings.filter(f => f.status === 'unreviewed'))}</Panel><Panel title={tr('Evidence requirements')} subtitle={tr('Before promotion to a confirmed case')}><div className="checklist">{['Reproduce within the approved scope and identity boundary','Compare positive and negative controls','Link request / response evidence with secrets removed','Record the final verdict and reproducibility limits'].map((text,i) => <div key={text}><span>{String(i+1).padStart(2,'0')}</span><p>{tr(text)}</p><Badge>{tr('Required')}</Badge></div>)}</div></Panel><p className="muted footnote">{tr('The live validation-case API is not connected in this MVP. This queue reflects finding review status only.')}</p></>}
         {page === 'Reports' && <>{reportError && <div className="error-banner" role="alert"><span>{reportError}</span><button onClick={() => setReportError('')}>{tr('Dismiss')}</button></div>}<Panel title={tr('Local report drafts')} subtitle={tr('Integrity-checked local artifacts · never submitted automatically')}>{demo ? <div className="report-card"><div className="report-illustration"><Icon name="report" size={42}/></div><div><Badge tone="warning">{tr('DEMO DRAFT')}</Badge><h3>{tr('Server version disclosure')}</h3><p>{tr('A synthetic report showing finding, evidence, impact, and remediation sections.')}</p><small className="mono">F-0040 · {tr('LOW')} · Markdown</small><div className="button-row"><button className="secondary-button" onClick={() => { setSelectedReport(null); setReportPreview(sampleReport); setModal('report'); }}>{tr('Preview draft')}</button><button className="primary-button" onClick={() => download('DEMO-Report.md', language === 'ko' ? sampleReport : sampleReportEn)}>{tr('Download demo .md')} <Icon name="arrow" size={14}/></button></div></div></div> : reports.length ? <div className="report-list">{reports.map(item => <div className="report-card" key={item.report_id}><div className="report-illustration"><Icon name="report" size={42}/></div><div><Badge tone="success">{tr('LOCAL DRAFT')}</Badge><h3>{item.title}</h3><p>{item.platform} · {tk("케이스", "case")} {item.case_id}</p><small className="mono">{item.report_id} · {new Date(item.created_at).toLocaleString(language === 'ko' ? 'ko-KR' : 'en-GB')}</small><div className="button-row"><button className="secondary-button" onClick={() => void openReport(item)}>{tr('Preview draft')}</button></div></div></div>)}</div> : <Empty title={tr('No report draft for this scan')}>{tr('Validated report artifacts will appear here after the existing CLI report workflow creates an integrity-bound draft.')}</Empty>}</Panel></>}
-        {page === 'Audit log' && <><div className="notice"><Icon name="logs"/><div><strong>{tr(demo ? 'Synthetic audit trail' : 'Authoritative audit metadata')}</strong><p>{tr('Pipeline.db audit_events are append-only. Details, request bodies, headers, tokens, and cookies are never returned by this endpoint.')}</p></div></div>{auditError && <div className="error-banner" role="alert"><span>{auditError}</span><button onClick={() => { setAuditError(''); go('Scans'); }}>{tr('Open scans')}</button></div>}<Panel title={tr('Decision history')} subtitle={tk(`${demo ? 4 : auditEntries.length}개 기록 · 최신순`, `${demo ? 4 : auditEntries.length} records · newest first`)}><div className="audit-list">{(demo ? [{id:'demo-4',created_at:'2026-09-20T05:28:24Z',event_type:'finding.created',stage:'Attack'},{id:'demo-3',created_at:'2026-09-20T05:28:12Z',event_type:'request.authorized',stage:'Attack'},{id:'demo-2',created_at:'2026-09-20T05:28:09Z',event_type:'pipeline.materialized',stage:'Recon'},{id:'demo-1',created_at:'2026-09-20T05:28:00Z',event_type:'scope.verified',stage:'Scope'}] : auditEntries).map(item => <div key={item.id}><time dateTime={item.created_at}>{new Date(item.created_at).toLocaleTimeString(language === 'ko' ? 'ko-KR' : 'en-GB',{hour12:false})}</time><span className="audit-point"/><div><strong>{localizeAuditEventType(language, item.event_type)}</strong><p>{demo ? tr('Synthetic fixture decision') : `${tr('Redacted pipeline event')} · ${item.id}`}</p></div><Badge>{tr(item.stage)}</Badge></div>)}</div>{!demo && !auditEntries.length && !auditError && <p className="table-empty">{tr('No audit records are available for this scan.')}</p>}</Panel></>}
+        {page === 'Audit log' && <>
+          <div className="notice"><Icon name="logs"/><div><strong>{tk('작업과 문제 기록', 'Work and problem history')}</strong><p>{tk('선택한 스캔의 작업 단계, 결과, 실패 정보를 확인합니다. 요청 본문과 인증정보는 표시하지 않습니다.', 'Review the selected scan’s work, outcomes, and failures. Request bodies and credentials are not displayed.')}</p></div></div>
+          {auditError && <div className="error-banner" role="alert"><span>{auditError}</span><button onClick={() => setAuditRevision(value => value + 1)}>{tk('다시 불러오기', 'Retry')}</button></div>}
+          {auditAckError && <div className="error-banner" role="alert"><span>{auditAckError}</span></div>}
+          <div className="toolbar audit-toolbar">
+            <label className="search-field"><Icon name="search" size={16}/><input aria-label={tk('감사 로그 검색', 'Search audit log')} value={auditSearch} onChange={event => setAuditSearch(event.target.value)} placeholder={tk('작업, 문제, 단계 또는 ID 검색', 'Search work, problem, stage, or ID')}/></label>
+            <select aria-label={tk('기록 수준 필터', 'Filter audit level')} value={auditLevelFilter} onChange={event => setAuditLevelFilter(event.target.value)}><option value="all">{tk('모든 수준', 'All levels')}</option><option value="error">{tk('오류', 'Errors')}</option><option value="warning">{tk('경고', 'Warnings')}</option><option value="success">{tk('완료', 'Completed')}</option><option value="info">{tk('정보', 'Information')}</option></select>
+            <button className="secondary-button" aria-pressed={showAcknowledgedAudit} onClick={() => setShowAcknowledgedAudit(value => !value)}>{showAcknowledgedAudit ? tk('확인 대기 보기', 'Show pending') : tk('확인 완료 보기', 'Show acknowledged')}</button>
+            {!demo && <button className="secondary-button" onClick={() => setAuditRevision(value => value + 1)}>{tk('새로고침', 'Refresh')}</button>}
+          </div>
+          <Panel title={tr('Decision history')} subtitle={showAcknowledgedAudit ? tk('확인 완료 ' + visibleAuditEntries.length + '개', visibleAuditEntries.length + ' acknowledged') : tk('확인 대기 ' + auditPendingCount + '개', auditPendingCount + ' pending')}>
+            <div className="audit-list">{visibleAuditEntries.map(item => {
+              const itemLevel = auditLevel(item);
+              const acknowledged = acknowledgedAudit.has(item.id);
+              return <div key={item.id} className={'audit-entry ' + itemLevel}>
+                <span className="audit-point" aria-hidden="true"/>
+                <div className="audit-entry-body">
+                  <div className="audit-entry-meta"><time dateTime={item.created_at}>{new Date(item.created_at).toLocaleString(language === 'ko' ? 'ko-KR' : 'en-GB', { hour12: false })}</time><Badge tone={itemLevel === 'error' ? 'critical' : itemLevel === 'success' ? 'success' : itemLevel === 'warning' ? 'warning' : ''}>{tr(itemLevel)}</Badge><span>{tr(item.stage)}</span></div>
+                  <strong>{auditMessage(item)}</strong>
+                  {itemLevel === 'error' && <p className="audit-problem">{tk('문제:', 'Problem:')} {auditProblem(item)}</p>}
+                  {item.task_id && <p className="audit-task-id">{tk('작업 ID', 'Task ID')} · <code>{item.task_id}</code></p>}
+                  <small className="audit-event-id">{item.event_type} · {item.id}</small>
+                </div>
+                <button className="audit-check" aria-label={acknowledged ? tk('확인 취소: ', 'Restore: ') + auditMessage(item) : tk('확인 완료: ', 'Acknowledge: ') + auditMessage(item)} title={acknowledged ? tk('다시 표시', 'Restore') : tk('확인하고 목록에서 숨기기', 'Acknowledge and hide')} onClick={() => acknowledgeAudit(item.id)}>{acknowledged ? tk('복원', 'Restore') : <Icon name="check" size={17}/>}</button>
+              </div>;
+            })}</div>
+            {!visibleAuditEntries.length && !auditError && <p className="table-empty">{showAcknowledgedAudit ? tk('확인 완료한 기록이 없습니다.', 'No acknowledged records.') : auditItems.length && auditPendingCount === 0 ? tk('모든 기록을 확인했습니다.', 'All records acknowledged.') : tk('조건에 맞는 기록이 없습니다.', 'No matching records.')}</p>}
+          </Panel>
+          <p className="audit-note">{tk('체크한 기록은 이 브라우저의 기본 목록에서 숨겨집니다. 원본 감사 기록은 삭제되지 않으며 ‘확인 완료 보기’에서 복원할 수 있습니다.', 'Checked records are hidden from this browser’s default list. Source audit records remain intact and can be restored from Show acknowledged.')}</p>
+        </>}
         {page === 'Settings' && <><Panel title={tr('Connection')} subtitle={tr('Configured at build time; no secrets in browser settings')}><dl className="detail-grid"><div><dt>{tr('Transport')}</dt><dd><Badge tone={demo ? 'warning' : 'success'}>{tr(demo ? 'Demo / local fixture' : 'Live / read-only')}</Badge></dd></div><div><dt>{tr('Connection state')}</dt><dd>{tr(state)}</dd></div><div><dt>{tr('Result storage')}</dt><dd className="mono">{tr(resultRoot || 'Unavailable')}</dd></div><div><dt>{tr('Snapshot endpoint')}</dt><dd className="mono">GET /api/v1/scans/:id</dd></div><div><dt>{tr('Delta stream')}</dt><dd className="mono">/ws/scans/:id?after=:event_id</dd></div><div><dt>{tr('Protocol')}</dt><dd>{tr('Version 1 · contiguous event IDs')}</dd></div><div><dt>{tr('Activity retention')}</dt><dd>{tr('Latest 500 events in memory')}</dd></div></dl><div className="panel-bottom"><p>{tr('Set VITE_TRANSPORT=live and VITE_SCAN_ID to connect an implemented backend. Live mode never falls back to demo data.')}</p><button className="secondary-button" onClick={refresh}>{tr(demo ? 'Restart demo' : 'Reload snapshot')}</button></div></Panel><Panel title={tr('Workspace preferences')} subtitle={tr('Theme is saved locally; operational data is never uploaded')}><div className="setting-row"><div><h3>{tr('Appearance')}</h3><p>{tr('Follow the system theme or keep this workspace light or dark.')}</p></div><select aria-label={tr('Color theme')} value={theme} onChange={event => setTheme(event.target.value as ThemeChoice)}><option value="system">{tr('System')}</option><option value="dark">{tr('Dark')}</option><option value="light">{tr('Light')}</option></select></div><div className="setting-row"><div><h3>{tr('Language')}</h3><p>{tr('Choose the dashboard display language.')}</p></div><select aria-label={tr('Language')} value={language} onChange={event => setLanguage(event.target.value as Language)}><option value="ko">한국어</option><option value="en">English</option></select></div><div className="setting-row"><div><h3>{tr('Compact density')}</h3><p>{tr('Reduce spacing in data tables and activity.')}</p></div><input aria-label={tr('Compact density')} type="checkbox" checked={compact} onChange={e => setCompact(e.target.checked)}/></div><div className="setting-row"><div><h3>{tr('Reveal private program name')}</h3><p>{tr('Hidden by default. Resets when the page reloads.')}</p></div><input aria-label={tr('Reveal private program name')} type="checkbox" checked={privateVisible} onChange={e => setPrivateVisible(e.target.checked)}/></div></Panel><Panel title={tr('Backend integration remaining')} subtitle={tr('Implemented boundaries stay separate from future operator workflows')}><ul className="integration-list"><li>{tr('Authentication and authorization for any deployment beyond the loopback-only local operator.')}</li><li>{tr('Evidence-backed Validation case decisions and review actions.')}</li><li>{tr('Report generation and platform submission remain explicit CLI/operator actions.')}</li></ul></Panel></>}
       </main>
       <aside className={`activity-panel ${collapsed ? 'collapsed' : ''}`} aria-label={tr('Persistent live activity')}>
@@ -944,13 +1025,14 @@ export default function App() {
             <progress aria-label={tr('Current stage progress')} max="100" value={snapshot?.progress || 0}/>
           </div>
           {hasActivity && <div className="activity-filters"><label className="search-field"><Icon name="search" size={14}/><input aria-label={tr('Search activity')} value={logSearch} onChange={e => setLogSearch(e.target.value)} placeholder={tr('Search activity…')}/></label><div><select aria-label={tr('Filter log level')} value={level} onChange={e => setLevel(e.target.value)}>{['All levels','info','success','warning','error'].map(l => <option key={l} value={l}>{tr(l)}</option>)}</select><select aria-label={tr('Filter log stage')} value={stageFilter} onChange={e => setStageFilter(e.target.value)}>{['All stages',...stages].map(s => <option key={s} value={s}>{tr(s)}</option>)}</select></div></div>}
-          {hasActivity && <div className="log-toolbar"><span>{visibleLogs.length} {tr('events')}{scopeActive && <b> · {scopeWorkLabel} {scopeElapsedLabel}</b>}</span><button onClick={() => setPaused(v => !v)} aria-pressed={paused}>{tr(paused ? '▶ Resume following' : 'Ⅱ Pause scrolling')}</button></div>}
+          {hasActivity && <div className="log-toolbar"><span>{visibleLogs.length + (showDashboardError ? 1 : 0)} {tr('events')}{scopeActive && <b> · {scopeWorkLabel} {scopeElapsedLabel}</b>}</span><button onClick={() => setPaused(v => !v)} aria-pressed={paused}>{tr(paused ? '▶ Resume following' : 'Ⅱ Pause scrolling')}</button></div>}
           <div className="log-stream" ref={stream} tabIndex={0} aria-label={tr('Activity events')}>
             {hasActivity && <div className="stream-start">{demo ? tr('SYNTHETIC SESSION STARTED') : tk("통합 활동 스트림 시작", "Combined activity stream started")}</div>}
             {visibleLogs.map(log => <article key={log.key} className={`log-entry ${log.level}`}><div><time dateTime={log.time}>{new Date(log.time).toLocaleTimeString(language === 'ko' ? 'ko-KR' : 'en-GB',{hour12:false})}</time><span>{log.source === 'scope' ? tk("스코프 수집", "Scope collection") : `${tk('스캔', 'Scan')} · ${tr(log.stage)}`}</span><i title={tr(log.level)}/><span className="sr-only">{tr(log.level)}</span></div><p>{localizeActivityMessage(language, log)}</p></article>)}
+            {showDashboardError && <article className="log-entry error" role="alert"><div><span>{tk('대시보드 연결', 'Dashboard connection')}</span><i title={tr('error')}/><span className="sr-only">{tr('error')}</span></div><p>{tr(error)}</p></article>}
             {showScopeWorking && <article className="log-entry scope-working"><div><time>{scopeElapsedLabel}</time><span>{tk("스코프 수집", "Scope collection")}</span><i title={scopeWorkLabel}/><span className="sr-only">{scopeWorkLabel}</span></div><p role="timer">{scopeWorkLabel} · {scopeElapsedLabel}</p></article>}
             {!hasActivity && <div className="activity-empty"><strong>{tk("아직 활동이 없습니다", "No activity yet")}</strong><p>{tk("스코프 수집 또는 스캔을 시작하면 활동이 여기에 표시됩니다.", "Start Scope collection or a scan to see activity here.")}</p></div>}
-            {hasActivity && visibleLogs.length === 0 && !showScopeWorking && <p className="table-empty">{tr('No matching events.')}</p>}
+            {hasActivity && visibleLogs.length === 0 && !showDashboardError && !showScopeWorking && <p className="table-empty">{tr('No matching events.')}</p>}
             {hasActivity && <div className="stream-end"><span className="dot"/>{scopeActive ? tk(`스코프 수집 진행 중 · ${scopeElapsedLabel}`, `Scope collection running · ${scopeElapsedLabel}`) : tr(paused ? 'Following paused · events still arrive' : snapshot?.status === 'running' ? 'Waiting for the next event' : 'End of available activity')}</div>}
           </div>
           <footer className="activity-footer"><Icon name="lock" size={13}/><p>{tr(demo ? 'Fixtures contain no credentials. Live events must be redacted by the server.' : 'Server-side redaction required. Never stream tokens, cookies, or sensitive bodies.')}</p></footer>

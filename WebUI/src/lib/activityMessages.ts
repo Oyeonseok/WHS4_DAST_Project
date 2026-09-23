@@ -38,6 +38,15 @@ const reconStateLabels: Record<string, string> = {
 };
 
 export function reconActivityLabel(params: Record<string, string | number>): string {
+  if (params.phase === 'endpoint_discovery' && params.state === 'found') {
+    const status = typeof params.response_status === 'number' ? params.response_status : null;
+    const evidence = status === null ? 'HTTP 응답 미확인 · 후보'
+      : status === 404 ? 'HTTP 404 응답 · 유효 경로 미확인'
+      : status === 401 || status === 403 ? `HTTP ${status} 접근 제한 응답 관측`
+      : status >= 500 ? `HTTP ${status} 서버 오류 응답 관측`
+      : `HTTP ${status} 응답 관측`;
+    return `URL 발견 · ${params.method} ${params.url} · ${evidence}${params.source ? ` · 출처 ${params.source}` : ''}`;
+  }
   const phase = reconPhaseLabels[String(params.phase)] ?? '정찰 작업';
   const state = reconStateLabels[String(params.state)] ?? '상태 변경';
   const root = typeof params.index === 'number' && typeof params.total === 'number'
@@ -94,7 +103,13 @@ const koreanMessages: Record<string, (params: Record<string, string | number>) =
   'scope.review_required': params => `스코프 초안이 검토를 기다립니다. 허용 범위 ${Number(params.in_scope) || 0}개, 제외 범위 ${Number(params.out_of_scope) || 0}개입니다.`,
   'scope.approved': () => '스코프 초안을 승인하고 무결성이 결합된 산출물을 게시했습니다.',
   'scope.rejected': () => '운영자가 스코프 초안을 거절했습니다. 승인 산출물은 생성하지 않았습니다.',
-  'scope.failed': params => params.reason ? `스코프 수집 실패: ${String(params.reason)}` : '스코프 수집에 실패했습니다. 자세한 원인은 서버 로그를 확인하세요.',
+  'scope.failed': params => {
+    const reason = String(params.reason || '');
+    if (reason === 'Scope navigation reached its three-step limit before capture' || reason === 'Scope navigation exhausted its reviewed views before capture') {
+      return '스코프 수집 실패: 프로그램 화면을 이동했지만 자산 목록과 정책을 함께 확인하지 못했습니다.';
+    }
+    return reason ? `스코프 수집 실패: ${reason}` : '스코프 수집에 실패했습니다. 자세한 원인은 서버 로그를 확인하세요.';
+  },
 };
 
 const auditLabelsEn: Record<string, string> = {
@@ -122,6 +137,15 @@ const reconStateLabelsEn: Record<string, string> = {
   started: 'started', finished: 'finished', skipped: 'skipped', failed: 'failed', planned: 'work scope planned',
 };
 function reconActivityLabelEn(params: Record<string, string | number>): string {
+  if (params.phase === 'endpoint_discovery' && params.state === 'found') {
+    const status = typeof params.response_status === 'number' ? params.response_status : null;
+    const evidence = status === null ? 'candidate · no HTTP response observed'
+      : status === 404 ? 'HTTP 404 observed · valid route unconfirmed'
+      : status === 401 || status === 403 ? `HTTP ${status} access restriction observed`
+      : status >= 500 ? `HTTP ${status} server error observed`
+      : `HTTP ${status} response observed`;
+    return `URL found · ${params.method} ${params.url} · ${evidence}${params.source ? ` · source ${params.source}` : ''}`;
+  }
   const phase = reconPhaseLabelsEn[String(params.phase)] ?? 'Recon task';
   const state = reconStateLabelsEn[String(params.state)] ?? 'status changed';
   const target = typeof params.index === 'number' && typeof params.total === 'number'
@@ -157,6 +181,10 @@ function scopeBrowserProgressEn(message: string): string {
   if (match) return `Scope Agent is opening navigation candidate ${match[1]}.`;
   match = /^Scope Agent가 화면 이동 후보 (\d+)번 열기를 완료했습니다\.$/.exec(message);
   if (match) return `Scope Agent opened navigation candidate ${match[1]}.`;
+  match = /^Scope Agent가 화면 이동 후보 (\d+)번\((.+)\)을 엽니다\.$/.exec(message);
+  if (match) return `Scope Agent is opening navigation candidate ${match[1]} (${match[2]}).`;
+  match = /^Scope 관련 이동 후보: (.+)\.$/.exec(message);
+  if (match) return `Scope-related navigation candidates: ${match[1]}.`;
   return 'Browser policy collection is in progress. See the source event for details.';
 }
 const englishMessages: Record<string, (params: Record<string, string | number>) => string> = {
