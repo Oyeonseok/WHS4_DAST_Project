@@ -35,6 +35,10 @@ def test_scope_requirements_use_grounded_rate_and_identity_header() -> None:
     )
 
     assert requirements.scope_max_requests_per_second == 10
+    assert {item.id: item.limits.requests_per_second for item in requirements.profiles} == {
+        "safe-recon": 10,
+        "focused-discovery": 10,
+    }
     assert requirements.required_header is not None
     assert requirements.required_header.name == "X-Intigriti-Username"
     assert requirements.required_header.input_field == "intigriti_username"
@@ -58,3 +62,18 @@ def test_scope_requirements_fail_closed_when_rate_is_not_grounded() -> None:
     assert requirements.scope_max_requests_per_second is None
     assert requirements.required_header is None
     assert requirements.profiles[0].limits is EXECUTION_PROFILES["safe-recon"]
+
+
+def test_scope_rate_shorthand_uses_the_policy_number_in_the_scan_profile() -> None:
+    analysis = _analysis(rate_quote=None).model_copy(update={
+        "source_evidence": [
+            SourceEvidence(section="Scope", quote="자동 점검은 6req/s제한"),
+        ],
+    })
+
+    requirements = build_scope_execution_requirements(
+        analysis, identity_header=None
+    )
+
+    assert requirements.scope_max_requests_per_second == 6
+    assert requirements.profiles[0].limits.requests_per_second == 6

@@ -5,9 +5,10 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc -b && vite build",
+    "build": "node scripts/check-i18n.mjs && tsc -b && vite build",
+    "check:i18n": "node scripts/check-i18n.mjs",
     "preview": "vite preview",
-    "test": "node tests/events.test.mjs"
+    "test": "node --test tests/*.test.mjs"
   },
   "engines": { "node": ">=22.18.0" },
   "dependencies": {

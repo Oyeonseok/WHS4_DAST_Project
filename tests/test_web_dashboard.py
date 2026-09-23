@@ -3,7 +3,11 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
+import signal
 import sqlite3
+import subprocess
+import sys
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
@@ -19,6 +23,7 @@ from aidast.recon.profiles import EXECUTION_PROFILES
 from aidast.web.projection import DashboardProjector, ScanNotFoundError
 from aidast.web.launch import (
     ApprovedScope,
+    LaunchJob,
     ProgramResolveRequest,
     ScanLaunchManager,
     ScanLaunchRequest,
@@ -45,7 +50,9 @@ SCAN_ID = "scan_web_test"
 SCOPE_ID = "scope_web_test"
 
 
-def _execution_requirements(identity_header: IdentityHeader | None):
+def _execution_requirements(
+    identity_header: IdentityHeader | None, *, rate_quote: str | None = None
+):
     return build_scope_execution_requirements(
         ScopeAnalysis(
             program_name="Fixture",
@@ -58,9 +65,9 @@ def _execution_requirements(identity_header: IdentityHeader | None):
             operational_constraints=[],
             safe_harbor="",
             ambiguities=["Focused launcher fixture."],
-            source_evidence=[
-                SourceEvidence(section="Scope", quote="Fixture scope")
-            ],
+            source_evidence=[SourceEvidence(section="Scope", quote="Fixture scope")]
+            + ([SourceEvidence(section="Rules of engagement", quote=rate_quote)]
+               if rate_quote else []),
         ),
         identity_header=identity_header,
     )
@@ -77,7 +84,7 @@ def _fixture(root: Path) -> Path:
           scan_id TEXT PRIMARY KEY, scope_type TEXT, scope_value TEXT,
           status TEXT, started_at TEXT, finished_at TEXT
         );
-        CREATE TABLE assets (asset_id TEXT PRIMARY KEY,scan_id TEXT);
+        CREATE TABLE assets (asset_id TEXT PRIMARY KEY,scan_id TEXT,identifier TEXT);
         CREATE TABLE origins (origin_id TEXT PRIMARY KEY,asset_id TEXT);
         CREATE TABLE endpoints (
           endpoint_id TEXT PRIMARY KEY,origin_id TEXT,method TEXT,normalized_path TEXT
@@ -107,7 +114,7 @@ def _fixture(root: Path) -> Path:
         "INSERT INTO scans VALUES (?,?,?,?,?,?)",
         (SCAN_ID, "approved_scope", SCOPE_ID, "failed", "2026-09-20 01:00:00", "2026-09-20 01:05:00"),
     )
-    conn.execute("INSERT INTO assets VALUES ('asset',?)", (SCAN_ID,))
+    conn.execute("INSERT INTO assets VALUES ('asset',?,'app.example.com')", (SCAN_ID,))
     conn.execute("INSERT INTO origins VALUES ('origin','asset')")
     conn.execute("INSERT INTO endpoints VALUES ('endpoint','origin','GET','/health')")
     conn.execute("INSERT INTO http_transactions VALUES ('http','endpoint')")
@@ -240,6 +247,98 @@ def test_projection_reads_sources_without_leaking_audit_details(tmp_path: Path) 
     assert projector.snapshot(SCAN_ID)["stage"] == "Attack"
 
 
+def test_projection_exposes_only_allowlisted_recon_activity(tmp_path: Path) -> None:
+    database = _fixture(tmp_path)
+    with sqlite3.connect(database) as conn:
+        conn.execute(
+            "INSERT INTO audit_events VALUES (?,?,?,?,?,?,?)",
+            ("recon-tool-1", SCAN_ID, "stage", None, "recon.activity",
+             json.dumps({"phase": "playwright_bootstrap", "state": "started",
+                         "url": "https://example.com/?token=secret", "headers": {"Cookie": "secret"}}),
+             "2026-09-20 01:00:01"),
+        )
+    snapshot = DashboardProjector(tmp_path).snapshot(SCAN_ID)
+    activity = [log for log in snapshot["logs"] if log.get("message_code") == "recon.activity"]
+    assert len(activity) == 1
+    assert activity[0]["message_params"] == {"phase": "playwright_bootstrap", "state": "started"}
+    assert "secret" not in json.dumps(snapshot)
+
+
+def test_projection_separates_candidate_urls_from_live_responses(tmp_path: Path) -> None:
+    database = _fixture(tmp_path)
+    with sqlite3.connect(database) as conn:
+        conn.execute("ALTER TABLE endpoints ADD COLUMN is_excluded INTEGER NOT NULL DEFAULT 0")
+        conn.execute("CREATE TABLE endpoint_observations (endpoint_id TEXT, discovery_kind TEXT)")
+        conn.execute("INSERT INTO endpoint_observations VALUES ('endpoint','http_response')")
+        conn.execute("INSERT INTO endpoints VALUES ('static','origin','GET','/assets/app.js',1)")
+    snapshot = DashboardProjector(tmp_path).snapshot(SCAN_ID)
+    assert snapshot["endpoints"] == 2
+    assert snapshot["service_endpoints"] == 1
+    assert snapshot["live_endpoints"] == 1
+
+
+def test_projection_reads_live_recon_request_budget_counter(tmp_path: Path) -> None:
+    database = _fixture(tmp_path)
+    database.with_name(f"mitm_capture_{SCAN_ID}.progress.json").write_text(
+        json.dumps({"version": 1, "allowed_requests": 14, "used_before": 3,
+                    "blocked_requests": 2, "updated_at": "2026-09-20T01:00:00Z"}),
+        encoding="utf-8",
+    )
+    assert DashboardProjector(tmp_path).snapshot(SCAN_ID)["requests"] == 17
+
+
+def test_failed_stage_overrides_completed_scan_in_snapshot_and_list(tmp_path: Path) -> None:
+    database = _fixture(tmp_path)
+    with sqlite3.connect(database) as conn:
+        conn.execute("UPDATE scans SET status='completed' WHERE scan_id=?", (SCAN_ID,))
+        conn.execute(
+            "UPDATE stage_runs SET finished_at='2026-09-20T01:07:00Z' WHERE scan_id=?",
+            (SCAN_ID,),
+        )
+
+    projector = DashboardProjector(tmp_path)
+    assert projector.snapshot(SCAN_ID)["status"] == "failed"
+    assert projector.list_scans()[0]["status"] == "failed"
+    assert projector.list_scans()[0]["finished_at"] == "2026-09-20T01:07:00Z"
+    assert projector.list_scans()[0]["targets"] == ["app.example.com"]
+
+
+def test_retry_stage_replaces_old_failure_in_scan_status(tmp_path: Path) -> None:
+    database = _fixture(tmp_path)
+    with sqlite3.connect(database) as conn:
+        conn.execute("UPDATE scans SET status='completed' WHERE scan_id=?", (SCAN_ID,))
+        conn.execute("UPDATE stage_runs SET stage='attack' WHERE scan_id=?", (SCAN_ID,))
+        conn.execute(
+            "INSERT INTO stage_runs VALUES (?,?,?,?,?,?,?,?)",
+            ("retry", SCAN_ID, "attack", "running", None,
+             "2026-09-20T01:10:00Z", None, "2026-09-20T01:10:00Z"),
+        )
+    projector = DashboardProjector(tmp_path)
+    assert projector.snapshot(SCAN_ID)["status"] == "running"
+    assert projector.list_scans()[0]["status"] == "running"
+    assert projector.list_scans()[0]["finished_at"] is None
+    with sqlite3.connect(database) as conn:
+        conn.execute(
+            "UPDATE stage_runs SET status='completed',finished_at='2026-09-20T01:11:00Z' WHERE stage_run_id='retry'"
+        )
+    assert projector.snapshot(SCAN_ID)["status"] == "completed"
+    assert projector.list_scans()[0]["status"] == "completed"
+    with sqlite3.connect(database) as conn:
+        conn.execute(
+            "INSERT INTO stage_runs VALUES (?,?,?,?,?,?,?,?)",
+            ("chain", SCAN_ID, "chaining", "skipped", None,
+             "2026-09-20T01:12:00Z", "2026-09-20T01:12:01Z", "2026-09-20T01:12:00Z"),
+        )
+        conn.execute(
+            "INSERT INTO stage_runs VALUES (?,?,?,?,?,?,?,?)",
+            ("validate", SCAN_ID, "validation", "completed", None,
+             "2026-09-20T01:13:00Z", "2026-09-20T01:13:01Z", "2026-09-20T01:13:00Z"),
+        )
+    stages = projector.snapshot(SCAN_ID)["stage_statuses"]
+    assert stages["Chaining"] == "skipped"
+    assert stages["Validation"] == "completed"
+
+
 def test_projection_rejects_unknown_and_unsafe_scan_ids(tmp_path: Path) -> None:
     _fixture(tmp_path)
     projector = DashboardProjector(tmp_path)
@@ -298,6 +397,15 @@ def test_recon_activity_tracks_started_task_and_clears_on_completion(tmp_path: P
             ("completed", SCAN_ID, "task-1", "dns_resolution", "success", "2026-09-20T01:02:00Z", "2026-09-20T01:02:00Z"),
         )
     assert projector.snapshot(SCAN_ID)["activity"] == "Processing Recon results"
+def test_projection_reads_program_grouped_scan(tmp_path: Path) -> None:
+    database = _fixture(tmp_path)
+    grouped = tmp_path / "Runs" / "yeswehack" / "example-program" / SCAN_ID
+    grouped.parent.mkdir(parents=True)
+    database.parent.rename(grouped)
+    projector = DashboardProjector(tmp_path)
+    assert projector.locate_database(SCAN_ID) == grouped / "Recon.db"
+    assert [item["scan_id"] for item in projector.list_scans()] == [SCAN_ID]
+    assert projector.snapshot(SCAN_ID)["scope_id"] == SCOPE_ID
 
 
 def test_api_snapshot_listing_and_websocket_replay(tmp_path: Path) -> None:
@@ -316,6 +424,7 @@ def test_api_snapshot_listing_and_websocket_replay(tmp_path: Path) -> None:
             listing = await client.get("/api/v1/scans")
             assert listing.status_code == 200
             assert [item["scan_id"] for item in listing.json()["scans"]] == [SCAN_ID]
+            assert listing.json()["scans"][0]["targets"] == ["app.example.com"]
 
             response = await client.get(f"/api/v1/scans/{SCAN_ID}")
             assert response.status_code == 200
@@ -402,7 +511,11 @@ def test_api_snapshot_listing_and_websocket_replay(tmp_path: Path) -> None:
 
 
 def test_scope_dashboard_requires_explicit_yes_or_no(tmp_path: Path) -> None:
-    text = "Example policy: *.example.test is in scope. Denial of service is prohibited."
+    text = (
+        "Example policy: *.example.test is in scope. Denial of service is prohibited. "
+        "Automated tooling\nmax. 10 requests /sec\n"
+        "Request header\nX-Intigriti-Username:{Username}"
+    )
     page = ProgramPage(
         requested_url="https://bugcrowd.com/engagements/example",
         final_url="https://bugcrowd.com/engagements/example",
@@ -495,6 +608,10 @@ def test_scope_dashboard_requires_explicit_yes_or_no(tmp_path: Path) -> None:
             )
             assert started.status_code == 202
             await wait_for_status(client, program_id, "review_required")
+            activity = (await client.get(f"/api/v1/programs/{program_id}/scope-job")).json()["events"]
+            assert activity[0]["message_code"] == "scope.started"
+            assert activity[-1]["message_code"] == "scope.review_required"
+            assert activity[-1]["message_params"] == {"in_scope": 1, "out_of_scope": 0}
             draft = await client.get(f"/api/v1/programs/{program_id}/scope-draft")
             assert draft.status_code == 200
             assert draft.json()["draft"]["in_scope_assets"][0]["asset"] == "*.example.test"
@@ -570,6 +687,7 @@ def test_scope_dashboard_requires_explicit_yes_or_no(tmp_path: Path) -> None:
                 "input_field": "intigriti_username",
             }
             assert requirements["profiles"][0]["limits"]["max_requests"] == 500
+            assert requirements["profiles"][0]["limits"]["requests_per_second"] == 10
             with sqlite3.connect(tmp_path / ".webui" / "programs.db") as connection:
                 connection.execute("DELETE FROM registered_programs")
             assert (await client.get("/api/v1/programs")).json()["programs"] == []
@@ -586,6 +704,24 @@ def test_scope_dashboard_requires_explicit_yes_or_no(tmp_path: Path) -> None:
             assert (await client.get(f"/api/v1/scopes/{approved_scope['scope_id']}")).status_code == 404
 
     asyncio.run(exercise())
+
+
+def test_scope_activity_schema_upgrades_existing_event_database(tmp_path: Path) -> None:
+    database = tmp_path / ".webui" / "scope_jobs.db"
+    database.parent.mkdir(parents=True)
+    with sqlite3.connect(database) as conn:
+        conn.execute(
+            "CREATE TABLE scope_job_events (job_id TEXT, event_id INTEGER, occurred_at TEXT, level TEXT, message TEXT, PRIMARY KEY(job_id,event_id))"
+        )
+        conn.execute(
+            "INSERT INTO scope_job_events VALUES ('scopejob_old',1,'2026-09-20T00:00:00Z','info','legacy')"
+        )
+    ScopeWorkflowManager(tmp_path, ProgramRegistry(tmp_path))
+    with sqlite3.connect(database) as conn:
+        row = conn.execute(
+            "SELECT message,message_code,message_params FROM scope_job_events WHERE job_id='scopejob_old'"
+        ).fetchone()
+    assert row == ("legacy", None, "{}")
 
 
 def test_dashboard_cli_defaults_and_rejects_remote_bind(tmp_path: Path) -> None:
@@ -654,6 +790,8 @@ def test_scan_launcher_builds_fixed_argv_and_streams_pre_database_logs(tmp_path:
         authorization_confirmed=True,
     )
     launched = manager.launch(request)
+    assert launched["targets"] == ["prismlife.com"]
+    assert manager.list_jobs()[0]["targets"] == ["prismlife.com"]
     argv = captured["argv"]
     assert captured["kwargs"]["shell"] is False
     assert argv[1:4] == ["-m", "aidast", "run"]
@@ -666,12 +804,28 @@ def test_scan_launcher_builds_fixed_argv_and_streams_pre_database_logs(tmp_path:
     assert argv[argv.index("--scan-id") + 1] == launched["scan_id"]
     assert argv[argv.index("--start-url") + 1] == "https://prismlife.com/app"
     assert manager.snapshot(launched["scan_id"])["logs"][-1]["message"] == "AI DAST pipeline process started."
+    assert manager.snapshot(launched["scan_id"])["logs"][-1]["message_code"] == "pipeline.started"
     assert projector.stored_events_after(launched["scan_id"], 0)[0]["event_id"] == 1
 
     with pytest.raises(ValueError, match="not in the approved Scope"):
         manager.launch(request.model_copy(update={"targets": ["outside.example"]}))
     with pytest.raises(ValueError, match="outside the selected approved target"):
         manager.launch(request.model_copy(update={"start_url": "https://outside.example/"}))
+    with pytest.raises(ValueError, match="request rate exceeds"):
+        manager.launch(request.model_copy(update={"max_rps": 0.6}))
+
+    from dataclasses import replace
+
+    approved = replace(
+        approved,
+        execution_requirements=_execution_requirements(
+            "hackerone", rate_quote="Automated tooling max. 10 requests /sec"
+        ),
+    )
+    manager.launch(request.model_copy(update={"max_rps": 10}))
+    assert captured["argv"][captured["argv"].index("--max-rps") + 1] == "10"
+    with pytest.raises(ValueError, match="request rate exceeds"):
+        manager.launch(request.model_copy(update={"max_rps": 11}))
     waiting.set()
 
 
@@ -714,6 +868,129 @@ def test_scan_completion_log_reports_persisted_report_stage(tmp_path: Path) -> N
     events = projector.stored_events_after(SCAN_ID, 0)
     assert events[-1]["payload"]["stage"] == "Report"
     assert "through Report" in events[-1]["payload"]["message"]
+def test_scan_cancel_terminates_managed_process_and_persists_cancelled_state(tmp_path: Path) -> None:
+    database = _fixture(tmp_path)
+    with sqlite3.connect(database) as conn:
+        conn.execute("UPDATE scans SET status='running',finished_at=NULL WHERE scan_id=?", (SCAN_ID,))
+        conn.execute("UPDATE stage_runs SET status='running',finished_at=NULL WHERE scan_id=?", (SCAN_ID,))
+    projector = DashboardProjector(tmp_path)
+    manager = ScanLaunchManager(tmp_path, projector, project_root=tmp_path)
+    finished = threading.Event()
+
+    class Process:
+        def poll(self) -> int | None:
+            return -15 if finished.is_set() else None
+
+        def terminate(self) -> None:
+            finished.set()
+
+        def wait(self) -> int:
+            assert finished.wait(2)
+            return -15
+
+    job = LaunchJob(SCAN_ID, None, "running", "2026-09-20T01:00:00Z", 10, ("example.com",), Process())  # type: ignore[arg-type]
+    manager._jobs[SCAN_ID] = job
+    monitor = threading.Thread(target=manager._monitor, args=(job,), daemon=True)
+    monitor.start()
+    app = create_app(result_root=tmp_path, launch_manager=manager)
+
+    async def cancel_via_api() -> None:
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+            rejected = await client.post(f"/api/v1/scans/{SCAN_ID}/cancel", headers={"Origin": "http://elsewhere"})
+            assert rejected.status_code == 403
+            response = await client.post(f"/api/v1/scans/{SCAN_ID}/cancel", headers={"Origin": "http://test"})
+            assert response.status_code == 202
+            assert response.json() == {"scan_id": SCAN_ID, "status": "cancelling"}
+
+    asyncio.run(cancel_via_api())
+    monitor.join(timeout=3)
+    assert not monitor.is_alive()
+    assert job.status == "cancelled"
+    with sqlite3.connect(database) as conn:
+        assert conn.execute("SELECT status FROM scans WHERE scan_id=?", (SCAN_ID,)).fetchone()[0] == "cancelled"
+        assert conn.execute("SELECT status FROM stage_runs WHERE scan_id=?", (SCAN_ID,)).fetchone()[0] == "cancelled"
+    assert [log["payload"]["message_code"] for log in projector.stored_events_after(SCAN_ID, 0)
+            if log["type"] == "log.appended"][-2:] == ["pipeline.cancel_requested", "pipeline.cancelled"]
+    with pytest.raises(ValueError, match="no active process"):
+        manager.cancel(SCAN_ID)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="pause uses POSIX process groups")
+def test_scan_pause_continue_and_cancel_preserve_one_process(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    database = _fixture(tmp_path)
+    with sqlite3.connect(database) as conn:
+        conn.execute("UPDATE scans SET status='running',finished_at=NULL WHERE scan_id=?", (SCAN_ID,))
+        conn.execute("UPDATE stage_runs SET status='running',finished_at=NULL WHERE scan_id=?", (SCAN_ID,))
+    projector = DashboardProjector(tmp_path)
+    manager = ScanLaunchManager(tmp_path, projector, project_root=tmp_path)
+    process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"],
+                               cwd=tmp_path, start_new_session=True)
+    monkeypatch.setattr(manager, "_isolated_scan_pid", lambda _scan_id: process.pid)
+    job = LaunchJob(SCAN_ID, None, "running", "2026-09-20T01:00:00Z", 10,
+                    ("example.com",), process)  # type: ignore[arg-type]
+    manager._jobs[SCAN_ID] = job
+    monitor = threading.Thread(target=manager._monitor, args=(job,), daemon=True)
+    monitor.start()
+    app = create_app(result_root=tmp_path, launch_manager=manager)
+    try:
+        async def control() -> None:
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+                origin = {"Origin": "http://test"}
+                paused = await client.post(f"/api/v1/scans/{SCAN_ID}/pause", headers=origin)
+                assert paused.status_code == 202
+                assert paused.json()["status"] == "paused"
+                assert (await client.get(f"/api/v1/scans/{SCAN_ID}")).json()["status"] == "paused"
+                assert process.poll() is None
+                continued = await client.post(f"/api/v1/scans/{SCAN_ID}/continue", headers=origin)
+                assert continued.status_code == 202
+                assert continued.json()["status"] == "running"
+                assert (await client.get(f"/api/v1/scans/{SCAN_ID}")).json()["status"] == "running"
+                await client.post(f"/api/v1/scans/{SCAN_ID}/pause", headers=origin)
+                cancelled = await client.post(f"/api/v1/scans/{SCAN_ID}/cancel", headers=origin)
+                assert cancelled.status_code == 202
+                assert cancelled.json()["status"] == "cancelling"
+        asyncio.run(control())
+        monitor.join(timeout=5)
+        assert not monitor.is_alive()
+        assert projector.snapshot(SCAN_ID)["status"] == "cancelled"
+    finally:
+        if process.poll() is None:
+            os.killpg(process.pid, signal.SIGKILL)
+        process.wait(timeout=5)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="process adoption uses /proc")
+def test_paused_scan_can_continue_after_dashboard_restart(tmp_path: Path) -> None:
+    database = _fixture(tmp_path)
+    with sqlite3.connect(database) as conn:
+        conn.execute("UPDATE scans SET status='running',finished_at=NULL WHERE scan_id=?", (SCAN_ID,))
+        conn.execute("UPDATE stage_runs SET status='running',finished_at=NULL WHERE scan_id=?", (SCAN_ID,))
+    (tmp_path / "aidast.py").write_text("import time\ntime.sleep(60)\n", encoding="utf-8")
+    process = subprocess.Popen(
+        [sys.executable, "-m", "aidast", "run", "https://example.com", "--scan-id", SCAN_ID],
+        cwd=tmp_path, start_new_session=True,
+    )
+    try:
+        projector = DashboardProjector(tmp_path)
+        first = ScanLaunchManager(tmp_path, projector, project_root=tmp_path)
+        first._record_process(SCAN_ID, process)
+        restarted = ScanLaunchManager(tmp_path, projector, project_root=tmp_path)
+        assert restarted._isolated_scan_pid(SCAN_ID) == process.pid
+        assert restarted.pause(SCAN_ID)["status"] == "paused"
+        assert projector.snapshot(SCAN_ID)["status"] == "paused"
+        another_restart = ScanLaunchManager(tmp_path, projector, project_root=tmp_path)
+        assert another_restart.continue_scan(SCAN_ID)["status"] == "running"
+        assert process.poll() is None
+        assert another_restart.cancel(SCAN_ID)["status"] == "cancelling"
+        for _ in range(50):
+            if projector.snapshot(SCAN_ID)["status"] == "cancelled":
+                break
+            threading.Event().wait(0.1)
+        assert projector.snapshot(SCAN_ID)["status"] == "cancelled"
+    finally:
+        if process.poll() is None:
+            os.killpg(process.pid, signal.SIGKILL)
+        process.wait(timeout=5)
 
 
 def test_scan_request_rejects_unconfirmed_or_excessive_budget() -> None:
@@ -726,12 +1003,6 @@ def test_scan_request_rejects_unconfirmed_or_excessive_budget() -> None:
         ScanLaunchRequest(**base)
     with pytest.raises(ValueError, match="request budget exceeds"):
         ScanLaunchRequest(**base, max_requests=501, authorization_confirmed=True)
-    with pytest.raises(ValueError, match="request rate exceeds"):
-        ScanLaunchRequest(
-            **base,
-            max_rps=0.6,
-            authorization_confirmed=True,
-        )
     with pytest.raises(ValueError, match="concurrency exceeds"):
         ScanLaunchRequest(
             **base,

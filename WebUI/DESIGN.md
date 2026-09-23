@@ -38,28 +38,27 @@ competing with the primary task.
 
 | Level | Size | Weight | Line height | Usage |
 | --- | --- | --- | --- | --- |
-| Page title | `30px` | 600 | 1.2 | Page heading |
-| Section title | `16px` | 600 | 1.35 | Panel heading |
-| Card title | `15px` | 600 | 1.4 | Local grouping |
-| Body | `14px` | 400 | 1.55 | Default interface copy |
-| Body / small | `13px` | 400-600 | 1.5 | Supporting text and controls |
-| Caption | `12px` | 500 | 1.45 | Labels and metadata |
-| Overline | `10px` | 600 | 1.3 | Eyebrows and section markers |
-| Log body | `12.5px` | 400 | 1.75 | Live event messages |
-| Log metadata | `11px` | 500 | 1.4 | Time, stage, and stream markers |
+| Page title | `36px` | 600 | 1.2 | Page heading |
+| Section title | `19px` | 600 | 1.35 | Panel heading |
+| Card title | `17px` | 600 | 1.4 | Local grouping |
+| Body | `16px` | 400 | 1.6 | Default interface copy |
+| Body / small | `14–15px` | 400-600 | 1.5 | Supporting text and controls |
+| Caption | `12–13px` | 500 | 1.45 | Labels and metadata |
+| Overline | `11px` | 600 | 1.3 | Eyebrows and section markers |
+| Log body | `14px` | 400 | 1.65 | Live event messages |
+| Log metadata | `12px` | 500 | 1.4 | Time, stage, and stream markers |
 
 ### Font stacks
 
-- Primary: `Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif`
+- Primary: `Inter, "Noto Sans KR", "Malgun Gothic", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif`
 - Monospace: `"SFMono-Regular", Consolas, "Liberation Mono", monospace`
 
 ### Rules
 
-- Interface text does not fall below `11px`. Only the short navigational
-  overlines `.eyebrow`, `.heading-tag`, `.nav-label`, and `.brand small` may
-  use `10px`.
-- Operational body and explanatory copy does not fall below `12px`.
-- Log message copy remains monospace but is never smaller than `12.5px`.
+- Interface text does not fall below `12px`. Short navigational overlines may
+  use `11px`.
+- Operational body and explanatory copy should use at least `14px`.
+- Log message copy remains at least `14px`.
 - Mobile breakpoints never reduce a selector below its desktop font size.
 - Data-heavy numbers use tabular figures.
 - Uppercase labels are limited to short metadata and use increased tracking.
@@ -74,13 +73,24 @@ Spacing follows a 4px base with practical steps of 4, 8, 12, 16, 20, 24,
 ### Shell
 
 - Desktop: fixed side navigation, fluid content, persistent activity rail.
+- The desktop shell follows the StyleGallery
+  [`fixed-sidenav-shell`](https://github.com/changeroa/StyleGallery/blob/main/patterns/viewport-shell/fixed-sidenav-shell.md)
+  contract: navigation stays stable and the document remains the primary scroll
+  owner.
+- The content plus activity region follows
+  [`main-with-rail`](https://github.com/changeroa/StyleGallery/blob/main/patterns/split-sidebar/main-with-rail.md):
+  the primary task stays dominant and the rail reflows to a sheet when space is
+  constrained.
 - The activity rail owns its log scroll; the document owns main-content
   scroll. Controls and footer remain outside the log scroll region.
-- At wide desktop sizes the activity rail is `380-400px`, preserving readable
+- At desktop sizes the activity rail is `320-350px`, preserving readable
   log lines and filter controls.
 - At `900px` and below the activity rail becomes a fixed, collapsible bottom
   sheet so live state is reachable without scrolling through page content.
-- At `660px` and below the sheet sits above the 64px bottom navigation.
+- At `660px` and below the sheet sits above the 72px bottom navigation.
+- Mobile navigation includes short Korean labels beneath icons and remains
+  horizontally scrollable without hiding destinations. The active destination
+  scrolls into view on navigation so the current location is always visible.
 - Primary content must reflow without horizontal scrolling at `390px`.
 
 ## 5. Components
@@ -112,14 +122,21 @@ Spacing follows a 4px base with practical steps of 4, 8, 12, 16, 20, 24,
 ### Activity rail
 
 - **Structure**: header, source status, stage progress, search and filters,
-  follow control, scrollable event stream, redaction footer.
+  follow control, scrollable event stream, redaction footer. Scope collection
+  events and scan events share one chronological stream but retain explicit
+  `스코프 수집` and `스캔 · {단계}` source labels.
 - **Variants**: desktop rail, tablet sheet, mobile sheet, collapsed.
-- **States**: live, demo, reconnecting, offline, following, paused, empty.
+- **States**: live, demo, reconnecting, offline, following, paused, empty,
+  Scope collecting, and browser-input waiting.
 - **Accessibility**: named aside, keyboard-scrollable stream, labelled filters,
   text status in addition to dots, and a labelled collapse control.
 - **Motion**: no decorative motion; event arrival relies on scroll position and
   visual emphasis.
 - **Layout**: fixed controls around one bounded `.log-stream` scroll owner.
+- **Live cadence**: while Scope collection is active, a non-persisted
+  `작업 중 · N초` row and status badge update once per second. Persisted backend
+  events remain the authoritative phase history; the timer only fills quiet
+  intervals so the operator can see that work is still running.
 
 ### Log entry
 
@@ -129,6 +146,36 @@ Spacing follows a 4px base with practical steps of 4, 8, 12, 16, 20, 24,
 - **Accessibility**: readable contrast, text level available to assistive
   technology, and wrapping for unbroken data.
 - **Layout**: chronological vertical stack.
+
+### Operator next action
+
+- **Structure**: concise state summary, ordered workflow steps, one primary next
+  action.
+- **Variants**: register program, approve Scope, start scan, review findings.
+- **States**: complete, current, upcoming.
+- **Accessibility**: ordered list semantics, status expressed in text and icon,
+  and one unambiguous button label.
+- **Layout**: full-width panel before metrics on Overview; steps reflow to one
+  column on narrow screens.
+
+### Connection status
+
+- **Structure**: status dot plus plain Korean state.
+- **Variants**: demo, connected, connecting, reconnecting, no scan selected,
+  offline.
+- **States**: announced with `role="status"` and never left in a permanent
+  loading state when no scan exists.
+- **Accessibility**: state is understandable without color or implementation
+  vocabulary.
+
+### Dialog action dock
+
+- **Structure**: required confirmation immediately above cancel and primary
+  action controls.
+- **States**: disabled until prerequisites pass, busy while submitting.
+- **Accessibility**: remains visible at the bottom of long scrollable dialogs
+  without obscuring form content.
+- **Layout**: sticky to the dialog bottom with a tonal surface and top divider.
 
 ## 6. Motion & Interaction
 
@@ -158,6 +205,9 @@ Cards do not receive decorative shadows.
 - Status never depends on color alone.
 - Touch targets are at least 38px; primary actions target 40px or more.
 - Korean and English copy must wrap without clipping or orphaned controls.
+- The shipped operator interface is Korean-only. Machine identifiers,
+  filenames, API paths, and standard vulnerability classifications may remain
+  in their canonical form.
 - The mobile activity sheet must remain collapsible and must not cover the
   bottom navigation.
 

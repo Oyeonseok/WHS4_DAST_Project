@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en">
+<html lang="ko">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -10,10 +10,7 @@
           const theme = saved === 'system'
             ? (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')
             : saved;
-          const savedLanguage = localStorage.getItem('aidast-language');
-          document.documentElement.lang = savedLanguage === 'en' || savedLanguage === 'ko'
-            ? savedLanguage
-            : (navigator.language.toLowerCase().startsWith('ko') ? 'ko' : 'en');
+          document.documentElement.lang = 'ko';
           document.documentElement.dataset.theme = theme === 'light' ? 'light' : 'dark';
           document.documentElement.style.colorScheme = document.documentElement.dataset.theme;
         } catch { document.documentElement.dataset.theme = 'dark'; }
@@ -21,8 +18,8 @@
     </script>
     <meta name="theme-color" content="#101419" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-    <meta name="description" content="AI DAST security workspace — approved scope, scan activity, findings, validation, and local reports." />
-    <title>AI DAST — Security Operations</title>
+    <meta name="description" content="승인된 Scope, 스캔 활동, 취약점 검증과 로컬 보고서를 관리하는 AI DAST 보안 워크스페이스" />
+    <title>AI DAST — 보안 운영 워크스페이스</title>
   </head>
   <body>
     <div id="root"></div>

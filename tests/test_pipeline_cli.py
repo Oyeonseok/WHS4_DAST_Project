@@ -50,7 +50,7 @@ class PipelineCliTests(unittest.TestCase):
                 "scope_markdown_sha256": hashlib.sha256((program_dir / "Scope.md").read_bytes()).hexdigest(),
             }), encoding="utf-8")
             scope = SimpleNamespace(
-                scope_id="pipeline-fixture", analysis=SimpleNamespace(in_scope_assets=[]),
+                scope_id="pipeline-fixture", analysis=SimpleNamespace(in_scope_assets=[], source_evidence=[]),
             )
 
             def fixture_executor(**kwargs):
@@ -101,7 +101,9 @@ class PipelineCliTests(unittest.TestCase):
                 ])
             self.assertEqual(result, 0)
             self.assertIn("Legacy Attack plan saved:", stdout.getvalue())
-            database, = (root / "AttackRuns").glob("*/legacy/Attack.db")
+            database, = (root / "AttackRuns").glob("*/*/scan_*/legacy/Attack.db")
+            self.assertEqual(database.relative_to(root / "AttackRuns").parts[:2], ("example-test", "program"))
+            self.assertTrue((root / "Runs" / "example-test" / "program" / database.parent.parent.name / "Recon.db").is_file())
             self.assertTrue((database.parent / "review/evidence-review-queue.json").is_file())
             with closing(sqlite3.connect(database)) as conn:
                 self.assertEqual(conn.execute("SELECT COUNT(*) FROM attack_plans").fetchone()[0], 1)
