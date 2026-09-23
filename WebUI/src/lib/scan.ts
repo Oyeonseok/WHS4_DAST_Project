@@ -1,4 +1,14 @@
+import type { Snapshot } from './events';
+
 export type ExecutionProfileId = 'safe-recon' | 'focused-discovery';
+
+export function scanRetryAction(scan: Pick<Snapshot, 'status' | 'stage'>): 'resume' | 'rescan' | null {
+  if (scan.status === 'completed' || scan.status === 'cancelled') return 'rescan';
+  if (scan.status !== 'failed') return null;
+  return scan.stage === 'Attack' || scan.stage === 'Chaining' || scan.stage === 'Validation'
+    ? 'resume'
+    : 'rescan';
+}
 
 export type ExecutionLimits = {
   readonly requests_per_second: number;

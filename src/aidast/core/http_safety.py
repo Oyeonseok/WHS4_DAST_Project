@@ -6,6 +6,7 @@ import base64
 from collections.abc import Mapping
 import hashlib
 import hmac
+from ipaddress import ip_address
 import json
 import re
 import secrets
@@ -18,6 +19,24 @@ BROWSER_MODE_HEADER = "x-aidast-browser-mode"
 BROWSER_SUPPORT_MODES = {"same-origin", "passive"}
 AUTH_CAPABILITY_HEADER = "X-AIDAST-Auth-Capability"
 AUTH_CAPABILITY_VERSION = 1
+
+
+def scope_uses_loopback_host(hosts: object) -> bool:
+    """Keep browser rendering traffic local when a scope contains loopback."""
+    if not isinstance(hosts, (list, tuple, set, frozenset)):
+        return False
+    for raw_host in hosts:
+        if not isinstance(raw_host, str):
+            continue
+        host = raw_host.lower().rstrip(".")
+        if host == "localhost" or host.endswith(".localhost"):
+            return True
+        try:
+            if ip_address(host).is_loopback:
+                return True
+        except ValueError:
+            pass
+    return False
 
 
 def _base64url_encode(value: bytes) -> str:

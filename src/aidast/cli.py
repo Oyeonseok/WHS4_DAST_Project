@@ -809,9 +809,11 @@ def _run_recon(
         if args.execute
         else None
     )
-    program_path = identify_program(program_url)
-    run_output = program_path.under(args.run_root) / scan_id if scan_id else None
-    attack_output = program_path.under(args.attack_output_root) / scan_id if scan_id else None
+    run_output = attack_output = None
+    if prepare_attack and scan_id is not None:
+        program_path = identify_program(program_url)
+        run_output = program_path.under(args.run_root) / scan_id
+        attack_output = program_path.under(args.attack_output_root) / scan_id
     if prepare_attack and scan_id is not None:
         if (
             run_output.exists() or attack_output.exists()

@@ -241,12 +241,15 @@ aidast recon "https://lab.aidast.invalid/juice-shop" \
   --max-concurrency 2 \
   --timeout-seconds 15 \
   --ffuf-wordlist resources/wordlists/common.txt \
-  --tag-batch-size 50 \
+  --tag-batch-size 25 \
+  --codex-timeout 600 \
   --execute \
   --tag-after
 ```
 
 VulnBank는 식별 URL과 target/start URL을 5001 대상으로 변경한다.
+
+2026-09-23 로컬 재검증에서는 50건 태깅 배치가 기본 Codex 제한 300초에 도달했다. 관측치당 입력이 늘어난 현재 구현에는 25건 배치와 600초 상한을 적용한다.
 
 검사 항목:
 
@@ -285,7 +288,9 @@ aidast run "https://lab.aidast.invalid/juice-shop" \
   --max-requests 500 \
   --max-depth 2 \
   --max-concurrency 2 \
-  --timeout-seconds 15
+  --timeout-seconds 15 \
+  --tag-batch-size 25 \
+  --codex-timeout 600
 ```
 
 VulnBank는 식별 URL과 target/start URL을 5001 대상으로 변경한다.

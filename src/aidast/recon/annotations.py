@@ -133,12 +133,17 @@ class AnnotationBatch(BaseModel):
     annotations: list[Annotation] = Field(max_length=300)
 
 
+class AnnotationContractError(ValueError):
+    """The model response violated the supplied observation/tag contract."""
+
+
 class ObservationRecorder:
     def __init__(self, conn, *, origin_id: str, scan_id: str, agent=None):
         self.conn = conn
         self.origin_id = origin_id
         self.scan_id = scan_id
         self.agent = agent
+        self.last_failure_retryable = False
         self.context_ids: dict[str, str] = {}
         # A deferred worker has no single origin/session.  Keep the recorder
         # reusable without manufacturing an invalid foreign-key reference.
@@ -225,6 +230,7 @@ class ObservationRecorder:
                 self._classify(payload[offset:offset + 200])
 
     def _classify(self, payload: list[dict]) -> bool:
+        self.last_failure_retryable = False
         run_id = db.new_id('annotation_run')
         self.conn.execute('''INSERT INTO annotation_runs
             (annotation_run_id,scan_id,model,prompt_version,taxonomy_version,status,started_at)
@@ -253,12 +259,12 @@ class ObservationRecorder:
             )
             ids = {item['observation_id'] for item in payload}
             if {a.observation_id for a in result.annotations} != ids:
-                raise ValueError('annotation result must cover exactly the supplied observations')
+                raise AnnotationContractError('annotation result must cover exactly the supplied observations')
             seen = set()
             for a in result.annotations:
                 identity = (a.observation_id, a.category, a.tag)
                 if a.tag not in TAXONOMY[a.category] or identity in seen:
-                    raise ValueError('invalid or duplicate annotation tag')
+                    raise AnnotationContractError('invalid or duplicate annotation tag')
                 seen.add(identity)
             with self.conn:
                 for a in result.annotations:
@@ -268,6 +274,7 @@ class ObservationRecorder:
                 self.conn.execute("UPDATE annotation_runs SET status='completed',finished_at=? WHERE annotation_run_id=?", (db.now(), run_id))
             return True
         except Exception as exc:
+            self.last_failure_retryable = isinstance(exc, AnnotationContractError)
             self.conn.rollback()
             self.conn.execute("UPDATE annotation_runs SET status='failed',error_message=?,finished_at=? WHERE annotation_run_id=?", (type(exc).__name__, db.now(), run_id))
             self.conn.commit()
@@ -292,6 +299,17 @@ def tag_pending_observations(conn, *, scan_id: str, agent, batch_size: int = 200
         ORDER BY o.observed_at, o.observation_id
     ''', (scan_id,)).fetchall()
     recorder = ObservationRecorder(conn, origin_id='', scan_id=scan_id, agent=agent)
+
+    def classify_with_split(payload: list[dict]) -> tuple[int, int]:
+        if recorder._classify(payload):
+            return len(payload), 0
+        if recorder.last_failure_retryable and len(payload) > 1:
+            midpoint = len(payload) // 2
+            left_done, left_failed = classify_with_split(payload[:midpoint])
+            right_done, right_failed = classify_with_split(payload[midpoint:])
+            return left_done + right_done, left_failed + right_failed
+        return 0, len(payload)
+
     total = 0
     failed = 0
     batches = (len(rows) + batch_size - 1) // batch_size
@@ -314,10 +332,9 @@ def tag_pending_observations(conn, *, scan_id: str, agent, batch_size: int = 200
                 'parameters': parameter_context(conn, row[15]),
             })
         try:
-            if recorder._classify(payload):
-                total += len(payload)
-            else:
-                failed += len(payload)
+            done_count, failed_count = classify_with_split(payload)
+            total += done_count
+            failed += failed_count
         except Exception:
             failed += len(payload)
         if progress is not None:

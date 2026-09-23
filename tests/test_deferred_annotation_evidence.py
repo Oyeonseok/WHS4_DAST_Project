@@ -41,6 +41,18 @@ class FailFirstAgent(RecordingAgent):
         return super()._run_structured(**kwargs)
 
 
+class PartialFirstAgent(RecordingAgent):
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def _run_structured(self, **kwargs):
+        self.calls += 1
+        result = super()._run_structured(**kwargs)
+        if self.calls == 1:
+            return AnnotationBatch(annotations=result.annotations[:1])
+        return result
+
+
 def test_deferred_tagging_reuses_sanitized_observation_evidence() -> None:
     with tempfile.TemporaryDirectory() as temporary:
         database = Path(temporary) / "Recon.db"
@@ -160,3 +172,37 @@ def test_deferred_tagging_preserves_successful_batches_and_retries_pending() -> 
     assert (retry_completed, retry_failed) == (2, 0)
     assert final_annotations == 3
     assert dict(run_statuses) == {"completed": 2, "failed": 1}
+
+
+def test_deferred_tagging_splits_batch_after_incomplete_model_result() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        database = Path(temporary) / "Recon.db"
+        with db.connect(database) as connection:
+            db.insert_scan(connection, scan_id="scan", scope_type="test", scope_value="scope")
+            asset_id = db.insert_asset(
+                connection, scan_id="scan", identifier="example.com", asset_type="DOMAIN"
+            )
+            origin_id = db.upsert_origin(
+                connection, asset_id=asset_id, scheme="https", host="example.com",
+                port=443, base_url="https://example.com",
+            )
+            ObservationRecorder(connection, origin_id=origin_id, scan_id="scan").record(
+                "fixture",
+                [{"method": "GET", "path": f"/item/{index}", "source": "fixture"}
+                 for index in range(4)],
+            )
+            agent = PartialFirstAgent()
+            completed, failed = tag_pending_observations(
+                connection, scan_id="scan", agent=agent, batch_size=4,
+            )
+            annotations = connection.execute(
+                "SELECT COUNT(*) FROM endpoint_annotations"
+            ).fetchone()[0]
+            run_statuses = dict(connection.execute(
+                "SELECT status, COUNT(*) FROM annotation_runs GROUP BY status"
+            ).fetchall())
+
+    assert (completed, failed) == (4, 0)
+    assert annotations == 4
+    assert agent.calls == 3
+    assert run_statuses == {"completed": 2, "failed": 1}

@@ -330,6 +330,7 @@ def test_projection_reads_live_recon_request_budget_counter(tmp_path: Path) -> N
     )
     snapshot = DashboardProjector(tmp_path).snapshot(SCAN_ID)
     assert snapshot["requests"] == 17
+    assert snapshot["progress"] == 0
     assert type(snapshot["progress"]) is int
     assert 0 <= snapshot["progress"] <= 100
 

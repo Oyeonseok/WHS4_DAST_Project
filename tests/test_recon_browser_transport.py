@@ -643,6 +643,28 @@ class ReconBrowserTransportTests(unittest.TestCase):
             self.driver._guard_request(route)
             route.abort.assert_called_once_with("blockedbyclient")
 
+    def test_loopback_browser_blocks_external_passive_resources(self):
+        policy = TargetPolicy(
+            scope_id="scope", policy_id="policy", asset_type=AssetType.URL,
+            asset="http://127.0.0.1:5001/", allowed_hosts=["127.0.0.1"],
+            allowed_schemes=["http"], allowed_ports=[5001],
+            allowed_path_prefixes=["/"], allowed_methods=["GET"],
+        )
+        driver = PlaywrightDriver(
+            policy.asset, ManualSessionConfig(login_url=policy.asset, session_file="unused.json"),
+            target_policy=policy, proxy_url="http://127.0.0.1:8080",
+        )
+        driver.browser_context_token = "browser-token-with-enough-length"
+        request = SimpleNamespace(
+            url="https://fonts.googleapis.com/css2?family=Roboto", method="GET",
+            resource_type="stylesheet", all_headers=lambda: {"accept": "text/css"},
+            frame=SimpleNamespace(url=policy.asset), is_navigation_request=lambda: False,
+        )
+        route = Mock(request=request)
+        driver._guard_request(route)
+        route.abort.assert_called_once_with("blockedbyclient")
+        route.continue_.assert_not_called()
+
     def test_visit_path_does_not_duplicate_an_absolute_path(self):
         page = Mock()
         page.goto.return_value = SimpleNamespace(

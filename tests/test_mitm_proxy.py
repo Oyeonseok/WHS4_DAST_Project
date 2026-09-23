@@ -67,6 +67,27 @@ class MitmAddonBudgetTests(unittest.TestCase):
             response=None,
         )
 
+    def test_loopback_scope_blocks_external_passive_browser_request(self):
+        addon = self._addon()
+        addon.allowed_hosts = {"127.0.0.1"}
+        addon.rules.update(
+            allowed_hosts=["127.0.0.1"], allowed_schemes=["http"],
+            allowed_ports=[5001],
+        )
+        flow = self._flow(
+            "/css2?family=Roboto",
+            headers={
+                "x-aidast-browser-token": "test-token",
+                "x-aidast-browser-mode": "passive",
+                "Sec-Fetch-Dest": "style",
+            },
+        )
+        flow.request.pretty_url = "https://fonts.googleapis.com/css2?family=Roboto"
+        addon.request(flow)
+        self.assertEqual(flow.response.status_code, 403)
+        self.assertTrue(flow.metadata["aidast_policy_blocked"])
+        self.assertEqual(addon.request_count, 0)
+
     def test_blocked_low_priority_requests_do_not_spend_browser_reserve(self):
         addon = self._addon()
         for index in range(8):

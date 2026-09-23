@@ -30,6 +30,16 @@ def test_repeated_variable_segments_are_learned_without_collapsing_static_paths(
     assert surface[0]["normalized_path"] == "/users/:param"
 
 
+def test_distinct_root_pages_do_not_become_one_variable_route() -> None:
+    paths = ("/blog", "/careers", "/compliance", "/forgot-password",
+             "/privacy", "/register", "/terms")
+    rows = [{"method": "GET", "path": path, "source": "katana"} for path in paths]
+
+    surface = judgment.merge_and_normalize(rows)
+
+    assert {row["normalized_path"] for row in surface} == set(paths)
+
+
 def test_adaptive_learning_is_separate_for_each_http_method() -> None:
     rows = [
         {"method": "GET", "path": f"/users/{value}", "source": "katana"}
