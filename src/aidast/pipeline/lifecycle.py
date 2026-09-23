@@ -157,7 +157,7 @@ def finish_stage_run(
                 )
                 _audit(conn, scan_id=row[0], stage_run_id=stage_run_id, task_id=task_id,
                        event_type="task.cancelled", details={"reason": "stage finished"})
-        if status == "failed" and stage_name == "validation":
+        if status in {"failed", "cancelled"} and stage_name == "validation":
             conn.execute(
                 """UPDATE validation_attempts
                 SET outcome='outcome_unknown',finished_at=?

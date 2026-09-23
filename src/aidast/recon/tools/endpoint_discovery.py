@@ -1091,6 +1091,8 @@ def discover_with_ffuf(
 
     if target_policy is not None and not target_policy.tools.ffuf_enabled:
         print("  [건너뜀] TargetPolicy에서 ffuf가 허용되지 않음")
+        if diagnostic_callback is not None:
+            diagnostic_callback("phase_skipped", phase="ffuf")
         return []
 
     if target_policy is not None and not proxy_url:
@@ -1103,6 +1105,8 @@ def discover_with_ffuf(
         print(
             "  [건너뜀] ffuf 미설치"
         )
+        if diagnostic_callback is not None:
+            diagnostic_callback("phase_skipped", phase="ffuf")
 
         return []
 
@@ -1112,6 +1116,8 @@ def discover_with_ffuf(
             "  [건너뜀] "
             "ffuf Wordlist 없음"
         )
+        if diagnostic_callback is not None:
+            diagnostic_callback("phase_skipped", phase="ffuf")
 
         return []
 
@@ -1123,6 +1129,8 @@ def discover_with_ffuf(
             "  [건너뜀] "
             f"Wordlist 없음: {wordlist}"
         )
+        if diagnostic_callback is not None:
+            diagnostic_callback("phase_skipped", phase="ffuf")
 
         return []
 
@@ -1172,6 +1180,8 @@ def discover_with_ffuf(
         roots,
         start=1,
     ):
+        if diagnostic_callback is not None:
+            diagnostic_callback("ffuf_root_started", index=index, total=len(roots))
 
         if root == "/":
 
@@ -1285,6 +1295,9 @@ def discover_with_ffuf(
             tmp_path.unlink(
                 missing_ok=True
             )
+
+            if diagnostic_callback is not None:
+                diagnostic_callback("phase_error", phase="ffuf")
 
             continue
 
@@ -1426,6 +1439,8 @@ def discover_with_ffuf(
             f"    -> "
             f"{discovered_count}건"
         )
+        if diagnostic_callback is not None:
+            diagnostic_callback("ffuf_root_finished", index=index, total=len(roots), count=discovered_count)
 
     unique = (
         _deduplicate_results(
@@ -1568,6 +1583,20 @@ def discover_endpoints(
         if diagnostic_callback is not None:
             diagnostic_callback(event, component="endpoint_discovery", **details)
 
+    katana_states: dict[str, str] = {}
+
+    def katana_diagnostic(event, **details):
+        mode = details.get("mode")
+        if isinstance(mode, str) and mode in {"standard", "headless"}:
+            if event == "tool_unavailable":
+                katana_states[mode] = "skipped"
+            elif event == "tool_error" or (event == "katana_process" and details.get("returncode") != 0):
+                katana_states[mode] = "failed"
+            elif event == "katana_process":
+                katana_states[mode] = "finished"
+        if diagnostic_callback is not None:
+            diagnostic_callback(event, **details)
+
     def endpoint_rows(items):
         return [diagnostic_endpoint(item) for item in items]
 
@@ -1708,6 +1737,7 @@ def discover_endpoints(
         # ---------------------------------------------
 
         authenticated_run = preauthenticated or interactive_login
+        diagnose("phase_started", phase="playwright_bootstrap")
         if preauthenticated:
             driver.start_from_session()
         elif interactive_login:
@@ -1751,6 +1781,7 @@ def discover_endpoints(
             raw_endpoints=endpoint_rows(login_raw_results),
             allowed_endpoints=endpoint_rows(login_results),
         )
+        diagnose("phase_completed", phase="playwright_bootstrap", count=len(login_results))
 
         print(
             "  초기 브라우저 HTTP : "
@@ -1764,9 +1795,13 @@ def discover_endpoints(
         ):
             print()
             print("  [Priority 1/2] Playwright 현재 페이지/API 관측")
+            diagnose("phase_started", phase="playwright_priority")
             try:
                 driver.ensure_session()
                 driver.run_interaction_pass([])
+                diagnose("phase_completed", phase="playwright_priority",
+                         reason=getattr(driver, "last_interaction_stop_reason", None),
+                         duplicate_count=getattr(driver, "last_interaction_duplicate_screens", 0))
             except Exception as exc:
                 print(f"  [경고] 초기 Playwright 관측 실패: {exc}")
                 diagnose(
@@ -1774,6 +1809,8 @@ def discover_endpoints(
                     error_type=type(exc).__name__, message=str(exc),
                 )
             observe_browser("playwright_priority")
+        else:
+            diagnose("phase_skipped", phase="playwright_priority")
 
         # =================================================
         # PHASE 2
@@ -1807,6 +1844,7 @@ def discover_endpoints(
         print(
             "  [1/2] Katana Standard"
         )
+        diagnose("phase_started", phase="katana_standard")
 
         standard_results = (
             discover_with_katana(
@@ -1822,11 +1860,13 @@ def discover_endpoints(
                     mitm_proxy_url
                 ),
                 target_policy=target_policy,
-                diagnostic_callback=diagnostic_callback,
+                diagnostic_callback=katana_diagnostic,
             )
         )
 
         observe("katana_standard", standard_results, passive_metadata=True)
+        diagnose({"skipped": "phase_skipped", "failed": "phase_error"}.get(katana_states.get("standard"), "phase_completed"),
+                 phase="katana_standard", count=len(standard_results))
 
         # ---------------------------------------------
         # Headless
@@ -1836,6 +1876,7 @@ def discover_endpoints(
             target_policy is None or target_policy.tools.katana_headless
         )
         if headless_allowed:
+            diagnose("phase_started", phase="katana_headless")
             driver.ensure_session()
             auth_headers = driver.get_auth_headers()
             # Reuse the authenticated Chromium CDP so Katana can observe the
@@ -1850,10 +1891,13 @@ def discover_endpoints(
                 chrome_ws_url=chrome_ws_url,
                 proxy_url=mitm_proxy_url,
                 target_policy=target_policy,
-                diagnostic_callback=diagnostic_callback,
+                diagnostic_callback=katana_diagnostic,
             )
+            diagnose({"skipped": "phase_skipped", "failed": "phase_error"}.get(katana_states.get("headless"), "phase_completed"),
+                     phase="katana_headless", count=len(headless_results))
         else:
             print("  [건너뜀] TargetPolicy에서 Katana Headless가 허용되지 않음")
+            diagnose("phase_skipped", phase="katana_headless")
             headless_results = []
 
         # Keep the live Chromium context across phases.  Restarting it here
@@ -1923,9 +1967,11 @@ def discover_endpoints(
             "  =================================="
         )
 
+        interaction_failed = False
         if enable_playwright_interaction and (
             target_policy is None or target_policy.tools.playwright_interaction
         ):
+            diagnose("phase_started", phase="playwright_interaction")
 
             driver.ensure_session()
 
@@ -1944,12 +1990,16 @@ def discover_endpoints(
                 )
 
             except Exception as exc:
+                interaction_failed = True
 
                 print(
                     "  [경고] "
                     "Playwright Interaction 실패: "
                     f"{exc}"
                 )
+                diagnose("phase_error", phase="playwright_interaction")
+        else:
+            diagnose("phase_skipped", phase="playwright_interaction")
 
         # 로그인 과정 + Interaction 과정
         playwright_raw_results = (
@@ -1967,6 +2017,12 @@ def discover_endpoints(
         )
 
         observe_browser("playwright_interaction")
+        if enable_playwright_interaction and not interaction_failed and (
+            target_policy is None or target_policy.tools.playwright_interaction
+        ):
+            diagnose("phase_completed", phase="playwright_interaction", count=len(playwright_results),
+                     reason=getattr(driver, "last_interaction_stop_reason", None),
+                     duplicate_count=getattr(driver, "last_interaction_duplicate_screens", 0))
 
         # =================================================
         # PHASE 4
@@ -1995,6 +2051,7 @@ def discover_endpoints(
             unique_count=len(ffuf_seed_results),
             endpoints=endpoint_rows(ffuf_seed_results),
         )
+        diagnose("phase_started", phase="ffuf")
         ffuf_results = discover_with_ffuf(
             base_url,
             wordlist=ffuf_wordlist,
@@ -2005,6 +2062,8 @@ def discover_endpoints(
             diagnostic_callback=diagnostic_callback,
         )
         observe("ffuf", ffuf_results)
+        if (target_policy is None or target_policy.tools.ffuf_enabled) and ffuf_wordlist and shutil.which("ffuf") and Path(ffuf_wordlist).is_file():
+            diagnose("phase_completed", phase="ffuf", count=len(ffuf_results))
 
         websocket_results = (
             driver.get_websocket_results()
@@ -2096,6 +2155,7 @@ def discover_endpoints(
             dict
         ] = []
 
+        diagnose("phase_started", phase="api_secondary")
         try:
             secondary_results = discover_api_secondary(
                 base_url,
@@ -2111,7 +2171,9 @@ def discover_endpoints(
                 ),
                 target_policy=target_policy,
                 proxy_url=mitm_proxy_url,
+                diagnostic_callback=diagnostic_callback,
             )
+            diagnose("phase_completed", phase="api_secondary", count=len(secondary_results))
 
         except Exception as exc:
 

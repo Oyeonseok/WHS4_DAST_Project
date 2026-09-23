@@ -8,7 +8,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
-from urllib.parse import urlsplit
+from urllib.parse import urljoin, urlsplit
 
 from playwright.sync_api import (
     Browser,
@@ -19,7 +19,12 @@ from playwright.sync_api import (
     sync_playwright,
 )
 
-from aidast.scope.models import CaptureReason, CaptureStatus, ProgramPage
+from aidast.scope.models import (
+    CaptureReason,
+    CaptureStatus,
+    ProgramPage,
+    ScopeNavigationDecision,
+)
 
 
 _BROWSER_USER_AGENT = (
@@ -302,16 +307,9 @@ class PlaywrightProgramPageReader:
             return CaptureStatus.BLOCKED, CaptureReason.CONTENT_INCOMPLETE
         if len(text) < 500:
             return CaptureStatus.PARTIAL, CaptureReason.CONTENT_INCOMPLETE
-        host = (urlsplit(final_url).hostname or "").lower()
-        if host == "hackerone.com" or host.endswith(".hackerone.com"):
-            required = ("assets in scope", "asset name", "bounty")
-            if not has_scope_view or not all(marker in folded for marker in required):
-                return CaptureStatus.PARTIAL, CaptureReason.CONTENT_INCOMPLETE
-        elif host == "bugcrowd.com" or host.endswith(".bugcrowd.com"):
-            if "targets" not in folded or "in scope" not in folded:
-                return CaptureStatus.PARTIAL, CaptureReason.CONTENT_INCOMPLETE
-        elif "in scope" not in folded:
-            return CaptureStatus.PARTIAL, CaptureReason.CONTENT_INCOMPLETE
+        # Labels such as Scope, Assets and Targets vary by platform. The agent
+        # interprets them, while the coordinator verifies grounded assets and
+        # rules before a draft may be published for review.
         return CaptureStatus.COMPLETE, CaptureReason.NONE
 
 
@@ -329,6 +327,7 @@ class RuntimeBrowserProgramPageReader(PlaywrightProgramPageReader):
         session_root: Path | None = None,
         input_fn: Callable[[str], str] | None = None,
         output_fn: Callable[[str], None] | None = None,
+        navigation_agent: Callable[[str, list[dict[str, str | int]]], ScopeNavigationDecision] | None = None,
     ) -> None:
         super().__init__(
             timeout_seconds=timeout_seconds,
@@ -342,6 +341,7 @@ class RuntimeBrowserProgramPageReader(PlaywrightProgramPageReader):
         )
         self._input = input_fn or input
         self._output = output_fn or print
+        self._navigation_agent = navigation_agent
 
     # 로그인 브라우저를 열고 사용자가 확인한 프로그램 페이지를 읽음
     def read(self, url: str) -> ProgramPage:
@@ -378,34 +378,68 @@ class RuntimeBrowserProgramPageReader(PlaywrightProgramPageReader):
                         "{get: () => undefined})"
                     )
                     page = context.pages[0] if context.pages else context.new_page()
+                    self._output("등록된 프로그램 페이지에 로그인 없이 접근할 수 있는지 확인합니다.")
+                    response = None
+                    navigation_failed = False
+                    initial_text: str | None = None
                     try:
-                        page.goto(
+                        response = page.goto(
                             url,
                             wait_until="domcontentloaded",
                             timeout=int(self._timeout_seconds * 1000),
                         )
                     except Exception:
+                        navigation_failed = True
                         self._output(
-                            "Initial navigation did not finish. Use the open browser "
-                            "to navigate to the exact program URL after login."
+                            "첫 페이지 이동이 끝나지 않았습니다. 브라우저에서 접근 상태를 확인해야 합니다."
                         )
-                    self._output(
-                        "Scope login browser opened. Complete the platform login/MFA, "
-                        "return to the exact program page, and open its scope view."
+                    else:
+                        if _same_program_url(url, page.url) and not (
+                            response is not None and response.status in {401, 403}
+                        ):
+                            initial_text = self._wait_for_stable_text(page)
+                    auth_gate = not _same_program_url(url, page.url) or (
+                        response is not None and response.status in {401, 403}
                     )
-                    try:
-                        self._input("준비가 끝나면 Enter > ")
-                    except EOFError as exc:
+                    if initial_text is not None:
+                        _, reason = self._classify_capture(
+                            initial_text, final_url=page.url, has_scope_view=False
+                        )
+                        auth_gate = auth_gate or reason in {
+                            CaptureReason.AUTHENTICATION_REQUIRED,
+                            CaptureReason.ACCESS_DENIED,
+                            CaptureReason.BOT_CHALLENGE,
+                        }
+                        auth_gate = auth_gate or page.locator('input[type="password"]:visible').count() > 0
+                    if navigation_failed or auth_gate:
+                        self._output(
+                            "현재 페이지에서 로그인 또는 접근 확인이 필요합니다. 브라우저에서 완료한 뒤 "
+                            "대시보드의 계속 버튼을 누르세요."
+                        )
+                        try:
+                            self._input("준비가 끝나면 Enter > ")
+                        except EOFError as exc:
+                            raise ProgramPageError(
+                                "scope browser confirmation was not received"
+                            ) from exc
+                        page = self._return_to_program_page(context.pages, page, url)
+                        initial_text = None
+                    else:
+                        self._output("로그인 없이 프로그램 정책 페이지에 접근했습니다. 바로 스코프를 읽습니다.")
+                    if self._navigation_agent is not None:
+                        context.route(
+                            "**/*",
+                            lambda route: self._guard_program_navigation(route, url),
+                        )
+                        return self._capture_agent_guided(page, url, initial_text=initial_text)
+                    captured = self._capture_loaded_page(
+                        page, url, discover_scope_view=False
+                    )
+                    if not _same_program_url(url, str(captured.final_url)):
                         raise ProgramPageError(
-                            "scope browser confirmation was not received"
-                        ) from exc
-
-                    page = self._select_program_page(context.pages, url)
-                    return self._capture_loaded_page(
-                        page,
-                        url,
-                        discover_scope_view=False,
-                    )
+                            "registered program page redirected away after login"
+                        )
+                    return captured
                 finally:
                     context.close()
         except ProgramPageError:
@@ -415,7 +449,110 @@ class RuntimeBrowserProgramPageReader(PlaywrightProgramPageReader):
                 f"failed to render authenticated program page: {exc}"
             ) from exc
 
-    # 프로그램 출처와 계정에 묶인 브라우저 세션 디렉터리를 준비
+    @staticmethod
+    def _guard_program_navigation(route: Route, program_url: str) -> None:
+        if route.request.is_navigation_request() and not _same_program_url(
+            program_url, route.request.url
+        ):
+            route.abort("blockedbyclient")
+            return
+        route.continue_()
+
+    def _navigation_candidates(
+        self, page: Page, program_url: str
+    ) -> tuple[list[dict[str, str | int]], dict[int, object]]:
+        controls = page.locator("a,button,[role=tab],[role=button],summary")
+        choices: list[dict[str, str | int]] = []
+        locators: dict[int, object] = {}
+        observed = controls.evaluate_all("""nodes => nodes.slice(0, 160).map((node, index) => {
+            const style = getComputedStyle(node);
+            return {
+                index,
+                visible: node.getClientRects().length > 0 && style.visibility !== 'hidden' && style.display !== 'none',
+                type: (node.getAttribute('type') || '').toLowerCase(),
+                label: ((node.innerText || node.getAttribute('aria-label') || node.getAttribute('title') || '') + '').replace(/\\s+/g, ' ').trim().slice(0, 120),
+                href: node.getAttribute('href') || ''
+            };
+        })""")
+        for item in observed:
+            if not item["visible"] or item["type"] == "submit":
+                continue
+            label = item["label"]
+            if not label:
+                continue
+            href = item["href"]
+            if href and not _same_program_url(program_url, urljoin(page.url, href)):
+                continue
+            candidate_id = len(choices)
+            choices.append({"id": candidate_id, "label": label})
+            locators[candidate_id] = controls.nth(item["index"])
+            if len(choices) >= 80:
+                break
+        return choices, locators
+
+    def _capture_agent_guided(
+        self, page: Page, program_url: str, *, initial_text: str | None = None
+    ) -> ProgramPage:
+        views: list[tuple[str, str]] = []
+        seen: set[tuple[str, str]] = set()
+        captured = False
+        for step in range(3):
+            if not _same_program_url(program_url, page.url):
+                raise ProgramPageError("Scope navigation left the exact program page")
+            self._output(f"프로그램 정책 화면을 읽고 있습니다. 단계 {step + 1}/3.")
+            body = initial_text if step == 0 and initial_text is not None else self._wait_for_stable_text(page)
+            if not _same_program_url(program_url, page.url):
+                raise ProgramPageError("Scope navigation left the exact program page")
+            self._output(f"프로그램 정책 화면 읽기를 완료했습니다. 단계 {step + 1}/3, 텍스트 {len(body)}자입니다.")
+            current = (page.url, body)
+            if current not in seen:
+                views.append(current)
+                seen.add(current)
+            choices, locators = self._navigation_candidates(page, program_url)
+            self._output(
+                f"화면 텍스트 {len(body)}자와 이동 후보 {len(choices)}개를 확인했습니다. "
+                "Scope Agent가 스코프 화면을 판단합니다."
+            )
+            decision = self._navigation_agent(body, choices)
+            if decision.action == "capture":
+                self._output("Scope Agent가 현재 정책 화면을 수집 대상으로 선택했습니다.")
+                captured = True
+                break
+            if decision.candidate_id not in locators:
+                raise ProgramPageError("Scope agent selected an unavailable page control")
+            try:
+                self._output(f"Scope Agent가 화면 이동 후보 {decision.candidate_id}번을 엽니다.")
+                locators[decision.candidate_id].click(timeout=5_000)
+                page.wait_for_timeout(500)
+                self._output(f"Scope Agent가 화면 이동 후보 {decision.candidate_id}번 열기를 완료했습니다.")
+            except Exception as exc:
+                raise ProgramPageError("Scope page control could not be opened") from exc
+        if not captured:
+            raise ProgramPageError("Scope navigation reached its three-step limit before capture")
+        text = "\n\n".join(
+            f"=== PROGRAM VIEW: {url} ===\n{body}" for url, body in views
+        )
+        text = "\n".join(line.rstrip() for line in text.splitlines() if line.strip()).strip()
+        if not text:
+            raise ProgramPageError("program page rendered without readable text")
+        if len(text) > self._max_content_chars:
+            raise ProgramPageError(
+                f"program page exceeds the {self._max_content_chars}-character capture budget"
+            )
+        status, reason = self._classify_capture(
+            text, final_url=page.url, has_scope_view=len(views) > 1
+        )
+        return ProgramPage(
+            requested_url=program_url,
+            final_url=page.url,
+            title=page.title().strip(),
+            captured_at=datetime.now(timezone.utc),
+            capture_status=status,
+            capture_reason=reason,
+            content_sha256=hashlib.sha256(text.encode("utf-8")).hexdigest(),
+            text=text,
+        )
+
     def _prepare_session_directory(self, url: str) -> Path:
         root_candidate = self._session_root.expanduser()
         if root_candidate.exists() and root_candidate.is_symlink():
@@ -463,7 +600,35 @@ class RuntimeBrowserProgramPageReader(PlaywrightProgramPageReader):
                 pass
         return directory
 
-    # 열린 탭 중 요청한 프로그램 URL에 해당하는 페이지를 고름
+    def _return_to_program_page(
+        self, pages: list[Page], initial_page: Page, expected_url: str
+    ) -> Page:
+        expected_origin = _url_origin(expected_url)
+        same_origin_pages = [
+            page for page in pages if _url_origin(page.url) == expected_origin
+        ]
+        page = same_origin_pages[-1] if same_origin_pages else initial_page
+        self._output("등록된 프로그램 URL로 브라우저를 이동합니다.")
+        try:
+            response = page.goto(
+                expected_url,
+                wait_until="domcontentloaded",
+                timeout=int(self._timeout_seconds * 1000),
+            )
+            self._output("등록된 프로그램 URL의 페이지 응답을 받았습니다. 브라우저 탭을 확인합니다.")
+            page.bring_to_front()
+        except Exception as exc:
+            raise ProgramPageError(
+                "could not return to the registered program URL after login"
+            ) from exc
+        if response is not None and response.status >= 400:
+            raise ProgramPageError(
+                f"registered program page returned HTTP {response.status} after login"
+            )
+        selected = self._select_program_page([page], expected_url)
+        self._output("등록된 프로그램 페이지 이동을 확인했습니다.")
+        return selected
+
     @staticmethod
     def _select_program_page(pages: list[Page], expected_url: str) -> Page:
         for page in reversed(pages):

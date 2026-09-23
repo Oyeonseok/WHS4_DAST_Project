@@ -957,6 +957,7 @@ def discover_api_secondary(
     max_messages: int = 300,
     target_policy: TargetPolicy | None = None,
     proxy_url: str | None = None,
+    diagnostic_callback=None,
 ) -> list[dict]:
     """
     API 2차 Discovery.
@@ -991,7 +992,12 @@ def discover_api_secondary(
             raise ValueError(f"TargetPolicy가 API base URL을 허용하지 않음: {base_url}")
         max_messages = min(max_messages, target_policy.limits.max_requests)
 
+    def activity(event: str, phase: str, **details: object) -> None:
+        if diagnostic_callback is not None:
+            diagnostic_callback(event, phase=phase, **details)
+
     broker = _request_broker(target_policy, proxy_url) if target_policy is not None else None
+    activity("phase_started", "openapi_detection")
     openapi_urls = detect_openapi(
         base_url,
         endpoints,
@@ -1000,11 +1006,13 @@ def discover_api_secondary(
         proxy_url=proxy_url,
         broker=broker,
     )
+    activity("phase_completed", "openapi_detection", count=len(openapi_urls))
 
     # =====================================================
     # Detect GraphQL
     # =====================================================
 
+    activity("phase_started", "graphql_detection")
     graphql_info = detect_graphql(
         base_url,
         endpoints,
@@ -1013,6 +1021,7 @@ def discover_api_secondary(
         proxy_url=proxy_url,
         broker=broker,
     )
+    activity("phase_completed", "graphql_detection", count=len(graphql_info))
 
     # ZAP이 endpoint만 가지고 introspection 할 수 있는
     # GraphQL만 2차 Query Generation 대상으로 사용
@@ -1056,6 +1065,8 @@ def discover_api_secondary(
         print(
             "  API 2차 Discovery 대상 없음"
         )
+        activity("phase_skipped", "zap_openapi")
+        activity("phase_skipped", "zap_graphql")
 
         return []
 
@@ -1077,6 +1088,7 @@ def discover_api_secondary(
         # =================================================
 
         if openapi_urls:
+            activity("phase_started", "zap_openapi")
 
             print()
             print(
@@ -1130,12 +1142,18 @@ def discover_api_secondary(
                 results.extend(
                     openapi_results
                 )
+                activity("phase_completed", "zap_openapi", count=len(openapi_results))
+            else:
+                activity("phase_error", "zap_openapi")
+        else:
+            activity("phase_skipped", "zap_openapi")
 
         # =================================================
         # GraphQL
         # =================================================
 
         if graphql_urls:
+            activity("phase_started", "zap_graphql")
 
             print()
             print(
@@ -1189,6 +1207,11 @@ def discover_api_secondary(
                 results.extend(
                     graphql_results
                 )
+                activity("phase_completed", "zap_graphql", count=len(graphql_results))
+            else:
+                activity("phase_error", "zap_graphql")
+        else:
+            activity("phase_skipped", "zap_graphql")
 
     # =====================================================
     # Final Deduplication

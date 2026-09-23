@@ -248,6 +248,15 @@ class TargetPolicyTests(unittest.TestCase):
             )
             self.assertEqual(result[("DOMAIN", "example.com")].limits, grounded.limits)
             self.assertEqual(grounded.limits.requests_per_second, 10)
+            scoped_result = _apply_policy_caps(
+                {("DOMAIN", "example.com"): policy}, profile="safe-recon",
+                max_rps=10, max_requests=None, max_depth=None,
+                max_concurrency=None, timeout_seconds=None, scope_max_rps=10,
+            )
+            self.assertEqual(
+                scoped_result[("DOMAIN", "example.com")].limits.requests_per_second,
+                10,
+            )
 
     def test_intigriti_username_rejects_header_injection(self) -> None:
         from aidast.cli import _parser

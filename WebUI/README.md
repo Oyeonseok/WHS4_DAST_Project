@@ -42,6 +42,15 @@ aidast dashboard --ui-dir WebUI/dist
 
 브라우저에서 <http://127.0.0.1:8000>을 엽니다.
 
+## 새 보안 콘솔 미리보기
+
+기존 Scope 수집·실시간 스캔 대시보드는 기본 주소에서 계속 사용할 수 있습니다.
+상단의 **새 콘솔 미리보기**를 누르거나
+<http://127.0.0.1:8000/?view=console#dashboard>를 열면 자산·스캔·취약점 관리 화면을
+확인할 수 있습니다. 이 미리보기는 `example.com` 계열 목 데이터만 사용하며 백엔드에
+스캔 요청을 보내지 않습니다. 새 스캔은 로컬 목록에 **대기 중**으로만 추가됩니다.
+미리보기의 상태 변경과 추가 항목은 브라우저 로컬 저장소에 저장됩니다.
+
 `dist/index.html`을 더블 클릭해 `file://`로 여는 방식은 지원하지 않습니다. REST와
 WebSocket이 같은 출처에서 연결되어야 하므로 반드시 대시보드 서버를 실행해야 합니다.
 
@@ -104,6 +113,17 @@ npm run preview -- --port 4173
 
 의존성 버전은 `package.json`과 `package-lock.json`에 고정되어 있습니다. 테스트는
 Node.js 기본 `node:test`를 사용합니다.
+
+### 한국어 문구 추가
+
+화면의 고정 문구는 `src/lib/i18n.ts`의 `ko` 목록에 등록하고 `tr(...)`로 표시합니다.
+`npm run build`는 `scripts/check-i18n.mjs`를 실행해 고정 문구의 번역 누락을
+오류로 처리합니다.
+
+Scope 수집 및 스캔 활동은 서버가 `message_code`와 필요한 `message_params`를
+전달합니다. 새 활동 종류를 만들 때 `src/lib/activityMessages.ts`에 한국어 문구를
+함께 등록하세요. 빌드 검사는 백엔드에 추가된 메시지 코드의 번역 등록 여부도
+확인합니다. 기존 저장 이벤트의 `message`는 호환용으로 유지됩니다.
 
 ## 데모 모드와 라이브 모드
 

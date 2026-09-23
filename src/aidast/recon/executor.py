@@ -14,11 +14,14 @@ from __future__ import annotations
 
 import functools
 import secrets
+import sqlite3
 from pathlib import Path
 from urllib.parse import urlparse
 from uuid import NAMESPACE_URL, uuid5
 
 from aidast.recon import db as dbmod
+from aidast.pipeline.lifecycle import audit_event
+from aidast.recon.activity import activity_from_diagnostic
 from aidast.auth.browser import TargetSession, BrowserLoginError, origin
 from aidast.core.request_broker import RequestBroker
 from aidast.recon.judgment import merge_and_normalize
@@ -182,6 +185,15 @@ class ReconExecutor:
         )
 
     def _diagnostic(self, event: str, **details: object) -> None:
+        activity = activity_from_diagnostic(event, details)
+        if activity is not None:
+            try:
+                audit_event(self.conn, scan_id=self.scan_id,
+                            event_type="recon.activity", details=activity)
+            except (OSError, ValueError, TypeError, sqlite3.Error) as exc:
+                if not self._diagnostic_warning_emitted:
+                    print(f"   [정찰 활동 기록 경고] {type(exc).__name__}: {exc}")
+                    self._diagnostic_warning_emitted = True
         if self.diagnostics is not None:
             try:
                 self.diagnostics.record(event, **details)
@@ -461,14 +473,17 @@ class ReconExecutor:
         policy = self._policy_for(task)
         asset_type = task.target.asset_type.value
         if asset_type not in {"DOMAIN", "WILDCARD"}:
+            self._diagnostic("phase_skipped", phase="subfinder")
             return
         root = _subfinder_query_root(task.target.asset)
         if root is None:
             print("   [건너뜀] wildcard 뒤에 안전한 DNS suffix가 없어 Subfinder root를 정할 수 없음")
+            self._diagnostic("phase_skipped", phase="subfinder")
             return
         if policy is not None:
             if not policy.include_subdomains:
                 print("   [건너뜀] TargetPolicy가 서브도메인 탐색을 허용하지 않음")
+                self._diagnostic("phase_skipped", phase="subfinder")
                 return
             # For embedded globs, the passive query root may be broader than
             # the exact approved pattern (e.g. info*example.com -> example.com).
@@ -482,7 +497,10 @@ class ReconExecutor:
                 raise ReconExecutionError(
                     f"TargetPolicy가 subfinder 루트를 허용하지 않음: {root}"
                 )
-        for sub in run_subfinder(root):
+        self._diagnostic("phase_started", phase="subfinder")
+        subdomains = run_subfinder(root)
+        self._diagnostic("phase_completed", phase="subfinder", count=len(subdomains))
+        for sub in subdomains:
             hostname = sub.lower().rstrip(".")
             if policy is not None and not policy.allows_host(hostname):
                 print(f"   [제외] subfinder 범위 밖 결과: {sub}")
@@ -579,7 +597,10 @@ class ReconExecutor:
     def _handle_dns_resolution(self, task: ReconTask) -> None:
         asset_id = self._ensure_asset(task)
         host = _extract_host(task.target.asset)
-        for hostname in run_dnsx([host]):
+        self._diagnostic("phase_started", phase="dnsx")
+        hostnames = run_dnsx([host])
+        self._diagnostic("phase_completed", phase="dnsx", count=len(hostnames))
+        for hostname in hostnames:
             dbmod.insert_dns_resolution(
                 self.conn, asset_id=asset_id, hostname=hostname, source="dnsx",
             )
@@ -590,9 +611,15 @@ class ReconExecutor:
         host = _extract_host(task.target.asset)
         policy = self._policy_for(task)
         allowed_ports = policy.allowed_ports if policy is not None else None
+        self._diagnostic("phase_started", phase="naabu")
+        naabu_results = run_naabu([host], ports=allowed_ports)
+        self._diagnostic("phase_completed", phase="naabu", count=len(naabu_results))
+        self._diagnostic("phase_started", phase="nmap")
+        nmap_results = run_nmap([host], ports=allowed_ports)
+        self._diagnostic("phase_completed", phase="nmap", count=len(nmap_results))
         found: list[tuple[str, str]] = (
-            [(entry, "naabu") for entry in run_naabu([host], ports=allowed_ports)]
-            + [(entry, "nmap") for entry in run_nmap([host], ports=allowed_ports)]
+            [(entry, "naabu") for entry in naabu_results]
+            + [(entry, "nmap") for entry in nmap_results]
         )
         for entry, source in found:
             parsed = _parse_host_port(entry)

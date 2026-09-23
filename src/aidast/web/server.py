@@ -159,6 +159,31 @@ def create_app(
         require_same_origin(request)
         return {"job": scope_action(lambda: workflow.browser_ready(program_id))}
 
+    def scope_control(action: Any) -> dict[str, Any]:
+        try:
+            return action()
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc.args[0])) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except (OSError, sqlite3.Error) as exc:
+            raise HTTPException(status_code=503, detail="Scope control unavailable") from exc
+
+    @app.post("/api/v1/programs/{program_id}/scope-pause", status_code=202)
+    async def scope_pause(program_id: str, request: Request) -> dict[str, Any]:
+        require_same_origin(request)
+        return {"job": scope_control(lambda: workflow.pause(program_id))}
+
+    @app.post("/api/v1/programs/{program_id}/scope-continue", status_code=202)
+    async def scope_continue(program_id: str, request: Request) -> dict[str, Any]:
+        require_same_origin(request)
+        return {"job": scope_control(lambda: workflow.continue_job(program_id))}
+
+    @app.post("/api/v1/programs/{program_id}/scope-cancel", status_code=202)
+    async def scope_cancel(program_id: str, request: Request) -> dict[str, Any]:
+        require_same_origin(request)
+        return {"job": scope_control(lambda: workflow.cancel(program_id))}
+
     @app.get("/api/v1/programs/{program_id}/scope-draft")
     async def scope_draft(program_id: str) -> dict[str, Any]:
         return {"draft": scope_action(lambda: workflow.draft(program_id))}
@@ -189,7 +214,11 @@ def create_app(
     @app.get("/api/v1/scans")
     async def scans() -> dict[str, Any]:
         merged = {item["scan_id"]: item for item in manager.list_jobs()}
-        merged.update({item["scan_id"]: item for item in projector.list_scans()})
+        for item in projector.list_scans():
+            pending = merged.get(item["scan_id"])
+            if pending and not item["targets"]:
+                item["targets"] = pending["targets"]
+            merged[item["scan_id"]] = item
         return {"scans": sorted(merged.values(), key=lambda item: item["started_at"], reverse=True)}
 
     @app.post("/api/v1/scans", status_code=202)
@@ -204,6 +233,52 @@ def create_app(
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    @app.post("/api/v1/scans/{scan_id}/resume", status_code=202)
+    async def resume_scan(scan_id: str, request: Request) -> dict[str, Any]:
+        require_same_origin(request)
+        try:
+            return manager.resume(scan_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except (OSError, sqlite3.Error) as exc:
+            raise HTTPException(status_code=503, detail="scan resume unavailable") from exc
+
+    @app.post("/api/v1/scans/{scan_id}/stop", status_code=202)
+    async def stop_scan(scan_id: str, request: Request) -> dict[str, str]:
+        require_same_origin(request)
+        try:
+            return manager.stop(scan_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.post("/api/v1/scans/{scan_id}/cancel", status_code=202)
+    async def cancel_scan(scan_id: str, request: Request) -> dict[str, str]:
+        require_same_origin(request)
+        try:
+            return manager.cancel(scan_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.post("/api/v1/scans/{scan_id}/pause", status_code=202)
+    async def pause_scan(scan_id: str, request: Request) -> dict[str, str]:
+        require_same_origin(request)
+        try:
+            return manager.pause(scan_id)
+        except (ValueError, ScanNotFoundError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except (OSError, sqlite3.Error) as exc:
+            raise HTTPException(status_code=503, detail="scan pause unavailable") from exc
+
+    @app.post("/api/v1/scans/{scan_id}/continue", status_code=202)
+    async def continue_scan(scan_id: str, request: Request) -> dict[str, str]:
+        require_same_origin(request)
+        try:
+            return manager.continue_scan(scan_id)
+        except (ValueError, ScanNotFoundError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except (OSError, sqlite3.Error) as exc:
+            raise HTTPException(status_code=503, detail="scan continuation unavailable") from exc
+
     @app.get("/api/v1/scans/{scan_id}")
     async def snapshot(scan_id: str) -> dict[str, Any]:
         try:
@@ -212,6 +287,15 @@ def create_app(
             return manager.snapshot(scan_id)
         except (OSError, sqlite3.Error) as exc:
             raise HTTPException(status_code=503, detail="scan projection unavailable") from exc
+
+    @app.get("/api/v1/scans/{scan_id}/attack-tasks")
+    async def attack_tasks(scan_id: str) -> dict[str, Any]:
+        try:
+            return projector.attack_tasks(scan_id)
+        except ScanNotFoundError:
+            raise
+        except (OSError, sqlite3.Error) as exc:
+            raise HTTPException(status_code=503, detail="attack task projection unavailable") from exc
 
     @app.get("/api/v1/scans/{scan_id}/audit")
     async def audit_log(scan_id: str) -> dict[str, Any]:

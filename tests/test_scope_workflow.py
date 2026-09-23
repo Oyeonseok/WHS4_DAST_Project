@@ -5,12 +5,14 @@ import io
 import errno
 import hashlib
 import os
+import signal
 import tempfile
+import time
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime, timezone
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import ANY, MagicMock, patch
 
 from pydantic import ValidationError
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
@@ -26,14 +28,19 @@ from aidast.scope.models import (
     ScopeAnalysis,
     ScopeAsset,
     ScopeCollectionResult,
+    ScopeNavigationDecision,
     SourceEvidence,
 )
 from aidast.scope.paths import ScopePathError, identify_program
 from aidast.scope.reader import (
+    PlaywrightProgramPageReader,
     ProgramPageError,
     RuntimeBrowserProgramPageReader,
     _same_program_url,
 )
+from aidast.web.programs import ProgramRegistrationRequest, ProgramRegistry
+from aidast.web.scope_process import ScopeProcessController
+from aidast.web.scope_workflow import ScopeCollectionRequest, ScopeWorkflowManager
 
 
 def sample_page() -> ProgramPage:
@@ -88,6 +95,35 @@ class FakeMainAgent:
 
 
 class ScopeCoordinatorTests(unittest.TestCase):
+    def test_collection_progress_reports_completed_steps_only_after_work(self) -> None:
+        events: list[tuple[str, dict[str, int]]] = []
+
+        class Reader:
+            def read(self, _url: str) -> ProgramPage:
+                self_test.assertEqual(events[-1][0], "page_read_started")
+                return sample_page()
+
+        class Agent(FakeMainAgent):
+            def interpret_captured_scope(self, page: ProgramPage) -> ScopeAnalysis:
+                self_test.assertEqual(events[-1][0], "analysis_started")
+                return sample_analysis()
+
+        self_test = self
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            _, draft = ScopeCoordinator(Path(temporary_dir) / "Scope").collect_draft(
+                "https://bugcrowd.com/example",
+                main_agent=Agent(), primary_reader=Reader(),
+                draft_root=Path(temporary_dir) / "drafts",
+                progress=lambda phase, counts: events.append((phase, counts)),
+            )
+            self.assertTrue((draft / "Scope.md").is_file())
+        self.assertEqual([phase for phase, _ in events], [
+            "page_read_started", "page_read_completed", "analysis_started",
+            "analysis_completed", "verification_started", "verification_completed",
+            "draft_started", "draft_completed",
+        ])
+        self.assertEqual(events[3][1], {"in_scope": 1, "out_of_scope": 0})
+
     def test_authenticated_reader_is_primary_and_interpreted_offline(self) -> None:
         class UnexpectedNativeAgent(FakeMainAgent):
             interpreted = False
@@ -368,6 +404,26 @@ class ScopeCoordinatorTests(unittest.TestCase):
 
 
 class CodexMainAgentTests(unittest.TestCase):
+    def test_captured_scope_retries_one_ungrounded_asset_with_exact_evidence(self) -> None:
+        agent = CodexMainAgent()
+        wrong = sample_analysis().model_copy(update={
+            "in_scope_assets": [
+                sample_analysis().in_scope_assets[0].model_copy(
+                    update={"asset": "Public-facing applications"}
+                )
+            ]
+        })
+        agent._run_structured = MagicMock(side_effect=[wrong, sample_analysis()])
+
+        analysis = agent.interpret_captured_scope(sample_page())
+
+        self.assertEqual(analysis.in_scope_assets[0].asset, "*.example.com")
+        self.assertEqual(agent._run_structured.call_count, 2)
+        self.assertIn(
+            "copied verbatim",
+            agent._run_structured.call_args.kwargs["prompt"],
+        )
+
     def test_scope_collection_prompt_invokes_native_skill_with_url(self) -> None:
         prompt = CodexMainAgent._build_scope_collection_prompt(
             "https://bugcrowd.com/engagements/example"
@@ -429,6 +485,129 @@ class CodexMainAgentTests(unittest.TestCase):
 
 
 class RuntimeBrowserProgramPageReaderTests(unittest.TestCase):
+    def test_platform_neutral_capture_accepts_scopes_and_asset_table(self) -> None:
+        text = (
+            "Cryptobox program rules. Scopes Scope Type Asset value "
+            "https://bounty.example.com Web application. "
+            "Out of scopes: other systems are excluded. "
+        ) * 8
+        self.assertEqual(
+            PlaywrightProgramPageReader._classify_capture(
+                text,
+                final_url="https://yeswehack.com/programs/example",
+                has_scope_view=False,
+            ),
+            (CaptureStatus.COMPLETE, CaptureReason.NONE),
+        )
+
+    def test_navigation_decision_uses_offline_codex_output(self) -> None:
+        agent = CodexMainAgent()
+        expected = ScopeNavigationDecision(action="open", candidate_id=0)
+        agent._run_structured = MagicMock(return_value=expected)
+
+        result = agent.choose_scope_view(
+            program_url="https://yeswehack.com/programs/example",
+            page_text="Program rules and a link to the asset list",
+            candidates=[{"id": 0, "label": "Assets"}],
+        )
+
+        self.assertEqual(result, expected)
+        self.assertFalse(agent._run_structured.call_args.kwargs["allow_browser"])
+        self.assertIn("Assets", agent._run_structured.call_args.kwargs["prompt"])
+
+    def test_agent_opens_observed_control_then_captures_program_page(self) -> None:
+        url = "https://yeswehack.com/programs/example"
+        page = MagicMock(url=url)
+        page.title.return_value = "Example program"
+        page.wait_for_timeout.return_value = None
+        control = MagicMock()
+        decisions = iter([
+            ScopeNavigationDecision(action="open", candidate_id=0),
+            ScopeNavigationDecision(action="capture", candidate_id=None),
+        ])
+        reader = RuntimeBrowserProgramPageReader(
+            identity="researcher",
+            timeout_seconds=1,
+            navigation_agent=lambda _text, _choices: next(decisions),
+        )
+        body = ("Rules and Scopes. https://bounty.example.com is listed. " * 20)
+        reader._wait_for_stable_text = MagicMock(return_value=body)
+        reader._navigation_candidates = MagicMock(return_value=(
+            [{"id": 0, "label": "Assets"}], {0: control}
+        ))
+
+        captured = reader._capture_agent_guided(page, url)
+
+        self.assertEqual(captured.capture_status, CaptureStatus.COMPLETE)
+        self.assertIn("https://bounty.example.com", captured.text)
+        control.click.assert_called_once_with(timeout=5_000)
+
+    def test_agent_cannot_open_external_target_link(self) -> None:
+        url = "https://yeswehack.com/programs/example"
+        internal = MagicMock()
+        internal.is_visible.return_value = True
+        internal.inner_text.return_value = "Assets"
+        internal.get_attribute.side_effect = lambda name: (
+            "/programs/example?tab=assets" if name == "href" else None
+        )
+        external = MagicMock()
+        external.is_visible.return_value = True
+        external.inner_text.return_value = "Test target"
+        external.get_attribute.side_effect = lambda name: (
+            "https://bounty.example.com" if name == "href" else None
+        )
+        controls = MagicMock()
+        controls.evaluate_all.return_value = [
+            {"index": 0, "visible": True, "type": "", "label": "Assets", "href": "/programs/example?tab=assets"},
+            {"index": 1, "visible": True, "type": "", "label": "Test target", "href": "https://bounty.example.com"},
+        ]
+        controls.nth.side_effect = [internal, external]
+        page = MagicMock(url=url)
+        page.locator.return_value = controls
+        reader = RuntimeBrowserProgramPageReader(identity="researcher")
+
+        choices, locators = reader._navigation_candidates(page, url)
+
+        self.assertEqual(choices, [{"id": 0, "label": "Assets"}])
+        self.assertEqual(list(locators), [0])
+        controls.evaluate_all.assert_called_once()
+        controls.count.assert_not_called()
+
+    def test_icon_control_uses_accessible_label(self) -> None:
+        url = "https://yeswehack.com/programs/example"
+        control = MagicMock()
+        control.is_visible.return_value = True
+        control.inner_text.return_value = ""
+        control.get_attribute.side_effect = lambda name: (
+            "View assets" if name == "aria-label" else None
+        )
+        controls = MagicMock()
+        controls.evaluate_all.return_value = [
+            {"index": 0, "visible": True, "type": "", "label": "View assets", "href": ""},
+        ]
+        controls.nth.return_value = control
+        page = MagicMock(url=url)
+        page.locator.return_value = controls
+
+        choices, locators = RuntimeBrowserProgramPageReader(
+            identity="researcher"
+        )._navigation_candidates(page, url)
+
+        self.assertEqual(choices, [{"id": 0, "label": "View assets"}])
+        self.assertEqual(list(locators), [0])
+
+    def test_navigation_request_outside_program_is_blocked(self) -> None:
+        route = MagicMock()
+        route.request.is_navigation_request.return_value = True
+        route.request.url = "https://bounty.example.com/"
+
+        RuntimeBrowserProgramPageReader._guard_program_navigation(
+            route, "https://yeswehack.com/programs/example"
+        )
+
+        route.abort.assert_called_once_with("blockedbyclient")
+        route.continue_.assert_not_called()
+
     def test_stable_text_retries_transient_body_timeout(self) -> None:
         text = "in scope " * 100
         page = MagicMock()
@@ -493,6 +672,7 @@ class RuntimeBrowserProgramPageReaderTests(unittest.TestCase):
         page.title.return_value = "Program"
         page.goto.return_value = MagicMock(status=200, url=url)
         page.locator.return_value.inner_text.return_value = text
+        page.locator.return_value.count.return_value = 0
         page.get_by_text.return_value.count.return_value = 0
 
         context = MagicMock()
@@ -501,6 +681,8 @@ class RuntimeBrowserProgramPageReaderTests(unittest.TestCase):
         playwright.chromium.launch_persistent_context.return_value = context
         manager = MagicMock()
         manager.__enter__.return_value = playwright
+        prompt = MagicMock(return_value="")
+        messages: list[str] = []
 
         with tempfile.TemporaryDirectory() as temporary_dir, patch(
             "aidast.scope.reader._validate_public_https_url"
@@ -509,8 +691,8 @@ class RuntimeBrowserProgramPageReaderTests(unittest.TestCase):
                 identity="intigriti-user",
                 timeout_seconds=1,
                 session_root=Path(temporary_dir),
-                input_fn=lambda _: "",
-                output_fn=lambda _: None,
+                input_fn=prompt,
+                output_fn=messages.append,
             )
             captured = reader.read(url)
 
@@ -521,7 +703,46 @@ class RuntimeBrowserProgramPageReaderTests(unittest.TestCase):
             self.assertEqual(captured.final_url.unicode_string(), url)
             context.route.assert_not_called()
             page.get_by_text.assert_not_called()
+            prompt.assert_not_called()
+            self.assertTrue(any("로그인 없이 프로그램 정책 페이지" in message for message in messages))
             context.close.assert_called_once_with()
+
+    def test_runtime_browser_requests_confirmation_only_after_auth_redirect(self) -> None:
+        url = "https://app.intigriti.com/researcher/programs/a/b/detail"
+        page = MagicMock(url="about:blank")
+        page.title.return_value = "Program"
+        page.locator.return_value.inner_text.return_value = "in scope *.example.com. " * 40
+
+        def navigate(*_args, **_kwargs):
+            page.url = (
+                "https://app.intigriti.com/login"
+                if page.goto.call_count == 1 else url
+            )
+            return MagicMock(status=200)
+
+        page.goto.side_effect = navigate
+        context = MagicMock(pages=[page])
+        playwright = MagicMock()
+        playwright.chromium.launch_persistent_context.return_value = context
+        manager = MagicMock()
+        manager.__enter__.return_value = playwright
+        prompt = MagicMock(return_value="")
+        messages: list[str] = []
+
+        with tempfile.TemporaryDirectory() as temporary_dir, patch(
+            "aidast.scope.reader._validate_public_https_url"
+        ), patch("aidast.scope.reader.sync_playwright", return_value=manager):
+            reader = RuntimeBrowserProgramPageReader(
+                identity="researcher", timeout_seconds=1,
+                session_root=Path(temporary_dir),
+                input_fn=prompt, output_fn=messages.append,
+            )
+            captured = reader.read(url)
+
+        self.assertEqual(captured.capture_status, CaptureStatus.COMPLETE)
+        prompt.assert_called_once()
+        self.assertEqual(page.goto.call_count, 2)
+        self.assertTrue(any("로그인 또는 접근 확인이 필요" in message for message in messages))
 
     def test_runtime_browser_rejects_page_that_did_not_return_to_program(self) -> None:
         with self.assertRaisesRegex(
@@ -531,6 +752,68 @@ class RuntimeBrowserProgramPageReaderTests(unittest.TestCase):
                 [MagicMock(url="https://app.intigriti.com/login")],
                 "https://app.intigriti.com/researcher/programs/a/b/detail",
             )
+
+    def test_runtime_browser_returns_from_program_picker_to_registered_url(self) -> None:
+        url = "https://app.intigriti.com/researcher/programs/a/b/detail"
+        page = MagicMock(url="https://app.intigriti.com/researcher/programs")
+        page.goto.side_effect = lambda *_args, **_kwargs: setattr(page, "url", url)
+        messages: list[str] = []
+        reader = RuntimeBrowserProgramPageReader(
+            identity="researcher", output_fn=messages.append
+        )
+
+        selected = reader._return_to_program_page([page], page, url)
+
+        self.assertIs(selected, page)
+        page.goto.assert_called_once_with(
+            url, wait_until="domcontentloaded", timeout=45_000
+        )
+        page.bring_to_front.assert_called_once_with()
+        self.assertTrue(any("등록된 프로그램 URL" in message for message in messages))
+        self.assertTrue(any("페이지 이동을 확인" in message for message in messages))
+        self.assertLess(
+            next(i for i, message in enumerate(messages) if "페이지 응답을 받았습니다" in message),
+            next(i for i, message in enumerate(messages) if "페이지 이동을 확인" in message),
+        )
+
+    def test_runtime_browser_does_not_reuse_hidden_program_tab(self) -> None:
+        url = "https://app.intigriti.com/researcher/programs/a/b/detail"
+        hidden_program_tab = MagicMock(url=url)
+        visible_picker = MagicMock(
+            url="https://app.intigriti.com/researcher/programs"
+        )
+        visible_picker.goto.side_effect = lambda *_args, **_kwargs: setattr(
+            visible_picker, "url", url
+        )
+        reader = RuntimeBrowserProgramPageReader(
+            identity="researcher", output_fn=lambda _message: None
+        )
+
+        selected = reader._return_to_program_page(
+            [hidden_program_tab, visible_picker], hidden_program_tab, url
+        )
+
+        self.assertIs(selected, visible_picker)
+        hidden_program_tab.goto.assert_not_called()
+        visible_picker.goto.assert_called_once_with(
+            url, wait_until="domcontentloaded", timeout=45_000
+        )
+        visible_picker.bring_to_front.assert_called_once_with()
+
+    def test_runtime_browser_reports_picker_redirect_after_return(self) -> None:
+        url = "https://app.intigriti.com/researcher/programs/a/b/detail"
+        page = MagicMock(url="https://app.intigriti.com/researcher/programs")
+        page.goto.return_value = MagicMock(status=200)
+        reader = RuntimeBrowserProgramPageReader(
+            identity="researcher", output_fn=lambda _message: None
+        )
+
+        with self.assertRaisesRegex(ProgramPageError, "observed same-origin paths"):
+            reader._return_to_program_page([page], page, url)
+
+        page.goto.assert_called_once_with(
+            url, wait_until="domcontentloaded", timeout=45_000
+        )
 
     def test_scope_parser_exposes_authenticated_browser_options(self) -> None:
         from aidast.cli import _parser
@@ -547,6 +830,91 @@ class RuntimeBrowserProgramPageReaderTests(unittest.TestCase):
         )
         self.assertEqual(args.scope_login_mode, "runtime-browser")
         self.assertEqual(args.scope_identity, "researcher")
+
+@unittest.skipUnless(os.name == "posix", "Scope process controls require POSIX")
+class ScopeProcessControlTests(unittest.TestCase):
+    def test_browser_confirmation_reaches_isolated_worker(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            (root / "fake_scope_worker.py").write_text(
+                "import sys\n"
+                "from pathlib import Path\n"
+                "from aidast.web.programs import ProgramRegistry\n"
+                "from aidast.web.scope_workflow import ScopeWorkflowManager\n"
+                "root, program_id, job_id = sys.argv[1:]\n"
+                "sys.stdin.read()\n"
+                "manager = ScopeWorkflowManager(Path(root), ProgramRegistry(Path(root)), worker_mode=True)\n"
+                "manager._update(job_id, status='awaiting_browser', level='warning', message='ready', message_code='scope.browser_ready')\n"
+                "manager._wait_for_browser_confirmation(job_id)\n"
+                "manager._update(job_id, status='review_required', level='success', message='done', message_code='scope.review_required')\n",
+                encoding="utf-8",
+            )
+            registry = ProgramRegistry(root)
+            program_id = registry.register(ProgramRegistrationRequest(
+                program_url="https://example.com/programs/test",
+                visibility="public",
+            ))["id"]
+            controller = ScopeProcessController(
+                root, project_root=root, worker_module="fake_scope_worker"
+            )
+            manager = ScopeWorkflowManager(
+                root, registry, process_controller=controller
+            )
+            job_id = manager.start(program_id, ScopeCollectionRequest())["scope_job_id"]
+            try:
+                deadline = time.monotonic() + 10
+                while time.monotonic() < deadline and manager.get_job(program_id)["scope_status"] == "collecting":
+                    time.sleep(0.05)
+                self.assertEqual(manager.get_job(program_id)["scope_status"], "awaiting_browser")
+                self.assertEqual(manager.browser_ready(program_id)["scope_status"], "collecting")
+                while time.monotonic() < deadline and manager.get_job(program_id)["scope_status"] == "collecting":
+                    time.sleep(0.05)
+                self.assertEqual(manager.get_job(program_id)["scope_status"], "review_required")
+            finally:
+                if controller.pid(job_id) is not None:
+                    controller.signal(job_id, signal.SIGKILL)
+                cleanup_deadline = time.monotonic() + 5
+                while controller._marker(job_id).exists() and time.monotonic() < cleanup_deadline:
+                    time.sleep(0.05)
+
+    def test_live_worker_pauses_continues_and_cancels_without_network(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            (root / "fake_scope_worker.py").write_text(
+                "import sys, time\nsys.stdin.read()\nwhile True: time.sleep(0.1)\n",
+                encoding="utf-8",
+            )
+            registry = ProgramRegistry(root)
+            program_id = registry.register(ProgramRegistrationRequest(
+                program_url="https://example.com/programs/test",
+                visibility="public",
+            ))["id"]
+            controller = ScopeProcessController(
+                root, project_root=root, worker_module="fake_scope_worker"
+            )
+            manager = ScopeWorkflowManager(
+                root, registry, process_controller=controller
+            )
+            job = manager.start(program_id, ScopeCollectionRequest())
+            job_id = job["scope_job_id"]
+            try:
+                self.assertIsNotNone(controller.pid(job_id))
+                self.assertEqual(manager.pause(program_id)["scope_status"], "paused")
+                self.assertEqual(manager.continue_job(program_id)["scope_status"], "collecting")
+                self.assertEqual(manager.pause(program_id)["scope_status"], "paused")
+                self.assertIn(manager.cancel(program_id)["scope_status"], {"cancelling", "cancelled"})
+                deadline = time.monotonic() + 5
+                while time.monotonic() < deadline and manager.get_job(program_id)["scope_status"] != "cancelled":
+                    time.sleep(0.05)
+                self.assertEqual(manager.get_job(program_id)["scope_status"], "cancelled")
+                self.assertIsNone(controller.pid(job_id))
+            finally:
+                if controller.pid(job_id) is not None:
+                    controller.signal(job_id, signal.SIGKILL)
+                cleanup_deadline = time.monotonic() + 5
+                while controller._marker(job_id).exists() and time.monotonic() < cleanup_deadline:
+                    time.sleep(0.05)
+
 
 class ScopeModelTests(unittest.TestCase):
     def test_rejects_whitespace_only_asset_and_evidence(self) -> None:
@@ -594,7 +962,8 @@ class CliTests(unittest.TestCase):
 
         self.assertEqual(result, 0)
         reader_type.assert_called_once_with(
-            identity="researcher", timeout_seconds=45.0
+            identity="researcher", timeout_seconds=45.0,
+            navigation_agent=ANY,
         )
 
     def test_scope_reports_extraction_before_review(self) -> None:

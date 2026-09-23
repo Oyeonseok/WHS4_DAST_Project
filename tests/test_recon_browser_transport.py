@@ -19,6 +19,7 @@ from aidast.recon.tools.playwright_driver import (
     InteractionConfig, ManualSessionConfig, PlaywrightDriver,
     _wait_for_manual_login,
 )
+from aidast.recon.tools.page_identity import canonical_visit_key, screen_fingerprint
 from aidast.scope.models import AssetType
 
 
@@ -154,6 +155,74 @@ class ReconBrowserTransportTests(unittest.TestCase):
         self.assertEqual(visit.call_count, 1)
         visit.assert_called_once_with("/api/one")
         self.assertEqual(self.driver._interaction_page_count, 2)
+
+    def test_playwright_interaction_pass_stops_at_action_and_time_limits(self):
+        page = Mock(url=self.policy.asset)
+        self.driver.interaction_config = InteractionConfig(max_pages=30, max_total_actions=1)
+        with (
+            patch.object(self.driver, "ensure_session"),
+            patch.object(self.driver, "_ensure_page", return_value=page),
+            patch.object(self.driver, "trigger_safe_actions", return_value=1),
+            patch.object(self.driver, "visit_path") as visit,
+        ):
+            self.driver.run_interaction_pass([{"method": "GET", "path": "/api/one"}])
+        visit.assert_not_called()
+        self.assertEqual(self.driver.last_interaction_stop_reason, "action_limit")
+
+        self.driver.interaction_config = InteractionConfig(max_pass_seconds=0)
+        with (
+            patch.object(self.driver, "ensure_session"),
+            patch.object(self.driver, "_ensure_page", return_value=page),
+            patch.object(self.driver, "trigger_safe_actions") as action,
+        ):
+            self.driver.run_interaction_pass([])
+        action.assert_not_called()
+        self.assertEqual(self.driver.last_interaction_stop_reason, "time_limit")
+
+    def test_fragment_routes_compare_rendered_screens(self):
+        page = Mock(url="https://example.com/api#first")
+        fingerprints = iter(("same-screen", "same-screen", "same-screen", "different-screen"))
+        with (
+            patch.object(self.driver, "ensure_session"),
+            patch.object(self.driver, "_ensure_page", return_value=page),
+            patch.object(self.driver, "_current_screen_fingerprint",
+                         side_effect=lambda: next(fingerprints)),
+            patch.object(self.driver, "trigger_safe_actions", return_value=1) as action,
+        ):
+            self.driver.run_interaction_pass([])
+            page.url = "https://example.com/api#second"
+            self.driver.run_interaction_pass([])
+            self.assertEqual(self.driver.last_interaction_duplicate_screens, 1)
+            page.url = "https://example.com/api/other-path"
+            self.driver.run_interaction_pass([])
+            self.assertEqual(self.driver.last_interaction_duplicate_screens, 1)
+            page.url = "https://example.com/api#third"
+            self.driver.run_interaction_pass([])
+        self.assertEqual(action.call_count, 2)
+
+    def test_fragment_navigation_without_http_response_can_be_html(self):
+        page = Mock(url="https://example.com/api#first")
+        def navigate(url: str, **_kwargs: object) -> None:
+            page.url = url
+            return None
+        page.goto.side_effect = navigate
+        page.evaluate.return_value = "text/html"
+        with patch.object(self.driver, "_ensure_page", return_value=page):
+            self.assertTrue(self.driver.visit_path("/api#second"))
+        page.goto.assert_called_once()
+
+    def test_browser_visit_identity_keeps_spa_fragment_and_page_content(self):
+        first = canonical_visit_key("https://example.com/api?utm_source=x&b=2&a=1#one")
+        same_request = canonical_visit_key("https://example.com/api?a=1&b=2#two")
+        self.assertNotEqual(first, same_request)
+        self.assertEqual(first.split("#")[0], same_request.split("#")[0])
+        snapshot = {"main_text": "Account settings and notification preferences are displayed here.",
+                    "controls": ["BUTTON settings", "BUTTON notifications"]}
+        self.assertEqual(screen_fingerprint(snapshot, origin="https://example.com"),
+                         screen_fingerprint(dict(snapshot), origin="https://example.com"))
+        changed = dict(snapshot, main_text="Account security and password controls are displayed here.")
+        self.assertNotEqual(screen_fingerprint(snapshot, origin="https://example.com"),
+                            screen_fingerprint(changed, origin="https://example.com"))
 
     def test_manual_launch_is_direct_and_unattached_until_login_finishes(self):
         with tempfile.TemporaryDirectory() as directory:

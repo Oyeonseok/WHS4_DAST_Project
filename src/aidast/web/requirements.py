@@ -2,22 +2,19 @@
 
 from __future__ import annotations
 
-import re
 from typing import Literal, assert_never
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from aidast.recon.profiles import EXECUTION_PROFILES, ProfileCaps, ProfileId
+from aidast.recon.profiles import (
+    EXECUTION_PROFILES,
+    ProfileCaps,
+    ProfileId,
+    grounded_scope_request_rate,
+)
 from aidast.scope.models import ScopeAnalysis
 
 IdentityHeader = Literal["hackerone", "intigriti"]
-_RATE_PATTERN = re.compile(
-    r"(?i)(?:max(?:imum)?\.?\s*)?"
-    r"(?P<rate>\d+(?:\.\d+)?)\s*requests?\s*(?:/|per)\s*"
-    r"(?:sec(?:ond)?s?)"
-)
-
-
 class ExecutionProfileRequirement(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -46,12 +43,7 @@ def build_scope_execution_requirements(
     *,
     identity_header: IdentityHeader | None,
 ) -> ScopeExecutionRequirements:
-    grounded_rates = [
-        float(match.group("rate"))
-        for evidence in analysis.source_evidence
-        if "rules of engagement" in evidence.section.casefold()
-        for match in _RATE_PATTERN.finditer(evidence.quote)
-    ]
+    scope_rate = grounded_scope_request_rate(analysis)
     match identity_header:
         case "hackerone":
             required_header = RequiredHeader(
@@ -68,11 +60,17 @@ def build_scope_execution_requirements(
         case unreachable:
             assert_never(unreachable)
     return ScopeExecutionRequirements(
-        scope_max_requests_per_second=min(grounded_rates) if grounded_rates else None,
+        scope_max_requests_per_second=scope_rate,
         required_header=required_header,
         operational_constraints=tuple(analysis.operational_constraints),
         profiles=tuple(
-            ExecutionProfileRequirement(id=profile_id, limits=limits)
+            ExecutionProfileRequirement(
+                id=profile_id,
+                limits=(
+                    limits.model_copy(update={"requests_per_second": scope_rate})
+                    if scope_rate is not None else limits
+                ),
+            )
             for profile_id, limits in EXECUTION_PROFILES.items()
         ),
     )

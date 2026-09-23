@@ -35,11 +35,13 @@ from aidast.recon.executor import ReconExecutionError, ReconExecutor
 from aidast.recon.agent import OfflineReconReview
 from aidast.recon.models import ReconPlanTarget, ReconStep
 from aidast.recon.policy import TargetPolicy, validate_policy_for_target
-from aidast.recon.profiles import EXECUTION_PROFILES
+from aidast.recon.profiles import EXECUTION_PROFILES, grounded_scope_request_rate
 from aidast.recon.surface import export_surface
 from aidast.pipeline.lifecycle import finish_stage_run, start_stage_run
+from aidast.pipeline.locations import scan_run_directory
 from aidast.pipeline.materialize import materialize_pipeline
 from aidast.pipeline.models import HandoffManifest, hash_artifact
+from aidast.pipeline.resume import execute_resume, inspect_resume
 from aidast.paths import RESULT_ROOT
 from aidast.reporting import (
     CaseReportAgent,
@@ -50,7 +52,7 @@ from aidast.reporting import (
     report_status,
 )
 from aidast.reporting.auto import generate_scan_reports, report_platform_for_program_url
-from aidast.scope.paths import ScopePathError, resolve_scope_directory
+from aidast.scope.paths import ScopePathError, identify_program, resolve_scope_directory
 from aidast.scope.reader import (
     PlaywrightProgramPageReader,
     ProgramPageError,
@@ -115,6 +117,8 @@ def main(
                 validation_coordinator=validation_coordinator,
                 report_writer=report_writer,
             )
+        if args.command == "resume":
+            return _run_resume(args)
         if args.command == "attack":
             return _run_attack(args, workflow=attack_workflow)
         if args.command in {"validate", "validation"}:
@@ -355,12 +359,16 @@ def _parser() -> argparse.ArgumentParser:
     _add_session_options(run)
     run.add_argument(
         "--run-root", type=Path, default=RESULT_ROOT / "Runs",
-        help="root for immutable Recon handoff artifacts (default: result/Runs)",
+        help="root for program-grouped Recon handoff artifacts (default: result/Runs)",
     )
     run.add_argument(
         "--attack-output-root", type=Path, default=RESULT_ROOT / "AttackRuns",
-        help="root for merged Pipeline.db runs (default: result/AttackRuns)",
+        help="root for program-grouped Pipeline.db runs (default: result/AttackRuns)",
     )
+
+    resume = commands.add_parser("resume", help="continue a persisted scan from its first unfinished stage")
+    resume.add_argument("scan_id", type=_scan_identifier)
+    resume.add_argument("--result-root", type=Path, default=RESULT_ROOT)
 
     # attack 명령어
     attack = commands.add_parser(
@@ -653,6 +661,9 @@ def _collect_scope(
         primary_reader = RuntimeBrowserProgramPageReader(
             identity=args.scope_identity,
             timeout_seconds=args.page_timeout,
+            navigation_agent=lambda page_text, candidates: main_agent.choose_scope_view(
+                program_url=program_url, page_text=page_text, candidates=candidates,
+            ),
         )
     return coordinator.collect(
         program_url,
@@ -798,8 +809,15 @@ def _run_recon(
         if args.execute
         else None
     )
+    program_path = identify_program(program_url)
+    run_output = program_path.under(args.run_root) / scan_id if scan_id else None
+    attack_output = program_path.under(args.attack_output_root) / scan_id if scan_id else None
     if prepare_attack and scan_id is not None:
-        if (args.run_root / scan_id).exists() or (args.attack_output_root / scan_id).exists():
+        if (
+            run_output.exists() or attack_output.exists()
+            or scan_run_directory(args.run_root, scan_id) is not None
+            or scan_run_directory(args.attack_output_root, scan_id) is not None
+        ):
             raise ReconCoordinatorError(f"scan output already exists: {scan_id}")
     target_sessions = None
     if args.execute and (
@@ -908,6 +926,7 @@ def _run_recon(
             max_depth=args.max_depth,
             max_concurrency=args.max_concurrency,
             timeout_seconds=args.timeout_seconds,
+            scope_max_rps=grounded_scope_request_rate(scope_document.analysis),
         )
         if hackerone_username:
             policies = {
@@ -932,7 +951,7 @@ def _run_recon(
             return 0
         _require_start_urls_allowed(policies, start_urls)
         if prepare_attack:
-            run_dir = (args.run_root / scan_id).resolve()
+            run_dir = run_output.resolve()
             run_dir.mkdir(parents=True, exist_ok=False)
             db_path = run_dir / "Recon.db"
             surface_path = run_dir / "Surface.json"
@@ -1047,7 +1066,6 @@ def _run_recon(
                     review_path=review_path,
                     stage_run_id=stage_run_id,
                 )
-                attack_output = args.attack_output_root / scan_id
                 legacy_plan = _plan_attack(
                     handoff_path,
                     attack_output / "legacy",
@@ -1271,6 +1289,7 @@ def _apply_policy_caps(
     max_depth: int | None,
     max_concurrency: int | None,
     timeout_seconds: int | None,
+    scope_max_rps: float | None = None,
 ) -> dict[tuple[str, str], TargetPolicy]:
     profile_limits = (
         EXECUTION_PROFILES[
@@ -1284,9 +1303,13 @@ def _apply_policy_caps(
         effective_rps = min(
             policy.limits.requests_per_second,
             (
-                profile_limits.requests_per_second
-                if profile_limits is not None
-                else policy.limits.requests_per_second
+                scope_max_rps
+                if scope_max_rps is not None
+                else (
+                    profile_limits.requests_per_second
+                    if profile_limits is not None
+                    else policy.limits.requests_per_second
+                )
             ),
             max_rps if max_rps is not None else float("inf"),
         )
@@ -1696,6 +1719,17 @@ def _run_tag(args: argparse.Namespace) -> int:
 
 
 # 로컬 대시보드 서버 실행
+def _run_resume(args: argparse.Namespace) -> int:
+    try:
+        plan = inspect_resume(args.result_root, args.scan_id)
+    except (OSError, ValueError, sqlite3.Error) as exc:
+        raise MainAgentError(f"scan cannot resume: {exc}") from exc
+    print(f"Resuming {plan.scan_id} from {plan.stage}", flush=True)
+    execute_resume(plan)
+    print(f"Resumed scan completed: {plan.scan_id}", flush=True)
+    return 0
+
+
 def _run_dashboard(args: argparse.Namespace) -> int:
     """Serve the loopback-only operator UI and read-only run projections."""
     import ipaddress
