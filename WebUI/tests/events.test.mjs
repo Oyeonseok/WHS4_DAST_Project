@@ -55,6 +55,17 @@ test('activity codes localize live messages and audit types without exposing raw
   assert.equal(localizeActivityMessage('ko', { message: 'Recon activity', message_code: 'recon.activity', message_params: { phase: 'ffuf', state: 'finished', index: 2, total: 3, count: 4 } }), 'ffuf 경로 탐색 종료 · 대상 2/3 · 결과 4건');
   assert.equal(localizeActivityMessage('ko', { message: 'Scan paused by operator.', message_code: 'pipeline.paused' }), '스캔 실행이 일시정지됐습니다.');
 });
+test('synthetic scan activity follows the selected display language', () => {
+  const event = demoSnapshot().logs[0];
+  assert.equal(localizeActivityMessage('en', event), 'Demo Scope and approval hashes match. Only synthetic lab data is used.');
+  assert.equal(localizeActivityMessage('ko', event), '데모 스코프와 승인 해시가 일치합니다. 합성 실습 환경만 사용합니다.');
+});
+test('English activity renders Korean-backed Scope and Recon events', () => {
+  assert.equal(localizeActivityMessage('en', { message: '스코프 수집을 시작했습니다.', message_code: 'scope.started' }), 'Scope collection started.');
+  assert.equal(localizeActivityMessage('en', { message: '프로그램 정책 화면 읽기를 완료했습니다. 단계 2/3, 텍스트 120자입니다.', message_code: 'scope.browser_progress' }), 'Finished reading the program policy page. Step 2/3, 120 characters.');
+  assert.equal(localizeActivityMessage('en', { message: '정찰 활동', message_code: 'recon.activity', message_params: { phase: 'playwright_interaction', state: 'started', index: 1, total: 2 } }), 'Playwright page interaction started · target 1/2');
+  assert.equal(localizeAuditEventType('en', 'stage.started'), 'Stage started');
+});
 test('paused scan remains paused even while its current stage is running', () => {
   const source = demoSnapshot();
   const paused = parseSnapshot({ ...source, status: 'paused', stage: 'Recon', stage_statuses: { Recon: 'running' } }, DEMO_SCAN);
@@ -87,6 +98,7 @@ test('scope collection and scan logs merge into one chronological activity strea
 test('active Scope collection elapsed time uses a TUI-style clock', () => {
   assert.equal(formatActivityElapsed(1), '1초');
   assert.equal(formatActivityElapsed(62), '1분 2초');
+  assert.equal(formatActivityElapsed(62, 'en'), '1m 2s');
 });
 test('Scope elapsed clock advances each second across dialog close and cancels on terminal status', () => {
   let now = 0;
