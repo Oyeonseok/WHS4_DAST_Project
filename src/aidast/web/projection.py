@@ -77,6 +77,7 @@ class ScopeInfo:
     program_name: str = ""
     program_id: str = ""
     budget: int = 0
+    per_target_budget: int | None = None
 
 
 def _utc(value: Any) -> str:
@@ -178,6 +179,32 @@ def _audit_message(event_type: str) -> str:
     # Never interpolate details_json, URLs, headers, bodies, or credentials.
     readable = event_type.replace("_", " ").replace(".", " · ").strip()
     return f"Pipeline event · {readable[:180]}"
+
+
+def _event_payload(row: sqlite3.Row) -> dict[str, Any]:
+    payload = _json_object(row["payload_json"])
+    source_key = str(row["source_key"])
+    if row["event_type"] == "log.appended" and source_key.startswith("audit:"):
+        payload["audit_id"] = source_key.removeprefix("audit:")[:256]
+    return payload
+
+
+def _failure_category(message: object) -> str | None:
+    """Classify an internal error without returning its potentially sensitive text."""
+    if not isinstance(message, str) or not message.strip():
+        return None
+    lowered = message.casefold()
+    if "timeout" in lowered or "timed out" in lowered:
+        return "timeout"
+    if "rate limit" in lowered or "request budget" in lowered or "429" in lowered:
+        return "rate_limit"
+    if any(word in lowered for word in ("permission denied", "unauthorized", "forbidden")):
+        return "access_denied"
+    if any(word in lowered for word in ("dns", "connection refused", "name resolution", "network unreachable")):
+        return "network"
+    if any(word in lowered for word in ("command not found", "executable not found", "no such file or directory")):
+        return "tool_unavailable"
+    return None
 
 
 class DashboardProjector:
@@ -311,7 +338,8 @@ class DashboardProjector:
                     if program_id == "h1-prism-vdp"
                     else str(document.get("analysis", {}).get("program_name") or slug)[:160]
                 )
-                return ScopeInfo(approved, scope_id, program_name, program_id, budget)
+                per_target_budget = values[0] if values and values[0] > 0 and len(set(values)) == 1 else None
+                return ScopeInfo(approved, scope_id, program_name, program_id, budget, per_target_budget)
             except (OSError, ValueError, TypeError, json.JSONDecodeError):
                 continue
         return ScopeInfo(scope_id=scope_id)
@@ -417,12 +445,12 @@ class DashboardProjector:
             source_path = Path(conn.execute("PRAGMA database_list").fetchone()[2])
             progress_path = source_path.parent / f"mitm_capture_{scan_id}.progress.json"
             try:
-                request_progress = json.loads(progress_path.read_text(encoding="utf-8"))
-                if request_progress.get("version") == 1 and all(
-                    type(request_progress.get(key)) is int and 0 <= request_progress[key] <= 1_000_000
+                capture_progress = json.loads(progress_path.read_text(encoding="utf-8"))
+                if capture_progress.get("version") == 1 and all(
+                    type(capture_progress.get(key)) is int and 0 <= capture_progress[key] <= 1_000_000
                     for key in ("allowed_requests", "used_before")
                 ):
-                    requests = max(requests, min(scope.budget, request_progress["allowed_requests"] + request_progress["used_before"]))
+                    requests = max(requests, min(scope.budget, capture_progress["allowed_requests"] + capture_progress["used_before"]))
             except (OSError, ValueError, TypeError, AttributeError):
                 pass
 
@@ -497,7 +525,7 @@ class DashboardProjector:
             audits = list(
                 conn.execute(
                     """SELECT a.rowid,a.audit_event_id,a.event_type,a.details_json,a.created_at,
-                    COALESCE(s.stage,'recon') AS stage
+                    a.task_id,COALESCE(s.stage,'recon') AS stage,s.error_message AS stage_error
                     FROM audit_events a LEFT JOIN stage_runs s
                     ON s.stage_run_id=a.stage_run_id
                     WHERE a.scan_id=? ORDER BY a.rowid""",
@@ -518,6 +546,7 @@ class DashboardProjector:
             "activity": activity,
             "requests": requests,
             "budget": scope.budget,
+            "per_target_budget": scope.per_target_budget,
             "endpoints": endpoints,
             "service_endpoints": service_endpoints,
             "live_endpoints": live_endpoints,
@@ -529,20 +558,29 @@ class DashboardProjector:
         }
         return state, audits
 
-    def audit_log(self, scan_id: str) -> list[dict[str, str]]:
-        """Return an authoritative, deliberately metadata-only audit view."""
+    def audit_log(self, scan_id: str) -> list[dict[str, Any]]:
+        """Return audit metadata with only validated activity and error categories."""
         database = self.locate_database(scan_id)
         with closing(self._source(database)) as conn:
             _state, audits = self._read_state(conn, scan_id)
-        return [
-            {
+        entries: list[dict[str, Any]] = []
+        for row in reversed(audits[-500:]):
+            event_type = str(row["event_type"])[:256]
+            activity = validated_activity(_json_object(row["details_json"])) if event_type == "recon.activity" else None
+            entries.append({
                 "id": str(row["audit_event_id"])[:256],
-                "event_type": str(row["event_type"])[:256],
+                "event_type": event_type,
                 "stage": _stage(row["stage"]),
                 "created_at": _utc(row["created_at"]),
-            }
-            for row in reversed(audits[-500:])
-        ]
+                "task_id": str(row["task_id"])[:128] if row["task_id"] else None,
+                "level": ("error" if activity["state"] == "failed" else
+                          "success" if activity["state"] == "finished" else "info")
+                if activity else _level(event_type),
+                "message_code": "recon.activity" if activity else "pipeline.audit_event",
+                "message_params": activity or {"event_type": event_type[:180]},
+                "failure_code": _failure_category(row["stage_error"]) if event_type == "stage.failed" else None,
+            })
+        return entries
 
     @staticmethod
     def _next_id(conn: sqlite3.Connection, scan_id: str) -> int:
@@ -606,7 +644,7 @@ class DashboardProjector:
         with self._lock, closing(sqlite3.connect(self.event_database)) as conn:
             conn.row_factory = sqlite3.Row
             rows = conn.execute(
-                """SELECT event_id,occurred_at,event_type,payload_json FROM web_events
+                """SELECT event_id,source_key,occurred_at,event_type,payload_json FROM web_events
                 WHERE scan_id=? AND event_id>? ORDER BY event_id LIMIT 256""",
                 (scan_id, after),
             ).fetchall()
@@ -617,7 +655,7 @@ class DashboardProjector:
                 "scan_id": scan_id,
                 "occurred_at": row["occurred_at"],
                 "type": row["event_type"],
-                "payload": _json_object(row["payload_json"]),
+                "payload": _event_payload(row),
             }
             for row in rows
         ]
@@ -709,23 +747,24 @@ class DashboardProjector:
                         (scan_id,),
                     ).fetchone()[0]
                 )
-                logs = [
-                    {
+                logs = []
+                for row in events.execute(
+                    """SELECT event_id,source_key,occurred_at,event_type,payload_json FROM web_events
+                    WHERE scan_id=? AND event_type='log.appended'
+                    ORDER BY event_id DESC LIMIT 500""",
+                    (scan_id,),
+                ).fetchall()[::-1]:
+                    payload = _event_payload(row)
+                    logs.append({
                         "id": int(row["event_id"]),
                         "time": row["occurred_at"],
-                        "stage": _json_object(row["payload_json"]).get("stage", "Recon"),
-                        "level": _json_object(row["payload_json"]).get("level", "info"),
-                        "message": _json_object(row["payload_json"]).get("message", "Pipeline event"),
-                        "message_code": _json_object(row["payload_json"]).get("message_code"),
-                        "message_params": _json_object(row["payload_json"]).get("message_params", {}),
-                    }
-                    for row in events.execute(
-                        """SELECT event_id,occurred_at,payload_json FROM web_events
-                        WHERE scan_id=? AND event_type='log.appended'
-                        ORDER BY event_id DESC LIMIT 500""",
-                        (scan_id,),
-                    ).fetchall()[::-1]
-                ]
+                        "stage": payload.get("stage", "Recon"),
+                        "level": payload.get("level", "info"),
+                        "message": payload.get("message", "Pipeline event"),
+                        "message_code": payload.get("message_code"),
+                        "message_params": payload.get("message_params", {}),
+                        **({"audit_id": payload["audit_id"]} if "audit_id" in payload else {}),
+                    })
             return {**state, "last_event_id": last_event_id, "logs": logs}
 
     def attack_tasks(self, scan_id: str) -> dict[str, Any]:

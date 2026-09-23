@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 import tempfile
 import unittest
@@ -79,6 +80,22 @@ class AttackSkillSelectorTests(unittest.TestCase):
                 path, "scan", available_attack_skill_names()
             )
         self.assertEqual(selected, ("hunt-misc",))
+
+    def test_unrelated_origin_header_does_not_select_cors(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = selector_database(Path(temporary))
+            with sqlite3.connect(path) as conn:
+                conn.execute("DELETE FROM observations")
+                endpoint = conn.execute("SELECT endpoint_id FROM endpoints LIMIT 1").fetchone()[0]
+                conn.execute(
+                    """INSERT INTO http_transactions
+                    (http_transaction_id,endpoint_id,method,url,response_headers)
+                    VALUES (?,?,?,?,?)""",
+                    ("tx", endpoint, "GET", "https://example.test/",
+                     json.dumps({"Vary": "Accept-Encoding", "Cross-Origin-Opener-Policy": "same-origin"})),
+                )
+            selected, _ = select_relevant_attack_skills(path, "scan", available_attack_skill_names())
+            self.assertNotIn("hunt-cors", selected)
 
     def test_incomplete_recon_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

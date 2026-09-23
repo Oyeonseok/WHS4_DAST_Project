@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import tempfile
+import tomllib
 import unittest
 from contextlib import closing
 from pathlib import Path
@@ -309,6 +310,15 @@ class NativeAttackMainAgentTests(unittest.TestCase):
                     work / ".codex/agents/aidast-attack.toml"
                 ).read_text(encoding="utf-8")
                 self.assertIn('model = "gpt-5.6-sol"', agent_config)
+                overrides = tomllib.loads("\n".join(
+                    command[index + 1]
+                    for index, value in enumerate(command[:-1]) if value == "--config"
+                ))
+                self.assertEqual(
+                    overrides["agents"]["aidast_attack"]["config_file"],
+                    str(work / ".codex/agents/aidast-attack.toml"),
+                )
+                self.assertTrue(overrides["agents"]["aidast_attack"]["description"])
                 self.assertTrue(
                     (work / ".agents/skills/aidast-live-attack/SKILL.md").is_file()
                 )

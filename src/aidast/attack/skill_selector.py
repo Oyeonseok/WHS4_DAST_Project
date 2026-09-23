@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from collections import defaultdict
 from contextlib import closing
@@ -63,6 +64,30 @@ def available_attack_skill_names() -> tuple[str, ...]:
 
 def _text(*values: object) -> str:
     return " ".join(str(value or "").casefold() for value in values)
+
+
+def _cors_response_signal(
+    observations: list[tuple], signals: list[tuple], transactions: list[tuple]
+) -> bool:
+    for _kind, key, value in observations:
+        name = str(key or "").casefold()
+        if name == "access-control-allow-origin" or (name == "vary" and "origin" in str(value or "").casefold()):
+            return True
+    for kind, value in signals:
+        name = str(kind or "").casefold()
+        if name == "access-control-allow-origin" or (name == "vary" and "origin" in str(value or "").casefold()):
+            return True
+    for _url, raw_headers, _content_type in transactions:
+        try:
+            parsed = json.loads(raw_headers or "{}")
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if not isinstance(parsed, dict):
+            continue
+        headers = {str(key).casefold(): str(value).casefold() for key, value in parsed.items()}
+        if "access-control-allow-origin" in headers or "origin" in headers.get("vary", ""):
+            return True
+    return False
 
 
 def select_relevant_attack_skills(
@@ -243,9 +268,7 @@ def select_relevant_attack_skills(
             match("hunt-idor", 55, "Recon data-role annotation")
 
     header_text = _text(*(value for row in observations + signals + transactions for value in row))
-    if "access-control-allow-origin" in header_text or (
-        "vary" in header_text and "origin" in header_text
-    ):
+    if _cors_response_signal(observations, signals, transactions):
         match("hunt-cors", 100, "CORS response signal")
     if "set-cookie" in header_text or "session" in header_text:
         match("hunt-session", 70, "session response signal")

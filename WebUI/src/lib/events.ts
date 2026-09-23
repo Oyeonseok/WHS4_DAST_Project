@@ -2,8 +2,8 @@ export const stages = ['Scope', 'Recon', 'Attack', 'Chaining', 'Validation', 'Re
 export type Stage = typeof stages[number];
 export type Level = 'info' | 'success' | 'warning' | 'error';
 export type Finding = { id: string; title: string; severity: 'HIGH' | 'MEDIUM' | 'LOW' | 'INFO' | 'CRITICAL'; status: 'unreviewed' | 'confirmed' | 'rejected' | 'resolved'; endpoint: string; cwe: string };
-export type Log = { id: number; time: string; stage: Stage; level: Level; message: string; message_code?: string | null; message_params?: Record<string, string | number> };
-export type Snapshot = { version: 1; scan_id: string; last_event_id: number; status: 'running' | 'paused' | 'completed' | 'failed' | 'cancelled' | 'pending'; stage: Stage; stage_statuses?: Partial<Record<Stage, string>>; progress: number; activity?: string | null; requests: number; budget: number; endpoints: number; service_endpoints?: number; live_endpoints?: number; findings: Finding[]; logs: Log[]; scope_approved?: boolean; scope_id?: string; program_id?: string; program_name?: string };
+export type Log = { id: number; time: string; stage: Stage; level: Level; message: string; message_code?: string | null; message_params?: Record<string, string | number>; audit_id?: string };
+export type Snapshot = { version: 1; scan_id: string; last_event_id: number; status: 'running' | 'paused' | 'completed' | 'failed' | 'cancelled' | 'pending'; stage: Stage; stage_statuses?: Partial<Record<Stage, string>>; progress: number; activity?: string | null; requests: number; budget: number; per_target_budget?: number | null; endpoints: number; service_endpoints?: number; live_endpoints?: number; findings: Finding[]; logs: Log[]; scope_approved?: boolean; scope_id?: string; program_id?: string; program_name?: string };
 export type ReportDraftStatus = 'loading' | 'present' | 'absent' | 'unavailable';
 export function displayStageStatus(snapshot: Snapshot, selected: Stage, reportDraft: ReportDraftStatus): string {
   if (selected === 'Report') return reportDraft === 'present' ? 'completed' : reportDraft === 'absent' ? 'not_created' : 'unknown';
@@ -36,6 +36,7 @@ const integer = (v: unknown): v is number => Number.isSafeInteger(v) && (v as nu
 const text = (v: unknown): v is string => typeof v === 'string' && v.length <= 16000;
 const messageMetadata = (v: Record<string, unknown>): boolean =>
   (v.message_code === undefined || v.message_code === null || (text(v.message_code) && v.message_code.length <= 100))
+  && (v.audit_id === undefined || (text(v.audit_id) && v.audit_id.length > 0 && v.audit_id.length <= 256))
   && (v.message_params === undefined || (record(v.message_params)
     && Object.keys(v.message_params).length <= 8
     && Object.values(v.message_params).every(item => typeof item === 'number' && Number.isFinite(item) || text(item) && item.length <= 180)));
@@ -59,6 +60,7 @@ export function parseSnapshot(value: unknown, scanId: string): Snapshot | null {
   if (['service_endpoints','live_endpoints'].some(key => value[key] !== undefined && !integer(value[key]))) return null;
   if ((value.scope_approved !== undefined && typeof value.scope_approved !== 'boolean') || (value.scope_id !== undefined && !text(value.scope_id)) || (value.program_id !== undefined && !text(value.program_id)) || (value.program_name !== undefined && !text(value.program_name))) return null;
   if (value.activity !== undefined && value.activity !== null && !text(value.activity)) return null;
+  if (value.per_target_budget !== undefined && value.per_target_budget !== null && !integer(value.per_target_budget)) return null;
   if (!value.logs.every(l => record(l) && integer(l.id) && l.id <= (value.last_event_id as number) && text(l.time) && Number.isFinite(Date.parse(l.time)) && stage(l.stage) && level(l.level) && text(l.message) && messageMetadata(l))) return null;
   return { ...value, logs: [...new Map((value.logs as Log[]).map(l => [l.id, l])).values()].sort((a,b) => a.id-b.id).slice(-500) } as Snapshot;
 }
