@@ -97,6 +97,113 @@ const koreanMessages: Record<string, (params: Record<string, string | number>) =
   'scope.failed': params => params.reason ? `스코프 수집 실패: ${String(params.reason)}` : '스코프 수집에 실패했습니다. 자세한 원인은 서버 로그를 확인하세요.',
 };
 
+const auditLabelsEn: Record<string, string> = {
+  'stage.started': 'Stage started', 'stage.resumed': 'Stage resumed',
+  'stage.completed': 'Stage completed', 'stage.failed': 'Stage failed',
+  'task.created': 'Task created', 'task.cancelled': 'Task cancelled',
+  'credential_reference.created': 'Credential reference created',
+  'scope.verified': 'Scope verified', 'pipeline.materialized': 'Pipeline created',
+  'request.authorized': 'Request authorized', 'finding.created': 'Finding candidate created',
+  'recon.activity': 'Recon tool activity',
+};
+const reconPhaseLabelsEn: Record<string, string> = {
+  subfinder: 'Subfinder subdomain discovery', dnsx: 'dnsx DNS resolution',
+  naabu: 'naabu port discovery', nmap: 'nmap port verification',
+  asset_discovery: 'Asset discovery', dns_resolution: 'DNS resolution', host_port_discovery: 'Host and port discovery',
+  http_probe: 'HTTP probing', origin_discovery: 'Web origin discovery', endpoint_discovery: 'Endpoint discovery',
+  playwright_bootstrap: 'Playwright browser and session setup', playwright_priority: 'Playwright priority page/API observation',
+  katana_standard: 'Katana standard crawling', katana_headless: 'Katana browser crawling',
+  playwright_interaction: 'Playwright page interaction', ffuf: 'ffuf path discovery',
+  api_secondary: 'API specification and GraphQL discovery', openapi_detection: 'OpenAPI specification detection',
+  graphql_detection: 'GraphQL endpoint detection', zap_openapi: 'ZAP OpenAPI discovery',
+  zap_graphql: 'ZAP GraphQL discovery', mitm_capture: 'mitmproxy request capture',
+};
+const reconStateLabelsEn: Record<string, string> = {
+  started: 'started', finished: 'finished', skipped: 'skipped', failed: 'failed', planned: 'work scope planned',
+};
+function reconActivityLabelEn(params: Record<string, string | number>): string {
+  const phase = reconPhaseLabelsEn[String(params.phase)] ?? 'Recon task';
+  const state = reconStateLabelsEn[String(params.state)] ?? 'status changed';
+  const target = typeof params.index === 'number' && typeof params.total === 'number'
+    ? ` · target ${params.index}/${params.total}` : '';
+  const count = typeof params.count === 'number' ? ` · ${params.count} results` : '';
+  const roots = typeof params.root_count === 'number' ? ` · ${params.root_count} discovery roots` : '';
+  const captured = typeof params.allowed_count === 'number'
+    ? ` · ${params.allowed_count} allowed, ${Number(params.blocked_count) || 0} blocked` : '';
+  const duplicates = typeof params.duplicate_count === 'number' && params.duplicate_count > 0
+    ? ` · ${params.duplicate_count} known pages skipped` : '';
+  const reason = { time_limit: 'time limit reached', action_limit: 'action limit reached', page_limit: 'page limit reached' }[String(params.reason)] ?? '';
+  return `${phase} ${state}${target}${count}${roots}${captured}${duplicates}${reason ? ` · ${reason}` : ''}`;
+}
+function scopeBrowserProgressEn(message: string): string {
+  const staticMessages: Record<string, string> = {
+    '등록된 프로그램 페이지에 로그인 없이 접근할 수 있는지 확인합니다.': 'Checking whether the registered program page is accessible without login.',
+    '첫 페이지 이동이 끝나지 않았습니다. 브라우저에서 접근 상태를 확인해야 합니다.': 'The first navigation did not finish. Check access in the browser.',
+    '현재 페이지에서 로그인 또는 접근 확인이 필요합니다. 브라우저에서 완료한 뒤 대시보드의 계속 버튼을 누르세요.': 'Login or access confirmation is required. Complete it in the browser, then select Continue in the dashboard.',
+    '로그인 없이 프로그램 정책 페이지에 접근했습니다. 바로 스코프를 읽습니다.': 'Accessed the program policy page without login. Reading Scope now.',
+    'Scope Agent가 현재 정책 화면을 수집 대상으로 선택했습니다.': 'Scope Agent selected the current policy page for collection.',
+    '등록된 프로그램 URL로 브라우저를 이동합니다.': 'Navigating the browser to the registered program URL.',
+    '등록된 프로그램 URL의 페이지 응답을 받았습니다. 브라우저 탭을 확인합니다.': 'Received the registered program URL response. Checking the browser tab.',
+    '등록된 프로그램 페이지 이동을 확인했습니다.': 'Confirmed navigation to the registered program page.',
+  };
+  if (staticMessages[message]) return staticMessages[message];
+  let match = /^프로그램 정책 화면을 읽고 있습니다\. 단계 (\d+)\/(\d+)\.$/.exec(message);
+  if (match) return `Reading the program policy page. Step ${match[1]}/${match[2]}.`;
+  match = /^프로그램 정책 화면 읽기를 완료했습니다\. 단계 (\d+)\/(\d+), 텍스트 (\d+)자입니다\.$/.exec(message);
+  if (match) return `Finished reading the program policy page. Step ${match[1]}/${match[2]}, ${match[3]} characters.`;
+  match = /^화면 텍스트 (\d+)자와 이동 후보 (\d+)개를 확인했습니다\. Scope Agent가 스코프 화면을 판단합니다\.$/.exec(message);
+  if (match) return `Observed ${match[1]} characters and ${match[2]} navigation candidates. Scope Agent is identifying the Scope page.`;
+  match = /^Scope Agent가 화면 이동 후보 (\d+)번을 엽니다\.$/.exec(message);
+  if (match) return `Scope Agent is opening navigation candidate ${match[1]}.`;
+  match = /^Scope Agent가 화면 이동 후보 (\d+)번 열기를 완료했습니다\.$/.exec(message);
+  if (match) return `Scope Agent opened navigation candidate ${match[1]}.`;
+  return 'Browser policy collection is in progress. See the source event for details.';
+}
+const englishMessages: Record<string, (params: Record<string, string | number>) => string> = {
+  'pipeline.accepted': () => 'Scan request accepted after approval verification.',
+  'pipeline.start_failed': () => 'Could not start the scan process.',
+  'pipeline.started': () => 'AI DAST pipeline started.',
+  'pipeline.completed': () => 'AI DAST pipeline completed.',
+  'pipeline.failed': () => 'AI DAST pipeline exited with an error.',
+  'pipeline.resumed': () => 'Scan restarted from the failed stage.',
+  'pipeline.resume_completed': () => 'Rerun completed.',
+  'pipeline.resume_failed': () => 'Rerun exited with an error.',
+  'pipeline.stop_requested': () => 'Operator requested scan stop.',
+  'pipeline.stopped': () => 'Operator stopped the scan.',
+  'pipeline.stop_persist_failed': () => 'The process exited, but saved scan status could not be updated.',
+  'pipeline.cancel_requested': () => 'Operator requested scan cancellation.',
+  'pipeline.cancelled': () => 'Scan cancelled.',
+  'pipeline.cancel_persist_failed': () => 'The process exited, but saved scan status could not be marked cancelled.',
+  'pipeline.paused': () => 'Scan execution paused.',
+  'pipeline.continued': () => 'Paused scan execution resumed.',
+  'pipeline.audit_event': params => `Pipeline event · ${auditLabelsEn[String(params.event_type)] ?? String(params.event_type || 'status changed')}`,
+  'recon.activity': params => reconActivityLabelEn(params),
+  'scope.started': () => 'Scope collection started.',
+  'scope.interrupted': () => 'Scope collection was interrupted by a dashboard restart.',
+  'scope.already_approved': () => 'A verified approved Scope already exists.',
+  'scope.browser_ready': () => 'The program page was not accessible automatically. Complete login or access confirmation in the browser, then select Continue.',
+  'scope.browser_confirmed': () => 'Browser access confirmed. Navigating to the registered program page for capture.',
+  'scope.browser_progress': () => 'Collecting the program policy page in the browser.',
+  'scope.page_read_started': () => 'Reading the program policy page.',
+  'scope.page_read_completed': params => `Finished reading the program policy page. Collected ${Number(params.characters) || 0} characters.`,
+  'scope.analysis_started': () => 'Scope Agent is analyzing In-Scope, Out-of-Scope, and policy constraints.',
+  'scope.analysis_completed': params => `Read and classified ${Number(params.in_scope) || 0} In-Scope and ${Number(params.out_of_scope) || 0} Out-of-Scope items.`,
+  'scope.collection_started': () => 'Scope Agent started page collection and policy analysis.',
+  'scope.collection_completed': params => `Page collection and policy analysis completed. Extracted ${Number(params.characters) || 0} characters, ${Number(params.in_scope) || 0} In-Scope and ${Number(params.out_of_scope) || 0} Out-of-Scope items.`,
+  'scope.verification_started': () => 'Verifying collected Scope against the source evidence.',
+  'scope.verification_completed': () => 'Scope and source evidence verification completed.',
+  'scope.draft_started': () => 'Saving the verified Scope draft.',
+  'scope.draft_completed': () => 'Scope draft saved.',
+  'scope.paused': () => 'Scope collection paused.',
+  'scope.continued': () => 'Scope collection resumed.',
+  'scope.cancel_requested': () => 'Scope collection cancellation requested.',
+  'scope.cancelled': () => 'Scope collection cancelled.',
+  'scope.review_required': params => `Scope draft awaits review. ${Number(params.in_scope) || 0} in-scope and ${Number(params.out_of_scope) || 0} out-of-scope assets.`,
+  'scope.approved': () => 'Scope draft approved and integrity-bound artifacts published.',
+  'scope.rejected': () => 'Operator rejected the Scope draft. No approval artifacts were created.',
+  'scope.failed': params => params.reason && !/[가-힣]/.test(String(params.reason)) ? `Scope collection failed: ${String(params.reason)}` : 'Scope collection failed. See server logs for details.',
+};
+
 const legacyCodes: Record<string, string> = {
   'Scan request accepted after approval verification.': 'pipeline.accepted',
   'Scan process could not be started.': 'pipeline.start_failed',
@@ -112,9 +219,29 @@ const legacyCodes: Record<string, string> = {
   'Scope draft rejected by the operator; no approval artifacts were published.': 'scope.rejected',
 };
 
+const demoMessagesKo: Record<string, string> = {
+  'Demo Scope and approval hashes match. Only synthetic lab data is used.': '데모 스코프와 승인 해시가 일치합니다. 합성 실습 환경만 사용합니다.',
+  'Demo asset inventory finalized · 218 Recon.db paths': '데모 자산 목록 확정 · Recon.db 경로 218개',
+  'Handoff.json provenance verified · Pipeline.db created': 'Handoff.json 출처 검증 완료 · Pipeline.db 생성',
+  'Access control template batch started · task 84 of 136': '접근 제어 템플릿 묶음 시작 · 작업 136개 중 84개',
+  'Response difference detected. Candidate requires validation.': '응답 차이를 탐지했습니다. 검증이 필요한 후보입니다.',
+  'Redacted evidence pair saved · credential references excluded': '민감정보를 제거한 증거 쌍 저장 · 인증정보 참조 제외',
+  'F-0042 added to review queue · matcher result alone is not a verdict': 'F-0042를 검토 대기열에 추가 · 매처 결과만으로 판정하지 않음',
+  'Policy budget checked · synthetic requests scheduled': '정책 예산 확인 완료 · 합성 요청 예약',
+  'Comparing response signatures across fixture accounts': '픽스처 계정별 응답 서명 비교 중',
+  'attack_attempts evidence references linked · secrets redacted': 'attack_attempts 증거 참조 연결 · 민감정보 제거',
+  'Template batch complete · candidates remain unreviewed': '템플릿 묶음 완료 · 후보는 미검토 상태 유지',
+};
+
 export function localizeActivityMessage(language: Language, event: ActivityMessage): string {
-  if (language === 'en') return event.message;
   const code = event.message_code || legacyCodes[event.message];
+  if (language === 'en') {
+    if (code === 'recon.activity') return reconActivityLabelEn(event.message_params || {});
+    if (code === 'scope.browser_progress' && /[가-힣]/.test(event.message)) return scopeBrowserProgressEn(event.message);
+    if (/[가-힣]/.test(event.message) && code && englishMessages[code]) return englishMessages[code](event.message_params || {});
+    return event.message;
+  }
+  if (demoMessagesKo[event.message]) return demoMessagesKo[event.message];
   if (code === 'scope.browser_progress' && /[가-힣]/.test(event.message)) return event.message;
   if (code && koreanMessages[code]) return koreanMessages[code](event.message_params || {});
   const oldDraft = /^Scope draft ready for explicit Yes\/No review: (\d+) in-scope and (\d+) out-of-scope assets\.$/.exec(event.message);
@@ -129,5 +256,5 @@ export function localizeActivityMessage(language: Language, event: ActivityMessa
 }
 
 export function localizeAuditEventType(language: Language, eventType: string): string {
-  return language === 'ko' ? auditLabels[eventType] ?? '상태 변경' : eventType;
+  return language === 'ko' ? auditLabels[eventType] ?? '상태 변경' : auditLabelsEn[eventType] ?? eventType;
 }

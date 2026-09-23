@@ -178,10 +178,11 @@ export function startScopeElapsedClock({
   };
 }
 
-export function formatActivityElapsed(seconds: number): string {
+export function formatActivityElapsed(seconds: number, language: 'ko' | 'en' = 'ko'): string {
   const wholeSeconds = Math.max(0, Math.floor(seconds));
   const minutes = Math.floor(wholeSeconds / 60);
   const remainder = wholeSeconds % 60;
+  if (language === 'en') return minutes > 0 ? `${minutes}m ${remainder}s` : `${remainder}s`;
   return minutes > 0 ? `${minutes}분 ${remainder}초` : `${remainder}초`;
 }
 

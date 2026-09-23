@@ -421,5 +421,6 @@ export function translate(language: Language, text: string): string {
 }
 
 export function initialLanguage(): Language {
-  return 'ko';
+  const saved = typeof localStorage === 'undefined' ? null : localStorage.getItem('aidast-language');
+  return saved === 'en' || saved === 'ko' ? saved : 'ko';
 }

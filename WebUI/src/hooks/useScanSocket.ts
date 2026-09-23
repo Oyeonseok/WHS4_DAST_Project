@@ -14,7 +14,7 @@ export function useScanSocket(scanId: string) {
       let current = demoSnapshot();
       setSnapshot(current);
       let tick = 0;
-      const messages = ['정책 예산 확인 완료 · 합성 요청 예약', '픽스처 계정별 응답 서명 비교 중', 'attack_attempts 증거 참조 연결 · 민감정보 제거', '템플릿 묶음 완료 · 후보는 미검토 상태 유지'];
+      const messages = ['Policy budget checked · synthetic requests scheduled', 'Comparing response signatures across fixture accounts', 'attack_attempts evidence references linked · secrets redacted', 'Template batch complete · candidates remain unreviewed'];
       const timer = window.setInterval(() => {
         tick++;
         const event: ScanEvent = { version: 1, event_id: current.last_event_id + 1, scan_id: current.scan_id, occurred_at: new Date().toISOString(), type: 'log.appended', payload: { stage: 'Attack', level: tick % 4 === 0 ? 'success' : 'info', message: messages[(tick - 1) % messages.length] } };
