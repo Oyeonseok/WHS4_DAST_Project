@@ -75,6 +75,16 @@ test('paused scan remains paused even while its current stage is running', () =>
   assert.ok(changed);
   assert.equal(applyEvent(source, changed).status, 'paused');
 });
+test('failed Recon restarts as a new scan while later failed stages can resume', async () => {
+  const { scanRetryAction } = await import('../src/lib/scan.ts');
+  assert.equal(scanRetryAction({ status: 'failed', stage: 'Recon' }), 'rescan');
+  for (const stage of ['Attack', 'Chaining', 'Validation']) {
+    assert.equal(scanRetryAction({ status: 'failed', stage }), 'resume');
+  }
+  assert.equal(scanRetryAction({ status: 'failed', stage: 'Report' }), 'rescan');
+  assert.equal(scanRetryAction({ status: 'cancelled', stage: 'Recon' }), 'rescan');
+  assert.equal(scanRetryAction({ status: 'running', stage: 'Recon' }), null);
+});
 test('structured scan log metadata survives event parsing and stream merging', () => {
   const structured = event(8, { payload: { stage: 'Recon', level: 'info', message: 'started', message_code: 'pipeline.started', message_params: {} } });
   const parsed = parseEvent(structured, DEMO_SCAN);

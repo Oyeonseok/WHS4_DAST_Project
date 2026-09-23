@@ -284,7 +284,9 @@ def test_projection_reads_live_recon_request_budget_counter(tmp_path: Path) -> N
                     "blocked_requests": 2, "updated_at": "2026-09-20T01:00:00Z"}),
         encoding="utf-8",
     )
-    assert DashboardProjector(tmp_path).snapshot(SCAN_ID)["requests"] == 17
+    snapshot = DashboardProjector(tmp_path).snapshot(SCAN_ID)
+    assert snapshot["requests"] == 17
+    assert snapshot["progress"] == 0
 
 
 def test_failed_stage_overrides_completed_scan_in_snapshot_and_list(tmp_path: Path) -> None:

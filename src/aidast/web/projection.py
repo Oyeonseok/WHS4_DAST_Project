@@ -417,12 +417,12 @@ class DashboardProjector:
             source_path = Path(conn.execute("PRAGMA database_list").fetchone()[2])
             progress_path = source_path.parent / f"mitm_capture_{scan_id}.progress.json"
             try:
-                progress = json.loads(progress_path.read_text(encoding="utf-8"))
-                if progress.get("version") == 1 and all(
-                    type(progress.get(key)) is int and 0 <= progress[key] <= 1_000_000
+                request_progress = json.loads(progress_path.read_text(encoding="utf-8"))
+                if request_progress.get("version") == 1 and all(
+                    type(request_progress.get(key)) is int and 0 <= request_progress[key] <= 1_000_000
                     for key in ("allowed_requests", "used_before")
                 ):
-                    requests = max(requests, min(scope.budget, progress["allowed_requests"] + progress["used_before"]))
+                    requests = max(requests, min(scope.budget, request_progress["allowed_requests"] + request_progress["used_before"]))
             except (OSError, ValueError, TypeError, AttributeError):
                 pass
 
