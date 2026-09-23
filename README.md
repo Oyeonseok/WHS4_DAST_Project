@@ -302,7 +302,7 @@ Report를 생성하지 않습니다. 플랫폼에 자동 제출하지 않습니�
 
 ```bash
 aidast report run \
-  result/AttackRuns/<scan_id>/Pipeline.db \
+  result/AttackRuns/<platform>/<program>/<scan_id>/Pipeline.db \
   --case-id <case_id> \
   --platform hackerone \
   --output-dir result/ReportRun/<scan_id>/<case_id>
@@ -360,8 +360,10 @@ form 입력값을 LLM에 전달하지 않습니다.
 
 ### Handoff와 통합 DB
 
-Recon 묶음은 `result/Runs/<scan_id>/`, 후속 단계가 공유하는 DB는
-`result/AttackRuns/<scan_id>/Pipeline.db`에 저장합니다.
+Recon 묶음은 `result/Runs/<platform>/<program>/<scan_id>/`, 후속 단계가 공유하는 DB는
+`result/AttackRuns/<platform>/<program>/<scan_id>/Pipeline.db`에 저장합니다.
+기존 평면 경로의 스캔도 대시보드와 재개 명령에서 계속 조회합니다. 기존 DB의
+원본 경로는 무결성 보호 대상이므로 과거 폴더를 직접 옮기지 마세요.
 
 `Handoff.json`은 관련 artifact의 SHA-256, 크기, 역할과 scan ID를 기록합니다.
 원본 `Recon.db`는 SQLite query-only 모드로 검증하고 backup으로 `Pipeline.db`를
@@ -397,7 +399,7 @@ Ed25519 승인 검증, 요청 intent, 세션 바인딩, 정책 실행기와 내�
 
 ```bash
 aidast validate status \
-  result/AttackRuns/<scan_id>/Pipeline.db \
+  result/AttackRuns/<platform>/<program>/<scan_id>/Pipeline.db \
   --scan-id <scan_id>
 ```
 
@@ -435,14 +437,15 @@ Report는 해당 Validation case가 허용한 evidence만 인용합니다. 생�
 기본 산출물은 Git에서 제외되는 `result/` 아래에 저장됩니다.
 
 - `Scope/<platform>/<program>/`: 프로그램별 Scope와 승인 정보
-- `Runs/<scan_id>/`: Recon, Surface, Handoff 산출물
-- `AttackRuns/<scan_id>/`: 통합 `Pipeline.db`
+- `Runs/<platform>/<program>/<scan_id>/`: Recon, Surface, Handoff 산출물
+- `AttackRuns/<platform>/<program>/<scan_id>/`: 통합 `Pipeline.db`
 - `ReportRun/`: case 기반 Report 초안
 - `AttackRun/`, `ValidationRun/`: Legacy 호환 데이터
 - `.aidast_sessions/`: 로컬 로그인 세션
 
-`--output-dir`, `--db-path`, `--surface-path`, `--run-root` 등으로 경로를
-명시하면 해당 경로를 사용합니다.
+`--run-root`와 `--attack-output-root`는 각각 프로그램별 하위 폴더를 만들
+기준 경로를 지정합니다. `--output-dir`, `--db-path`, `--surface-path`는
+해당 명령의 출력 경로를 지정합니다.
 
 ## 프로젝트 구조
 

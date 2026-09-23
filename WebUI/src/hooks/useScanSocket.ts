@@ -3,7 +3,7 @@ import { applyEvent, applyOrderedEvent, parseEvent, parseSnapshot, type Snapshot
 import { demoSnapshot } from '../data/demo';
 
 export const transportMode = import.meta.env.VITE_TRANSPORT === 'live' ? 'live' : 'demo';
-type Connection = 'loading' | 'demo' | 'connecting' | 'live' | 'reconnecting' | 'offline';
+type Connection = 'idle' | 'loading' | 'demo' | 'connecting' | 'live' | 'reconnecting' | 'offline';
 export function useScanSocket(scanId: string) {
   const [snapshot, setSnapshot] = useState<Snapshot | null>(transportMode === 'demo' ? demoSnapshot : null);
   const [state, setState] = useState<Connection>(transportMode === 'demo' ? 'demo' : 'loading');
@@ -14,7 +14,7 @@ export function useScanSocket(scanId: string) {
       let current = demoSnapshot();
       setSnapshot(current);
       let tick = 0;
-      const messages = ['Policy budget checked · synthetic request reserved', 'Comparing response signatures across fixture identities', 'Evidence reference linked to attack_attempts · sensitive fields removed', 'Template batch completed · candidate remains unreviewed'];
+      const messages = ['Policy budget checked · synthetic requests scheduled', 'Comparing response signatures across fixture accounts', 'attack_attempts evidence references linked · secrets redacted', 'Template batch complete · candidates remain unreviewed'];
       const timer = window.setInterval(() => {
         tick++;
         const event: ScanEvent = { version: 1, event_id: current.last_event_id + 1, scan_id: current.scan_id, occurred_at: new Date().toISOString(), type: 'log.appended', payload: { stage: 'Attack', level: tick % 4 === 0 ? 'success' : 'info', message: messages[(tick - 1) % messages.length] } };
@@ -26,7 +26,7 @@ export function useScanSocket(scanId: string) {
     }
     if (!scanId) {
       setSnapshot(null);
-      setState('loading');
+      setState('idle');
       setError('No scans are available yet. Use New scan to start from a verified approved Scope.');
       return;
     }

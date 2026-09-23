@@ -61,6 +61,7 @@ class MitmAddonBudgetTests(unittest.TestCase):
                 method=method,
                 headers=dict(headers or {}),
                 content=content,
+                get_text=lambda strict=False: content.decode("utf-8", errors="replace"),
             ),
             metadata={},
             response=None,
@@ -108,7 +109,7 @@ class MitmAddonBudgetTests(unittest.TestCase):
         addon.request(duplicate)
         self.assertEqual(duplicate.metadata["aidast_priority"], 6)
         self.assertTrue(duplicate.metadata["aidast_duplicate"])
-        self.assertEqual(addon.request_count, before_duplicate)
+        self.assertEqual(addon.request_count, before_duplicate + 1)
 
         ffuf = self._flow("/guess", headers={"X-AIDAST-Source": "ffuf"})
         addon.request(ffuf)
@@ -154,6 +155,40 @@ class MitmAddonBudgetTests(unittest.TestCase):
         for content in (b"first", b"second"):
             addon.request(self._flow("/api/items", content=content))
         self.assertEqual(addon.request_count, 2)
+
+    def test_repeated_static_requests_cannot_bypass_total_budget(self):
+        addon = self._addon()
+        for _ in range(8):
+            flow = self._flow("/assets/app.js")
+            addon.request(flow)
+            self.assertIsNone(flow.response)
+        blocked = self._flow("/assets/app.js")
+        addon.request(blocked)
+        self.assertIsNotNone(blocked.response)
+        self.assertEqual(addon.request_count, 8)
+        self.assertTrue(blocked.metadata["aidast_duplicate"])
+
+    def test_static_and_duplicate_responses_do_not_capture_bodies(self):
+        addon = self._addon()
+        addon.rules["mitm_capture_bodies"] = True
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            addon.out_path = Path(temporary_dir) / "capture.jsonl"
+            for path in ("/assets/app.js", "/api/items", "/api/items"):
+                flow = self._flow(path)
+                addon.request(flow)
+                flow.response = SimpleNamespace(
+                    status_code=200, headers={"Content-Type": "text/plain"},
+                    content=b"response-payload", get_text=lambda strict=False: "response-payload",
+                )
+                addon.response(flow)
+            import json
+            rows = [json.loads(line) for line in addon.out_path.read_text().splitlines()]
+            progress = json.loads(addon.out_path.with_suffix(".progress.json").read_text())
+        self.assertFalse(rows[0]["capture_bodies"])
+        self.assertTrue(rows[1]["capture_bodies"])
+        self.assertFalse(rows[2]["capture_bodies"])
+        self.assertEqual([row["response_body"] for row in rows], [None, "response-payload", None])
+        self.assertEqual(progress["allowed_requests"], 1)
 
 
 class MitmProxyStartupTests(unittest.TestCase):

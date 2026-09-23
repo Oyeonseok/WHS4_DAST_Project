@@ -43,6 +43,7 @@ from aidast.recon.judgment import is_probable_redirect_loop_path
 from aidast.auth.endpoints import AuthenticationEndpoint, normalize_origin
 from aidast.core.http_safety import BROWSER_MODE_HEADER, BROWSER_TOKEN_HEADER
 from aidast.recon.tools.api_secondary_discovery import _http_request
+from aidast.recon.tools.page_identity import canonical_visit_key, screen_fingerprint
 
 
 def _wait_for_manual_login(timeout_seconds: int = 300) -> bool:
@@ -135,6 +136,12 @@ class InteractionConfig:
     max_pages: int = 30
 
     max_actions_per_page: int = 10
+
+    # By default the page and per-page limits provide the hard ceiling.
+    # A smaller explicit value can still be supplied for constrained runs.
+    max_total_actions: int | None = None
+
+    max_pass_seconds: float = 180.0
 
     action_wait_ms: int = 500
 
@@ -252,7 +259,9 @@ class PlaywrightDriver:
         self.authentication_endpoints: list[AuthenticationEndpoint] = []
         self._observation_cursor = 0
         self._interaction_visited: set[str] = set()
+        self._interaction_seen_screens: set[str] = set()
         self._interaction_page_count = 0
+        self.last_interaction_duplicate_screens = 0
         self._context_serial = 0
         self._action_context = None
 
@@ -2524,6 +2533,7 @@ class PlaywrightDriver:
         )
 
         url = urljoin(self.base_url.rstrip("/") + "/", path)
+        previous_url = page.url
 
         try:
 
@@ -2550,6 +2560,18 @@ class PlaywrightDriver:
             return False
 
         if response is None:
+            # Playwright returns no HTTP response for same-document fragment
+            # navigation. SPA hash routes still need a rendered-screen check.
+            previous = urlparse(previous_url)
+            target = urlparse(url)
+            if (target.fragment and target.fragment != previous.fragment
+                    and (previous.scheme, previous.netloc, previous.path, previous.query)
+                    == (target.scheme, target.netloc, target.path, target.query)
+                    and canonical_visit_key(page.url) == canonical_visit_key(url)):
+                try:
+                    return "html" in str(page.evaluate("document.contentType")).lower()
+                except Exception:
+                    return False
             return False
 
         # 해당 Endpoint가 401이라고 해서
@@ -2626,6 +2648,9 @@ class PlaywrightDriver:
 
     def trigger_safe_actions(
         self,
+        *,
+        max_actions: int | None = None,
+        deadline: float | None = None,
     ) -> int:
 
         page = (
@@ -2674,6 +2699,8 @@ class PlaywrightDriver:
                 actions
                 >=
                 config.max_actions_per_page
+            ) or (max_actions is not None and actions >= max_actions) or (
+                deadline is not None and time.monotonic() >= deadline
             ):
 
                 break
@@ -2829,6 +2856,52 @@ class PlaywrightDriver:
     # Interaction Pass
     # =====================================================
 
+    def _current_screen_fingerprint(self) -> str | None:
+        """Read only visible content and control labels after a page has loaded."""
+        page = self._ensure_page()
+        try:
+            current_url = page.url
+            if not self._same_origin(current_url):
+                return None
+            snapshot = page.evaluate("""() => {
+                const main = document.querySelector('main, [role="main"]') || document.body;
+                const controls = [...document.querySelectorAll(
+                    '[role="tab"], button[aria-controls], button[aria-expanded], '
+                    'button[aria-haspopup], [role="button"][aria-controls], '
+                    '[role="button"][aria-expanded], [role="button"][aria-haspopup], '
+                    'summary, nav button'
+                )].filter(el => el.getClientRects().length).slice(0, 100).map(el =>
+                    [el.tagName, el.getAttribute('role') || '',
+                     el.getAttribute('aria-label') || '',
+                     el.getAttribute('aria-selected') || '',
+                     el.getAttribute('aria-expanded') || '',
+                     el.getAttribute('aria-controls') || '', el.innerText || ''].join(' '));
+                const text = main?.innerText || '';
+                return {
+                    main_text: text.length > 16000
+                        ? text.slice(0, 12000) + String.fromCharCode(10) + text.slice(-4000) : text,
+                    text_length: text.length,
+                    controls
+                };
+            }""")
+            parsed = urlparse(current_url)
+            return screen_fingerprint(snapshot, origin=f"{parsed.scheme}://{parsed.netloc}")
+        except Exception:
+            return None
+
+    def _screen_was_explored(self, url: str) -> bool:
+        key = canonical_visit_key(url)
+        fingerprint = self._current_screen_fingerprint()
+        if fingerprint is not None:
+            duplicate = fingerprint in self._interaction_seen_screens
+            self._interaction_seen_screens.add(fingerprint)
+        else:
+            duplicate = key in self._interaction_visited
+        self._interaction_visited.add(key)
+        if duplicate:
+            self.last_interaction_duplicate_screens += 1
+        return duplicate
+
     def run_interaction_pass(
         self,
         endpoints: list[dict],
@@ -2849,6 +2922,11 @@ class PlaywrightDriver:
         visited = self._interaction_visited
         pages = self._interaction_page_count
         pages_at_start = pages
+        self.last_interaction_duplicate_screens = 0
+        deadline = time.monotonic() + self.interaction_config.max_pass_seconds
+        action_limit = (self.interaction_config.max_total_actions
+                        if self.interaction_config.max_total_actions is not None
+                        else self.interaction_config.max_pages * self.interaction_config.max_actions_per_page)
 
         actions = 0
 
@@ -2880,12 +2958,14 @@ class PlaywrightDriver:
                 )
 
             current_url = page.url
-            current_path = urlparse(current_url).path or "/"
-            if current_path not in visited and pages < self.interaction_config.max_pages:
+            if pages < self.interaction_config.max_pages and time.monotonic() < deadline:
                 page.wait_for_timeout(500)
-                actions += self.trigger_safe_actions()
-                pages += 1
-                visited.add(current_path)
+                if not self._screen_was_explored(current_url):
+                    actions += self.trigger_safe_actions(
+                        max_actions=action_limit - actions,
+                        deadline=deadline,
+                    )
+                    pages += 1
 
         except Exception:
             pass
@@ -2896,12 +2976,9 @@ class PlaywrightDriver:
 
         for endpoint in endpoints:
 
-            if (
-                pages
-                >=
-                self.interaction_config
-                .max_pages
-            ):
+            if (pages >= self.interaction_config.max_pages
+                    or actions >= action_limit
+                    or time.monotonic() >= deadline):
 
                 break
 
@@ -2925,7 +3002,9 @@ class PlaywrightDriver:
             if not path:
                 continue
 
-            if path in visited:
+            url = urljoin(self.base_url.rstrip("/") + "/", path)
+            key = canonical_visit_key(url)
+            if key in visited:
                 continue
 
             if self._path_looks_dangerous(
@@ -2934,14 +3013,10 @@ class PlaywrightDriver:
 
                 continue
 
-            visited.add(
-                path
-            )
-
             if not self.visit_path(
                 path
             ):
-
+                visited.add(key)
                 continue
 
             pages += 1
@@ -2956,9 +3031,24 @@ class PlaywrightDriver:
             except Exception:
                 pass
 
+            duplicate_screen = self._screen_was_explored(self._ensure_page().url)
+            visited.add(key)
+            if duplicate_screen:
+                continue
+
             actions += (
-                self.trigger_safe_actions()
+                self.trigger_safe_actions(
+                    max_actions=action_limit - actions,
+                    deadline=deadline,
+                )
             )
+
+        self.last_interaction_stop_reason = (
+            "time_limit" if time.monotonic() >= deadline else
+            "action_limit" if actions >= action_limit else
+            "page_limit" if pages >= self.interaction_config.max_pages else
+            "completed"
+        )
 
         print()
         print(
@@ -2971,6 +3061,8 @@ class PlaywrightDriver:
             f"  [Playwright] "
             f"UI Action : {actions}개"
         )
+
+        print(f"  [Playwright] 이미 본 화면 건너뜀 : {self.last_interaction_duplicate_screens}개")
 
         print(
             f"  [Playwright] "

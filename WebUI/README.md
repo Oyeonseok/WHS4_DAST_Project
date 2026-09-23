@@ -105,6 +105,17 @@ npm run preview -- --port 4173
 의존성 버전은 `package.json`과 `package-lock.json`에 고정되어 있습니다. 테스트는
 Node.js 기본 `node:test`를 사용합니다.
 
+### 한국어 문구 추가
+
+화면의 고정 문구는 `src/lib/i18n.ts`의 `ko` 목록에 등록하고 `tr(...)`로 표시합니다.
+`npm run build`는 `scripts/check-i18n.mjs`를 실행해 고정 문구의 번역 누락을
+오류로 처리합니다.
+
+Scope 수집 및 스캔 활동은 서버가 `message_code`와 필요한 `message_params`를
+전달합니다. 새 활동 종류를 만들 때 `src/lib/activityMessages.ts`에 한국어 문구를
+함께 등록하세요. 빌드 검사는 백엔드에 추가된 메시지 코드의 번역 등록 여부도
+확인합니다. 기존 저장 이벤트의 `message`는 호환용으로 유지됩니다.
+
 ## 데모 모드와 라이브 모드
 
 ### 데모 모드

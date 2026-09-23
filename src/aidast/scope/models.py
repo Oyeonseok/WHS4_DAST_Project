@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 from enum import StrEnum
-from typing import Annotated
+from typing import Annotated, Literal
 
 from pydantic import (
     AwareDatetime,
@@ -60,6 +60,21 @@ class CaptureReason(StrEnum):
     ACCESS_DENIED = "ACCESS_DENIED"
     CONTENT_INCOMPLETE = "CONTENT_INCOMPLETE"
     UNKNOWN = "UNKNOWN"
+
+
+class ScopeNavigationDecision(StrictModel):
+    """One bounded choice among controls already observed on the program page."""
+
+    action: Literal["capture", "open"]
+    candidate_id: int | None
+
+    @model_validator(mode="after")
+    def check_candidate(self) -> ScopeNavigationDecision:
+        if (self.action == "open") != (self.candidate_id is not None):
+            raise ValueError("open requires a candidate_id; capture requires null")
+        if self.candidate_id is not None and self.candidate_id < 0:
+            raise ValueError("candidate_id must be non-negative")
+        return self
 
 
 class ScopeAsset(StrictModel):

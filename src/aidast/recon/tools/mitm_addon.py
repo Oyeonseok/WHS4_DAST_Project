@@ -19,6 +19,8 @@ import json
 import hmac
 import hashlib
 import runpy
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -59,7 +61,9 @@ class ScopeAndCaptureAddon:
         self.out_path: Path | None = None
         self.rules: dict = {}
         self.request_count = 0
+        self.blocked_request_count = 0
         self.budget_used_before = 0
+        self._last_progress_write = 0.0
         self.seen_requests: set[tuple[str, ...]] = set()
         self.enforcement_required = True
 
@@ -136,8 +140,9 @@ class ScopeAndCaptureAddon:
         phase_hint = str(flow.request.headers.pop("X-AIDAST-Phase", "")).lower()
         source_hint = str(flow.request.headers.pop("X-AIDAST-Source", "")).lower()
         method = flow.request.method.upper()
-        # Prioritize browser API/document traffic over crawler noise. Static
-        # resources and duplicate requests do not consume the finite budget.
+        # Prioritize browser API/document traffic over crawler noise. Every
+        # forwarded request still consumes the finite total budget, including
+        # static resources and duplicates from browser reloads.
         resource = str(flow.request.headers.get("Sec-Fetch-Dest", "")).lower()
         is_static = path.rsplit("/", 1)[-1].split("?", 1)[0].lower().endswith(
             (".js", ".css", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".woff", ".woff2", ".ttf", ".map")
@@ -146,7 +151,6 @@ class ScopeAndCaptureAddon:
             method, parsed, getattr(flow.request, "content", b"") or b""
         )
         duplicate = request_key in self.seen_requests
-        self.seen_requests.add(request_key)
         fetch_mode = str(flow.request.headers.get("Sec-Fetch-Mode", "")).lower()
         if support_mode and (
             method not in {"GET", "HEAD"}
@@ -182,7 +186,7 @@ class ScopeAndCaptureAddon:
             and not any(self._path_matches(path, prefix) for prefix in excluded_paths)
         )
         request_allowed = bool(boundary_allowed or support_mode)
-        counts_against_budget = request_allowed and not duplicate and priority < 6
+        counts_against_budget = request_allowed
         # Evaluate against the count that would result if this request is
         # admitted. A rejected candidate is deferred, not consumed: otherwise
         # a flood of low-priority traffic beyond its quota could also exhaust
@@ -190,11 +194,11 @@ class ScopeAndCaptureAddon:
         candidate_request_count = self.request_count + int(counts_against_budget)
         global_request_count = self.budget_used_before + candidate_request_count
         allowed = request_allowed and (
-            not counts_against_budget
-            or global_request_count <= (budget_total if priority <= 2 else noncritical_limit)
+            global_request_count <= (budget_total if priority <= 2 else noncritical_limit)
         )
         if allowed and counts_against_budget:
             self.request_count = candidate_request_count
+            self.seen_requests.add(request_key)
         if support_mode:
             flow.metadata["aidast_browser_support"] = support_mode
         flow.metadata["aidast_traffic_class"] = (
@@ -208,7 +212,32 @@ class ScopeAndCaptureAddon:
         )
         if not allowed:
             flow.metadata["aidast_deferred_candidate"] = True
+            self.blocked_request_count += 1
             self._block(flow)
+        self._write_progress()
+
+    def _write_progress(self, *, force: bool = False) -> None:
+        if self.out_path is None or (not force and self._last_progress_write
+                                     and time.monotonic() - self._last_progress_write < 1):
+            return
+        path = self.out_path.with_suffix(".progress.json")
+        temporary = path.with_suffix(".progress.tmp")
+        payload = {
+            "version": 1,
+            "allowed_requests": self.request_count,
+            "blocked_requests": self.blocked_request_count,
+            "used_before": self.budget_used_before,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        try:
+            temporary.write_text(json.dumps(payload, separators=(",", ":")), encoding="utf-8")
+            temporary.replace(path)
+            self._last_progress_write = time.monotonic()
+        except OSError:
+            pass
+
+    def done(self) -> None:
+        self._write_progress(force=True)
 
     def _authorized_browser_support(
         self, flow, parsed, host_allowed: bool, host_excluded: bool
@@ -270,6 +299,8 @@ class ScopeAndCaptureAddon:
             self.scope_loaded
             and self.rules.get("mitm_capture_bodies", False) is True
             and support_mode != "passive"
+            and not flow.metadata.get("aidast_static_resource")
+            and not flow.metadata.get("aidast_duplicate")
         )
         record = {
             "source": "mitmproxy",

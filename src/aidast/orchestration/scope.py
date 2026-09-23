@@ -83,19 +83,30 @@ class ScopeCoordinator:
         primary_reader: ProgramPageReader | None = None,
         fallback_reader: ProgramPageReader | None = None,
         draft_root: Path | str | None = None,
+        progress: Callable[[str, dict[str, int]], None] | None = None,
     ) -> tuple[ScopeDocument, Path]:
         """Collect an unapproved draft for a later explicit review decision."""
+        def report(phase: str, **counts: int) -> None:
+            if progress is not None:
+                progress(phase, counts)
+
         if self.output_dir.exists():
             raise CoordinatorError(
                 f"scope output already exists: {self.output_dir}; "
                 "move or remove it before collecting a new scope"
             )
         if primary_reader is not None:
+            report("page_read_started")
             page = primary_reader.read(program_url)
             self._require_complete_capture(page)
+            report("page_read_completed", characters=len(page.text))
+            report("analysis_started")
             analysis = main_agent.interpret_captured_scope(page)
+            report("analysis_completed", in_scope=len(analysis.in_scope_assets), out_of_scope=len(analysis.out_of_scope_assets))
         else:
+            report("collection_started")
             page, analysis = main_agent.collect_scope(program_url)
+            report("collection_completed", characters=len(page.text), in_scope=len(analysis.in_scope_assets), out_of_scope=len(analysis.out_of_scope_assets))
         if (
             page.capture_reason is CaptureReason.JAVASCRIPT_RENDER_INCOMPLETE
             and fallback_reader is not None
@@ -109,15 +120,23 @@ class ScopeCoordinator:
                 )
             ):
                 page = fallback_page
+                report("page_read_completed", characters=len(page.text))
+                report("analysis_started")
                 analysis = main_agent.interpret_captured_scope(page)
+                report("analysis_completed", in_scope=len(analysis.in_scope_assets), out_of_scope=len(analysis.out_of_scope_assets))
         self._require_complete_capture(page)
+        report("verification_started")
+        self._require_grounded_analysis(page, analysis)
+        report("verification_completed")
         document = ScopeDocument(
             scope_id=f"scope_{uuid4().hex}",
             created_at=datetime.now(timezone.utc),
             source=page,
             analysis=analysis,
         )
+        report("draft_started")
         staging = self._create_scope_draft(document, draft_root=draft_root)
+        report("draft_completed")
         return document, staging
 
     # 초안의 무결성을 확인하고 승인된 Scope로 게시
@@ -163,7 +182,38 @@ class ScopeCoordinator:
                 f"({page.capture_reason.value}); no Scope.md was generated"
             )
 
-    # 저장된 Scope의 승인 정보를 검증하고 반환
+    @staticmethod
+    def _require_grounded_analysis(page: ProgramPage, analysis: ScopeAnalysis) -> None:
+        if not analysis.program_description.strip() or not analysis.in_scope_assets:
+            raise CoordinatorError(
+                "Scope analysis lacks an explicit program description or target list; "
+                "no Scope.md was generated"
+            )
+        if not (
+            analysis.out_of_scope_assets
+            or analysis.prohibited_activities
+            or analysis.operational_constraints
+        ):
+            raise CoordinatorError(
+                "Scope analysis lacks rules, exclusions, or constraints; "
+                "no Scope.md was generated"
+            )
+        for evidence in analysis.source_evidence:
+            if evidence.quote not in page.text:
+                raise CoordinatorError(
+                    "Scope analysis contains a quote absent from the captured page; "
+                    "no Scope.md was generated"
+                )
+        for asset in analysis.in_scope_assets:
+            if asset.asset not in page.text or not any(
+                asset.asset in evidence.quote
+                for evidence in analysis.source_evidence
+            ):
+                raise CoordinatorError(
+                    "Scope analysis lacks exact source evidence for an in-scope asset; "
+                    "no Scope.md was generated"
+                )
+
     def verify_approval(self) -> ScopeApproval:
         approval, _, _ = self._load_verified_snapshot()
         return approval

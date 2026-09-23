@@ -84,11 +84,16 @@ class ApiSecondaryPolicyTests(unittest.TestCase):
     def test_discovery_candidates_share_one_request_budget(self) -> None:
         policy = self._policy().model_copy(deep=True)
         policy.limits.max_requests = 2
+        events: list[tuple[str, str]] = []
         with patch("aidast.recon.tools.api_secondary_discovery.build_opener") as opener:
             opener.return_value.open.side_effect = lambda *args, **kwargs: self._response()
             result = discover_api_secondary("https://example.com/api", [], target_policy=policy,
-                                            proxy_url="http://127.0.0.1:8080")
+                                            proxy_url="http://127.0.0.1:8080",
+                                            diagnostic_callback=lambda event, **details: events.append((event, details["phase"])))
         self.assertEqual(result, [])
+        self.assertIn(("phase_started", "openapi_detection"), events)
+        self.assertIn(("phase_completed", "graphql_detection"), events)
+        self.assertIn(("phase_skipped", "zap_openapi"), events)
         self.assertEqual(opener.call_count, 1)
         self.assertEqual(opener.return_value.open.call_count, 2)
 

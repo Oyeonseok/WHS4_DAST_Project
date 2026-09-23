@@ -364,7 +364,7 @@ Scope → AI-Dast Recon → 태깅
 추가합니다. 복제 전후 원본 해시가 달라지면 파이프라인을 중단합니다.
 
 ```text
-result/Runs/<scan_id>/
+result/Runs/<platform>/<program>/<scan_id>/
 ├── Recon.db
 ├── Surface.json
 ├── ReconReview.json
@@ -373,7 +373,7 @@ result/Runs/<scan_id>/
 ├── TargetPolicy.json
 └── Handoff.json
 
-result/AttackRuns/<scan_id>/
+result/AttackRuns/<platform>/<program>/<scan_id>/
 └── Pipeline.db
 ```
 
@@ -389,18 +389,18 @@ Report 단계를 건너뜁니다. `CodexMainAgent`는 단계별 adapter 이름�
 
 ```bash
 aidast attack review \
-  result/Runs/<scan_id>/Handoff.json \
-  --output-dir result/AttackRuns/<scan_id>
+  result/Runs/<platform>/<program>/<scan_id>/Handoff.json \
+  --output-dir result/AttackRuns/<platform>/<program>/<scan_id>
 
 aidast attack plan \
-  result/Runs/<scan_id>/Handoff.json \
-  --output-dir result/AttackRuns/<scan_id>
+  result/Runs/<platform>/<program>/<scan_id>/Handoff.json \
+  --output-dir result/AttackRuns/<platform>/<program>/<scan_id>
 
 aidast attack status \
-  result/AttackRuns/<scan_id>/Attack.db
+  result/AttackRuns/<platform>/<program>/<scan_id>/Attack.db
 
 aidast attack revoke \
-  result/AttackRuns/<scan_id>/Attack.db \
+  result/AttackRuns/<platform>/<program>/<scan_id>/Attack.db \
   --reason "검토 중단"
 ```
 
@@ -411,8 +411,9 @@ adapter의 HEAD/GET/OPTIONS 응답 메타데이터만 관찰합니다. 신뢰된
 
 Recon handoff와 원본 파일 SHA-256은 DB를 열 때마다 다시 확인합니다.
 SQLite `-wal`, `-journal`, `-shm` 파일이 없는 완결된 Recon snapshot이 필요합니다.
-Review config와 계획은 상대 경로를 사용하므로 `result/Runs/`와
-`result/AttackRuns/`의 상대 배치를 유지하면 함께 이동할 수 있습니다.
+Review config와 계획은 상대 경로를 사용합니다. 통합 `Pipeline.db`의 원본 경로는
+무결성 보호 대상이므로 완료된 평면 경로의 스캔을 직접 옮기지 마세요. 새 스캔은
+처음부터 프로그램별 경로에 저장하며, 기존 평면 경로도 조회·재개할 수 있습니다.
 
 `approve`와 `execute`는 신뢰된 애플리케이션이
 `main(argv, attack_workflow=...)`로 검증 경계를 주입한 경우에만 사용할 수 있습니다.
@@ -520,16 +521,16 @@ result/
 ├── Recon.db
 ├── Surface.json
 ├── ReconReview.json
-├── Runs/<scan_id>/
-├── AttackRuns/<scan_id>/Pipeline.db
+├── Runs/<platform>/<program>/<scan_id>/
+├── AttackRuns/<platform>/<program>/<scan_id>/Pipeline.db
 ├── AttackRun/                     # legacy
 ├── ValidationRun/                 # legacy
 ├── ReportRun/<scan_id>/<case_id>/
 └── .aidast_sessions/
 ```
 
-`--output-dir`, `--db-path`, `--surface-path`, `--run-root` 등으로 경로를 직접
-지정하면 명시한 경로를 사용합니다.
+`--run-root`와 `--attack-output-root`는 프로그램별 폴더를 만들 기준 경로입니다.
+`--output-dir`, `--db-path`, `--surface-path`는 해당 명령의 출력 경로입니다.
 
 핵심 코드는 `src/aidast/recon`, `pipeline`, `attack`, `chaining`, `validation`,
 `reporting`으로 나뉩니다. Stage orchestration은 `src/aidast/orchestration`,
