@@ -33,6 +33,8 @@ from aidast.scope.models import AssetType
 from aidast.scope.paths import ScopePathError, resolve_scope_directory
 
 from .projection import DashboardProjector, ScanNotFoundError
+from .process_identity import process_args, process_cwd, process_stat
+from .process_control import control_process
 from .requirements import (
     IdentityHeader,
     ScopeExecutionRequirements,
@@ -48,6 +50,10 @@ EXECUTABLE_TYPES = {
     AssetType.IP_ADDRESS,
 }
 _HANDLE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+
+
+def _windows_host() -> bool:
+    return os.name == "nt"
 
 
 def _now() -> str:
@@ -394,7 +400,9 @@ class ScanLaunchManager:
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 shell=False,
-                start_new_session=os.name != "nt",
+                start_new_session=not _windows_host(),
+                **({"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+                   if _windows_host() else {}),
             )
         except OSError as exc:
             job.status = "failed"
@@ -444,7 +452,9 @@ class ScanLaunchManager:
                     argv, cwd=self.project_root, env=env,
                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL, shell=False,
-                    start_new_session=os.name != "nt",
+                    start_new_session=not _windows_host(),
+                    **({"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+                       if _windows_host() else {}),
                 )
             except OSError as exc:
                 raise ValueError("scan resume process could not be started") from exc
@@ -473,14 +483,13 @@ class ScanLaunchManager:
 
     @staticmethod
     def _process_stat(pid: int) -> tuple[str, str]:
-        fields = Path(f"/proc/{pid}/stat").read_text().split(") ", 1)[1].split()
-        return fields[0], fields[19]
+        return process_stat(pid)
 
     def _record_process(self, scan_id: str, process: Any) -> None:
-        if os.name != "posix" or not isinstance(process, subprocess.Popen):
+        if (os.name != "posix" and not _windows_host()) or not isinstance(process, subprocess.Popen):
             return
         pid = process.pid
-        if os.getpgid(pid) != pid:
+        if not _windows_host() and os.getpgid(pid) != pid:
             raise ValueError("scan process was not started in an isolated session")
         _state, started = self._process_stat(pid)
         marker = self._process_marker(scan_id)
@@ -495,7 +504,7 @@ class ScanLaunchManager:
 
     def _isolated_scan_pid(self, scan_id: str) -> int | None:
         """Recover only the exact process recorded by this dashboard."""
-        if os.name != "posix":
+        if os.name != "posix" and not _windows_host():
             return None
         try:
             marker = json.loads(self._process_marker(scan_id).read_text(encoding="utf-8"))
@@ -505,15 +514,15 @@ class ScanLaunchManager:
         started = marker.get("started") if isinstance(marker, dict) else None
         if type(pid) is not int or pid < 2 or not isinstance(started, str):
             return None
-        entry = Path(f"/proc/{pid}")
         try:
             state, actual_start = self._process_stat(pid)
-            if actual_start != started or state == "Z" or os.getpgid(pid) != pid:
+            if actual_start != started or state == "Z":
                 return None
-            if Path(os.readlink(entry / "cwd")).resolve() != self.project_root:
+            if not _windows_host() and os.getpgid(pid) != pid:
                 return None
-            args = [part.decode("utf-8", "replace") for part in
-                    (entry / "cmdline").read_bytes().split(b"\0") if part]
+            if process_cwd(pid) != self.project_root:
+                return None
+            args = process_args(pid)
             if args[1:3] != ["-m", "aidast"]:
                 return None
             if args[3:4] == ["run"]:
@@ -530,6 +539,16 @@ class ScanLaunchManager:
         if pid is None:
             raise ValueError("this scan has no isolated active process managed by this dashboard")
         os.killpg(pid, signum)
+        return pid
+
+    def _control_scan(self, scan_id: str, action: str) -> int:
+        pid = self._isolated_scan_pid(scan_id)
+        if pid is None:
+            raise ValueError("this scan has no isolated active process managed by this dashboard")
+        marker = json.loads(self._process_marker(scan_id).read_text(encoding="utf-8"))
+        if marker.get("pid") != pid or not isinstance(marker.get("started"), str):
+            raise ValueError("scan process identity changed")
+        control_process(pid, marker["started"], action)
         return pid
 
     def _set_scan_pause_status(self, scan_id: str, *, expected: str, status: str) -> None:
@@ -553,19 +572,23 @@ class ScanLaunchManager:
 
     def pause(self, scan_id: str) -> dict[str, str]:
         self.projector.validate_scan_id(scan_id)
-        if os.name != "posix":
-            raise ValueError("scan pause is available only on POSIX hosts")
+        if os.name != "posix" and not _windows_host():
+            raise ValueError("scan pause is unavailable on this host")
         with self._lock:
             job = self._jobs.get(scan_id)
             if job is not None and job.stop_requested:
                 raise ValueError("scan cancellation is already in progress")
             if self._persisted_scan_status(scan_id) != "running":
                 raise ValueError("scan is not running")
-            pid = self._signal_pid(scan_id, signal.SIGSTOP)
+            pid = (self._control_scan(scan_id, "pause") if _windows_host()
+                   else self._signal_pid(scan_id, signal.SIGSTOP))
             try:
                 self._set_scan_pause_status(scan_id, expected="running", status="paused")
             except (OSError, sqlite3.Error, ValueError):
-                os.killpg(pid, signal.SIGCONT)
+                if _windows_host():
+                    self._control_scan(scan_id, "resume")
+                else:
+                    os.killpg(pid, signal.SIGCONT)
                 raise
             if job is not None:
                 job.status = "paused"
@@ -575,16 +598,20 @@ class ScanLaunchManager:
 
     def continue_scan(self, scan_id: str) -> dict[str, str]:
         self.projector.validate_scan_id(scan_id)
-        if os.name != "posix":
-            raise ValueError("scan pause is available only on POSIX hosts")
+        if os.name != "posix" and not _windows_host():
+            raise ValueError("scan pause is unavailable on this host")
         with self._lock:
             if self._persisted_scan_status(scan_id) != "paused":
                 raise ValueError("scan is not paused")
-            pid = self._signal_pid(scan_id, signal.SIGCONT)
+            pid = (self._control_scan(scan_id, "resume") if _windows_host()
+                   else self._signal_pid(scan_id, signal.SIGCONT))
             try:
                 self._set_scan_pause_status(scan_id, expected="paused", status="running")
             except (OSError, sqlite3.Error, ValueError):
-                os.killpg(pid, signal.SIGSTOP)
+                if _windows_host():
+                    self._control_scan(scan_id, "pause")
+                else:
+                    os.killpg(pid, signal.SIGSTOP)
                 raise
             job = self._jobs.get(scan_id)
             if job is not None:
@@ -605,8 +632,14 @@ class ScanLaunchManager:
                 if pid is None:
                     raise ValueError("this scan has no isolated active process managed by this dashboard")
                 if status == "paused":
-                    os.killpg(pid, signal.SIGCONT)
-                os.killpg(pid, signal.SIGTERM)
+                    if _windows_host():
+                        self._control_scan(scan_id, "resume")
+                    else:
+                        os.killpg(pid, signal.SIGCONT)
+                if _windows_host():
+                    self._control_scan(scan_id, "terminate")
+                else:
+                    os.killpg(pid, signal.SIGTERM)
                 threading.Thread(target=self._finish_adopted_cancel,
                                  args=(scan_id, pid), daemon=True).start()
                 self._log(scan_id, "cancel.requested", "Recon", "Scan cancellation requested.",
@@ -620,9 +653,15 @@ class ScanLaunchManager:
                 raise ValueError("scan process has already exited")
             job.stop_requested = True
             try:
-                if job.status == "paused" and isinstance(job.process, subprocess.Popen) and os.name == "posix":
-                    os.killpg(job.process.pid, signal.SIGCONT)
-                self._terminate_process(job.process)
+                if job.status == "paused" and isinstance(job.process, subprocess.Popen):
+                    if _windows_host():
+                        self._control_scan(scan_id, "resume")
+                    elif os.name == "posix":
+                        os.killpg(job.process.pid, signal.SIGCONT)
+                if _windows_host() and isinstance(job.process, subprocess.Popen):
+                    self._control_scan(scan_id, "terminate")
+                else:
+                    self._terminate_process(job.process)
             except (OSError, subprocess.SubprocessError) as exc:
                 job.stop_requested = False
                 raise ValueError("scan process could not be stopped") from exc
@@ -641,8 +680,11 @@ class ScanLaunchManager:
             time.sleep(0.1)
         if self._isolated_scan_pid(scan_id) == pid:
             try:
-                os.killpg(pid, signal.SIGKILL)
-            except ProcessLookupError:
+                if _windows_host():
+                    self._control_scan(scan_id, "kill")
+                else:
+                    os.killpg(pid, signal.SIGKILL)
+            except (OSError, ValueError):
                 pass
         try:
             self._persist_stop(scan_id)
@@ -666,9 +708,6 @@ class ScanLaunchManager:
                     if process.poll() is None:
                         os.killpg(process.pid, signal.SIGKILL)
             threading.Thread(target=force_stop, daemon=True).start()
-        elif isinstance(process, subprocess.Popen) and os.name == "nt":
-            subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"],
-                           check=True, capture_output=True, timeout=10)
         else:
             process.terminate()
 

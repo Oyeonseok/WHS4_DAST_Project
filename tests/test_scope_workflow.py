@@ -5,7 +5,6 @@ import io
 import errno
 import hashlib
 import os
-import signal
 import tempfile
 import time
 import unittest
@@ -831,7 +830,7 @@ class RuntimeBrowserProgramPageReaderTests(unittest.TestCase):
         self.assertEqual(args.scope_login_mode, "runtime-browser")
         self.assertEqual(args.scope_identity, "researcher")
 
-@unittest.skipUnless(os.name == "posix", "Scope process controls require POSIX")
+@unittest.skipUnless(os.name in {"posix", "nt"}, "Scope process controls require POSIX or Windows")
 class ScopeProcessControlTests(unittest.TestCase):
     def test_browser_confirmation_reaches_isolated_worker(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_dir:
@@ -872,7 +871,7 @@ class ScopeProcessControlTests(unittest.TestCase):
                 self.assertEqual(manager.get_job(program_id)["scope_status"], "review_required")
             finally:
                 if controller.pid(job_id) is not None:
-                    controller.signal(job_id, signal.SIGKILL)
+                    controller.kill(job_id)
                 cleanup_deadline = time.monotonic() + 5
                 while controller._marker(job_id).exists() and time.monotonic() < cleanup_deadline:
                     time.sleep(0.05)
@@ -910,7 +909,7 @@ class ScopeProcessControlTests(unittest.TestCase):
                 self.assertIsNone(controller.pid(job_id))
             finally:
                 if controller.pid(job_id) is not None:
-                    controller.signal(job_id, signal.SIGKILL)
+                    controller.kill(job_id)
                 cleanup_deadline = time.monotonic() + 5
                 while controller._marker(job_id).exists() and time.monotonic() < cleanup_deadline:
                     time.sleep(0.05)

@@ -21,7 +21,7 @@ def export_surface(conn: sqlite3.Connection, *, scan_id: str, output_path: Path)
         FROM annotation_runs WHERE scan_id=? ORDER BY started_at, annotation_run_id""", (scan_id,))
     for origin_id, base_url, spa_detected, framework in origins:
         endpoints = conn.execute(
-            """SELECT endpoint_id, method, normalized_path, content_type, source_tools
+            """SELECT endpoint_id, method, normalized_path, query_signature, content_type, source_tools
                FROM endpoints WHERE origin_id=? AND is_excluded=0""",
             (origin_id,),
         ).fetchall()
@@ -41,10 +41,11 @@ def export_surface(conn: sqlite3.Connection, *, scan_id: str, output_path: Path)
                         "annotations": _annotations(conn, endpoint_id),
                         "method": method,
                         "path": path,
+                        "query_signature": query_signature,
                         "content_type": content_type,
                         "source_tools": (source_tools or "").split(","),
                     }
-                    for endpoint_id, method, path, content_type, source_tools in endpoints
+                    for endpoint_id, method, path, query_signature, content_type, source_tools in endpoints
                 ],
                 "surface_signals": {key: value for key, value in signals},
             }

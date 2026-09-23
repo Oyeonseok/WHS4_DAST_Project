@@ -4,12 +4,12 @@ from __future__ import annotations
 import json
 import re
 from typing import Literal
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from aidast.recon import db
-from aidast.recon.judgment import normalize_path, is_static_asset
+from aidast.recon.judgment import normalize_path, is_static_asset, query_signature
 
 
 TAXONOMY = {
@@ -36,9 +36,62 @@ def safe_url(value: str) -> str:
             host = '[' + host + ']'
         if parsed.port:
             host += ':' + str(parsed.port)
-        return urlunsplit((parsed.scheme, host, safe_text(parsed.path), '', ''))
+        blocked = {"token", "secret", "password", "passwd", "authorization", "cookie", "session"}
+        keys = sorted({name for name, _ in parse_qsl(parsed.query, keep_blank_values=True)
+                       if name and name.casefold() not in blocked})
+        query = urlencode([(name, '') for name in keys])
+        return urlunsplit((parsed.scheme, host, safe_text(parsed.path), query, ''))
     except ValueError:
         return ''
+
+
+def _parameter_type(value: str) -> str:
+    if value.lower() in {"true", "false"}:
+        return "boolean"
+    return "integer" if value.isdigit() else "string"
+
+
+def _parameter_role(name: str) -> str:
+    lowered = name.lower().replace("-", "_")
+    if lowered in {"id", "uid", "user_id", "account_id", "object_id", "uuid"} or lowered.endswith("_id"):
+        return "identifier"
+    if any(part in lowered for part in ("token", "secret", "password", "passwd", "api_key")):
+        return "credential"
+    if any(part in lowered for part in ("url", "uri", "redirect", "callback", "next", "return")):
+        return "url"
+    if any(part in lowered for part in ("file", "path", "filename", "document")):
+        return "file"
+    if lowered in {"q", "query", "search", "keyword", "term", "filter", "sort"}:
+        return "search"
+    return "unknown"
+
+
+def persist_url_parameters(conn, endpoint_id: str, raw_url: str, path: str = "") -> None:
+    """Persist parameter names and roles, never observed values."""
+    parsed = urlsplit(str(raw_url or ""))
+    for name, value in parse_qsl(parsed.query, keep_blank_values=True):
+        if name:
+            db.upsert_parameter(
+                conn, endpoint_id=endpoint_id, name=name, location="query",
+                data_type=_parameter_type(value), role=_parameter_role(name),
+                is_identifier=_parameter_role(name) == "identifier",
+            )
+    for name in re.findall(r"\{([A-Za-z_][A-Za-z0-9_.-]*)\}", path or parsed.path):
+        db.upsert_parameter(
+            conn, endpoint_id=endpoint_id, name=name, location="path",
+            data_type="string", role=_parameter_role(name),
+            is_identifier=_parameter_role(name) == "identifier",
+        )
+
+
+def parameter_context(conn, endpoint_id: str) -> list[dict]:
+    rows = conn.execute(
+        """SELECT name,location,data_type,role,is_identifier FROM parameters
+           WHERE endpoint_id=? ORDER BY location,name""", (endpoint_id,),
+    ).fetchall()
+    return [dict(name=name, location=location, data_type=data_type,
+                 role=role or "unknown", is_identifier=bool(is_identifier))
+            for name, location, data_type, role, is_identifier in rows]
 
 
 def sanitize_evidence(value) -> dict:
@@ -60,6 +113,9 @@ def sanitize_evidence(value) -> dict:
     seeds = value.get('seed_paths')
     if isinstance(seeds, list):
         result['seed_paths'] = [safe_url(path) for path in seeds[:10] if isinstance(path, str)]
+    scripts = value.get('source_scripts')
+    if isinstance(scripts, list):
+        result['source_scripts'] = [safe_url(path) for path in scripts[:5] if isinstance(path, str)]
     return result
 
 
@@ -103,10 +159,13 @@ class ObservationRecorder:
             method = item.get('method', 'GET').upper()
             endpoint_id = db.upsert_endpoint(
                 self.conn, origin_id=self.origin_id, method=method, path=path,
-                normalized_path=normalize_path(path), content_type=item.get('content_type'),
+                normalized_path=normalize_path(path),
+                query_signature=query_signature(item.get('url', path)),
+                content_type=item.get('content_type'),
                 source_tool=item.get('source', phase), is_excluded=is_static_asset(path),
                 exclude_reason='static_asset' if is_static_asset(path) else None,
             )
+            persist_url_parameters(self.conn, endpoint_id, item.get('url', path), path)
             context = item.get('context') or {}
             key = str(context.get('context_key') or 'phase:' + phase)
             context_id = self.context_ids.get(key)
@@ -154,6 +213,7 @@ class ObservationRecorder:
                 # delayed/batched tagging cannot lose timeline ordering.
                 'observed_at': item.get('observed_at'),
                 'phase': phase,
+                'parameters': parameter_context(self.conn, endpoint_id),
             })
         self.conn.commit()
         if self.agent is not None:
@@ -222,7 +282,7 @@ def tag_pending_observations(conn, *, scan_id: str, agent, batch_size: int = 200
         SELECT o.observation_id, o.source_tool, o.discovery_kind, o.observed_url,
                o.association_method, o.observed_at, o.evidence_json, e.method, e.path,
                c.page_url, c.page_title, c.action_type, c.action_target,
-               c.auth_state, c.context_summary
+               c.auth_state, c.context_summary, e.endpoint_id
         FROM endpoint_observations o
         JOIN endpoints e ON e.endpoint_id=o.endpoint_id
         JOIN origins g ON g.origin_id=e.origin_id
@@ -251,6 +311,7 @@ def tag_pending_observations(conn, *, scan_id: str, agent, batch_size: int = 200
                 'page_url': row[9], 'page_title': row[10],
                 'action': row[12], 'auth_state': row[13],
                 'association_method': row[4],
+                'parameters': parameter_context(conn, row[15]),
             })
         try:
             if recorder._classify(payload):

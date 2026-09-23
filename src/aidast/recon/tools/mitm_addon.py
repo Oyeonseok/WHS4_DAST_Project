@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import hmac
+import hashlib
 import runpy
 import time
 from datetime import datetime, timezone
@@ -33,6 +34,16 @@ validate_scope_rules = _safety["validate_scope_rules"]
 BROWSER_TOKEN_HEADER = _safety["BROWSER_TOKEN_HEADER"]
 BROWSER_MODE_HEADER = _safety["BROWSER_MODE_HEADER"]
 BROWSER_SUPPORT_MODES = _safety["BROWSER_SUPPORT_MODES"]
+
+
+def _canonical_request_key(method: str, parsed, body: bytes | None = None) -> tuple[str, ...]:
+    """Keep distinct query/body requests separate without retaining their values."""
+    query = parsed.query or ""
+    query_digest = hashlib.sha256(query.encode()).hexdigest() if query else ""
+    body_digest = hashlib.sha256(body).hexdigest() if body else ""
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    return (method.upper(), parsed.scheme.lower(), (parsed.hostname or "").lower().rstrip("."),
+            str(port), parsed.path or "/", query_digest, body_digest)
 
 
 def _host_matches(host: str, pattern: str) -> bool:
@@ -53,7 +64,7 @@ class ScopeAndCaptureAddon:
         self.blocked_request_count = 0
         self.budget_used_before = 0
         self._last_progress_write = 0.0
-        self.seen_requests: set[tuple[str, str, str]] = set()
+        self.seen_requests: set[tuple[str, ...]] = set()
         self.enforcement_required = True
 
     def load(self, loader) -> None:
@@ -136,7 +147,9 @@ class ScopeAndCaptureAddon:
         is_static = path.rsplit("/", 1)[-1].split("?", 1)[0].lower().endswith(
             (".js", ".css", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".woff", ".woff2", ".ttf", ".map")
         ) or resource in {"script", "style", "image", "font", "media"}
-        request_key = (method, host, path)
+        request_key = _canonical_request_key(
+            method, parsed, getattr(flow.request, "content", b"") or b""
+        )
         duplicate = request_key in self.seen_requests
         fetch_mode = str(flow.request.headers.get("Sec-Fetch-Mode", "")).lower()
         if support_mode and (

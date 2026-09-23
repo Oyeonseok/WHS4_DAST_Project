@@ -109,7 +109,7 @@ class PipelineMaterializationTests(unittest.TestCase):
         self.assertEqual(result.recon_database_sha256, source_digest)
         self.assertEqual(self.recon_path.read_bytes(), source_before)
         with sqlite3.connect(self.recon_path) as source:
-            self.assertEqual(source.execute("PRAGMA user_version").fetchone()[0], 4)
+            self.assertEqual(source.execute("PRAGMA user_version").fetchone()[0], db.RECON_SCHEMA_VERSION)
             source_schema = source.execute(
                 "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
             ).fetchall()

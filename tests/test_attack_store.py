@@ -76,7 +76,7 @@ class AttackStoreTests(unittest.TestCase):
         self.assertEqual(store.get_run()["source_database_path"], "../handoff/Recon.db")
         self.assertEqual(store.get_run()["source_database_sha256"], hashlib.sha256(original).hexdigest())
         with closing(sqlite3.connect(self.source)) as source_conn:
-            self.assertEqual(source_conn.execute("PRAGMA user_version").fetchone()[0], 4)
+            self.assertEqual(source_conn.execute("PRAGMA user_version").fetchone()[0], db.RECON_SCHEMA_VERSION)
         self.assertEqual({p.name for p in self.bundle.iterdir()}, {"Recon.db", "Handoff.json"})
         for _ in range(2):
             migrate_attack_schema(store.conn)

@@ -39,6 +39,7 @@ from playwright.sync_api import (
 )
 
 from aidast.recon.policy import TargetPolicy
+from aidast.recon.judgment import is_probable_redirect_loop_path
 from aidast.auth.endpoints import AuthenticationEndpoint, normalize_origin
 from aidast.core.http_safety import BROWSER_MODE_HEADER, BROWSER_TOKEN_HEADER
 from aidast.recon.tools.api_secondary_discovery import _http_request
@@ -2550,6 +2551,9 @@ class PlaywrightDriver:
                     ),
                 )
             )
+
+            if isinstance(page.url, str) and is_probable_redirect_loop_path(urlparse(page.url).path):
+                return False
 
         except Exception:
 

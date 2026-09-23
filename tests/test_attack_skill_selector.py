@@ -88,6 +88,27 @@ class AttackSkillSelectorTests(unittest.TestCase):
                     path, "scan", available_attack_skill_names()
                 )
 
+    def test_recon_parameter_role_selects_matching_attack_skill(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "Pipeline.db"
+            conn = db.init_db(path)
+            db.insert_scan(conn, scan_id="scan", scope_type="approved", scope_value="scope")
+            asset = db.insert_asset(conn, scan_id="scan", identifier="example.test", asset_type="DOMAIN")
+            origin = db.upsert_origin(conn, asset_id=asset, scheme="https", host="example.test",
+                                      port=443, base_url="https://example.test")
+            endpoint = db.upsert_endpoint(conn, origin_id=origin, method="GET", path="/view",
+                                          normalized_path="/view", source_tool="fixture")
+            db.upsert_parameter(conn, endpoint_id=endpoint, name="destination", location="query",
+                                data_type="string", role="url")
+            conn.execute("UPDATE scans SET status='completed',finished_at=CURRENT_TIMESTAMP WHERE scan_id='scan'")
+            conn.commit()
+            conn.close()
+            selected, reasons = select_relevant_attack_skills(
+                path, "scan", available_attack_skill_names()
+            )
+        self.assertIn("hunt-ssrf", selected)
+        self.assertIn("URL parameter", reasons["hunt-ssrf"])
+
     def test_packaged_enumeration_excludes_chaining_skill(self) -> None:
         names = available_attack_skill_names()
         self.assertIn("hunt-dispatch", names)

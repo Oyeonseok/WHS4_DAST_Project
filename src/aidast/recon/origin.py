@@ -1,10 +1,9 @@
-"""ORIGIN_DISCOVERY - confirms an Origin from an HTTP_PROBE result and
-decides SPA vs server-rendered with simple rule-based signatures.
+"""ORIGIN_DISCOVERY - confirms an Origin from an HTTP_PROBE result.
 
-MVP note: this replaces the LLM judgment mentioned in the design docs with
-plain if-statements. The function signature is deliberately small
-(ProbeResult in, OriginResolution out) so swapping the body for an LLM call
-later doesn't require touching the executor.
+ Crawler selection is deliberately not based on SPA/framework heuristics.
+Endpoint discovery runs standard and browser-backed collectors for every
+origin. The signal is retained only as metadata for adaptive discovery and
+Attack skill prioritization; it never suppresses a collector.
 """
 
 from __future__ import annotations
@@ -14,42 +13,42 @@ from dataclasses import dataclass
 from aidast.recon.tools.http_probe import ProbeResult
 
 SPA_SIGNATURES = {
-    "Angular": ["ng-version", "ng-app", "_nghost"],
+    "Angular": ["ng-version", "ng-app", "_nghost", "<app-root", "ng-component"],
     "React": ["__next_data__", 'id="root"', "data-reactroot"],
     "Vue": ['id="app"', "data-v-app", "__vue__"],
 }
 
-
 @dataclass
 class OriginResolution:
-    spa_detected: bool
+    spa_detected: bool | None
     framework_signature: str | None
     main_crawler_mode: str
 
 
 def resolve_origin(probe_result: ProbeResult) -> OriginResolution:
+    # Detect only as a non-blocking signal. It must not select standard versus
+    # headless: both collectors always run in endpoint_discovery.
     body_lower = probe_result.body.lower()
-
-    for framework, markers in SPA_SIGNATURES.items():
-        if any(marker.lower() in body_lower for marker in markers):
-            return OriginResolution(
-                spa_detected=True,
-                framework_signature=framework,
-                main_crawler_mode="katana_headless",
-            )
-
-    # Short body with several <script> tags and little visible text is a
-    # reasonable SPA heuristic even without a recognized framework marker.
-    script_count = body_lower.count("<script")
-    if len(probe_result.body) < 2000 and script_count >= 2:
-        return OriginResolution(
-            spa_detected=True,
-            framework_signature=None,
-            main_crawler_mode="katana_headless",
-        )
-
+    framework = next(
+        (name for name, markers in SPA_SIGNATURES.items()
+         if any(marker in body_lower for marker in markers)),
+        None,
+    )
+    if framework is None:
+        script_count = body_lower.count("<script")
+        module_count = body_lower.count('type="module"') + body_lower.count("type='module'")
+        mount = any(marker in body_lower for marker in (
+            "<app-root", 'id="root"', "id=\'root\'", 'id="app"', "id=\'app\'",
+        ))
+        if (len(body_lower) < 2000 and script_count >= 2) or module_count or mount:
+            framework = None
+            spa_detected = True
+        else:
+            spa_detected = False
+    else:
+        spa_detected = True
     return OriginResolution(
-        spa_detected=False,
-        framework_signature=None,
-        main_crawler_mode="katana_standard",
+        spa_detected=spa_detected,
+        framework_signature=framework,
+        main_crawler_mode="katana_both",
     )

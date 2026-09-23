@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import os
 import re
-import signal
 import shutil
 import sqlite3
 import subprocess
@@ -106,7 +105,7 @@ class ScopeWorkflowManager:
         self._process_controller = (
             None if worker_mode else process_controller or (
                 ScopeProcessController(self.result_root)
-                if os.name == "posix"
+                if os.name in {"posix", "nt"}
                 and agent_factory is None
                 and public_reader_factory is None
                 and runtime_reader_factory is None
@@ -268,7 +267,7 @@ class ScopeWorkflowManager:
             code="scope.paused", message="스코프 수집을 일시정지했습니다.",
         )
         try:
-            controller.signal(job_id, signal.SIGSTOP)
+            controller.pause(job_id)
         except (OSError, ValueError) as exc:
             self._update(
                 job_id, status="failed", error="스코프 작업을 일시정지하지 못했습니다.",
@@ -292,7 +291,7 @@ class ScopeWorkflowManager:
             code="scope.continued", message="일시정지한 스코프 수집을 계속합니다.",
         )
         try:
-            controller.signal(job_id, signal.SIGCONT)
+            controller.resume(job_id)
         except (OSError, ValueError) as exc:
             self._update(
                 job_id, status="failed", error="스코프 작업을 재개하지 못했습니다.",
@@ -314,8 +313,8 @@ class ScopeWorkflowManager:
         )
         try:
             if status == "paused":
-                controller.signal(job_id, signal.SIGCONT)
-            controller.signal(job_id, signal.SIGTERM)
+                controller.resume(job_id)
+            controller.terminate(job_id)
         except (OSError, ValueError) as exc:
             self._update(
                 job_id, status="failed", error="스코프 작업을 취소하지 못했습니다.",
@@ -351,7 +350,7 @@ class ScopeWorkflowManager:
         controller = self._process_controller
         if controller and not controller.wait_for_exit(job_id, timeout_seconds=5):
             try:
-                controller.signal(job_id, signal.SIGKILL)
+                controller.kill(job_id)
             except (OSError, ValueError):
                 pass
 
