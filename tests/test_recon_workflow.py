@@ -836,6 +836,30 @@ class ReconCliTests(unittest.TestCase):
         main_agent.assert_not_called()
         self.assertIn("requires an explicit --target", errors.getvalue())
 
+    def test_recon_execute_reaches_executor_without_run_only_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir) / "Scope"
+            ScopeCoordinator(root / "bugcrowd" / "example").collect(
+                PROGRAM_URL,
+                main_agent=FakeReconMainAgent(),
+                approved_by="reviewer",
+                review=lambda _: True,
+            )
+            errors = io.StringIO()
+            with (
+                patch("aidast.cli.CodexMainAgent", return_value=FakeReconMainAgent()),
+                patch("aidast.cli.ReconExecutor", side_effect=ReconExecutionError("executor reached")),
+                redirect_stdout(io.StringIO()),
+                redirect_stderr(errors),
+            ):
+                result = main([
+                    "recon", PROGRAM_URL, "--target", "*.example.com",
+                    "--execute", "--output-dir", str(root),
+                ])
+
+        self.assertEqual(result, 1)
+        self.assertIn("executor reached", errors.getvalue())
+
     def test_target_selects_exact_canonical_scope_asset(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_dir:
             root = Path(temporary_dir) / "Scope"

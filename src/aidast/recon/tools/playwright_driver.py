@@ -41,7 +41,9 @@ from playwright.sync_api import (
 from aidast.recon.policy import TargetPolicy
 from aidast.recon.judgment import is_probable_redirect_loop_path
 from aidast.auth.endpoints import AuthenticationEndpoint, normalize_origin
-from aidast.core.http_safety import BROWSER_MODE_HEADER, BROWSER_TOKEN_HEADER
+from aidast.core.http_safety import (
+    BROWSER_MODE_HEADER, BROWSER_TOKEN_HEADER, scope_uses_loopback_host,
+)
 from aidast.recon.tools.api_secondary_discovery import _http_request
 from aidast.recon.tools.page_identity import canonical_visit_key, screen_fingerprint
 
@@ -900,7 +902,8 @@ class PlaywrightDriver:
                     )
                 return "same-origin" if method_allowed else None
             if (
-                request.method.upper() in {"GET", "HEAD"}
+                not scope_uses_loopback_host(self.target_policy.allowed_hosts)
+                and request.method.upper() in {"GET", "HEAD"}
                 and parsed.scheme == "https"
                 and self._effective_port(parsed) == 443
                 and request.resource_type

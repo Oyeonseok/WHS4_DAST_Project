@@ -34,6 +34,7 @@ validate_scope_rules = _safety["validate_scope_rules"]
 BROWSER_TOKEN_HEADER = _safety["BROWSER_TOKEN_HEADER"]
 BROWSER_MODE_HEADER = _safety["BROWSER_MODE_HEADER"]
 BROWSER_SUPPORT_MODES = _safety["BROWSER_SUPPORT_MODES"]
+scope_uses_loopback_host = _safety["scope_uses_loopback_host"]
 
 
 def _canonical_request_key(method: str, parsed, body: bytes | None = None) -> tuple[str, ...]:
@@ -270,7 +271,8 @@ class ScopeAndCaptureAddon:
                 )
             ) else None
         return mode if (
-            method in {"GET", "HEAD"}
+            not scope_uses_loopback_host(self.allowed_hosts)
+            and method in {"GET", "HEAD"}
             and parsed.scheme == "https"
             and port == 443
         ) else None

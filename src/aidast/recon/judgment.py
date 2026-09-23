@@ -122,6 +122,10 @@ def adaptive_path_fingerprints(
         path = str(item.get("path") or "").split("?", 1)[0]
         segments = tuple(part for part in path.split("/") if part)
         for index, value in enumerate(segments):
+            if index == 0:
+                # Sibling pages such as /blog and /register have no stable
+                # parent route that identifies them as variable values.
+                continue
             key = (str(item.get("method", "GET")).upper(), index, segments[:index] + segments[index + 1:])
             rows[key].add(value)
     learned: dict[str | tuple[str, str], str] = {}
