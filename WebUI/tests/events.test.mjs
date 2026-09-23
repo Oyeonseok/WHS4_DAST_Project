@@ -6,11 +6,13 @@ import { initialLanguage, translate } from '../src/lib/i18n.ts';
 import { localizeActivityMessage, localizeAuditEventType } from '../src/lib/activityMessages.ts';
 import { resolveExecutionLimits } from '../src/lib/scan.ts';
 import { scopeCollectionRequest } from '../src/lib/scope.ts';
+import { auditLevel, readAuditAcknowledgements, saveAuditAcknowledgements } from '../src/lib/audit.ts';
 import {
   formatActivityElapsed,
   initialScopeActivityState,
   isScopeActivityActive,
   mergeActivityLogs,
+  hideAcknowledgedActivity,
   reduceScopeActivity,
   startScopeElapsedClock,
   startScopeJobPolling,
@@ -18,6 +20,26 @@ import {
 } from '../src/lib/activity.ts';
 
 const event = (id = 8, overrides = {}) => ({ version: 1, event_id: id, scan_id: DEMO_SCAN, occurred_at: '2026-09-20T06:00:00Z', type: 'log.appended', payload: { stage: 'Attack', level: 'info', message: 'Redacted fixture event' }, ...overrides });
+test('audit acknowledgements persist per scan and invalid storage data is ignored', () => {
+  const items = new Map();
+  const storage = { getItem: key => items.get(key) ?? null, setItem: (key, value) => { items.set(key, value); } };
+  assert.equal(saveAuditAcknowledgements(storage, 'scan-one', new Set(['audit-1'])), true);
+  assert.deepEqual([...readAuditAcknowledgements(storage, 'scan-one')], ['audit-1']);
+  assert.deepEqual([...readAuditAcknowledgements(storage, 'scan-two')], []);
+  items.set('aidast:audit-ack:v1:scan-one', '{invalid');
+  assert.deepEqual([...readAuditAcknowledgements(storage, 'scan-one')], []);
+  assert.equal(auditLevel({ event_type: 'stage.failed' }), 'error');
+});
+test('acknowledged audit records disappear from scan activity and return when restored', () => {
+  const snapshot = demoSnapshot();
+  const merged = mergeActivityLogs(snapshot.logs, []);
+  assert.equal(merged.length, snapshot.logs.length);
+  assert.equal(hideAcknowledgedActivity(merged, new Set(['demo-4'])).length, snapshot.logs.length - 1);
+  assert.equal(hideAcknowledgedActivity(merged, new Set(['demo-4'])).some(log => log.audit_id === 'demo-4'), false);
+  assert.equal(hideAcknowledgedActivity(merged, new Set()).length, snapshot.logs.length);
+  assert.equal(parseSnapshot(snapshot, DEMO_SCAN)?.logs.find(log => log.audit_id === 'demo-4')?.id, 7);
+  assert.equal(parseEvent(event(8, { payload: { stage: 'Recon', level: 'info', message: 'safe', audit_id: 'audit-8' } }), DEMO_SCAN)?.type, 'log.appended');
+});
 test('dashboard labels use the Korean catalog and preserve English keys', () => {
   for (const key of ['Scopes / Programs', 'Yes · Approve Scope']) {
     assert.notEqual(translate('ko', key), key);
@@ -52,6 +74,8 @@ test('activity codes localize live messages and audit types without exposing raw
   assert.equal(localizeActivityMessage('ko', { message: 'Unexpected internal text' }), '활동이 기록되었습니다. 자세한 내용은 서버 로그를 확인하세요.');
   assert.equal(localizeAuditEventType('ko', 'stage.started'), '단계 시작');
   assert.equal(localizeActivityMessage('ko', { message: 'Recon activity', message_code: 'recon.activity', message_params: { phase: 'playwright_interaction', state: 'started' } }), 'Playwright 화면 상호작용 시작');
+  assert.equal(localizeActivityMessage('ko', { message: 'Recon activity', message_code: 'recon.activity', message_params: { phase: 'endpoint_discovery', state: 'found', method: 'GET', url: 'https://example.com/missing', response_status: 404, source: 'ffuf' } }), 'URL 발견 · GET https://example.com/missing · HTTP 404 응답 · 유효 경로 미확인 · 출처 ffuf');
+  assert.equal(localizeActivityMessage('en', { message: 'Recon activity', message_code: 'recon.activity', message_params: { phase: 'endpoint_discovery', state: 'found', method: 'GET', url: 'https://example.com/guess' } }), 'URL found · GET https://example.com/guess · candidate · no HTTP response observed');
   assert.equal(localizeActivityMessage('ko', { message: 'Recon activity', message_code: 'recon.activity', message_params: { phase: 'ffuf', state: 'finished', index: 2, total: 3, count: 4 } }), 'ffuf 경로 탐색 종료 · 대상 2/3 · 결과 4건');
   assert.equal(localizeActivityMessage('ko', { message: 'Scan paused by operator.', message_code: 'pipeline.paused' }), '스캔 실행이 일시정지됐습니다.');
 });
@@ -64,6 +88,9 @@ test('English activity renders Korean-backed Scope and Recon events', () => {
   assert.equal(localizeActivityMessage('en', { message: '스코프 수집을 시작했습니다.', message_code: 'scope.started' }), 'Scope collection started.');
   assert.equal(localizeActivityMessage('en', { message: '프로그램 정책 화면 읽기를 완료했습니다. 단계 2/3, 텍스트 120자입니다.', message_code: 'scope.browser_progress' }), 'Finished reading the program policy page. Step 2/3, 120 characters.');
   assert.equal(localizeActivityMessage('en', { message: '정찰 활동', message_code: 'recon.activity', message_params: { phase: 'playwright_interaction', state: 'started', index: 1, total: 2 } }), 'Playwright page interaction started · target 1/2');
+  assert.equal(localizeActivityMessage('en', { message: 'Scope Agent가 화면 이동 후보 3번(Scope)을 엽니다.', message_code: 'scope.browser_progress' }), 'Scope Agent is opening navigation candidate 3 (Scope).');
+  assert.equal(localizeActivityMessage('en', { message: 'Scope 관련 이동 후보: 3:Scope.', message_code: 'scope.browser_progress' }), 'Scope-related navigation candidates: 3:Scope.');
+  assert.equal(localizeActivityMessage('ko', { message: '스코프 수집 실패', message_code: 'scope.failed', message_params: { reason: 'Scope navigation exhausted its reviewed views before capture' } }), '스코프 수집 실패: 프로그램 화면을 이동했지만 자산 목록과 정책을 함께 확인하지 못했습니다.');
   assert.equal(localizeAuditEventType('en', 'stage.started'), 'Stage started');
 });
 test('paused scan remains paused even while its current stage is running', () => {

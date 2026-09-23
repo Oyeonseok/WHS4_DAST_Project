@@ -837,6 +837,7 @@ class ScanLaunchManager:
             "activity": "Preparing Recon" if job.status == "running" else None,
             "requests": 0,
             "budget": job.max_requests,
+            "per_target_budget": job.max_requests,
             "endpoints": 0,
             "findings": [],
             "scope_approved": True,

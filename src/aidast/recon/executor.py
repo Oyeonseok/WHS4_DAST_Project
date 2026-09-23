@@ -13,10 +13,11 @@ results are always merged together with no separate re-crawl decision.
 from __future__ import annotations
 
 import functools
+import json
 import secrets
 import sqlite3
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlsplit, urlunsplit
 from uuid import NAMESPACE_URL, uuid5
 
 from aidast.recon import db as dbmod
@@ -202,6 +203,44 @@ class ReconExecutor:
                 if not self._diagnostic_warning_emitted:
                     print(f"   [진단 로그 경고] {type(exc).__name__}: {exc}")
                     self._diagnostic_warning_emitted = True
+
+    def _log_discovered_urls(self, base_url: str, origin_id: str, endpoints: list[dict]) -> None:
+        """Log each included route with observed status, if a response was recorded."""
+        base = urlsplit(base_url)
+        for item in endpoints:
+            if item["is_excluded"]:
+                continue
+            row = self.conn.execute(
+                "SELECT endpoint_id FROM endpoints WHERE origin_id=? AND method=? AND normalized_path=?",
+                (origin_id, item["method"], item["normalized_path"]),
+            ).fetchone()
+            if row is None:
+                continue
+            statuses: list[int] = []
+            for (evidence_json,) in self.conn.execute(
+                "SELECT evidence_json FROM endpoint_observations WHERE endpoint_id=?", (row[0],)
+            ):
+                try:
+                    evidence = json.loads(evidence_json or "{}")
+                except (TypeError, ValueError):
+                    continue
+                status = evidence.get("response_status") if isinstance(evidence, dict) else None
+                if type(status) is int and 100 <= status <= 599:
+                    statuses.append(status)
+            for (status,) in self.conn.execute(
+                "SELECT response_status FROM http_transactions WHERE endpoint_id=?", (row[0],)
+            ):
+                if type(status) is int and 100 <= status <= 599:
+                    statuses.append(status)
+            status = min(statuses, key=lambda value: (
+                0 if 200 <= value < 400 else 1 if value in {401, 403} else
+                2 if 400 <= value < 500 else 3, value
+            )) if statuses else None
+            self._diagnostic(
+                "url_discovered", method=item["method"],
+                url=urlunsplit((base.scheme, base.netloc, item["normalized_path"], "", "")),
+                source=",".join(sorted(item["source_tools"])), response_status=status,
+            )
 
     def close(self) -> None:
         if self.candidate_conn is not self.conn:
@@ -810,6 +849,7 @@ class ReconExecutor:
                 is_excluded=item["is_excluded"], exclude_reason=item["exclude_reason"],
             )
         dbmod.reconcile_observed_endpoints(self.conn, origin_id=origin_id, raw_endpoints=raw)
+        self._log_discovered_urls(url, origin_id, merged)
 
         included = [e for e in merged if not e["is_excluded"]]
         print(f"   발견 {len(included)}건 (제외 {len(merged) - len(included)}건)")

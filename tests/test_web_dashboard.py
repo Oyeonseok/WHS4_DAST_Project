@@ -214,6 +214,7 @@ def test_projection_reads_sources_without_leaking_audit_details(tmp_path: Path) 
     assert snapshot["endpoints"] == 1
     assert snapshot["requests"] == 1
     assert snapshot["budget"] == 2000
+    assert snapshot["per_target_budget"] == 2000
     assert snapshot["scope_approved"] is True
     assert snapshot["program_id"] == "h1-prism-vdp"
     assert snapshot["findings"][0]["endpoint"] == "GET /health"
@@ -261,7 +262,50 @@ def test_projection_exposes_only_allowlisted_recon_activity(tmp_path: Path) -> N
     activity = [log for log in snapshot["logs"] if log.get("message_code") == "recon.activity"]
     assert len(activity) == 1
     assert activity[0]["message_params"] == {"phase": "playwright_bootstrap", "state": "started"}
+    assert activity[0]["audit_id"] == "recon-tool-1"
+    replay = DashboardProjector(tmp_path).events_after(SCAN_ID, 0)
+    assert any(event["type"] == "log.appended" and event["payload"].get("audit_id") == "recon-tool-1" for event in replay)
+    audit = DashboardProjector(tmp_path).audit_log(SCAN_ID)
+    assert audit[0]["message_code"] == "recon.activity"
+    assert audit[0]["message_params"] == {"phase": "playwright_bootstrap", "state": "started"}
+    assert audit[0]["level"] == "info"
+    assert "secret" not in json.dumps(audit)
     assert "secret" not in json.dumps(snapshot)
+
+
+def test_projection_shows_discovered_url_with_response_evidence(tmp_path: Path) -> None:
+    database = _fixture(tmp_path)
+    with sqlite3.connect(database) as conn:
+        conn.execute(
+            "INSERT INTO audit_events VALUES (?,?,?,?,?,?,?)",
+            ("recon-url-1", SCAN_ID, "stage", None, "recon.activity",
+             json.dumps({"phase": "endpoint_discovery", "state": "found", "method": "GET",
+                         "url": "https://example.com/missing?token=secret", "source": "ffuf",
+                         "response_status": 404, "headers": {"Cookie": "secret"}}),
+             "2026-09-20 01:00:02"),
+        )
+    projector = DashboardProjector(tmp_path)
+    expected = {"phase": "endpoint_discovery", "state": "found", "method": "GET",
+                "url": "https://example.com/missing", "source": "ffuf", "response_status": 404}
+    assert any(log.get("message_params") == expected for log in projector.snapshot(SCAN_ID)["logs"])
+    assert any(event["type"] == "log.appended" and event["payload"].get("message_params") == expected
+               for event in projector.events_after(SCAN_ID, 0))
+    assert projector.audit_log(SCAN_ID)[0]["message_params"] == expected
+
+
+def test_audit_log_categorizes_failures_without_exposing_error_text(tmp_path: Path) -> None:
+    database = _fixture(tmp_path)
+    with sqlite3.connect(database) as conn:
+        conn.execute(
+            "UPDATE stage_runs SET error_message=? WHERE stage_run_id='stage'",
+            ("Connection timed out for https://private.example/?token=secret",),
+        )
+    audit = DashboardProjector(tmp_path).audit_log(SCAN_ID)
+    assert audit[0]["event_type"] == "stage.failed"
+    assert audit[0]["failure_code"] == "timeout"
+    assert audit[0]["level"] == "error"
+    assert "private.example" not in json.dumps(audit)
+    assert "secret" not in json.dumps(audit)
 
 
 def test_projection_separates_candidate_urls_from_live_responses(tmp_path: Path) -> None:
@@ -284,7 +328,10 @@ def test_projection_reads_live_recon_request_budget_counter(tmp_path: Path) -> N
                     "blocked_requests": 2, "updated_at": "2026-09-20T01:00:00Z"}),
         encoding="utf-8",
     )
-    assert DashboardProjector(tmp_path).snapshot(SCAN_ID)["requests"] == 17
+    snapshot = DashboardProjector(tmp_path).snapshot(SCAN_ID)
+    assert snapshot["requests"] == 17
+    assert type(snapshot["progress"]) is int
+    assert 0 <= snapshot["progress"] <= 100
 
 
 def test_failed_stage_overrides_completed_scan_in_snapshot_and_list(tmp_path: Path) -> None:

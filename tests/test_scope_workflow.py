@@ -5,6 +5,7 @@ import io
 import errno
 import hashlib
 import os
+import signal
 import tempfile
 import time
 import unittest
@@ -540,6 +541,59 @@ class RuntimeBrowserProgramPageReaderTests(unittest.TestCase):
         self.assertEqual(captured.capture_status, CaptureStatus.COMPLETE)
         self.assertIn("https://bounty.example.com", captured.text)
         control.click.assert_called_once_with(timeout=5_000)
+
+    def test_navigation_combines_tabs_and_avoids_reopening_a_control_on_revisit(self) -> None:
+        url = "https://hackerone.com/example?type=team"
+        page = MagicMock(url=url)
+        page.title.return_value = "Example program"
+        page.wait_for_timeout.return_value = None
+        other = MagicMock()
+        scope = MagicMock()
+        clicks = 0
+
+        def open_other(*, timeout):
+            nonlocal clicks
+            self.assertEqual(timeout, 5_000)
+            clicks += 1
+            page.url = url + ("&tab=other" if clicks == 1 else "")
+
+        other.click.side_effect = open_other
+        scope.click.side_effect = lambda *, timeout: setattr(page, "url", url + "&tab=scope")
+        overview = "Program policy and testing rules. " * 30
+        other_text = "General program information. " * 30
+        scope_text = "In-scope assets: https://app.example.com. " * 30
+        decisions = iter([
+            ScopeNavigationDecision(action="open", candidate_id=0),
+            ScopeNavigationDecision(action="open", candidate_id=0),
+            ScopeNavigationDecision(action="open", candidate_id=1),
+            ScopeNavigationDecision(action="capture", candidate_id=None),
+        ])
+        observed = []
+
+        def choose(text, choices):
+            observed.append((text, [choice["id"] for choice in choices]))
+            return next(decisions)
+
+        reader = RuntimeBrowserProgramPageReader(identity="researcher", navigation_agent=choose)
+        reader._wait_for_stable_text = lambda current: (
+            scope_text if "tab=scope" in current.url else
+            other_text if "tab=other" in current.url else overview
+        )
+        reader._navigation_candidates = lambda *_args: (
+            [{"id": 0, "label": "Overview"}, {"id": 1, "label": "Scope"}],
+            {0: other, 1: scope},
+        )
+
+        captured = reader._capture_agent_guided(page, url)
+
+        self.assertEqual(captured.capture_status, CaptureStatus.COMPLETE)
+        self.assertIn("Program policy and testing rules.", captured.text)
+        self.assertIn("In-scope assets: https://app.example.com.", captured.text)
+        self.assertEqual(observed[2][1], [1])
+        self.assertIn(overview, observed[3][0])
+        self.assertIn(scope_text, observed[3][0])
+        self.assertEqual(other.click.call_count, 2)
+        scope.click.assert_called_once()
 
     def test_agent_cannot_open_external_target_link(self) -> None:
         url = "https://yeswehack.com/programs/example"

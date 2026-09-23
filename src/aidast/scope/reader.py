@@ -495,40 +495,62 @@ class RuntimeBrowserProgramPageReader(PlaywrightProgramPageReader):
     ) -> ProgramPage:
         views: list[tuple[str, str]] = []
         seen: set[tuple[str, str]] = set()
+        attempted: dict[tuple[str, str], set[int]] = {}
         captured = False
-        for step in range(3):
+        max_views = 6
+        for step in range(max_views):
             if not _same_program_url(program_url, page.url):
                 raise ProgramPageError("Scope navigation left the exact program page")
-            self._output(f"프로그램 정책 화면을 읽고 있습니다. 단계 {step + 1}/3.")
+            self._output(f"프로그램 정책 화면을 읽고 있습니다. 단계 {step + 1}/{max_views}.")
             body = initial_text if step == 0 and initial_text is not None else self._wait_for_stable_text(page)
             if not _same_program_url(program_url, page.url):
                 raise ProgramPageError("Scope navigation left the exact program page")
-            self._output(f"프로그램 정책 화면 읽기를 완료했습니다. 단계 {step + 1}/3, 텍스트 {len(body)}자입니다.")
+            self._output(f"프로그램 정책 화면 읽기를 완료했습니다. 단계 {step + 1}/{max_views}, 텍스트 {len(body)}자입니다.")
             current = (page.url, body)
             if current not in seen:
                 views.append(current)
                 seen.add(current)
             choices, locators = self._navigation_candidates(page, program_url)
+            available = [choice for choice in choices if choice["id"] not in attempted.get(current, set())]
             self._output(
-                f"화면 텍스트 {len(body)}자와 이동 후보 {len(choices)}개를 확인했습니다. "
+                f"화면 텍스트 {len(body)}자와 이동 후보 {len(available)}개를 확인했습니다. "
                 "Scope Agent가 스코프 화면을 판단합니다."
             )
-            decision = self._navigation_agent(body, choices)
+            relevant = [
+                choice for choice in available
+                if any(word in str(choice["label"]).casefold()
+                       for word in ("scope", "asset", "target", "범위", "자산"))
+            ][:8]
+            if relevant:
+                labels = ", ".join(
+                    f"{choice['id']}:{str(choice['label'])[:40]}" for choice in relevant
+                )
+                self._output(f"Scope 관련 이동 후보: {labels}.")
+            observed = "\n\n".join(
+                f"=== {'CURRENT' if view == current else 'PREVIOUS'} PROGRAM VIEW: {url} ===\n{text}"
+                for view in [current, *[view for view in views if view != current]]
+                for url, text in [view]
+            )
+            decision = self._navigation_agent(observed, available)
             if decision.action == "capture":
                 self._output("Scope Agent가 현재 정책 화면을 수집 대상으로 선택했습니다.")
                 captured = True
                 break
-            if decision.candidate_id not in locators:
+            if decision.candidate_id not in {choice["id"] for choice in available}:
                 raise ProgramPageError("Scope agent selected an unavailable page control")
+            if step == max_views - 1:
+                break
+            attempted.setdefault(current, set()).add(decision.candidate_id)
+            label = next(str(choice["label"]) for choice in available if choice["id"] == decision.candidate_id)
             try:
-                self._output(f"Scope Agent가 화면 이동 후보 {decision.candidate_id}번을 엽니다.")
+                self._output(f"Scope Agent가 화면 이동 후보 {decision.candidate_id}번({label[:80]})을 엽니다.")
                 locators[decision.candidate_id].click(timeout=5_000)
                 page.wait_for_timeout(500)
                 self._output(f"Scope Agent가 화면 이동 후보 {decision.candidate_id}번 열기를 완료했습니다.")
             except Exception as exc:
                 raise ProgramPageError("Scope page control could not be opened") from exc
         if not captured:
-            raise ProgramPageError("Scope navigation reached its three-step limit before capture")
+            raise ProgramPageError("Scope navigation exhausted its reviewed views before capture")
         text = "\n\n".join(
             f"=== PROGRAM VIEW: {url} ===\n{body}" for url, body in views
         )

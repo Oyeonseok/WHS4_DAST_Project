@@ -7,6 +7,7 @@ from pathlib import Path
 
 from aidast.recon.diagnostics import ReconDiagnostics, diagnostic_endpoint
 from aidast.recon.activity import activity_from_diagnostic, validated_activity
+from aidast.recon import db
 from aidast.recon.executor import ReconExecutor
 from aidast.recon.tools.endpoint_discovery import _parse_katana_output
 
@@ -47,6 +48,71 @@ class ReconDiagnosticsTests(unittest.TestCase):
             "phase": "playwright_interaction", "state": "finished", "duplicate_count": 3,
         })
         self.assertIsNone(validated_activity({"phase": ["invalid"], "state": "started"}))
+
+    def test_discovered_url_activity_strips_secrets_and_preserves_response_status(self) -> None:
+        activity = activity_from_diagnostic("url_discovered", {
+            "method": "GET", "url": "https://example.com/account?token=secret#private",
+            "source": "katana_standard,ffuf", "response_status": 404,
+            "headers": {"Authorization": "secret"},
+        })
+        self.assertEqual(activity, {
+            "phase": "endpoint_discovery", "state": "found", "method": "GET",
+            "url": "https://example.com/account", "source": "katana_standard,ffuf",
+            "response_status": 404,
+        })
+        self.assertEqual(validated_activity({**activity, "headers": "secret"}), activity)
+        self.assertEqual(activity_from_diagnostic("url_discovered", {
+            "method": "GET", "url": "http://example.com/?session=secret", "response_status": 301,
+        })["url"], "http://example.com/")
+        self.assertEqual(activity_from_diagnostic("url_discovered", {
+            "method": "GET", "url": "https://example.com/very/long/nested/route/with/many/segments",
+        })["url"], "https://example.com/very/long/nested/route/with/many/segments")
+        self.assertIsNone(activity_from_diagnostic("url_discovered", {
+            "method": "GET", "url": "https://name:secret@example.com/account",
+        }))
+
+    def test_recon_logs_candidate_and_observed_urls_without_network_requests(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            conn = db.init_db(Path(temporary_dir) / "Recon.db")
+            try:
+                db.insert_scan(conn, scan_id="scan_urls", scope_type="test", scope_value="example.com")
+                asset_id = db.insert_asset(conn, scan_id="scan_urls", identifier="example.com", asset_type="domain")
+                origin_id = db.upsert_origin(conn, asset_id=asset_id, scheme="https", host="example.com",
+                                             port=443, base_url="https://example.com")
+                items = []
+                for path, status, excluded in (("/ok", 200, False), ("/missing", 404, False),
+                                               ("/guess", None, False), ("/logo.png", 200, True)):
+                    endpoint_id = db.upsert_endpoint(
+                        conn, origin_id=origin_id, method="GET", path=path, normalized_path=path,
+                        source_tool="katana_standard", is_excluded=excluded,
+                    )
+                    if status is not None:
+                        conn.execute(
+                            """INSERT INTO endpoint_observations
+                            (observation_id,endpoint_id,source_tool,discovery_kind,observed_url,
+                             association_method,observed_at,evidence_json)
+                            VALUES (?,?,?,?,?,?,?,?)""",
+                            (db.new_id("observation"), endpoint_id, "katana_standard", "http_response",
+                             "https://example.com" + path, "tool_batch", db.now(),
+                             json.dumps({"response_status": status})),
+                        )
+                    items.append({"method": "GET", "normalized_path": path, "source_tools": {"katana_standard"},
+                                  "is_excluded": excluded})
+                conn.commit()
+                executor = ReconExecutor.__new__(ReconExecutor)
+                executor.conn, executor.scan_id = conn, "scan_urls"
+                executor.diagnostics, executor._diagnostic_warning_emitted = None, False
+                executor._log_discovered_urls("https://example.com", origin_id, items)
+                rows = [json.loads(row[0]) for row in conn.execute(
+                    "SELECT details_json FROM audit_events WHERE event_type='recon.activity' ORDER BY rowid"
+                )]
+                self.assertEqual([(row["url"], row.get("response_status")) for row in rows], [
+                    ("https://example.com/ok", 200),
+                    ("https://example.com/missing", 404),
+                    ("https://example.com/guess", None),
+                ])
+            finally:
+                conn.close()
 
     def test_jsonl_redacts_secrets_and_url_queries(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_dir:
