@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { parseEvent, parseSnapshot, applyEvent, applyOrderedEvent, displayStageStatus, pipelineStageState, stages } from '../src/lib/events.ts';
 import { demoSnapshot, DEMO_SCAN } from '../src/data/demo.ts';
-import { translate } from '../src/lib/i18n.ts';
+import { initialLanguage, translate } from '../src/lib/i18n.ts';
 import { localizeActivityMessage, localizeAuditEventType } from '../src/lib/activityMessages.ts';
 import { resolveExecutionLimits } from '../src/lib/scan.ts';
 import { scopeCollectionRequest } from '../src/lib/scope.ts';
@@ -22,6 +22,20 @@ test('dashboard labels use the Korean catalog and preserve English keys', () => 
   for (const key of ['Scopes / Programs', 'Yes · Approve Scope']) {
     assert.notEqual(translate('ko', key), key);
     assert.equal(translate('en', key), key);
+  }
+});
+test('display language defaults to Korean and restores the saved choice', () => {
+  const original = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
+  try {
+    Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: { getItem: () => null } });
+    assert.equal(initialLanguage(), 'ko');
+    Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: { getItem: () => 'en' } });
+    assert.equal(initialLanguage(), 'en');
+    Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: { getItem: () => 'invalid' } });
+    assert.equal(initialLanguage(), 'ko');
+  } finally {
+    if (original) Object.defineProperty(globalThis, 'localStorage', original);
+    else delete globalThis.localStorage;
   }
 });
 test('activity codes localize live messages and audit types without exposing raw English', () => {
