@@ -12,6 +12,13 @@ import time
 from pathlib import Path
 from uuid import uuid4
 
+from .process_identity import process_args, process_cwd, process_stat
+from .process_control import control_process
+
+
+def _windows_host() -> bool:
+    return os.name == "nt"
+
 
 class ScopeProcessController:
     def __init__(
@@ -32,14 +39,13 @@ class ScopeProcessController:
 
     @staticmethod
     def _process_stat(pid: int) -> tuple[str, str]:
-        fields = Path(f"/proc/{pid}/stat").read_text().split(") ", 1)[1].split()
-        return fields[0], fields[19]
+        return process_stat(pid)
 
     def start(
         self, job_id: str, program_id: str, request_json: str
     ) -> subprocess.Popen[str]:
-        if os.name != "posix":
-            raise OSError("Scope process controls require a POSIX host")
+        if os.name != "posix" and not _windows_host():
+            raise OSError("Scope process controls require a supported host")
         env = os.environ.copy()
         env["AIDAST_RESULT_ROOT"] = str(self.result_root)
         source_root = self.project_root / "src"
@@ -59,10 +65,12 @@ class ScopeProcessController:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             text=True,
-            start_new_session=True,
+            start_new_session=not _windows_host(),
+            **({"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+               if _windows_host() else {}),
         )
         try:
-            if os.getpgid(process.pid) != process.pid:
+            if not _windows_host() and os.getpgid(process.pid) != process.pid:
                 raise OSError("Scope worker did not start in an isolated session")
             _state, started = self._process_stat(process.pid)
             marker = self._marker(job_id)
@@ -83,7 +91,10 @@ class ScopeProcessController:
             process.stdin.close()
         except Exception:
             try:
-                os.killpg(process.pid, signal.SIGTERM)
+                if _windows_host():
+                    process.kill()
+                else:
+                    os.killpg(process.pid, signal.SIGTERM)
             except ProcessLookupError:
                 pass
             self.forget(job_id)
@@ -91,7 +102,7 @@ class ScopeProcessController:
         return process
 
     def pid(self, job_id: str) -> int | None:
-        if os.name != "posix":
+        if os.name != "posix" and not _windows_host():
             return None
         try:
             marker = json.loads(self._marker(job_id).read_text(encoding="utf-8"))
@@ -102,16 +113,13 @@ class ScopeProcessController:
             if not isinstance(program_id, str):
                 return None
             state, current_start = self._process_stat(pid)
-            if state == "Z" or current_start != started or os.getpgid(pid) != pid:
+            if state == "Z" or current_start != started:
                 return None
-            entry = Path(f"/proc/{pid}")
-            if Path(os.readlink(entry / "cwd")).resolve() != self.project_root:
+            if not _windows_host() and os.getpgid(pid) != pid:
                 return None
-            args = [
-                value.decode("utf-8", "replace")
-                for value in (entry / "cmdline").read_bytes().split(b"\0")
-                if value
-            ]
+            if process_cwd(pid) != self.project_root:
+                return None
+            args = process_args(pid)
             if args[1:] != [
                 "-m", self.worker_module, str(self.result_root),
                 program_id, job_id,
@@ -122,11 +130,39 @@ class ScopeProcessController:
             return None
 
     def signal(self, job_id: str, signum: int) -> int:
+        if _windows_host():
+            raise ValueError("use the named Scope process controls on Windows")
         pid = self.pid(job_id)
         if pid is None:
             raise ValueError("Scope job has no isolated active worker")
         os.killpg(pid, signum)
         return pid
+
+    def _control(self, job_id: str, action: str, signum: int | None = None) -> int:
+        pid = self.pid(job_id)
+        if pid is None:
+            raise ValueError("Scope job has no isolated active worker")
+        if _windows_host():
+            marker = json.loads(self._marker(job_id).read_text(encoding="utf-8"))
+            if marker.get("pid") != pid or not isinstance(marker.get("started"), str):
+                raise ValueError("Scope worker identity changed")
+            control_process(pid, marker["started"], action)
+        else:
+            assert signum is not None
+            os.killpg(pid, signum)
+        return pid
+
+    def pause(self, job_id: str) -> int:
+        return self._control(job_id, "pause", getattr(signal, "SIGSTOP", None))
+
+    def resume(self, job_id: str) -> int:
+        return self._control(job_id, "resume", getattr(signal, "SIGCONT", None))
+
+    def terminate(self, job_id: str) -> int:
+        return self._control(job_id, "terminate", signal.SIGTERM)
+
+    def kill(self, job_id: str) -> int:
+        return self._control(job_id, "kill", getattr(signal, "SIGKILL", None))
 
     def forget(self, job_id: str) -> None:
         self._marker(job_id).unlink(missing_ok=True)

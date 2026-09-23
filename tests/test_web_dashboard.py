@@ -959,7 +959,7 @@ def test_scan_pause_continue_and_cancel_preserve_one_process(tmp_path: Path, mon
         process.wait(timeout=5)
 
 
-@pytest.mark.skipif(os.name != "posix", reason="process adoption uses /proc")
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX process groups")
 def test_paused_scan_can_continue_after_dashboard_restart(tmp_path: Path) -> None:
     database = _fixture(tmp_path)
     with sqlite3.connect(database) as conn:
@@ -991,6 +991,55 @@ def test_paused_scan_can_continue_after_dashboard_restart(tmp_path: Path) -> Non
         if process.poll() is None:
             os.killpg(process.pid, signal.SIGKILL)
         process.wait(timeout=5)
+
+
+def test_windows_scan_pause_continue_and_cancel_after_restart(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import aidast.web.launch as launch_module
+
+    database = _fixture(tmp_path)
+    with sqlite3.connect(database) as conn:
+        conn.execute("UPDATE scans SET status='running',finished_at=NULL WHERE scan_id=?", (SCAN_ID,))
+        conn.execute("UPDATE stage_runs SET status='running',finished_at=NULL WHERE scan_id=?", (SCAN_ID,))
+
+    class Worker:
+        pid = 42
+
+    alive = True
+    actions: list[str] = []
+
+    def control(_pid: int, _started: str, action: str) -> None:
+        nonlocal alive
+        actions.append(action)
+        if action == "terminate":
+            alive = False
+
+    monkeypatch.setattr(launch_module, "_windows_host", lambda: True)
+    monkeypatch.setattr(launch_module.subprocess, "Popen", Worker)
+    monkeypatch.setattr(launch_module, "process_cwd", lambda _pid: tmp_path)
+    monkeypatch.setattr(launch_module, "process_args", lambda _pid: [
+        "python.exe", "-m", "aidast", "run", "https://example.com", "--scan-id", SCAN_ID,
+    ])
+    monkeypatch.setattr(launch_module, "control_process", control)
+    monkeypatch.setattr(
+        ScanLaunchManager, "_process_stat",
+        staticmethod(lambda _pid: ("R" if alive else "Z", "1234.5")),
+    )
+
+    projector = DashboardProjector(tmp_path)
+    first = ScanLaunchManager(tmp_path, projector, project_root=tmp_path)
+    first._record_process(SCAN_ID, Worker())
+    restarted = ScanLaunchManager(tmp_path, projector, project_root=tmp_path)
+    assert restarted.pause(SCAN_ID)["status"] == "paused"
+    assert restarted.continue_scan(SCAN_ID)["status"] == "running"
+    assert restarted.cancel(SCAN_ID)["status"] == "cancelling"
+    for _ in range(50):
+        if projector.snapshot(SCAN_ID)["status"] == "cancelled":
+            break
+        threading.Event().wait(0.02)
+    assert projector.snapshot(SCAN_ID)["status"] == "cancelled"
+    assert actions == ["pause", "resume", "terminate"]
 
 
 def test_scan_request_rejects_unconfirmed_or_excessive_budget() -> None:
