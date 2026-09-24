@@ -415,6 +415,8 @@ F1        = 2 × precision × recall / (precision + recall)
 
 최종 평가는 대상별로 다음 내용을 하나의 Markdown 보고서에 정리한다.
 
+Phase별 결과 문서는 [공통 작성 정책](../test-results/PHASE_RESULT_FORMAT_POLICY.md)의 판정·실행 이력·근거·제한사항 순서를 따른다. Phase B·C·D의 Recon 수집률은 [전용 형식](../test-results/RECON_COVERAGE_TEMPLATE.md)의 실행별 표와 단계별 대상 합집합 표를 각 결과 세트에 작성한다. 고정 route 기준 버전, `Recon.db` 경로, 인증·시작 경로 및 실패 실행의 제외 사유를 함께 기록한다.
+
 ```text
 환경·버전
 Scope·Policy 요약
