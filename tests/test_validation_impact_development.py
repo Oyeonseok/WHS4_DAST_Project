@@ -13,6 +13,29 @@ from aidast.validation import (
 )
 
 
+def test_legacy_impact_contract_digest_does_not_gain_empty_precondition() -> None:
+    from aidast.validation.contracts.impact_development import (
+        ImpactDevelopmentRuntimeContract, impact_contract_document,
+    )
+    legacy = {
+        "schema_version": 1,
+        "actions": [{
+            "contract_id": "debug-users-password-field",
+            "path_id": "bounded-impact-confirmation",
+            "endpoint_template": "/debug/{resource}", "method": "GET",
+            "request": {"path_parameters": {"resource": "users"},
+                        "query_parameters": {}, "headers": {},
+                        "json_body": None, "text_body": None},
+            "assertions": [{"assertion_id": "password-field-name",
+                            "kind": "body_contains", "expected": '"password":',
+                            "path": [], "header": None}],
+            "credential_roles": [],
+        }],
+    }
+    contract = ImpactDevelopmentRuntimeContract.model_validate(legacy)
+    assert impact_contract_document(contract) == legacy
+
+
 class ImpactHypothesisExecutorTests(unittest.TestCase):
     def setUp(self):
         self.profile = SkillProfileResolver().resolve("hunt-idor").profile
@@ -26,6 +49,16 @@ class ImpactHypothesisExecutorTests(unittest.TestCase):
         )
         self.assertEqual(impact, self.impact)
         self.assertEqual(observations, ())
+
+    def test_score_one_gap_can_request_a_bounded_improvement(self):
+        weak = evaluate_impact(1, 1, 2)
+        requests = self.executor.requests(
+            profile=self.profile, impact=weak, evidence_ids=("evidence",),
+        )
+        self.assertEqual({item.path_id for item in requests}, {
+            "cross-role-object-access", "sensitive-object-field",
+        })
+        self.assertTrue(all(item.current_score == 1 for item in requests))
 
     def test_observed_declared_signal_applies_only_declared_score(self):
         def port(request):

@@ -546,9 +546,10 @@ class NativeAttackDatabaseCliTests(unittest.TestCase):
             self.assertEqual(
                 stored_runtime[3], canonical_sha256(normalized_development)
             )
-            normalized_impact = ImpactDevelopmentRuntimeContract.model_validate(
-                impact_development_contract
-            ).model_dump(mode="json")
+            from aidast.validation.contracts.impact_development import impact_contract_document
+            normalized_impact = impact_contract_document(
+                ImpactDevelopmentRuntimeContract.model_validate(impact_development_contract)
+            )
             self.assertEqual(json.loads(stored_runtime[4]), normalized_impact)
             self.assertEqual(
                 stored_runtime[5], canonical_sha256(normalized_impact)

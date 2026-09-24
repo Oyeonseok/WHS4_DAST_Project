@@ -26,6 +26,7 @@ from ..contracts.models import (BlindAssessment, ClaimComparison, ValidationStag
                      canonical_json, canonical_sha256)
 from ..persistence.repository import ValidationRepository
 from ..contracts.models import PrerequisiteResolverPort, ReproductionObservation, ReproductionPort
+from ..contracts.impact_development import impact_action_document
 
 
 class ValidationCoordinatorError(RuntimeError):
@@ -44,6 +45,32 @@ class ValidationAgentRunner(Protocol):
 
 class PolicyProvider(Protocol):
     def __call__(self, endpoint: str, method: str) -> TargetPolicy: ...
+
+
+def _impact_planning_context(candidate: ValidatedCandidate,
+                             observations: tuple[dict[str, Any], ...]
+                             ) -> tuple[dict[str, Any], ...]:
+    """Give the planner only gated request provenance and non-secret marker receipts."""
+    return (*observations, {
+        "context_kind": "verified_attack_source_requests",
+        "requests": list(candidate.source_requests),
+    }, {
+        "context_kind": "immutable_impact_execution_capabilities",
+        "capabilities": [{
+            "contract_id": action.contract_id,
+            "path_id": action.path_id,
+            "endpoint_template": action.endpoint_template,
+            "method": action.method,
+            "request": action.request.model_dump(mode="json"),
+            "assertions": [assertion.model_dump(mode="json") for assertion in action.assertions],
+            "credential_roles": list(action.credential_roles),
+            "precondition_observation": (
+                action.precondition_observation.model_dump(mode="json")
+                if action.precondition_observation is not None else None
+            ),
+            "contract_sha256": canonical_sha256(impact_action_document(action)),
+        } for action in candidate.impact_development_actions],
+    })
 
 
 class ValidationCoordinator:
@@ -1286,8 +1313,6 @@ class ValidationCoordinator:
             assessment.impact_sensitivity.score,
             assessment.impact_actor_requirements.score,
         )
-        if not initial.underpowered:
-            return assessment
         available_paths = {
             action.path_id for action in candidate.impact_development_actions
         }
@@ -1304,27 +1329,7 @@ class ValidationCoordinator:
         )
         if not requests:
             return assessment
-        planning_context = (*observations, {
-            "context_kind": "immutable_impact_execution_capabilities",
-            "capabilities": [
-                {
-                    "contract_id": action.contract_id,
-                    "path_id": action.path_id,
-                    "endpoint_template": action.endpoint_template,
-                    "method": action.method,
-                    "request": action.request.model_dump(mode="json"),
-                    "assertions": [
-                        assertion.model_dump(mode="json")
-                        for assertion in action.assertions
-                    ],
-                    "credential_roles": list(action.credential_roles),
-                    "contract_sha256": canonical_sha256(
-                        action.model_dump(mode="json")
-                    ),
-                }
-                for action in candidate.impact_development_actions
-            ],
-        })
+        planning_context = _impact_planning_context(candidate, observations)
         runner = None
 
         def port(request, hypothesis_id):

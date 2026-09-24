@@ -18,14 +18,19 @@ import sqlite3
 import tempfile
 from pathlib import Path
 from typing import Callable
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from aidast.pipeline.lifecycle import create_task, finish_stage_run, start_stage_run, transition_task
 from aidast.pipeline.live_schema import migrate_live_pipeline_schema
 from aidast.recon import db
 from aidast.recon.policy import PolicyLimits, TargetPolicy, ToolPolicy
 from aidast.scope.models import AssetType
-from aidast.validation import canonical_reproduction_spec, canonical_sha256, validate_runtime_contract
+from aidast.validation import (
+    ImpactDevelopmentRuntimeContract, canonical_reproduction_spec, canonical_sha256,
+    validate_runtime_contract,
+)
 from aidast.validation.contracts.eligibility import ScopePolicySource
+from aidast.validation.contracts.impact_development import impact_contract_document
 from aidast.validation.contracts.runtime_contract import HttpRequestTemplate, render_http_request
 from aidast.validation.core.integrity import CandidateIntegrityGate
 from aidast.validation.persistence.repository import ValidationRepository
@@ -41,6 +46,44 @@ DEFAULT_SCOPE_ROOT = ROOT / "result/Scope/lab-aidast-invalid"
 BASES = {"juice-shop": "http://127.0.0.1:3001", "vuln-bank": "http://127.0.0.1:5001"}
 SKILLS = {"sql_injection": "hunt-sqli", "unauthenticated_disclosure": "hunt-auth-bypass",
           "excessive_data_exposure": "hunt-source-leak"}
+IMPACT_CANDIDATE = "vuln-bank:curated:GET:/debug/users:excessive_data_exposure"
+
+
+class _NoRedirect(HTTPRedirectHandler):
+    def redirect_request(self, request, response, code, message, headers, newurl):
+        return None
+
+
+def probe_impact_markers(url: str) -> tuple[set[str], str]:
+    """Check only non-secret JSON field names in one bounded local GET response."""
+    if url != BASES["vuln-bank"] + "/debug/users":
+        raise ValueError("impact marker probe URL is not the pinned debug route")
+    with build_opener(_NoRedirect).open(Request(url, method="GET"), timeout=15) as response:
+        if response.status != 200 or response.geturl() != url:
+            raise ValueError("impact marker probe response changed")
+        body = response.read(1_048_577)
+    if len(body) > 1_048_576:
+        raise ValueError("impact marker probe response exceeded bounded size")
+    return impact_marker_names(body), hashlib.sha256(body).hexdigest()
+
+
+def impact_marker_names(body: bytes) -> set[str]:
+    """Extract only the declared root and users[*].password JSON keys."""
+    document = json.loads(body)
+    if not isinstance(document, dict) or "users" not in document:
+        return set()
+    names = {"users"}
+    users = document["users"]
+    if isinstance(users, list) and any(
+        isinstance(user, dict) and "password" in user for user in users
+    ):
+        names.add("password")
+    if b'"username":"admin"' in body and isinstance(users, list) and any(
+        isinstance(user, dict) and user.get("username") == "admin" and "password" in user
+        for user in users
+    ):
+        names.add("seeded_admin")
+    return names
 
 
 def _digest(value: str) -> str:
@@ -154,9 +197,20 @@ def prepare_validation_lab(inventory: Path, answers: Path, observations: Path,
                            output: Path, *,
                            scope_root: Path = DEFAULT_SCOPE_ROOT,
                            live_probe: Callable[[str], tuple[int, str, int]] = fetch_status_and_digest,
-                           identity_probe: Callable[[], dict] = verify_runtime_identity) -> dict:
+                           identity_probe: Callable[[], dict] = verify_runtime_identity,
+                           impact_probe: bool = False,
+                           impact_marker_probe: Callable[[str], tuple[set[str], str]] = probe_impact_markers) -> dict:
     """Build an isolated Pipeline.db and mapping; existing output is never replaced."""
     cases = _load_inputs(inventory, answers, observations, live_probe, identity_probe)
+    if impact_probe:
+        selected = next((observation for candidate, observation in cases
+                         if candidate["candidate_id"] == IMPACT_CANDIDATE), None)
+        if selected is None:
+            raise ValueError("impact marker is missing from the pinned local response")
+        names, response_sha = impact_marker_probe(selected["url"])
+        if (not {"users", "password", "seeded_admin"} <= names
+                or response_sha != selected["response_body_sha256"]):
+            raise ValueError("impact marker or response digest changed")
     scopes = {}
     for project, base in BASES.items():
         source = ScopePolicySource.from_path(scope_root / project / "Scope.md")
@@ -224,6 +278,39 @@ def prepare_validation_lab(inventory: Path, answers: Path, observations: Path,
                 finding_id, attempt_id = f"lab-finding-{short}", f"lab-attempt-{short}"
                 source_id, evidence_id = f"lab-source-{short}", f"lab-evidence-{short}"
                 endpoint, parameter, location, runtime, skill = _contract(candidate)
+                impact_contract = None
+                if impact_probe and candidate_id == IMPACT_CANDIDATE:
+                    runtime["target"]["assertions"][0]["expected"] = "users"
+                    runtime["negative_control"]["assertions"][0]["expected"] = "users"
+                    runtime = validate_runtime_contract(runtime).model_dump(mode="json")
+                    impact_contract = ImpactDevelopmentRuntimeContract.model_validate({
+                        "schema_version": 1,
+                        "actions": [{
+                            "contract_id": "debug-users-password-field",
+                            "path_id": "bounded-impact-confirmation",
+                            "endpoint_template": endpoint,
+                            "method": "GET",
+                            "request": runtime["target"]["request"],
+                            "assertions": [{
+                                "assertion_id": "password-field-name",
+                                "kind": "body_contains",
+                                "expected": '"password":',
+                            }, {
+                                "assertion_id": "seeded-admin-username",
+                                "kind": "body_contains",
+                                "expected": '"username":"admin"',
+                            }],
+                            "credential_roles": [],
+                            "precondition_observation": {
+                                "source_request_id": source_id,
+                                "response_sha256": observation["response_body_sha256"],
+                                "response_status": observation["observed_http_status"],
+                                "marker_json_path": ["users", "*", "username"],
+                                "marker_assertion_id": "seeded-admin-username",
+                            },
+                        }],
+                    })
+                    impact_contract = impact_contract_document(impact_contract)
                 endpoint_key = (project, endpoint)
                 if endpoint_key not in endpoint_ids:
                     endpoint_ids[endpoint_key] = "lab-endpoint-" + _digest(project + endpoint)[:16]
@@ -285,18 +372,24 @@ def prepare_validation_lab(inventory: Path, answers: Path, observations: Path,
                         injection_location,parameter_name,payload_template_json,
                         required_identity_roles_json,source_attempt_ids_json,source_request_ids_json,
                         payload_structure_sha256,source_policy_sha256,runtime_contract_json,
-                        runtime_contract_sha256,spec_sha256)
-                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        runtime_contract_sha256,impact_development_contract_json,
+                        impact_development_contract_sha256,spec_sha256)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (finding_id, skill, endpoint_id, "GET", endpoint, location, parameter,
                      json.dumps(spec["payload_template"]), "[]", json.dumps([attempt_id]),
                      json.dumps([source_id]), spec["payload_structure_sha256"], policy_sha,
                      json.dumps(runtime, sort_keys=True), spec["runtime_contract_sha256"],
+                     json.dumps(impact_contract, sort_keys=True) if impact_contract else None,
+                     canonical_sha256(impact_contract) if impact_contract else None,
                      spec["spec_sha256"]),
                 )
                 transition_task(conn, task_id, status="completed")
                 mapping["cases"].append({"candidate_id": candidate_id, "scan_id": scan_id,
                                          "finding_id": finding_id,
                                          "source_http_status": observation["observed_http_status"]})
+                if impact_contract is not None:
+                    mapping["impact_lab"] = {"candidate_id": candidate_id,
+                                             "scan_id": scan_id, "finding_id": finding_id}
             finish_stage_run(conn, stage)
             chain = start_stage_run(conn, scan_id=scan_id, stage="chaining",
                                     stage_run_id=f"{scan_id}-chaining")
@@ -323,9 +416,12 @@ def main() -> None:
     parser.add_argument("--observations", type=Path, default=DEFAULT_ROOT / "LocalControlObservations.json")
     parser.add_argument("--output", type=Path, default=DEFAULT_ROOT / "validation-lab")
     parser.add_argument("--scope-root", type=Path, default=DEFAULT_SCOPE_ROOT)
+    parser.add_argument("--impact-probe", action="store_true",
+                        help="stage a separate weak-impact /debug/users case")
     args = parser.parse_args()
     result = prepare_validation_lab(args.candidate_db, args.answer_db, args.observations,
-                                    args.output, scope_root=args.scope_root)
+                                    args.output, scope_root=args.scope_root,
+                                    impact_probe=args.impact_probe)
     print(json.dumps({"output": str(args.output), "staged_cases": len(result["cases"]),
                       "fixture_kind": result["fixture_kind"]}))
 

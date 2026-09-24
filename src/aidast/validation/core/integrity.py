@@ -13,13 +13,14 @@ from ..contracts.models import (
     AttackClaim, BlindCase, DevelopmentCapability, ImpactDevelopmentCapability,
     StagedBlindCase,
 )
-from .matching import canonical_payload, payload_structure_sha256
+from .matching import payload_structure_sha256
 from ..contracts.models import canonical_sha256
 from .profiles import ResolvedValidationProfile, SkillProfileResolver, ValidationProfileError
-from ..contracts.runtime_contract import validate_runtime_contract
+from ..contracts.runtime_contract import render_http_request, validate_runtime_contract
 from ..contracts.development import DevelopmentActionContract, DevelopmentRuntimeContract
 from ..contracts.impact_development import (
     ImpactDevelopmentActionContract, ImpactDevelopmentRuntimeContract,
+    impact_action_document, impact_contract_document,
 )
 
 
@@ -43,6 +44,7 @@ class ValidatedCandidate:
     staged: StagedBlindCase
     development_actions: tuple[DevelopmentActionContract, ...] = ()
     impact_development_actions: tuple[ImpactDevelopmentActionContract, ...] = ()
+    source_requests: tuple[dict[str, Any], ...] = ()
 
 
 SPEC_DIGEST_FIELDS = (
@@ -124,7 +126,7 @@ class CandidateIntegrityGate:
                 )
             except (ValueError, TypeError):
                 raise CandidateIntegrityError("impact_development_contract_schema") from None
-            if canonical_sha256(impact_contract.model_dump(mode="json")) != impact_sha256:
+            if canonical_sha256(impact_contract_document(impact_contract)) != impact_sha256:
                 raise CandidateIntegrityError("impact_development_contract_sha256")
             impact_actions = impact_contract.actions
         if reproduction_spec_digest(spec) != spec["spec_sha256"]:
@@ -141,7 +143,7 @@ class CandidateIntegrityGate:
         skills = {row["skill_name"] for row in attempts}
         if len(skills) != 1 or spec["attack_skill_name"] not in skills:
             raise CandidateIntegrityError("confirmed_skill_binding")
-        self._source_requests(scan_id, spec, attempts, finding["base_url"])
+        source_requests = self._source_requests(scan_id, spec, attempts, finding["base_url"])
         try:
             profile = self.resolver.resolve(spec["attack_skill_name"])
         except ValidationProfileError:
@@ -184,6 +186,28 @@ class CandidateIntegrityGate:
             for action in impact_actions
         ):
             raise CandidateIntegrityError("impact_development_profile_scope")
+        for action in impact_actions:
+            receipt = action.precondition_observation
+            if receipt is None:
+                continue
+            source = next((row for row in source_requests
+                           if row["request_id"] == receipt.source_request_id), None)
+            matching_attempt = next((row for row in attempts
+                                     if source is not None
+                                     and row["request_fingerprint"] == source["request_fingerprint"]), None)
+            try:
+                url, headers, body = render_http_request(
+                    urljoin(finding["base_url"].rstrip("/") + "/",
+                            action.endpoint_template.lstrip("/")), action.request,
+                )
+            except ValueError:
+                raise CandidateIntegrityError("impact_precondition_request") from None
+            if (source is None or matching_attempt is None
+                    or source["method"] not in {"GET", "HEAD", "OPTIONS"}
+                    or source["url"] != url or source["response_status"] != receipt.response_status
+                    or matching_attempt["response_signature"] != receipt.response_sha256
+                    or headers or body is not None):
+                raise CandidateIntegrityError("impact_precondition_provenance")
         if any(
             role not in roles
             for action in impact_actions for role in action.credential_roles
@@ -238,7 +262,7 @@ class CandidateIntegrityGate:
                     path_id=action.path_id,
                     endpoint_template=action.endpoint_template,
                     method=action.method,
-                    contract_sha256=canonical_sha256(action.model_dump(mode="json")),
+                    contract_sha256=canonical_sha256(impact_action_document(action)),
                 )
                 for action in impact_actions
             ),
@@ -258,6 +282,9 @@ class CandidateIntegrityGate:
             profile, StagedBlindCase(
                 blind, claim, reproduction_spec_sha256=spec["spec_sha256"],
             ), development_actions, impact_actions,
+            tuple({key: row[key] for key in (
+                "request_id", "method", "url", "response_status", "authorization_source"
+            )} for row in source_requests),
         )
 
     def validate_chain(self, *, case_id: str, scan_id: str, chain_id: str) -> ValidatedCandidate:
@@ -456,7 +483,7 @@ class CandidateIntegrityGate:
             raise CandidateIntegrityError("source_attempt_ids")
         placeholders = ",".join("?" for _ in identifiers)
         rows = self.conn.execute(
-            f"""SELECT attempt_id,task_id,skill_name,endpoint_id,request_fingerprint
+            f"""SELECT attempt_id,task_id,skill_name,endpoint_id,request_fingerprint,response_signature
             FROM attack_attempts WHERE scan_id=? AND finding_id=? AND outcome='confirmed'
             AND attempt_id IN ({placeholders})""", (scan_id, finding_id, *identifiers),
         ).fetchall()
@@ -473,7 +500,7 @@ class CandidateIntegrityGate:
         return rows
 
     def _source_requests(self, scan_id: str, spec: dict[str, Any], attempts: list[sqlite3.Row],
-                         base_url: str) -> None:
+                         base_url: str) -> tuple[sqlite3.Row, ...]:
         identifiers = spec["source_request_ids"]
         if not isinstance(identifiers, list) or not identifiers or len(identifiers) != len(set(identifiers)):
             raise CandidateIntegrityError("source_request_ids")
@@ -481,7 +508,7 @@ class CandidateIntegrityGate:
         placeholders = ",".join("?" for _ in identifiers)
         rows = self.conn.execute(
             f"""SELECT request_id,task_id,request_fingerprint,method,policy_sha256,status,url,
-            authorization_source
+            authorization_source,response_status
             FROM attack_http_requests WHERE scan_id=? AND request_id IN ({placeholders})""",
             (scan_id, *identifiers),
         ).fetchall()
@@ -515,6 +542,7 @@ class CandidateIntegrityGate:
                 # authority for an independent Validation case. Legacy mutation
                 # rows without provenance also fail closed.
                 raise CandidateIntegrityError("source_request_authorization")
+        return tuple(rows)
 
 
 def canonical_reproduction_spec(**values: Any) -> dict[str, Any]:

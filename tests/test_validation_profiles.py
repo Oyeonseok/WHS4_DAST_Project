@@ -165,9 +165,11 @@ class ValidationProfileTests(unittest.TestCase):
             profile=profile, impact=evaluate_impact(0, 1, 2),
             evidence_ids=("current_evidence",),
         )
-        self.assertEqual([item["path_id"] for item in proposals], ["cross-role-object-access"])
-        self.assertEqual(proposals[0]["supporting_evidence_ids"], ["current_evidence"])
-        self.assertEqual(proposals[0]["execution_owner"], "validation")
+        self.assertEqual([item["path_id"] for item in proposals],
+                         ["cross-role-object-access", "sensitive-object-field"])
+        self.assertTrue(all(item["supporting_evidence_ids"] == ["current_evidence"]
+                            and item["execution_owner"] == "validation"
+                            for item in proposals))
 
     def test_codex_runner_keeps_claim_out_of_blind_pass(self):
         resolved = SkillProfileResolver().resolve("hunt-idor")

@@ -1,0 +1,20 @@
+{
+  "fixture_kind": "synthetic_impact_development_lab_oracle",
+  "candidate_id": "vuln-bank:curated:GET:/debug/users:excessive_data_exposure",
+  "target_validation_status": "CONFIRMED",
+  "path_id": "bounded-impact-confirmation",
+  "gap_axis": "sensitivity",
+  "initial_score_max": 1,
+  "final_score_min": 2,
+  "contract_id": "debug-users-password-field",
+  "method": "GET",
+  "url": "http://127.0.0.1:5001/debug/users",
+  "response_status": 200,
+  "assertion_kind": "body_contains",
+  "assertion_expected": "\"password\":",
+  "marker_json_path": ["users", "*", "username"],
+  "marker_assertion_id": "seeded-admin-username",
+  "marker_assertion_expected": "\"username\":\"admin\"",
+  "signal_kind": "hunt_source_leak_bounded_impact_observed",
+  "proof_requirement": "The real Impact Development agent must choose execute; one current-stage native GET must satisfy the immutable non-secret field-name assertion; its request and observation evidence must be cited by the final sensitivity score, which rises from at most 1 to at least 2."
+}

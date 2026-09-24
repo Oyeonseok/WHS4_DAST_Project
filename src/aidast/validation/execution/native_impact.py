@@ -9,7 +9,7 @@ from contextlib import closing
 from pathlib import Path
 from urllib.parse import urljoin
 
-from ..contracts.impact_development import ImpactDevelopmentActionContract
+from ..contracts.impact_development import ImpactDevelopmentActionContract, impact_action_document
 from ..contracts.models import BlindCase, canonical_sha256
 from ..contracts.runtime_contract import evaluate_http_response, render_http_request
 from ..persistence.repository import ValidationRepository
@@ -38,7 +38,7 @@ class NativeImpactDevelopmentPort:
     ) -> dict:
         if contract is None or contract.path_id != request.path_id:
             raise ValueError("impact development contract is missing or mismatched")
-        contract_sha = canonical_sha256(contract.model_dump(mode="json"))
+        contract_sha = canonical_sha256(impact_action_document(contract))
         capability = next((
             item for item in blind_case.impact_development_capabilities
             if item.contract_id == contract.contract_id and item.path_id == request.path_id
