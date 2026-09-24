@@ -641,6 +641,8 @@ class CodexMainAgent:
                 str(result_path),
                 "-",
             ]
+            if self._main_model is not None:
+                command[2:2] = ["--model", self._main_model]
             if allow_browser:
                 command[2:2] = [
                     "--enable",

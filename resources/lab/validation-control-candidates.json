@@ -1,0 +1,98 @@
+[
+  {
+    "candidate_id": "juice-shop:case:GET:/api/Users:unauthenticated_disclosure",
+    "project": "juice-shop",
+    "path": "/api/Users",
+    "method": "GET",
+    "vuln_class": "unauthenticated_disclosure",
+    "title": "Unauthenticated user list disclosure",
+    "description": "Probe whether GET /api/Users returns user records without an Authorization header.",
+    "source_path": "server.ts",
+    "anchor": "app.get('/api/Users', security.isAuthorized())",
+    "probe": {"auth": "none", "expected_data": "user records"}
+  },
+  {
+    "candidate_id": "juice-shop:case:GET:/api/Feedbacks/:id:unauthenticated_disclosure",
+    "project": "juice-shop",
+    "path": "/api/Feedbacks/:id",
+    "method": "GET",
+    "vuln_class": "unauthenticated_disclosure",
+    "title": "Unauthenticated feedback object disclosure",
+    "description": "Probe whether GET /api/Feedbacks/1 returns a feedback record without an Authorization header.",
+    "source_path": "server.ts",
+    "anchor": "app.use('/api/Feedbacks/:id', security.isAuthorized())",
+    "probe": {"auth": "none", "path_value": "1", "expected_data": "feedback record"}
+  },
+  {
+    "candidate_id": "juice-shop:case:GET:/api/PrivacyRequests:unauthenticated_disclosure",
+    "project": "juice-shop",
+    "path": "/api/PrivacyRequests",
+    "method": "GET",
+    "vuln_class": "unauthenticated_disclosure",
+    "title": "Unauthenticated privacy request disclosure",
+    "description": "Probe whether GET /api/PrivacyRequests returns records without an Authorization header.",
+    "source_path": "server.ts",
+    "anchor": "app.get('/api/PrivacyRequests', security.denyAll())",
+    "probe": {"auth": "none", "expected_data": "privacy request records"}
+  },
+  {
+    "candidate_id": "juice-shop:case:GET:/api/Complaints:unauthenticated_disclosure",
+    "project": "juice-shop",
+    "path": "/api/Complaints",
+    "method": "GET",
+    "vuln_class": "unauthenticated_disclosure",
+    "title": "Unauthenticated complaint list disclosure",
+    "description": "Probe whether GET /api/Complaints returns records without an Authorization header.",
+    "source_path": "server.ts",
+    "anchor": "app.get('/api/Complaints', security.isAuthorized())",
+    "probe": {"auth": "none", "expected_data": "complaint records"}
+  },
+  {
+    "candidate_id": "vuln-bank:case:GET:/api/billers/by-category/<int:category_id>:sql_injection",
+    "project": "vuln-bank",
+    "path": "/api/billers/by-category/<int:category_id>",
+    "method": "GET",
+    "vuln_class": "sql_injection",
+    "title": "SQL injection through biller category path value",
+    "description": "Probe whether a noninteger SQL payload in category_id reaches the SQL query.",
+    "source_path": "app.py",
+    "anchor": "WHERE category_id = {category_id}",
+    "probe": {"path_value": "1' OR 1=1", "injection_point": "category_id"}
+  },
+  {
+    "candidate_id": "vuln-bank:case:GET:/api/virtual-cards/<int:card_id>/transactions:sql_injection",
+    "project": "vuln-bank",
+    "path": "/api/virtual-cards/<int:card_id>/transactions",
+    "method": "GET",
+    "vuln_class": "sql_injection",
+    "title": "SQL injection through card transaction path value",
+    "description": "Probe whether a noninteger SQL payload in card_id reaches the SQL query.",
+    "source_path": "app.py",
+    "anchor": "WHERE ct.card_id = {card_id}",
+    "probe": {"path_value": "1' OR 1=1", "injection_point": "card_id", "auth": "none"}
+  },
+  {
+    "candidate_id": "vuln-bank:case:GET:/api/v1/payments/<int:payment_id>:bola",
+    "project": "vuln-bank",
+    "path": "/api/v1/payments/<int:payment_id>",
+    "method": "GET",
+    "vuln_class": "bola",
+    "title": "Cross merchant payment read by ID",
+    "description": "Probe whether an authenticated merchant can read another merchant's payment by ID.",
+    "source_path": "merchant_payments.py",
+    "anchor": "AND mp.merchant_id = {current_merchant['id']}",
+    "probe": {"identity": "authenticated merchant A", "object": "payment owned by merchant B"}
+  },
+  {
+    "candidate_id": "vuln-bank:case:GET:/api/v1/payments:bola",
+    "project": "vuln-bank",
+    "path": "/api/v1/payments",
+    "method": "GET",
+    "vuln_class": "bola",
+    "title": "Cross merchant payment list disclosure",
+    "description": "Probe whether an authenticated merchant receives payments owned by another merchant in the list.",
+    "source_path": "merchant_payments.py",
+    "anchor": "WHERE mp.merchant_id = {current_merchant['id']}",
+    "probe": {"identity": "authenticated merchant A", "object": "payment owned by merchant B"}
+  }
+]

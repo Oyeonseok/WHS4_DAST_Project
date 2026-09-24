@@ -94,6 +94,19 @@ class FfufRootSelectionSkillTests(unittest.TestCase):
             )
         self.assertEqual(roots, ["/", "/api", "/api/v1"])
 
+    def test_selector_uses_recon_model(self) -> None:
+        agent_result = FfufRootSelection(
+            base_url="", roots=["/api"], count=1,
+            selection_reason="관측한 API prefix를 선택했습니다.",
+        )
+        with mock.patch("aidast.recon.tools.ffuf_root_selector.CodexMainAgent") as agent:
+            agent.return_value._run_structured.return_value = agent_result
+            roots = select_ffuf_roots_from_endpoints([
+                {"path": "/api/users", "method": "GET", "source": "katana"},
+            ])
+        self.assertEqual(roots, ["/api"])
+        self.assertEqual(agent.call_args.kwargs["main_model"], "gpt-6-luna")
+
     def test_ffuf_selects_roots_before_running(self) -> None:
         with tempfile.NamedTemporaryFile() as wordlist:
             with (

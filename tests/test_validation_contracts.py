@@ -7,7 +7,7 @@ from pydantic import ValidationError as PydanticValidationError
 
 from aidast.validation import (AttackClaim, BlindAssessment, BlindCase, BlindDisclosureError,
                                ClaimComparison, DecisionEngine, DecisionInput, StagedBlindCase,
-                               ValidationCaseSnapshot, canonical_reproduction_spec,
+                               ReproductionObservation, ValidationCaseSnapshot, canonical_reproduction_spec,
                                canonical_sha256, evaluate_impact)
 
 
@@ -71,7 +71,45 @@ class ValidationContractTests(unittest.TestCase):
         self.assertEqual(engine.decide(DecisionInput(integrity_ok=False, known=True)), "INCONCLUSIVE")
         self.assertEqual(engine.decide(DecisionInput(known=True, policy_allowed=False)), "KNOWN")
         self.assertEqual(engine.decide(DecisionInput(policy_allowed=False)), "OUT_OF_SCOPE")
-        self.assertEqual(engine.decide(DecisionInput(explicit_non_exploit_evidence=True)), "DISPROVEN")
+        self.assertEqual(engine.decide(DecisionInput(
+            explicit_non_exploit_evidence=True,
+            target_observations=(False, False, False),
+            target_outcomes=("not_observed",) * 3,
+        )), "DISPROVEN")
+        self.assertEqual(engine.decide(DecisionInput(
+            explicit_non_exploit_evidence=True,
+            target_observations=(False, False, False),
+            target_outcomes=("not_observed", "blocked", "not_observed"),
+        )), "INCONCLUSIVE")
+        self.assertEqual(engine.decide(DecisionInput(
+            explicit_non_exploit_evidence=True,
+        )), "INCONCLUSIVE")
+        self.assertEqual(engine.decide(DecisionInput(
+            explicit_non_exploit_evidence=True,
+            target_observations=(False, True, False),
+        )), "INCONCLUSIVE")
+        self.assertEqual(engine.decide(DecisionInput(
+            explicit_non_exploit_evidence=True,
+            target_observations=(False, False, False),
+            target_outcomes=("not_observed",) * 3,
+            resolvable_blocker=True,
+        )), "DEVELOPING")
+        self.assertEqual(engine.decide(DecisionInput(
+            explicit_non_exploit_evidence=True,
+            target_observations=(False, False, False),
+            target_outcomes=("not_observed",) * 3,
+            unresolved_blocker=True,
+        )), "DISPROVEN")
+        self.assertEqual(engine.decide(DecisionInput(
+            explicit_non_exploit_evidence=True,
+            target_observations=(False, False, False),
+            target_outcomes=("not_observed",) * 3,
+            topology_or_unknown_cause=True,
+        )), "DISPROVEN")
+        self.assertEqual(engine.decide(DecisionInput(
+            target_observations=(True, True, True),
+            unresolved_blocker=True, impact=sufficient,
+        )), "INCONCLUSIVE")
         self.assertEqual(engine.decide(DecisionInput(resolvable_blocker=True)), "DEVELOPING")
         self.assertEqual(engine.decide(DecisionInput(resolvable_blocker=True, development_used=True)), "BLOCKED")
         self.assertEqual(engine.decide(DecisionInput(target_observations=(True, True, False, True, True),
@@ -82,6 +120,15 @@ class ValidationContractTests(unittest.TestCase):
                                                           impact=evaluate_impact(0, 3, 3))), "UNDERPOWERED")
         self.assertEqual(engine.decide(DecisionInput(target_observations=(True, True, True),
                                                           impact=sufficient)), "CONFIRMED")
+
+    def test_explicit_negative_observation_requires_completed_negative_replay(self):
+        base = dict(outcome="not_observed", signal_type="response_diff",
+                    signal_observed=False, details={}, content_sha256="a" * 64,
+                    content_length=1, explicit_non_exploit=True)
+        self.assertTrue(ReproductionObservation.model_validate(base).explicit_non_exploit)
+        for outcome in ("blocked", "error", "outcome_unknown"):
+            with self.subTest(outcome=outcome), self.assertRaises(PydanticValidationError):
+                ReproductionObservation.model_validate(base | {"outcome": outcome})
 
     def test_attack_claim_is_revealed_only_after_assessment_freeze(self):
         blind = BlindCase(case_id="case", target_kind="finding", endpoint="/objects/{id}",

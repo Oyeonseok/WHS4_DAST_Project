@@ -450,6 +450,7 @@ class CodexMainAgentTests(unittest.TestCase):
                 "work = pathlib.Path(sys.argv[sys.argv.index('--cd') + 1])\n"
                 "assert (work / '.agents/skills/aidast-scope/SKILL.md').is_file()\n"
                 "assert '--enable' in sys.argv and 'browser_use' in sys.argv\n"
+                "assert sys.argv[sys.argv.index('--model') + 1] == 'gpt-6-luna'\n"
                 "prompt = sys.stdin.read()\n"
                 "assert '$aidast-scope' in prompt\n"
                 "output = pathlib.Path(sys.argv[sys.argv.index('--output-last-message') + 1])\n"
@@ -459,7 +460,8 @@ class CodexMainAgentTests(unittest.TestCase):
             executable.chmod(executable.stat().st_mode | 0o111)
 
             page, analysis = CodexMainAgent(
-                executable=str(executable), timeout_seconds=10
+                executable=str(executable), timeout_seconds=10,
+                main_model="gpt-6-luna",
             ).collect_scope("https://bugcrowd.com/engagements/example")
 
             self.assertEqual(page.title, "Example Program")

@@ -38,8 +38,10 @@ class DecisionInput:
     explicit_non_exploit_evidence: bool = False
     topology_or_unknown_cause: bool = False
     resolvable_blocker: bool = False
+    unresolved_blocker: bool = False
     development_used: bool = False
     target_observations: tuple[bool, ...] = ()
+    target_outcomes: tuple[str, ...] = ()
     semantic_conflict: bool = False
     attack_has_positive_evidence: bool = False
     impact: ImpactResult | None = None
@@ -63,8 +65,15 @@ class DecisionEngine:
             return "OUT_OF_SCOPE"
         if not value.positive_control_passed or not value.negative_control_clear:
             return "INCONCLUSIVE"
-        if value.explicit_non_exploit_evidence:
+        if (value.explicit_non_exploit_evidence
+                and len(value.target_observations) in {3, 5}
+                and not any(value.target_observations)
+                and len(value.target_outcomes) == len(value.target_observations)
+                and all(outcome == "not_observed" for outcome in value.target_outcomes)
+                and not value.resolvable_blocker):
             return "DISPROVEN"
+        if value.unresolved_blocker:
+            return "INCONCLUSIVE"
         if value.topology_or_unknown_cause:
             return "INCONCLUSIVE"
         if value.resolvable_blocker:
