@@ -128,6 +128,7 @@ def test_runner_limits_policy_decision_and_correction():
     assert "UNKNOWN" in prompt
     assert "explicitly supersedes" in prompt
     assert "quote" in prompt.lower()
+    assert "one contiguous excerpt" in prompt
     assert "no final Validation status" in prompt
     assert "never generate payloads or steps" in prompt
     assert "Check the conflicting exclusion" in prompt

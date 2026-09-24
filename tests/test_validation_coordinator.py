@@ -213,6 +213,46 @@ class BlockThenPassPort(FakePort):
         return result
 
 
+class NegativeProofPort(FakePort):
+    def __init__(self, *, last_target_has_proof=True):
+        super().__init__()
+        self.last_target_has_proof = last_target_has_proof
+
+    def execute(self, blind_case, *, attempt_kind, batch_no, ordinal, attempt_id, **context):
+        result = super().execute(blind_case, attempt_kind=attempt_kind,
+                                 batch_no=batch_no, ordinal=ordinal,
+                                 attempt_id=attempt_id, **context)
+        if attempt_kind != "target":
+            return result
+        return result.model_copy(update={
+            "outcome": "not_observed", "signal_observed": False,
+            "explicit_non_exploit": self.last_target_has_proof or ordinal != 3,
+        })
+
+
+class InvalidBlockedProofPort(NegativeProofPort):
+    def execute(self, blind_case, **context):
+        result = super().execute(blind_case, **context)
+        if context["attempt_kind"] == "target":
+            return result.model_copy(update={"outcome": "blocked"})
+        return result
+
+
+class NegativeProofAgent(FakeAgent):
+    def assess(self, blind_case, observations, correction=None):
+        return super().assess(blind_case, observations, correction) | {
+            "reproduced": False,
+        }
+
+
+class AlwaysBlockerAgent(FakeAgent):
+    def assess(self, blind_case, observations, correction=None):
+        return super().assess(blind_case, observations, correction) | {
+            "blocker_axis": "identity_auth",
+            "blocker_reason": "The current identity cannot resolve the target state.",
+        }
+
+
 class SuccessfulPrerequisite:
     def perform(self, blind_case, *, action_type, blocker_axis, **context):
         return {
@@ -432,6 +472,30 @@ class ValidationCoordinatorTests(unittest.TestCase):
             self.assertEqual(conn.execute("SELECT assessment_id FROM validation_eligibility_assessments").fetchone()[0],
                              decision["eligibility_assessment_id"])
 
+    def test_explicit_negative_proof_requires_every_target_attempt(self):
+        result = ValidationCoordinator(
+            db_path=self.path, agent=NegativeProofAgent(),
+            reproduction=NegativeProofPort(last_target_has_proof=False),
+            policy_provider=lambda endpoint, method: self.policy,
+        ).run("scan")
+        self.assertEqual(result.summary["statuses"], {"INCONCLUSIVE": 1})
+
+    def test_complete_explicit_negative_proof_is_disproven(self):
+        result = ValidationCoordinator(
+            db_path=self.path, agent=NegativeProofAgent(),
+            reproduction=NegativeProofPort(),
+            policy_provider=lambda endpoint, method: self.policy,
+        ).run("scan")
+        self.assertEqual(result.summary["statuses"], {"DISPROVEN": 1})
+
+    def test_blocked_target_with_forged_negative_flag_cannot_disprove(self):
+        result = ValidationCoordinator(
+            db_path=self.path, agent=NegativeProofAgent(),
+            reproduction=InvalidBlockedProofPort(),
+            policy_provider=lambda endpoint, method: self.policy,
+        ).run("scan")
+        self.assertEqual(result.summary["statuses"], {"INCONCLUSIVE": 1})
+
     def test_unknown_preflight_is_inconclusive_without_replay(self):
         self.eligibility.invalid = True
         port = FakePort()
@@ -538,6 +602,23 @@ class ValidationCoordinatorTests(unittest.TestCase):
                 test.assertEqual(result.summary["statuses"], {"INCONCLUSIVE": 1})
                 test.assertEqual(port.calls, [])
                 test.assertEqual(len(eligibility.requests), 2)
+
+    def test_ungrounded_quote_gets_specific_retry_guidance(self):
+        class SplitQuoteAgent(FakeEligibilityAgent):
+            def assess(self, request, correction=None):
+                result = super().assess(request, correction).model_dump()
+                if correction is None:
+                    result["scope_quote"] = "noncontiguous first line\nnoncontiguous second line"
+                return result
+
+        agent = SplitQuoteAgent()
+        result = ValidationCoordinator(
+            db_path=self.path, agent=FakeAgent(), reproduction=FakePort(),
+            policy_provider=lambda endpoint, method: self.policy,
+            eligibility_agent=agent,
+        ).run("scan")
+        self.assertEqual(result.summary["statuses"], {"CONFIRMED": 1})
+        self.assertIn("one contiguous excerpt", agent.corrections[1])
 
     def test_eligibility_unavailable_is_persisted_unknown_before_adapter_check(self):
         class UnavailableAgent(FakeEligibilityAgent):
@@ -1291,7 +1372,7 @@ class ValidationCoordinatorTests(unittest.TestCase):
                 "SELECT count(*) FROM validation_http_requests"
             ).fetchone()[0], 1)
 
-    def test_native_development_without_contract_fails_closed_as_blocked(self):
+    def test_native_development_without_contract_stays_inconclusive(self):
         result = ValidationCoordinator(
             db_path=self.path, agent=BlockerAgent(),
             reproduction=BlockThenPassPort(),
@@ -1299,19 +1380,32 @@ class ValidationCoordinatorTests(unittest.TestCase):
             prerequisite_resolver=NativePrerequisiteResolver(),
         ).run("scan")
 
-        self.assertEqual(result.summary["statuses"], {"BLOCKED": 1})
+        self.assertEqual(result.summary["statuses"], {"INCONCLUSIVE": 1})
         with db.connect(self.path) as conn:
-            action = conn.execute(
-                """SELECT status,details_json FROM validation_development_actions"""
-            ).fetchone()
+            actions = conn.execute(
+                "SELECT count(*) FROM validation_development_actions"
+            ).fetchone()[0]
             requests = conn.execute(
                 "SELECT count(*) FROM validation_http_requests"
             ).fetchone()[0]
-        self.assertEqual(action[0], "failed")
-        self.assertEqual(
-            json.loads(action[1])["reason"], "development_contract_missing"
-        )
+            decision = json.loads(conn.execute(
+                "SELECT decision_json FROM validation_cases"
+            ).fetchone()[0])
+        self.assertEqual(actions, 0)
+        self.assertEqual(decision["development_unavailable_reason"], "development_contract_missing")
         self.assertEqual(requests, 0)
+
+    def test_unavailable_native_development_cannot_confirm_positive_targets(self):
+        result = ValidationCoordinator(
+            db_path=self.path, agent=AlwaysBlockerAgent(), reproduction=FakePort(),
+            policy_provider=lambda endpoint, method: self.policy,
+            prerequisite_resolver=NativePrerequisiteResolver(),
+        ).run("scan")
+        self.assertEqual(result.summary["statuses"], {"INCONCLUSIVE": 1})
+        with db.connect(self.path) as conn:
+            self.assertEqual(conn.execute(
+                "SELECT count(*) FROM validation_development_actions"
+            ).fetchone()[0], 0)
 
     def test_native_builder_wires_injected_prerequisite_resolver(self):
         policy_path = Path(self.temp.name) / "TargetPolicy.json"

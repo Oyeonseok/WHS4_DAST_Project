@@ -17,7 +17,8 @@ from ..core.decision import DecisionEngine, DecisionInput
 from ..core.integrity import CandidateIntegrityError, CandidateIntegrityGate, ValidatedCandidate
 from ..core.matching import KnownCandidate, KnownMatcher, MATCHER_VERSION
 from ..contracts.eligibility import (
-    ConditionalEligibilityContext, EligibilityAssessment, EligibilityPhase, EligibilityRequest, ScopePolicySource,
+    ConditionalEligibilityContext, EligibilityAssessment, EligibilityPhase, EligibilityRequest,
+    ScopeEligibilityError, ScopePolicySource,
 )
 from ..core.scope_eligibility import unknown_assessment, validate_grounding
 from .eligibility_runner import EligibilityAgentRunner
@@ -315,10 +316,17 @@ class ValidationCoordinator:
                     raise ValueError("eligibility case, phase, scope or evidence mismatch")
                 validate_grounding(assessment, scope.scope_markdown)
                 break
-            except (TypeError, ValueError):
+            except (TypeError, ValueError) as exc:
                 if attempt:
                     assessment = unknown_assessment(request, "Eligibility output failed schema or grounding validation.")
-                correction = "The previous object failed schema or grounding validation; correct only invalid fields."
+                correction = (
+                    "scope_quote must be one contiguous excerpt copied exactly from the "
+                    "scope Markdown. Do not join separated rules; explain other rules "
+                    "in reason. Correct only the invalid quote."
+                    if isinstance(exc, ScopeEligibilityError)
+                    and "scope quote is not grounded" in str(exc)
+                    else "The previous object failed schema or grounding validation; correct only invalid fields."
+                )
             except Exception:
                 assessment = unknown_assessment(request, "Eligibility assessment unavailable.")
                 break
@@ -553,7 +561,9 @@ class ValidationCoordinator:
             development_used = False
             if assessment.blocker_axis in {
                 "identity_auth", "state_setup", "encoding_transport", "timing_concurrency"
-            }:
+            } and self._development_unavailable_reason(
+                candidate, assessment.blocker_axis
+            ) is None:
                 development_used = True
                 succeeded, development_evidence = self._develop(
                     repo, candidate, stage_run_id, assessment.blocker_axis,
@@ -716,12 +726,21 @@ class ValidationCoordinator:
         )
         from ..core.decision import evaluate_impact
         impact_result = evaluate_impact(*impact_tuple)
+        development_unavailable_reason = (
+            self._development_unavailable_reason(candidate, assessment.blocker_axis)
+            if assessment.blocker_axis in {
+                "identity_auth", "state_setup", "encoding_transport", "timing_concurrency"
+            } else None
+        )
         status = self.engine.decide(DecisionInput(
             policy_allowed=all(item["policy_allowed"] for item in observations),
             positive_control_passed=positive, negative_control_clear=negative,
-            explicit_non_exploit_evidence=any(
-                item["attempt_kind"] == "target" and item["explicit_non_exploit"]
-                for item in observations
+            explicit_non_exploit_evidence=(
+                assessment.reproduced is False
+                and len([item for item in observations if item["attempt_kind"] == "target"]) in {3, 5}
+                and all(item["explicit_non_exploit"] and item["outcome"] == "not_observed"
+                        for item in observations
+                        if item["attempt_kind"] == "target")
             ),
             topology_or_unknown_cause=(
                 assessment.blocker_axis == "environment_topology"
@@ -730,9 +749,13 @@ class ValidationCoordinator:
                     and assessment.blocker_axis is None
                 )
             ),
-            resolvable_blocker=assessment.blocker_axis in {
+            resolvable_blocker=(assessment.blocker_axis in {
                 "identity_auth", "state_setup", "encoding_transport", "timing_concurrency"
-            }, development_used=development_used, target_observations=targets,
+            } and development_unavailable_reason is None),
+            unresolved_blocker=development_unavailable_reason is not None,
+            development_used=development_used, target_observations=targets,
+            target_outcomes=tuple(item["outcome"] for item in observations
+                                  if item["attempt_kind"] == "target"),
             semantic_conflict=comparison.alignment == "conflicting",
             attack_has_positive_evidence=bool(comparison.attack_evidence_ids), impact=impact_result,
         ))
@@ -743,6 +766,8 @@ class ValidationCoordinator:
             "claim_comparison": comparison.model_dump(mode="json"),
             "evidence_ids": evidence_ids,
         }
+        if development_unavailable_reason is not None:
+            decision["development_unavailable_reason"] = development_unavailable_reason
         if self._impact_development_records:
             decision["impact_development"] = self._impact_development_records
         if status == "UNDERPOWERED" and allow_impact_hypotheses:
@@ -1070,12 +1095,32 @@ class ValidationCoordinator:
             raise ValidationCoordinatorError("stored claim comparison binding mismatch")
         return comparison, rows[0]["evidence_id"]
 
+    def _development_unavailable_reason(self, candidate: ValidatedCandidate,
+                                        blocker_axis: str) -> str | None:
+        actions = [item for item in candidate.profile.profile.allowed_development_actions
+                   if item.blocker_axis == blocker_axis]
+        if not actions:
+            return "development_action_not_allowed"
+        if self.prerequisite_resolver is None:
+            return "development_resolver_missing"
+        if getattr(self.prerequisite_resolver, "requires_contract", False):
+            contracts = {(item.action_type, item.blocker_axis)
+                         for item in candidate.development_actions}
+            if not any((item.action_type, blocker_axis) in contracts for item in actions):
+                return "development_contract_missing"
+        return None
+
     def _develop(self, repo: ValidationRepository, candidate: ValidatedCandidate,
                  stage_run_id: str, blocker_axis: str, *,
                  policy: TargetPolicy) -> tuple[bool, list[str]]:
         repo.set_processing_phase(candidate.case_id, stage_run_id=stage_run_id, phase="developing")
         actions = [item for item in candidate.profile.profile.allowed_development_actions
                    if item.blocker_axis == blocker_axis][:2]
+        if getattr(self.prerequisite_resolver, "requires_contract", False):
+            available = {(item.action_type, item.blocker_axis)
+                         for item in candidate.development_actions}
+            actions = [item for item in actions
+                       if (item.action_type, blocker_axis) in available]
         if not actions or self.prerequisite_resolver is None:
             return False, []
         stored = {
