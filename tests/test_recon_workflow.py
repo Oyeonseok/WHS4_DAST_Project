@@ -1033,12 +1033,13 @@ class ReconCliTests(unittest.TestCase):
             fake_main = FakeReconMainAgent()
             output = io.StringIO()
             with (
-                patch("aidast.cli.CodexMainAgent", return_value=fake_main),
+                patch("aidast.cli.CodexMainAgent", return_value=fake_main) as planner,
                 redirect_stdout(output),
             ):
                 result = main(["recon", PROGRAM_URL, "--output-dir", str(root)])
 
             self.assertEqual(result, 0)
+            self.assertEqual(planner.call_args.kwargs["main_model"], "gpt-6-luna")
             self.assertIn("Reusing approved Scope", output.getvalue())
             self.assertIsNotNone(fake_main.received_scope_markdown)
 

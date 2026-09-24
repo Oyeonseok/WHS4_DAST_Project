@@ -20,6 +20,7 @@ from aidast.agents.main import (
     CodexValidationReviewer,
     MainAgentError,
 )
+from aidast.agents.native_pipeline import RECON_MODEL
 from aidast.auth.codex import CodexAuth, CodexAuthError
 from aidast.auth.browser import BrowserLoginError, collect_target_sessions
 from aidast.core.http_safety import validate_platform_username
@@ -742,7 +743,10 @@ def _run_recon(
     program_url = args.program_url
     program_dir = resolve_scope_directory(program_url, args.output_dir)
     scope_coordinator = ScopeCoordinator(program_dir)
-    main_agent = CodexMainAgent(timeout_seconds=args.codex_timeout)
+    main_agent = CodexMainAgent(
+        timeout_seconds=args.codex_timeout,
+        main_model=RECON_MODEL,
+    )
 
     if program_dir.exists():
         scope_document, scope_markdown = scope_coordinator.load_approved_scope()
