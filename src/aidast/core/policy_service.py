@@ -19,7 +19,7 @@ from typing import Callable, Iterator, Protocol
 from urllib.parse import urlsplit
 
 from aidast.attack.authorization import (
-    AuthorizationBindings, AuthorizationError, BudgetLimits, RequestIntent,
+    AuthorizationBindings, AuthorizationError, RequestIntent,
     RunAuthorization, canonical_digest, validate_authorization, validate_intent,
 )
 from aidast.core.request_broker import BrokerResponse, RequestBroker, RequestPolicyError
