@@ -883,6 +883,70 @@ class DashboardProjector:
                     "attempt_count": sum(task["attempt_count"] for task in tasks),
                 }
 
+    def validations(self, scan_id: str) -> dict[str, Any]:
+        """Expose per-case Validation verdicts with a compact, allowlisted evidence summary."""
+        from aidast.validation.persistence.evidence_policy import redact_text
+
+        with self._lock:
+            database = self.locate_database(scan_id)
+            with closing(self._source(database)) as source:
+                if "validation_cases" not in _tables(source):
+                    return {"scan_id": scan_id, "cases": []}
+                has_attempts = "validation_attempts" in _tables(source)
+                has_evidence = "validation_evidence" in _tables(source)
+                cases = []
+                for row in source.execute(
+                    """SELECT case_id,target_kind,finding_id,chain_id,processing_phase,current_status,
+                    decision_json,decision_stage_run_id,latest_stage_run_id,known_source_case_id,
+                    severity,impact_score,updated_at FROM validation_cases
+                    WHERE scan_id=? ORDER BY created_at,case_id LIMIT 1000""",
+                    (scan_id,),
+                ):
+                    item: dict[str, Any] = {
+                        "case_id": str(row["case_id"])[:128],
+                        "target_kind": str(row["target_kind"]),
+                        "target_id": str(row["finding_id"] or row["chain_id"])[:128],
+                        "processing_phase": str(row["processing_phase"]),
+                        "current_status": row["current_status"],
+                        "updated_at": _utc(row["updated_at"]),
+                    }
+                    if row["current_status"] is not None:
+                        decision = _json_object(row["decision_json"])
+                        summary: dict[str, Any] = {}
+                        reason = decision.get("reason")
+                        if isinstance(reason, str):
+                            summary["reason"] = str(redact_text(reason))[:200]
+                        for key in ("match_kind", "failed_check"):
+                            if isinstance(decision.get(key), str):
+                                summary[key] = str(redact_text(decision[key]))[:64]
+                        if row["known_source_case_id"]:
+                            summary["known_source_case_id"] = str(row["known_source_case_id"])[:128]
+                        if row["severity"]:
+                            summary["severity"] = str(row["severity"])
+                        if row["impact_score"] is not None:
+                            summary["impact_score"] = int(row["impact_score"])
+                        item["decision"] = summary
+                    stage_run = row["decision_stage_run_id"] or row["latest_stage_run_id"]
+                    if has_attempts:
+                        attempts: dict[str, dict[str, int]] = {}
+                        for attempt in source.execute(
+                            """SELECT attempt_kind,outcome,count(*) AS n FROM validation_attempts
+                            WHERE case_id=? AND stage_run_id=? GROUP BY attempt_kind,outcome""",
+                            (row["case_id"], stage_run),
+                        ):
+                            bucket = attempts.setdefault(str(attempt["attempt_kind"]), {})
+                            bucket[str(attempt["outcome"])] = int(attempt["n"])
+                        if attempts:
+                            evidence: dict[str, Any] = {"attempts": attempts}
+                            if has_evidence:
+                                evidence["evidence_count"] = int(source.execute(
+                                    "SELECT count(*) FROM validation_evidence WHERE case_id=? AND stage_run_id=?",
+                                    (row["case_id"], stage_run),
+                                ).fetchone()[0])
+                            item["evidence"] = evidence
+                    cases.append(item)
+                return {"scan_id": scan_id, "cases": cases}
+
     def events_after(self, scan_id: str, after: int) -> list[dict[str, Any]]:
         if after < 0:
             raise ProjectionError("event cursor must be non-negative")
