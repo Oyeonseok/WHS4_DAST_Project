@@ -274,6 +274,10 @@ def _parser() -> argparse.ArgumentParser:
     recon.add_argument("--surface-path", type=Path, default=RESULT_ROOT / "Surface.json")
     recon.add_argument("--ffuf-wordlist")
     recon.add_argument(
+        "--ffuf-max-time-seconds", type=_positive_int, default=150,
+        help="maximum ffuf runtime per root in seconds (default: 150)",
+    )
+    recon.add_argument(
         "--diagnostic-logs", action="store_true",
         help="write temporary endpoint-discovery diagnostics under result/logs",
     )
@@ -340,6 +344,10 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--auth-host", action="append", default=[])
     run.add_argument("--auth-path", action="append", default=[])
     run.add_argument("--ffuf-wordlist")
+    run.add_argument(
+        "--ffuf-max-time-seconds", type=_positive_int, default=150,
+        help="maximum ffuf runtime per root in seconds (default: 150)",
+    )
     run.add_argument(
         "--diagnostic-logs", action="store_true",
         help="write temporary endpoint-discovery diagnostics under result/logs",
@@ -967,6 +975,7 @@ def _run_recon(
             scope_value=scope_document.scope_id,
             db_path=db_path,
             ffuf_wordlist=args.ffuf_wordlist,
+            ffuf_max_time_seconds=args.ffuf_max_time_seconds,
             target_policies=policies,
             require_policy_enforcement=True,
             execution_start_urls=start_urls,

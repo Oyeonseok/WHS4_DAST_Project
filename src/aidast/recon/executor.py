@@ -126,6 +126,7 @@ class ReconExecutor:
         scope_value: str,
         db_path: Path,
         ffuf_wordlist: str | None = None,
+        ffuf_max_time_seconds: int = 150,
         # 승인된 Scope에서 뽑은 {"allowed_hosts": [...]} 형태.
         # 아직 Scope 파이프라인이 안 붙어서 None이면 mitmproxy가
         # 스코프 강제 없이(fail-open) 관찰만 한다.
@@ -164,6 +165,7 @@ class ReconExecutor:
         )
         dbmod.insert_scan(self.conn, scan_id=scan_id, scope_type=scope_type, scope_value=scope_value)
         self.ffuf_wordlist = ffuf_wordlist
+        self.ffuf_max_time_seconds = ffuf_max_time_seconds
         self.scope_rules = scope_rules
         self.target_policies = target_policies or {}
         self.require_policy_enforcement = require_policy_enforcement
@@ -802,6 +804,7 @@ class ReconExecutor:
             raw = discover_endpoints(
                 url,
                 ffuf_wordlist=self.ffuf_wordlist,
+                ffuf_max_time_seconds=self.ffuf_max_time_seconds,
                 mitm_proxy_url=proxy_url,
                 target_policy=policy,
                 observation_callback=recorder.record,
