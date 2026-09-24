@@ -34,7 +34,7 @@ from aidast.orchestration.recon import ReconCoordinator, ReconCoordinatorError
 from aidast.orchestration.scope import CoordinatorError, ScopeCoordinator
 from aidast.recon.executor import ReconExecutionError, ReconExecutor
 from aidast.recon.agent import OfflineReconReview
-from aidast.recon.models import ReconPlanTarget, ReconStep
+from aidast.recon.models import ReconPlan, ReconPlanTarget, ReconStep
 from aidast.recon.policy import TargetPolicy, validate_policy_for_target
 from aidast.recon.profiles import EXECUTION_PROFILES, grounded_scope_request_rate
 from aidast.recon.surface import export_surface
@@ -718,6 +718,49 @@ def _review_scope_draft(scope_path: Path) -> bool:
 
 # === Recon 실행과 후속 단계 연결 ===
 # 승인된 Scope를 바탕으로 Recon을 계획하고 선택적으로 후속 단계를 실행
+def _complete_executable_recon_plan(
+    plan: ReconPlan,
+    selected_targets: list[ScopeAsset],
+) -> ReconPlan:
+    """Keep an explicit execution request from becoming a probe-only run."""
+    proposed = {(item.asset_type, item.asset): item for item in plan.targets}
+    order = (
+        ReconStep.DNS_RESOLUTION,
+        ReconStep.HOST_PORT_DISCOVERY,
+        ReconStep.HTTP_PROBE,
+        ReconStep.ORIGIN_DISCOVERY,
+        ReconStep.ENDPOINT_DISCOVERY,
+    )
+    targets: list[ReconPlanTarget] = []
+    for target in selected_targets:
+        if target.asset_type not in {
+            AssetType.URL, AssetType.API, AssetType.DOMAIN,
+            AssetType.WILDCARD, AssetType.IP_ADDRESS,
+        }:
+            continue
+        model_target = proposed.get((target.asset_type, target.asset))
+        if target.asset_type is AssetType.WILDCARD:
+            steps = [ReconStep.ASSET_DISCOVERY]
+        else:
+            requested = set(model_target.steps) if model_target is not None else set()
+            requested.update({
+                ReconStep.HTTP_PROBE,
+                ReconStep.ORIGIN_DISCOVERY,
+                ReconStep.ENDPOINT_DISCOVERY,
+            })
+            steps = [step for step in order if step in requested]
+        targets.append(ReconPlanTarget(
+            asset_type=target.asset_type,
+            asset=target.asset,
+            steps=steps,
+            constraints=(
+                list(model_target.constraints)
+                if model_target is not None else list(plan.global_constraints)
+            ),
+        ))
+    return plan.model_copy(update={"targets": targets}) if targets else plan
+
+
 def _run_recon(
     args: argparse.Namespace,
     *,
@@ -908,6 +951,8 @@ def _run_recon(
             ))
         if complete_plan_targets:
             plan = plan.model_copy(update={"targets": complete_plan_targets})
+    elif args.execute:
+        plan = _complete_executable_recon_plan(plan, selected_targets)
     tasks = ReconCoordinator().create_tasks(
         plan=plan,
         scope=scope_document,

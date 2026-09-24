@@ -5,6 +5,7 @@ import io
 import json
 import tempfile
 import unittest
+import aidast.cli as cli_module
 from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime, timezone
 from pathlib import Path
@@ -781,6 +782,37 @@ class ReconMainAgentTests(unittest.TestCase):
 
 
 class ReconCliTests(unittest.TestCase):
+    def test_execute_completes_probe_only_model_plan_for_selected_url(self) -> None:
+        target = ScopeAsset(
+            asset_type=AssetType.URL,
+            asset="https://example.com/app",
+            description="웹 앱",
+            eligibility="보상 대상",
+            maximum_severity="Critical",
+        )
+        proposed = ReconPlan(
+            plan_id="plan_probe_only",
+            scope_id="scope_test",
+            objective="승인된 웹 앱 정찰",
+            mode="RECON",
+            targets=[ReconPlanTarget(
+                asset_type=AssetType.URL,
+                asset=target.asset,
+                steps=[ReconStep.HTTP_PROBE],
+                constraints=[],
+            )],
+            global_constraints=["Scope 준수"],
+            completion_criteria=["완료"],
+        )
+
+        completed = cli_module._complete_executable_recon_plan(proposed, [target])
+
+        self.assertEqual(completed.targets[0].steps, [
+            ReconStep.HTTP_PROBE,
+            ReconStep.ORIGIN_DISCOVERY,
+            ReconStep.ENDPOINT_DISCOVERY,
+        ])
+
     def test_wildcard_start_url_does_not_narrow_asset_discovery_policy(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_dir:
             root = Path(temporary_dir) / "Scope"
