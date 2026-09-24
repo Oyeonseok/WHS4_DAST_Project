@@ -291,8 +291,11 @@ class ReproductionObservation(StrictContract):
             raise ValueError("blocker axes are valid only for blocked outcomes")
         if not self.policy_allowed and self.outcome != "blocked":
             raise ValueError("policy rejection must be represented as a blocked outcome")
-        if self.explicit_non_exploit and self.signal_observed is not False:
-            raise ValueError("non-exploit evidence cannot contain a positive signal")
+        if self.explicit_non_exploit and (
+            self.signal_observed is not False or self.outcome != "not_observed"
+            or self.blocker_axis is not None or not self.policy_allowed
+        ):
+            raise ValueError("non-exploit evidence requires a completed negative replay")
         return self
 
 

@@ -118,6 +118,7 @@ class NativePrerequisiteResolver:
     """Execute one profile-approved development request through the trusted broker."""
 
     requires_request_ledger = True
+    requires_contract = True
 
     def __init__(self, *, credential_resolver=None, transport=None,
                  policy_provider=None):

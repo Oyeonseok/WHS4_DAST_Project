@@ -1,0 +1,185 @@
+[
+  {
+    "path": "/debug/users",
+    "method": "GET",
+    "vuln_class": "excessive_data_exposure",
+    "source_path": "app.py",
+    "anchor": "SELECT id, username, password, account_number, is_admin FROM users",
+    "description": "The unauthenticated debug route returns user records including passwords."
+  },
+  {
+    "path": "/graphql",
+    "method": "POST",
+    "vuln_class": "graphql_introspection",
+    "source_path": "README.md",
+    "anchor": "Enabled schema introspection on the transaction analytics endpoint",
+    "description": "The authenticated GraphQL endpoint exposes schema introspection."
+  },
+  {
+    "path": "/graphql",
+    "method": "POST",
+    "vuln_class": "sql_injection",
+    "source_path": "README.md",
+    "anchor": "SQL injection in GraphQL resolver query construction",
+    "description": "The transaction analytics resolver constructs SQL from request-controlled values."
+  },
+  {
+    "path": "/graphql",
+    "method": "POST",
+    "vuln_class": "graphql_complexity",
+    "source_path": "README.md",
+    "anchor": "Missing GraphQL depth / complexity controls",
+    "description": "The GraphQL endpoint has no documented depth or complexity limits.",
+    "evaluation_status": "OUT_OF_TEST_SCOPE"
+  },
+  {
+    "path": "/graphql",
+    "method": "POST",
+    "vuln_class": "information_disclosure",
+    "source_path": "app.py",
+    "anchor": "formatted_error = {'message': str(error)}",
+    "description": "GraphQL errors return underlying exception messages."
+  },
+  {
+    "path": "/graphql",
+    "method": "POST",
+    "vuln_class": "jwt_signature_bypass",
+    "source_path": "README.md",
+    "anchor": "Weak JWT-based authentication inherited by `/graphql`",
+    "description": "The GraphQL route uses the shared weak JWT verifier."
+  },
+  {
+    "path": "/api/check_balance",
+    "method": "GET",
+    "vuln_class": "jwt_signature_bypass",
+    "source_path": "auth.py",
+    "anchor": "Second try without verification",
+    "shared_helper": "verify_token",
+    "description": "The shared JWT verifier retries invalid signatures without signature verification."
+  },
+  {
+    "path": "/api/login",
+    "method": "POST",
+    "vuln_class": "jwt_no_expiry",
+    "source_path": "auth.py",
+    "anchor": "Missing 'exp' claim - tokens never expire",
+    "shared_helper": "generate_token",
+    "description": "Generated JWTs omit an expiration claim."
+  },
+  {
+    "path": "/api/check_balance",
+    "method": "GET",
+    "vuln_class": "token_in_url",
+    "source_path": "auth.py",
+    "anchor": "Also check query parameters (vulnerable by design)",
+    "shared_helper": "token_required",
+    "description": "The JWT decorator accepts a token in a URL query parameter."
+  },
+  {
+    "path": "/api/check_balance",
+    "method": "GET",
+    "vuln_class": "sql_injection",
+    "source_path": "auth.py",
+    "anchor": "WHERE account_number='{account_number}'",
+    "description": "The API balance endpoint interpolates the request's account_number query value into SQL."
+  },
+  {
+    "path": "/api/v1/merchants/me",
+    "method": "GET",
+    "vuln_class": "sql_injection",
+    "source_path": "merchant_payments.py",
+    "anchor": "WHERE api_key = '{api_key}'",
+    "shared_helper": "get_merchant_from_request",
+    "description": "Merchant authentication interpolates the supplied API key into SQL."
+  },
+  {
+    "path": "/api/v1/merchants/register",
+    "method": "POST",
+    "vuln_class": "predictable_secret",
+    "source_path": "merchant_payments.py",
+    "anchor": "API keys are derived from a four-digit code.",
+    "shared_helper": "generate_merchant_api_key",
+    "description": "Merchant API keys derive from a four-digit random code."
+  },
+  {
+    "path": "/api/v1/merchants/register",
+    "method": "POST",
+    "vuln_class": "excessive_data_exposure",
+    "source_path": "merchant_payments.py",
+    "anchor": "'password': password,",
+    "description": "Merchant registration returns the submitted password in debug information."
+  },
+  {
+    "path": "/api/v1/merchants/login",
+    "method": "POST",
+    "vuln_class": "api_key_exposure",
+    "source_path": "merchant_payments.py",
+    "anchor": "'api_key': merchant['api_key']",
+    "description": "Merchant login returns the stored API key in its response."
+  },
+  {
+    "path": "/api/v1/payments/charge",
+    "method": "POST",
+    "vuln_class": "predictable_identifier",
+    "source_path": "merchant_payments.py",
+    "anchor": "Authorization codes are timestamp-based and predictable",
+    "shared_helper": "generate_authorization_code",
+    "description": "Payment authorization codes derive from a timestamp and small random suffix."
+  },
+  {
+    "path": "/api/v1/payments/<int:payment_id>",
+    "method": "GET",
+    "vuln_class": "excessive_data_exposure",
+    "source_path": "merchant_payments.py",
+    "anchor": "'cvv': payment[6]",
+    "description": "The merchant payment detail response includes card number and CVV."
+  },
+  {
+    "path": "/api/v1/payments/merchant_id/<int:merchant_id>",
+    "method": "GET",
+    "vuln_class": "bola",
+    "source_path": "README.md",
+    "anchor": "Object-level authorization gaps in merchant payment lookup",
+    "description": "The merchant payment listing accepts another merchant's ID."
+  },
+  {
+    "path": "/api/ai/chat",
+    "method": "POST",
+    "vuln_class": "prompt_injection",
+    "source_path": "README.md",
+    "anchor": "Prompt Injection (CWE-77)",
+    "description": "The authenticated AI chat documents prompt injection behavior."
+  },
+  {
+    "path": "/api/ai/chat",
+    "method": "POST",
+    "vuln_class": "sensitive_context_exposure",
+    "source_path": "app.py",
+    "anchor": "Pass sensitive user context directly to AI",
+    "description": "The authenticated AI chat sends account context to its model adapter."
+  },
+  {
+    "path": "/api/ai/chat/anonymous",
+    "method": "POST",
+    "vuln_class": "prompt_injection",
+    "source_path": "app.py",
+    "anchor": "Still vulnerable to prompt injection",
+    "description": "The anonymous AI chat documents prompt injection behavior."
+  },
+  {
+    "path": "/api/ai/chat/anonymous",
+    "method": "POST",
+    "vuln_class": "ai_data_access",
+    "source_path": "app.py",
+    "anchor": "Direct database access possible",
+    "description": "The anonymous AI chat documents possible database access."
+  },
+  {
+    "path": "/api/ai/system-info",
+    "method": "GET",
+    "vuln_class": "information_disclosure",
+    "source_path": "app.py",
+    "anchor": "Exposes AI system information without authentication",
+    "description": "The unauthenticated endpoint returns AI system information."
+  }
+]

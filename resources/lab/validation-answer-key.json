@@ -1,0 +1,112 @@
+[
+  {
+    "candidate_id": "juice-shop:case:GET:/api/Users:unauthenticated_disclosure",
+    "expected_verdict": "NOT_VULNERABLE",
+    "scope": "GET /api/Users without Authorization does not return user records on Juice Shop v20.2.0.",
+    "evidence_level": "source_and_local_http",
+    "observed_http_status": 401,
+    "limitations": "Does not assess authenticated access, token bypasses, or other user endpoints.",
+    "target_validation_status": "DISPROVEN",
+    "readiness": "GET_REPLAY_READY",
+    "proof_requirement": "Read-only target and independent controls must show explicit non-exploitation of the scoped claim; a single rejection code is insufficient."
+  },
+  {
+    "candidate_id": "juice-shop:case:GET:/api/Feedbacks/:id:unauthenticated_disclosure",
+    "expected_verdict": "NOT_VULNERABLE",
+    "scope": "GET /api/Feedbacks/1 without Authorization does not return a feedback record on Juice Shop v20.2.0.",
+    "evidence_level": "source_and_local_http",
+    "observed_http_status": 401,
+    "limitations": "Does not assess authenticated object access or other feedback routes.",
+    "target_validation_status": "DISPROVEN",
+    "readiness": "GET_REPLAY_READY",
+    "proof_requirement": "Read-only target and independent controls must show explicit non-exploitation of the scoped claim; a single rejection code is insufficient."
+  },
+  {
+    "candidate_id": "juice-shop:case:GET:/api/PrivacyRequests:unauthenticated_disclosure",
+    "expected_verdict": "NOT_VULNERABLE",
+    "scope": "GET /api/PrivacyRequests without Authorization does not return records on Juice Shop v20.2.0.",
+    "evidence_level": "source_and_local_http",
+    "observed_http_status": 401,
+    "limitations": "Does not assess authenticated privacy request routes.",
+    "target_validation_status": "DISPROVEN",
+    "readiness": "GET_REPLAY_READY",
+    "proof_requirement": "Read-only target and independent controls must show explicit non-exploitation of the scoped claim; a single rejection code is insufficient."
+  },
+  {
+    "candidate_id": "juice-shop:case:GET:/api/Complaints:unauthenticated_disclosure",
+    "expected_verdict": "NOT_VULNERABLE",
+    "scope": "GET /api/Complaints without Authorization does not return records on Juice Shop v20.2.0.",
+    "evidence_level": "source_and_local_http",
+    "observed_http_status": 401,
+    "limitations": "Does not assess authenticated complaint access.",
+    "target_validation_status": "DISPROVEN",
+    "readiness": "GET_REPLAY_READY",
+    "proof_requirement": "Read-only target and independent controls must show explicit non-exploitation of the scoped claim; a single rejection code is insufficient."
+  },
+  {
+    "candidate_id": "vuln-bank:case:GET:/api/billers/by-category/<int:category_id>:sql_injection",
+    "expected_verdict": "NOT_VULNERABLE",
+    "scope": "A string SQL payload in category_id cannot reach the route SQL query at the pinned VulnBank commit.",
+    "evidence_level": "source_and_local_http",
+    "observed_http_status": 404,
+    "limitations": "Only SQL injection through this path value is ruled out; biller data exposure remains possible.",
+    "target_validation_status": "DISPROVEN",
+    "readiness": "GET_REPLAY_READY",
+    "proof_requirement": "Read-only target and independent controls must show explicit non-exploitation of the scoped claim; a single rejection code is insufficient."
+  },
+  {
+    "candidate_id": "vuln-bank:case:GET:/api/virtual-cards/<int:card_id>/transactions:sql_injection",
+    "expected_verdict": "NOT_VULNERABLE",
+    "scope": "A string SQL payload in card_id cannot reach the route SQL query at the pinned VulnBank commit.",
+    "evidence_level": "source_and_local_http",
+    "observed_http_status": 404,
+    "limitations": "Only SQL injection through this path value is ruled out; BOLA and data exposure remain possible.",
+    "target_validation_status": "DISPROVEN",
+    "readiness": "GET_REPLAY_READY",
+    "proof_requirement": "Read-only target and independent controls must show explicit non-exploitation of the scoped claim; a single rejection code is insufficient."
+  },
+  {
+    "candidate_id": "vuln-bank:case:GET:/api/v1/payments/<int:payment_id>:bola",
+    "expected_verdict": "NOT_VULNERABLE",
+    "scope": "An authenticated merchant A cannot read a payment owned by merchant B through GET /api/v1/payments/<int:payment_id> at the pinned commit.",
+    "evidence_level": "source_review",
+    "observed_http_status": null,
+    "limitations": "Source predicate reviewed; two merchant identities were not exercised. Other data exposure on this route is outside this verdict.",
+    "target_validation_status": "DISPROVEN",
+    "readiness": "NEEDS_TWO_MERCHANT_IDENTITIES",
+    "proof_requirement": "Two authenticated merchant identities and a payment owned by the other merchant; repeat target and controls with recorded object ownership."
+  },
+  {
+    "candidate_id": "vuln-bank:case:GET:/api/v1/payments:bola",
+    "expected_verdict": "NOT_VULNERABLE",
+    "scope": "An authenticated merchant A does not receive merchant B's payments from GET /api/v1/payments at the pinned commit.",
+    "evidence_level": "source_review",
+    "observed_http_status": null,
+    "limitations": "Source predicate reviewed; two merchant identities were not exercised. Exposed card data for own payments is outside this verdict.",
+    "target_validation_status": "DISPROVEN",
+    "readiness": "NEEDS_TWO_MERCHANT_IDENTITIES",
+    "proof_requirement": "Two authenticated merchant identities and a payment owned by the other merchant; repeat target and controls with recorded object ownership."
+  },
+  {
+    "candidate_id": "vuln-bank:curated:GET:/debug/users:excessive_data_exposure",
+    "expected_verdict": "VULNERABLE",
+    "scope": "GET /debug/users exposes user data through the debug route at the pinned VulnBank commit.",
+    "evidence_level": "source_and_local_http",
+    "observed_http_status": 200,
+    "limitations": "Source reviewed and local route responded; no account data is included in this answer key.",
+    "target_validation_status": "CONFIRMED",
+    "readiness": "GET_REPLAY_READY",
+    "proof_requirement": "Read-only target must expose user data; independent controls must isolate the effect and impact must meet the confirmed threshold."
+  },
+  {
+    "candidate_id": "vuln-bank:curated:GET:/api/v1/payments/merchant_id/<int:merchant_id>:bola",
+    "expected_verdict": "VULNERABLE",
+    "scope": "An authenticated merchant can request another merchant's payment list by changing merchant_id at the pinned VulnBank commit.",
+    "evidence_level": "source_review",
+    "observed_http_status": null,
+    "limitations": "Source lacks an ownership predicate; two merchant identities were not exercised.",
+    "target_validation_status": "CONFIRMED",
+    "readiness": "NEEDS_TWO_MERCHANT_IDENTITIES",
+    "proof_requirement": "Two authenticated merchant identities and a payment owned by the other merchant; repeat target and controls with recorded object ownership."
+  }
+]

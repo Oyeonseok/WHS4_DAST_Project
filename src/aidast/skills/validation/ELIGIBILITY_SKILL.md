@@ -15,7 +15,9 @@ Return only an `EligibilityAssessment` with one of `ELIGIBLE`, `INELIGIBLE`,
 
 Quote the exact applicable policy text in `scope_quote`; identify the matched rule
 and explain the policy reasoning. Never invent, paraphrase as a quote, or broaden a
-policy rule. Use `UNKNOWN` when the supplied rules conflict unless one quoted rule
+policy rule. Use one contiguous excerpt copied exactly from the Markdown. If
+multiple rules matter, quote one applicable excerpt and discuss the others in
+`reason`; do not join separated excerpts into `scope_quote`. Use `UNKNOWN` when the supplied rules conflict unless one quoted rule
 explicitly supersedes the other. Use `UNKNOWN` when the policy does not support a
 grounded decision. A later coordinator verifies that each quote occurs in the
 approved scope snapshot.
