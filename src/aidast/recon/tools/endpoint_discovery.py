@@ -1100,6 +1100,7 @@ def discover_with_ffuf(
     proxy_url: str | None = None,
     root_selector: Callable[[list[dict]], list[str]] | None = None,
     target_policy: TargetPolicy | None = None,
+    max_time_seconds: int = 150,
     diagnostic_callback=None,
 ) -> list[dict]:
     parsed_base = urlparse(base_url)
@@ -1154,6 +1155,9 @@ def discover_with_ffuf(
 
         return []
 
+    with Path(wordlist).open("rb") as wordlist_file:
+        wordlist_lines = sum(1 for _ in wordlist_file)
+
     selector = root_selector or select_ffuf_roots_from_endpoints
     try:
         roots = selector(seed_endpoints)
@@ -1187,6 +1191,8 @@ def discover_with_ffuf(
         diagnostic_callback(
             "ffuf_roots", component="endpoint_discovery",
             root_count=len(roots), roots=roots,
+            wordlist_lines=wordlist_lines,
+            max_time_seconds=max_time_seconds if target_policy is not None else None,
         )
 
     results: list[
@@ -1270,18 +1276,21 @@ def discover_with_ffuf(
 
         if proxy_url:
             command += ["-x", proxy_url]
+            # The policy proxy returns this body for requests it did not
+            # forward. Exclude those responses before ffuf reports endpoints.
+            command += ["-fr", "Blocked by AI-DAST TargetPolicy"]
 
         if target_policy is not None:
             command += [
                 "-t", str(target_policy.limits.concurrency),
                 "-timeout", str(target_policy.limits.timeout_seconds),
-                "-maxtime", "150",
+                "-maxtime", str(max_time_seconds),
             ]
             command += _tool_rate_args(
                 "ffuf", target_policy.limits.requests_per_second
             )
 
-        run_timeout = 180
+        run_timeout = max_time_seconds + 30 if target_policy is not None else 180
 
         _append_headers(
             command,
@@ -1532,6 +1541,7 @@ def discover_endpoints(
     base_url: str,
     *,
     ffuf_wordlist: str | None = None,
+    ffuf_max_time_seconds: int = 150,
     request_headers: dict[str, str] | None = None,
 
     # None이면 base_url을 Browser에 표시
@@ -2113,6 +2123,7 @@ def discover_endpoints(
             auth_headers=auth_headers,
             proxy_url=mitm_proxy_url,
             target_policy=target_policy,
+            max_time_seconds=ffuf_max_time_seconds,
             diagnostic_callback=diagnostic_callback,
         )
         observe("ffuf", ffuf_results)

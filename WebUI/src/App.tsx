@@ -18,6 +18,7 @@ import { localizeActivityMessage, localizeAuditEventType } from './lib/activityM
 import { auditLevel, readAuditAcknowledgements, saveAuditAcknowledgements, type AuditEntry } from './lib/audit';
 import { initialLanguage, translate, type Language } from './lib/i18n';
 import {
+  isValidTagBatchSize,
   resolveExecutionLimits,
   scanRetryAction,
   type ExecutionProfileId,
@@ -203,6 +204,7 @@ export default function App() {
   const [maxConcurrency, setMaxConcurrency] = useState(2);
   const [timeoutSeconds, setTimeoutSeconds] = useState(15);
   const [maxDepth, setMaxDepth] = useState(2);
+  const [tagBatchSize, setTagBatchSize] = useState(25);
   const [platformHandle, setPlatformHandle] = useState('');
   const [loginMode, setLoginMode] = useState<'none' | 'runtime-browser'>('none');
   const [authorizationConfirmed, setAuthorizationConfirmed] = useState(false);
@@ -648,7 +650,7 @@ export default function App() {
         body: JSON.stringify({
           scope_id: selectedScope.scope_id, targets: selectedTargets, profile: scanProfile,
           max_requests: maxRequests, max_rps: maxRps, max_concurrency: maxConcurrency,
-          timeout_seconds: timeoutSeconds, max_depth: maxDepth,
+          timeout_seconds: timeoutSeconds, max_depth: maxDepth, tag_batch_size: tagBatchSize,
           login_mode: loginMode, authorization_confirmed: true,
           hackerone_username: selectedScope.identity_header === 'hackerone' ? platformHandle : null,
           intigriti_username: selectedScope.identity_header === 'intigriti' ? platformHandle : null,
@@ -865,7 +867,8 @@ export default function App() {
     && maxRps > 0 && maxRps <= selectedLimits.requests_per_second
     && maxConcurrency >= 1 && maxConcurrency <= selectedLimits.concurrency
     && timeoutSeconds >= 1 && timeoutSeconds <= selectedLimits.timeout_seconds
-    && maxDepth >= 0 && maxDepth <= selectedLimits.max_depth;
+    && maxDepth >= 0 && maxDepth <= selectedLimits.max_depth
+    && isValidTagBatchSize(tagBatchSize);
   const canLaunch = !demo && !!selectedScope && selectedTargets.length > 0
     && selectedTargets.every(target => selectedScope.targets.some(item => item.asset === target))
     && authorizationConfirmed && limitsValid
@@ -900,7 +903,8 @@ export default function App() {
         <div className="form-grid"><label className="form-field"><span>{tr('Requests per second')} <small>≤ {selectedLimits?.requests_per_second}</small></span><input type="number" min="0.1" step="0.1" max={selectedLimits?.requests_per_second} value={maxRps} onChange={event => setMaxRps(Number(event.target.value))}/></label><label className="form-field"><span>{tr('Concurrency')} <small>≤ {selectedLimits?.concurrency}</small></span><input type="number" min="1" max={selectedLimits?.concurrency} value={maxConcurrency} onChange={event => setMaxConcurrency(Number(event.target.value))}/></label></div>
         <div className="scan-rate-summary" aria-live="polite"><span>{tr('This scan per-target request-rate cap')}</span><strong>{maxRps > 0 ? `${maxRps} ${tr('requests per second unit')}` : tr('Enter a valid request rate')}</strong>{requestInterval !== null && <small>{language === 'ko' ? `평균 ${requestInterval}초에 1회 요청` : `Average one request every ${requestInterval} seconds`}</small>}<p>{tr('Concurrency limits parallel work; it does not multiply the request-rate setting.')} {tr('The generated TargetPolicy may lower this setting further.')}</p></div>
         <div className="form-grid"><label className="form-field"><span>{tr('Timeout seconds')} <small>≤ {selectedLimits?.timeout_seconds}</small></span><input type="number" min="1" max={selectedLimits?.timeout_seconds} value={timeoutSeconds} onChange={event => setTimeoutSeconds(Number(event.target.value))}/></label><label className="form-field"><span>{tr('Maximum depth')} <small>≤ {selectedLimits?.max_depth}</small></span><input type="number" min="0" max={selectedLimits?.max_depth} value={maxDepth} onChange={event => setMaxDepth(Number(event.target.value))}/></label></div>
-        <div className="form-grid"><label className="form-field"><span>{tr('Login behavior')}</span><select value={loginMode} onChange={event => setLoginMode(event.target.value as 'none' | 'runtime-browser')}><option value="none">{tr('No login prompt')}</option><option value="runtime-browser">{tr('Open runtime browser')}</option></select></label>{requiredHeader && <label className="form-field"><span className="mono">{requiredHeader.name} <small>{tr('required for every request')}</small></span><input value={platformHandle} onChange={event => setPlatformHandle(event.target.value)} autoComplete="off" maxLength={64} placeholder={tr('Enter the platform username sent in this header')}/></label>}</div>
+        <div className="form-grid"><label className="form-field"><span>{tk('태깅 배치 크기', 'Tag batch size')} <small>1–200</small></span><input type="number" min="1" max="200" step="1" value={tagBatchSize} onChange={event => setTagBatchSize(Number(event.target.value))} aria-describedby="tag-batch-size-hint"/><small id="tag-batch-size-hint">{tk('한 번에 모델에 전달할 관측치 수 · 25건 권장 (모델 호출 제한 300초)', 'Observations per model call · 25 recommended (300-second model timeout)')}</small></label><label className="form-field"><span>{tr('Login behavior')}</span><select value={loginMode} onChange={event => setLoginMode(event.target.value as 'none' | 'runtime-browser')}><option value="none">{tr('No login prompt')}</option><option value="runtime-browser">{tr('Open runtime browser')}</option></select></label></div>
+        {requiredHeader && <label className="form-field"><span className="mono">{requiredHeader.name} <small>{tr('required for every request')}</small></span><input value={platformHandle} onChange={event => setPlatformHandle(event.target.value)} autoComplete="off" maxLength={64} placeholder={tr('Enter the platform username sent in this header')}/></label>}
       </>}
       {launchError && <p className="form-error" role="alert">{launchError}</p>}
       {!scopes.length && !launchError && <p className="form-empty">{tr('Loading verified scopes…')}</p>}

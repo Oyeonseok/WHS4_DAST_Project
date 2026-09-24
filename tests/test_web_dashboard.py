@@ -832,6 +832,7 @@ def test_scan_launcher_builds_fixed_argv_and_streams_pre_database_logs(tmp_path:
         max_depth=1,
         max_concurrency=1,
         timeout_seconds=10,
+        tag_batch_size=17,
         login_mode="none",
         start_url="https://prismlife.com/app",
         hackerone_username="web_operator",
@@ -849,6 +850,7 @@ def test_scan_launcher_builds_fixed_argv_and_streams_pre_database_logs(tmp_path:
     assert argv[argv.index("--max-depth") + 1] == "1"
     assert argv[argv.index("--max-concurrency") + 1] == "1"
     assert argv[argv.index("--timeout-seconds") + 1] == "10"
+    assert argv[argv.index("--tag-batch-size") + 1] == "17"
     assert argv[argv.index("--scan-id") + 1] == launched["scan_id"]
     assert argv[argv.index("--start-url") + 1] == "https://prismlife.com/app"
     assert manager.snapshot(launched["scan_id"])["logs"][-1]["message"] == "AI DAST pipeline process started."
@@ -1100,6 +1102,9 @@ def test_scan_request_rejects_unconfirmed_or_excessive_budget() -> None:
         ScanLaunchRequest(**base)
     with pytest.raises(ValueError, match="request budget exceeds"):
         ScanLaunchRequest(**base, max_requests=501, authorization_confirmed=True)
+    for invalid_batch in (0, 201, 1.5):
+        with pytest.raises(ValueError):
+            ScanLaunchRequest(**base, tag_batch_size=invalid_batch, authorization_confirmed=True)
     with pytest.raises(ValueError, match="concurrency exceeds"):
         ScanLaunchRequest(
             **base,

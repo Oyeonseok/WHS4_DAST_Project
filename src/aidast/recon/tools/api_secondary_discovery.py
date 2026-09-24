@@ -66,9 +66,10 @@ ADAPTIVE_API_THRESHOLD = 10
 ADAPTIVE_MAX_SCRIPTS = 5
 ADAPTIVE_MAX_CANDIDATES = 30
 _JS_API_PATH = re.compile(
-    r"[\"'](?P<path>/(?:api|rest)(?:/[^\"'\\\s?#]{0,160})?)[\"']",
+    r"(?P<quote>[\"'`])(?P<path>/(?:api|rest)(?:/[^\"'`\\\s?#]{0,160})?)(?P=quote)",
     re.IGNORECASE,
 )
+_POLICY_BLOCK_BODY = b"Blocked by AI-DAST TargetPolicy\n"
 
 
 # =========================================================
@@ -1037,10 +1038,11 @@ def discover_adaptive_js_api_candidates(
             control_url, headers=headers, target_policy=target_policy,
             proxy_url=proxy_url, broker=broker, timeout=5.0,
         )
-        if status is not None and status < 500:
+        if status is not None and not (status == 403 and body == _POLICY_BLOCK_BODY):
             controls[prefix] = (status, response_headers, body, control_url)
 
     results: list[dict] = []
+    unverified_count = 0
     for url in sorted(candidates):
         if not _same_origin(url, base_url):
             continue
@@ -1052,6 +1054,8 @@ def discover_adaptive_js_api_candidates(
         )
         if status is None or status == 404 or status >= 500:
             continue
+        if status == 403 and body == _POLICY_BLOCK_BODY:
+            continue
         content_type = next(
             (value for key, value in response_headers.items() if key.lower() == "content-type"), ""
         ).split(";", 1)[0].strip().lower()
@@ -1059,11 +1063,25 @@ def discover_adaptive_js_api_candidates(
             continue
         prefix = "/api" if urlparse(url).path.lower().startswith("/api") else "/rest"
         if prefix not in controls:
+            unverified_count += 1
             continue
         control_status, control_headers, control_body, control_url = controls[prefix]
-        if (_fingerprint(status, response_headers, body, request_url=url) ==
-                _fingerprint(control_status, control_headers, control_body,
-                             request_url=control_url)):
+        candidate_fingerprint = _fingerprint(
+            status, response_headers, body, request_url=url,
+        )
+        control_fingerprint = _fingerprint(
+            control_status, control_headers, control_body, request_url=control_url,
+        )
+        if control_status >= 500:
+            # A broken missing-route handler cannot establish whether an auth
+            # error belongs to a real route. Only distinct 2xx API responses
+            # provide enough evidence to retain a candidate.
+            if not 200 <= status < 300:
+                unverified_count += 1
+                continue
+            if candidate_fingerprint[1:] == control_fingerprint[1:]:
+                continue
+        elif candidate_fingerprint == control_fingerprint:
             continue
         results.append({
             "method": "GET", "path": urlparse(url).path or "/", "url": url,
@@ -1072,7 +1090,10 @@ def discover_adaptive_js_api_candidates(
             "evidence": {"response_status": status, "source_scripts": scripts},
         })
     if diagnostic_callback is not None:
-        diagnostic_callback("completed", component="adaptive_js", accepted_count=len(results))
+        diagnostic_callback(
+            "completed", component="adaptive_js",
+            accepted_count=len(results), unverified_count=unverified_count,
+        )
     return results
 
 
