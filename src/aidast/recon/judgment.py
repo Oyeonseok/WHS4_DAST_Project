@@ -134,6 +134,11 @@ def adaptive_path_fingerprints(
         path, _, query = raw.partition("?")
         segments = [part for part in path.split("/") if part]
         for index, value in enumerate(segments):
+            if segments[0].lower() in {"api", "rest"}:
+                # API resource and action names can have many siblings at
+                # any depth. That alone does not prove a segment is an ID.
+                # Explicit numeric/UUID IDs are still normalized below.
+                continue
             key = (str(item.get("method", "GET")).upper(), index, tuple(segments[:index] + segments[index + 1:]))
             if len(rows[key]) >= threshold and not _looks_static_segment(value):
                 segments[index] = ":param"

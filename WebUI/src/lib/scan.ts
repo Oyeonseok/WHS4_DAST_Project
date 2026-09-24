@@ -2,6 +2,10 @@ import type { Snapshot } from './events';
 
 export type ExecutionProfileId = 'safe-recon' | 'focused-discovery';
 
+export function isValidTagBatchSize(value: number): boolean {
+  return Number.isInteger(value) && value >= 1 && value <= 200;
+}
+
 export function scanRetryAction(scan: Pick<Snapshot, 'status' | 'stage'>): 'resume' | 'rescan' | null {
   if (scan.status === 'completed' || scan.status === 'cancelled') return 'rescan';
   if (scan.status !== 'failed') return null;

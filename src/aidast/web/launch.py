@@ -71,6 +71,7 @@ class ScanLaunchRequest(BaseModel):
     max_concurrency: int | None = Field(default=None, ge=1, le=20)
     timeout_seconds: int | None = Field(default=None, ge=1, le=120)
     max_depth: int | None = Field(default=None, ge=0, le=10)
+    tag_batch_size: int = Field(default=25, ge=1, le=200)
     login_mode: str = "none"
     start_url: str | None = Field(default=None, max_length=2048)
     hackerone_username: str | None = None
@@ -354,6 +355,8 @@ class ScanLaunchManager:
                 request.profile,
                 "--max-requests",
                 str(request.max_requests),
+                "--tag-batch-size",
+                str(request.tag_batch_size),
                 "--login-mode",
                 request.login_mode,
                 "--output-dir",
