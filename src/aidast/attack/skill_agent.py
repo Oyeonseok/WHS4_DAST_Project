@@ -11,7 +11,7 @@ import hashlib
 import json
 import uuid
 from dataclasses import asdict, dataclass
-from typing import Mapping, Protocol
+from typing import Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
 

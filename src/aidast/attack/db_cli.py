@@ -423,7 +423,8 @@ def commit_finding(db_path: Path, scan_id: str, payload_path: Path) -> dict:
                     raise ValueError("impact development contract widens the reproduction endpoint")
                 if any(role not in roles for role in action.credential_roles):
                     raise ValueError("impact development contract uses an undeclared identity role")
-            impact_development_contract = validated_impact.model_dump(mode="json")
+            from aidast.validation.contracts.impact_development import impact_contract_document
+            impact_development_contract = impact_contract_document(validated_impact)
             impact_development_contract_json = canonical_json(impact_development_contract)
             impact_development_contract_sha256 = canonical_sha256(impact_development_contract)
         from aidast.validation.integrity import canonical_reproduction_spec

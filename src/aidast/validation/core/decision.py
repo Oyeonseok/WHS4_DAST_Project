@@ -106,7 +106,8 @@ class ImpactGapAnalyzer:
         proposals = []
         for path in profile.impact_expansion_paths:
             current = scores[path.gap_axis]
-            if current > 0:
+            potential = path.potential_impact[path.gap_axis]
+            if current > 1 or current >= potential:
                 continue
             proposals.append({
                 "gap_axis": path.gap_axis,

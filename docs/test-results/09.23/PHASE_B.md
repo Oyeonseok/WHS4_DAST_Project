@@ -2,7 +2,7 @@
 
 ## 실행 기준
 
-Phase A에서 검증한 별도 승인 Scope와 정책으로 두 대상을 실행했다. 공통 상한은 0.5 RPS, 요청 500, depth 2, timeout 15초이며 생성 정책의 concurrency는 1이었다. `--login-mode none`, `--execute`, `--tag-after`, `--tag-batch-size 50`, `resources/wordlists/common.txt`를 사용했다. 산출물은 대상별 `result/test-runs/09.23/phase-b/` 아래에 분리했다.
+Phase A에서 검증한 별도 승인 Scope와 정책으로 두 대상을 실행했다. 공통 상한은 0.5 RPS, 요청 500, depth 2, timeout 15초이며 생성 정책의 concurrency는 1이었다. 첫 실행은 `--tag-batch-size 50`, 최종 재실행은 `--tag-batch-size 25 --codex-timeout 600`을 사용했다. 공통으로 `--login-mode none`, `--execute`, `--tag-after`, `resources/wordlists/common.txt`를 적용했다. 산출물은 대상별 `result/test-runs/09.23/phase-b/` 아래에 분리했다.
 
 ## 선행 CLI 회귀
 
@@ -45,15 +45,26 @@ Juice Shop은 이전 실행에서 observation 168개에 대한 annotation run 4�
 - 이전 `recon-minseok-validate`의 태깅 배치도 **50건**이었다. 당시 50건 입력은 약 7.9~26.1 KiB였고 이번 첫 실행은 약 16.2~37.3 KiB였다. 첫 Juice Shop 실패 배치는 300.07초로 기본 Codex 300초 제한에 도달했다. 같은 기존 관측치의 미처리 175건을 **25건씩 7배치**로 별도 재처리한 결과 175건 성공, 실패 0건이었다. 각 배치는 약 2분 30초였다.
 - VulnBank 외부 font 요청은 브라우저의 `passive` 지원 경로와 프록시 허용 경로 양쪽에서 발생했다. loopback host를 포함한 Scope에서는 두 경로 모두 범위 밖 passive 요청을 허용하지 않도록 수정했다. 양쪽 회귀 테스트를 실패 상태에서 시작해 수정 후 통과시켰다.
 - VulnBank의 첫 25건 재실행에서는 일곱 번째 배치가 14초 후 `ValueError`로 실패했다. 300초 timeout과 다른 오류다. 태깅 코드가 모델 결과의 관측 ID 전체 일치 또는 허용 태그 조건을 검사하는 두 지점에서 `ValueError`를 던지며, DB에는 클래스만 저장돼 둘 중 어느 조건인지는 확인할 수 없다. 계약 오류가 발생하면 해당 배치만 절반씩 재분류하고 단일 관측치까지 실패하면 그대로 보고하도록 수정했다. 불완전한 모델 결과를 재현하는 테스트는 수정 전 실패, 수정 후 통과했다.
+- 다음 VulnBank 시도에서는 서로 다른 루트 공개 페이지가 `/:param`으로 합쳐져 기준 GET route 수집이 11개에서 4개로 줄었다. 루트 첫 segment는 변수 path로 학습하지 않도록 정규화를 수정하고, `/blog`, `/careers`, `/register` 등의 독립 경로를 검증하는 회귀 테스트를 추가했다. 이 시도는 이전 코드를 로드한 상태였으므로 최종 결과에서 제외했다.
 - 로컬 평가 계획의 태깅 설정을 **25건 배치, Codex 제한 600초**로 바꿨다. 수정 후 전체 Python 테스트는 **1046 passed, 6 skipped, 642 subtests passed**였다. 전체 테스트는 로컬 소켓 접근 권한과 `TMPDIR=/private/tmp`를 적용해 실행했다.
 
-## 수정 후 새 Phase B scan
+## 최종 Phase B 재실행
 
 | 대상 | scan ID | Recon stage | observations | HTTP transactions | 태깅 | Surface / Review |
 | --- | --- | --- | ---: | ---: | --- | --- |
-| Juice Shop | `scan_e427fc7ccb614d24af3a014932b77e73` | `completed` | 232 | 391 | 10배치, 232건 성공·0건 실패 | 둘 다 생성 |
-| VulnBank | `scan_13f614d057de40d0ac217a66fcd5de9b` | 진행 중 | 305 | 399 | 진행 중 | 진행 중 |
+| Juice Shop | `scan_ebd5060a8e7b43b1822c05ab3eb9855f` | `completed` | 249 | 394 | 10배치, 249건 성공·0건 실패 | 둘 다 생성 |
+| VulnBank | `scan_2624aff2c41441adb12084d6a4970980` | `completed` | 301 | 399 | 13배치, 301건 성공·0건 실패 | 둘 다 생성 |
 
-Juice Shop의 DB endpoint는 15개였고 고정 application GET 기준 71개 중 7개(9.9%)를 수집했다. 새 스캔의 모든 annotation run은 `completed`이고, scan도 `completed`다. HTTP transaction 391건은 전부 loopback host였다. 프록시 종료 집계는 허용 391건, 정책 차단 25건이며 요청 상한 500 이내다.
+Juice Shop의 DB endpoint는 24개였고 고정 application GET 기준 71개 중 7개(9.9%)를 수집했다. scan, Recon stage 및 annotation run 10개가 모두 `completed`다. HTTP transaction 394건은 전부 loopback host였다. 프록시 종료 집계는 허용 394건, 정책 차단 114건이며 요청 상한 500 이내다. 프록시 캡처 중간 점검에서 `accounts.google.com`, `content-autofill.googleapis.com`, `burpsuite` 요청은 모두 `policy_blocked=true`였다.
 
-VulnBank의 새 스캔도 엔드포인트 수집을 마쳤다. DB endpoint는 61개이고 HTTP transaction 399건은 전부 loopback host였다. 프록시 종료 집계는 허용 399건, 정책 차단 424건이다. 차단 건에는 ffuf 예산 보류 후보가 포함되므로 허용 요청 상한 500을 넘은 것이 아니다. 태깅 완료 전에는 VulnBank의 최종 Phase B 판정을 내리지 않는다.
+VulnBank의 최종 새 스캔은 DB endpoint 68개, 고정 application GET 기준 47개 중 11개(23.4%)를 수집했다. HTTP transaction 399건은 전부 loopback host였다. 프록시 종료 집계는 허용 399건, 정책 차단 487건이다. 차단 건에는 ffuf 예산 보류 후보가 포함되므로 허용 요청 상한 500을 넘은 것이 아니다. 프록시 캡처 중간 점검에서 `fonts.googleapis.com` 등 관측된 외부 host는 모두 `policy_blocked=true`였다. scan과 Recon stage는 `completed`, annotation run 13개는 모두 `completed`였다.
+
+루트 path 수정 후 두 대상을 동시에 시작하고 전체 Python suite도 병행했던 시도는 mitmdump 시작 제한 8초를 넘겨 양쪽 모두 관측치 0건의 `completed_with_errors`로 끝났다. 이 산출물은 평가에서 제외했다. 동일 정책으로 프록시를 단독 기동하자 정상 시작했으며, 위 두 최종 스캔은 순차 실행으로 완료됐다. 프록시 기동 실패의 직접 원인은 stderr가 저장되지 않아 확정할 수 없다.
+
+경로 정규화 수정 후 전체 Python suite는 병행 실행과 단독 실행 모두 `tests/test_native_helper_broker.py::test_broker_serializes_clients_before_starting_response_timeout` 1개가 2초 client timeout에 걸렸다. 두 차례 모두 나머지 **1046 passed, 6 skipped, 642 subtests passed**였고, 해당 테스트의 단독 재실행은 **1 passed**였다. 전체 suite의 최종 PASS로 기록하지 않는다. 이 테스트는 Phase B Recon 경로가 아닌 helper broker의 시간 경합 검사다.
+
+## 최종 판정
+
+**PASS — Recon-only shakedown.** 두 대상 모두 scan과 Recon stage가 완료됐고, 태깅 실패 0건 및 `Surface.json`·`ReconReview.json` 생성을 확인했다. 저장된 HTTP transaction의 범위 밖 host는 0건이며, 외부 요청에 대한 프록시 중간 점검도 전부 차단이었다. 고정 application GET 기준 수집률은 Juice Shop **7/71(9.9%)**, VulnBank **11/47(23.4%)**, 합계 **18/118(15.3%)**다. 수집률이 낮은 상태는 후속 Phase D의 Attack/Validation 성능 해석에 반영해야 한다.
+
+Phase B·C·D의 동일 기준 실행별 수집률과 단계별 합집합은 [Recon 수집률 표](RECON_COVERAGE.md)에 정리했다.

@@ -7,7 +7,6 @@ dependency.
 
 from __future__ import annotations
 
-import hashlib
 import re
 from collections import defaultdict
 from urllib.parse import parse_qsl, unquote, urlsplit
@@ -85,32 +84,6 @@ def query_signature(raw_url: str) -> str:
         f"{name}{'[]' if count > 1 else ''}"
         for name, count in sorted(counts.items(), key=lambda item: item[0].lower())
     )
-
-
-def response_fingerprint(status: object, content_type: object, body: bytes | str | None = None,
-                         content_length: object = None) -> str:
-    """Stable, body-safe fingerprint for soft-404/similarity decisions."""
-    if isinstance(body, str):
-        body = body.encode("utf-8", "replace")
-    digest = hashlib.sha256(body or b"").hexdigest() if body is not None else ""
-    return "|".join((str(status or ""), str(content_type or "").split(";", 1)[0].lower(),
-                     str(content_length if content_length is not None else len(body or b"")), digest))
-
-
-def limit_parameter_occurrences(raw_url: str, maximum: int = 5) -> str:
-    """Bound crawler loops that append the same query key indefinitely."""
-    try:
-        parsed = urlsplit(str(raw_url or ""))
-        counts: dict[str, int] = defaultdict(int)
-        kept = []
-        for name, value in parse_qsl(parsed.query, keep_blank_values=True):
-            counts[name] += 1
-            if counts[name] <= maximum:
-                kept.append((name, value))
-        from urllib.parse import urlencode, urlunsplit
-        return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, urlencode(kept), ""))
-    except ValueError:
-        return str(raw_url or "")
 
 
 def adaptive_path_fingerprints(

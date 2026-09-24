@@ -2687,6 +2687,7 @@ class PlaywrightDriver:
         *,
         max_actions: int | None = None,
         deadline: float | None = None,
+        after_action: Callable[[], None] | None = None,
     ) -> int:
 
         page = (
@@ -2877,6 +2878,12 @@ class PlaywrightDriver:
                 finally:
                     self._action_context = None
 
+                if after_action is not None:
+                    try:
+                        after_action()
+                    except Exception:
+                        pass
+
                 actions += 1
 
                 if (
@@ -2948,6 +2955,55 @@ class PlaywrightDriver:
             self.last_interaction_duplicate_screens += 1
         return duplicate
 
+    def _visible_navigation_paths(self) -> list[str]:
+        """Collect visible, same-origin links that can open another screen."""
+        page = self._ensure_page()
+        try:
+            links = page.evaluate("""() => [...document.querySelectorAll('a[href], [routerlink]')]
+                .filter(el => el.getClientRects().length && !el.hasAttribute('download')
+                    && el.getAttribute('target') !== '_blank')
+                .map(el => ({href: el.href || null,
+                    routerLink: el.getAttribute('routerLink')}))""")
+        except Exception:
+            return []
+        if not isinstance(links, list):
+            return []
+
+        paths: list[str] = []
+        for link in links:
+            if isinstance(link, str):
+                href = link
+                router_link = None
+            elif isinstance(link, dict):
+                href = link.get("href")
+                router_link = link.get("routerLink")
+            else:
+                continue
+            if not href and isinstance(router_link, str) and router_link.startswith("/"):
+                if urlparse(page.url).fragment.startswith("/"):
+                    href = page.url.split("#", 1)[0] + "#" + router_link
+                else:
+                    href = urljoin(page.url, router_link)
+            if not isinstance(href, str) or not href:
+                continue
+            url = urljoin(page.url, href)
+            parsed = urlparse(url)
+            if parsed.scheme not in {"http", "https"} or not self._same_origin(url):
+                continue
+            if self.target_policy is not None and not self.target_policy.allows_url(url):
+                continue
+            path = parsed.path or "/"
+            if parsed.query:
+                path += "?" + parsed.query
+            if parsed.fragment:
+                path += "#" + parsed.fragment
+            if self._path_looks_dangerous(path):
+                continue
+            if any(marker in path.lower() for marker in ("{", "}", "%7b", "%7d")):
+                continue
+            paths.append(path)
+        return paths
+
     def run_interaction_pass(
         self,
         endpoints: list[dict],
@@ -2975,6 +3031,15 @@ class PlaywrightDriver:
                         else self.interaction_config.max_pages * self.interaction_config.max_actions_per_page)
 
         actions = 0
+        pending = list(endpoints)
+        queued = set()
+
+        def queue_visible_links() -> None:
+            for path in self._visible_navigation_paths():
+                key = canonical_visit_key(urljoin(self.base_url.rstrip("/") + "/", path))
+                if key not in queued and key not in visited:
+                    queued.add(key)
+                    pending.append({"method": "GET", "path": path})
 
         page = (
             self._ensure_page()
@@ -3006,12 +3071,15 @@ class PlaywrightDriver:
             current_url = page.url
             if pages < self.interaction_config.max_pages and time.monotonic() < deadline:
                 page.wait_for_timeout(500)
+                queue_visible_links()
                 if not self._screen_was_explored(current_url):
                     actions += self.trigger_safe_actions(
                         max_actions=action_limit - actions,
                         deadline=deadline,
+                        after_action=queue_visible_links,
                     )
                     pages += 1
+                    queue_visible_links()
 
         except Exception:
             pass
@@ -3020,7 +3088,10 @@ class PlaywrightDriver:
         # Discovered Pages
         # ---------------------------------------------
 
-        for endpoint in endpoints:
+        index = 0
+        while index < len(pending):
+            endpoint = pending[index]
+            index += 1
 
             if (pages >= self.interaction_config.max_pages
                     or actions >= action_limit
@@ -3053,6 +3124,11 @@ class PlaywrightDriver:
             if key in visited:
                 continue
 
+            if not self._same_origin(url) or (
+                self.target_policy is not None and not self.target_policy.allows_url(url)
+            ):
+                continue
+
             if self._path_looks_dangerous(
                 path
             ):
@@ -3082,12 +3158,16 @@ class PlaywrightDriver:
             if duplicate_screen:
                 continue
 
+            queue_visible_links()
+
             actions += (
                 self.trigger_safe_actions(
                     max_actions=action_limit - actions,
                     deadline=deadline,
+                    after_action=queue_visible_links,
                 )
             )
+            queue_visible_links()
 
         self.last_interaction_stop_reason = (
             "time_limit" if time.monotonic() >= deadline else

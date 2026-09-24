@@ -14,7 +14,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from aidast.scope.paths import ScopePathError, identify_program
+from aidast.scope.paths import identify_program
 
 
 _PROGRAM_ID = re.compile(r"^registered-([0-9a-f]{12})$")

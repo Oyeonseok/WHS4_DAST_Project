@@ -1,5 +1,7 @@
 # Validation 후보 데이터 인벤토리
 
+약한 영향도 증거에서 실제 Impact Development 실행을 시험하는 환경과 정답은 [Impact Development 실습](../test-results/09.24/validation/VALIDATION_IMPACT_DEVELOPMENT_LAB.md)에 정리했다.
+
 ## 목적과 산출물
 
 Validation 실험에 앞서 교육용 앱 두 개의 **출처가 확인되는 공격 후보**를 독립 SQLite DB에 적재한다. 기본 산출물은 `result/test-runs/validation-candidates/CandidateInventory.db`이며 `result/`는 Git에서 제외된다. 별도 정답지는 `result/test-runs/validation-candidates/CandidateAnswerKey.db`에 생성한다. 재생성에 필요한 스크립트와 출처 스냅샷은 저장소에 둔다.

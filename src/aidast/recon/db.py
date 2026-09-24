@@ -627,26 +627,6 @@ def upsert_host_port(
     return host_port_id
 
 
-def insert_observation(
-    conn: sqlite3.Connection, *, origin_id: str, obs_type: str, key: str, value: str, source: str
-) -> None:
-    conn.execute(
-        "INSERT INTO observations (observation_id, origin_id, type, key, value, source) VALUES (?, ?, ?, ?, ?, ?)",
-        (new_id("obs"), origin_id, obs_type, key, value, source),
-    )
-    conn.commit()
-
-
-def insert_surface_signal(
-    conn: sqlite3.Connection, *, origin_id: str, signal_type: str, value: str
-) -> None:
-    conn.execute(
-        "INSERT INTO surface_signals (signal_id, origin_id, signal_type, value) VALUES (?, ?, ?, ?)",
-        (new_id("signal"), origin_id, signal_type, value),
-    )
-    conn.commit()
-
-
 def log_pipeline_run(
     conn: sqlite3.Connection,
     *,
@@ -714,28 +694,6 @@ def insert_http_transaction(
     )
     conn.commit()
     return transaction_id
-
-
-def insert_websocket_connection(
-    conn: sqlite3.Connection, *, url: str, source: str | None = None
-) -> str:
-    connection_id = new_id("ws")
-    conn.execute(
-        "INSERT INTO websocket_connections (websocket_connection_id, url, source) VALUES (?, ?, ?)",
-        (connection_id, url, source),
-    )
-    conn.commit()
-    return connection_id
-
-
-def insert_websocket_message(
-    conn: sqlite3.Connection, *, connection_id: str, direction: str, payload: bytes | None
-) -> None:
-    conn.execute(
-        "INSERT INTO websocket_messages (websocket_message_id, connection_id, direction, payload) VALUES (?, ?, ?, ?)",
-        (new_id("wsmsg"), connection_id, direction, payload),
-    )
-    conn.commit()
 
 
 CONTEXT_SCHEMA = """

@@ -27,3 +27,16 @@
 VulnBank 전체 Recon의 보조 ZAP OpenAPI import는 원본 `/static/openapi.json`에서 `/transfer` request schema의 `required`가 배열이 아닌 오류로 실패했다. Recon stage와 대시보드 인증 검사는 완료됐다. 서로 다른 사용자 객체에 대한 접근 허용 여부와 취약점은 Phase D/E에서 별도로 검증해야 한다.
 
 원본은 `result/test-runs/09.23/phase-c/` 아래의 대상별 디렉터리와 `sessions/` 및 `dashboard-sessions/`에 보관한다. 계정 비밀번호와 세션 값은 Git에 추가하지 않았다.
+
+## Recon application GET route 수집률
+
+Phase B와 같은 [고정 GET route 기준](../main-branch/phase_b/PHASE_B_ENDPOINT_BASELINE.md)으로 완료된 각 `Recon.db`를 대조했다. DB endpoint 총수는 수집률의 분자가 아니다.
+
+| 실행 | 적중 / 기준 | 수집률 |
+| --- | ---: | ---: |
+| Juice Shop primary | 9 / 71 | 12.7% |
+| VulnBank primary, `/` 시작 | 5 / 47 | 10.6% |
+| VulnBank primary, `/dashboard` 시작 | 5 / 47 | 10.6% |
+| VulnBank secondary, `/dashboard` 시작 | 5 / 47 | 10.6% |
+
+VulnBank 세 실행의 중복 제거 합집합은 **10/47(21.3%)**, 두 대상의 Phase C 합계는 **19/118(16.1%)**다. 인증 상태와 시작 경로가 다르므로 실행별 값은 구분해서 해석한다. 전체 단계별 비교와 계산 규칙은 [Recon 수집률 표](RECON_COVERAGE.md)에 기록했다.

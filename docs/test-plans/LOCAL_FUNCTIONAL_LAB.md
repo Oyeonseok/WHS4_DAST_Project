@@ -2,7 +2,7 @@
 
 ## 현재 구성
 
-- Juice Shop: <http://127.0.0.1:3001/>. [Compose 설정](../lab/compose.yaml)은 로컬 loopback에만 포트를 열고 이미지 digest를 고정합니다.
+- Juice Shop: <http://127.0.0.1:3001/>. [Compose 설정](../../lab/compose.yaml)은 로컬 loopback에만 포트를 열고 이미지 digest를 고정합니다.
 - VulnBank: <http://127.0.0.1:5001/>. 원본은 [Commando-X/vuln-bank](https://github.com/Commando-X/vuln-bank).
 - VulnBank의 PostgreSQL은 내부 네트워크에서만 연결되며 호스트에 DB 포트를 게시하지 않습니다. 웹의 AI 채팅은 빈 `DEEPSEEK_API_KEY`로 mock 모드를 사용합니다.
 
@@ -60,12 +60,14 @@ VulnBank의 DB 연결 상태는 `http://127.0.0.1:5001/healthz`, API 문서는 `
 
 비교 시 앱 이미지/커밋, 프로젝트 커밋과 작업 트리 변경, 로그인 상태, 데이터 초기 상태, 정책·예산, 모델 식별자를 함께 기록하세요. 동일 조건을 최소 3회 반복하고 중앙값과 변동 범위를 비교합니다. 모델 사용량을 수집하지 못했다면 0으로 쓰지 말고 미측정으로 남깁니다.
 
+단계별 결과를 작성할 때는 [Phase별 결과 문서 작성 정책](../test-results/PHASE_RESULT_FORMAT_POLICY.md)의 공통 항목과 판정·증거 기록 순서를 적용합니다.
+
 탐지 정확도는 `precision = TP / (TP + FP)`, `recall = TP / (TP + FN)`로 계산합니다. 분모가 0이면 N/A로 기록합니다. 정답 목록은 해당 버전·계정·범위에서 평가 가능한 항목으로 확정해야 합니다. Juice Shop의 모든 챌린지를 그대로 분모로 쓰거나 후보 개수만으로 탐지 성능을 판단하면 안 됩니다. 인증 실패 등으로 평가하지 못한 항목은 따로 기록합니다.
 
 현재 구성은 환경 기동·가용성 확인과 오프라인 기능 테스트까지 제공합니다. 자동 취약점 공격 실행이나 재현 절차는 포함하지 않습니다.
 
 ## 참고
 
-- 프로젝트 구조: [PROJECT_OVERVIEW.md](PROJECT_OVERVIEW.md)
+- 프로젝트 구조: [PROJECT_OVERVIEW.md](../PROJECT_OVERVIEW.md)
 - Juice Shop 공식 Docker 이미지 안내: [OWASP Developer Guide](https://devguide.owasp.org/en/07-training-education/01-vulnerable-apps/01-juice-shop/)
 - VulnBank 원본 구성: [docker-compose.yml](https://github.com/Commando-X/vuln-bank/blob/5e5ea5425fcf309373a0655dd111ecfb45037cbf/docker-compose.yml)

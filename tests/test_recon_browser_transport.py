@@ -217,6 +217,93 @@ class ReconBrowserTransportTests(unittest.TestCase):
             self.assertTrue(self.driver.visit_path("/api#second"))
         page.goto.assert_called_once()
 
+    def test_interaction_pass_follows_links_revealed_by_safe_menu_action(self):
+        driver = PlaywrightDriver("https://example.com/", self.config)
+        page = Mock(url="https://example.com/")
+        menu_open = False
+
+        def visible_links(_script):
+            return ["https://example.com/#/search"] if not menu_open else [
+                "https://example.com/#/search",
+                "https://example.com/#/basket",
+                "https://outside.example/#/account",
+            ]
+
+        def open_menu(*, after_action, **_kwargs):
+            nonlocal menu_open
+            menu_open = True
+            after_action()
+            menu_open = False
+            return 1
+
+        def visit(path):
+            page.url = "https://example.com" + path
+            return True
+
+        page.evaluate.side_effect = visible_links
+        with (
+            patch.object(driver, "ensure_session"),
+            patch.object(driver, "_ensure_page", return_value=page),
+            patch.object(driver, "_current_screen_fingerprint", return_value=None),
+            patch.object(driver, "trigger_safe_actions", side_effect=open_menu),
+            patch.object(driver, "visit_path", side_effect=visit) as visits,
+        ):
+            driver.run_interaction_pass([])
+
+        self.assertEqual(
+            [call.args[0] for call in visits.call_args_list],
+            ["/#/search", "/#/basket"],
+        )
+        self.assertEqual(driver._interaction_page_count, 3)
+
+    def test_visible_navigation_paths_follows_routerlink_buttons_in_hash_app(self):
+        driver = PlaywrightDriver("https://example.com/", self.config)
+        page = Mock(url="https://example.com/#/search")
+        page.evaluate.return_value = [
+            {"href": None, "routerLink": "/basket"},
+            {"href": "https://example.com/#/account", "routerLink": None},
+            {"href": None, "routerLink": "/logout"},
+            {"href": None, "routerLink": "https://outside.example/admin"},
+        ]
+        with patch.object(driver, "_ensure_page", return_value=page):
+            self.assertEqual(
+                driver._visible_navigation_paths(),
+                ["/#/basket", "/#/account"],
+            )
+
+    def test_safe_actions_collect_links_before_next_menu_closes(self):
+        driver = PlaywrightDriver("https://example.com/", self.config)
+        page = Mock()
+        candidates = page.locator.return_value
+        candidates.count.return_value = 2
+        menu_state = "closed"
+        snapshots = []
+        elements = [Mock(), Mock()]
+
+        def click_open(**_kwargs):
+            nonlocal menu_state
+            menu_state = "open"
+
+        def click_close(**_kwargs):
+            nonlocal menu_state
+            menu_state = "closed"
+
+        elements[0].click.side_effect = click_open
+        elements[1].click.side_effect = click_close
+        for element in elements:
+            element.is_visible.return_value = True
+            element.inner_text.return_value = "menu"
+            element.get_attribute.return_value = None
+            element.evaluate.side_effect = ["button", False]
+        candidates.nth.side_effect = elements
+
+        with patch.object(driver, "_ensure_page", return_value=page):
+            self.assertEqual(
+                driver.trigger_safe_actions(after_action=lambda: snapshots.append(menu_state)),
+                2,
+            )
+        self.assertEqual(snapshots, ["open", "closed"])
+
     def test_browser_visit_identity_keeps_spa_fragment_and_page_content(self):
         first = canonical_visit_key("https://example.com/api?utm_source=x&b=2&a=1#one")
         same_request = canonical_visit_key("https://example.com/api?a=1&b=2#two")

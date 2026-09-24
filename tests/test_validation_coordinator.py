@@ -1714,7 +1714,8 @@ class ValidationCoordinatorTests(unittest.TestCase):
             canonical_sha256,
         )
 
-        impact_contract = ImpactDevelopmentRuntimeContract.model_validate({
+        from aidast.validation.contracts.impact_development import impact_contract_document
+        impact_contract = impact_contract_document(ImpactDevelopmentRuntimeContract.model_validate({
             "schema_version": 1,
             "actions": [{
                 "contract_id": "cross-role-object-2",
@@ -1727,7 +1728,7 @@ class ValidationCoordinatorTests(unittest.TestCase):
                 }],
                 "credential_roles": [],
             }],
-        }).model_dump(mode="json")
+        }))
         with db.connect(self.path) as conn:
             conn.execute("DROP TRIGGER finding_reproduction_specs_no_update")
             conn.execute(
@@ -1783,7 +1784,7 @@ class ValidationCoordinatorTests(unittest.TestCase):
         )
 
         result = ValidationCoordinator(
-            db_path=self.path, agent=UnderpoweredAgent(), reproduction=FakePort(),
+            db_path=self.path, agent=FakeAgent(), reproduction=FakePort(),
             policy_provider=lambda endpoint, method: self.policy,
             impact_development_port=impact_port, impact_agent_factory=factory,
         ).run("scan")

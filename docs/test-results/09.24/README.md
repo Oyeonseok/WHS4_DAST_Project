@@ -2,6 +2,8 @@
 
 [지금까지의 변경사항과 수집 성능 요약](RECON_REFACTOR_SUMMARY.md): 기존 1,000건 실행 대비 실제 GET 요청·최종 Surface의 정답 경로가 각각 **9/71→25/71**로 증가했다.
 
+브라우저 화면 탐색의 다음 실험은 [다섯 번째 리팩토링 기록](REFACTOR_05_BROWSER_NAVIGATION.md)에 있다. 화면 방문은 **6→8개**였지만 실제 GET·Surface 정답은 모두 **25/71**로 유지됐다. [브라우저 GET O/X 표](RECON_BROWSER_GET_ROUTE_MATRIX.md)와 [브라우저 Surface O/X 표](RECON_BROWSER_SURFACE_ROUTE_MATRIX.md)를 별도로 생성했다. 후속 Recon 계획과 ffuf root 선택 모델은 `gpt-6-luna`로 지정했다.
+
 ## 범위와 정답
 
 - 대상: 로컬 OWASP Juice Shop 20.2.0, `http://127.0.0.1:3001/`, 승인 Scope `scope_local_lab_juice_shop`. 실행 컨테이너의 package version과 이미지 참조 digest가 정답지의 `20.2.0` 및 `sha256:73c53fbf442e8337b3ea3d98c7e8550308854701ebdfce4cc39768f36b75430e`와 일치함을 재확인했다.
@@ -17,7 +19,7 @@
 | --- | --- | --- |
 | `no-ffuf-150` | 없음 | ffuf 미실행 |
 | `smoke-ffuf-150`, `smoke-ffuf-300` | [11개 smoke 파일](wordlists/ffuf-smoke-wordlist.txt) | 로컬 common 목록에서 선택한 기능 확인용 경로, SHA-256 `1da6b8d0c5f49c9759982099ffb9b4c7a8fa4a2c6de7f99fc805fe264b295584` |
-| `seclists-api-500`, `seclists-api-1000`, `spa-refactor-1000`, `path-normalization-1000` | [SecLists API 파일](wordlists/common-api-endpoints-mazen160.txt) | [SecLists 원본](https://github.com/danielmiessler/SecLists/blob/8420764ea28d5cdc1a8bbb8311736a2235be28c4/Discovery/Web-Content/common-api-endpoints-mazen160.txt), commit `8420764ea28d5cdc1a8bbb8311736a2235be28c4`, 174줄, SHA-256 `cd774e12b54e075ac7c34b95b9f2ad908461e0ae43c57fc82976020575adb059` |
+| `seclists-api-500`, `seclists-api-1000`, `spa-refactor-1000`, `path-normalization-1000`, `browser-navigation-1000`, `browser-routerlink-1000`, `browser-action-capture-full-1000`, `browser-luna-full-1000` | [SecLists API 파일](wordlists/common-api-endpoints-mazen160.txt) | [SecLists 원본](https://github.com/danielmiessler/SecLists/blob/8420764ea28d5cdc1a8bbb8311736a2235be28c4/Discovery/Web-Content/common-api-endpoints-mazen160.txt), commit `8420764ea28d5cdc1a8bbb8311736a2235be28c4`, 174줄, SHA-256 `cd774e12b54e075ac7c34b95b9f2ad908461e0ae43c57fc82976020575adb059` |
 
 SecLists의 API 경로 후보를 수정 없이 사용했다. 이 목록만으로 Juice Shop의 모든 route를 추론할 수는 없다. ffuf는 root 선택, 150초/root 시간 제한, 전체 요청 예산을 적용한다. 따라서 목록 파일 174줄을 지정했더라도 모든 조합이 서버에 도달했는지는 별도로 확인한다.
 
@@ -51,6 +53,8 @@ SecLists 실험은 실제 호출을 [실행 스크립트](run-seclists-api-500.s
 
 정적 API 경로 병합 수정 후에는 [네 번째 실행 스크립트](run-path-normalization-1000.sh)를 `bash docs/test-results/09.24/run-path-normalization-1000.sh > result/test-runs/09.24/path-normalization-1000/run.log 2>&1`로 실행했다. 같은 승인 Scope·인증 세션·wordlist를 사용했다. scan ID `scan_9b9185ab83f14a1ebee0cd26bd3b8463`의 DB·Surface·정책 스냅샷은 `path-normalization-1000/`, 진단 로그는 `result/test-runs/09.24/logs/<scan ID>/recon.jsonl`에 있다. [수정·검증 기록](REFACTOR_04_STATIC_ROUTE_NORMALIZATION.md)에 원인과 중단한 첫 시도도 명시했다.
 
+브라우저 탐색 수정의 네 유효 재실행은 [다섯 번째 기록](REFACTOR_05_BROWSER_NAVIGATION.md)의 각 실행 스크립트와 명령 전문으로 재현할 수 있다. HTTP_PROBE만 수행한 `browser-action-capture-1000`은 ENDPOINT_DISCOVERY가 없어 O/X 비교에서 제외했다.
+
 ## 실행 결과
 
 | 실행 | GET 요청 정답 | Surface 보존 | HTTP transaction | ffuf 결과 |
@@ -62,6 +66,10 @@ SecLists 실험은 실제 호출을 [실행 스크립트](run-seclists-api-500.s
 | `seclists-api-1000` | 9/71 | 9/71 | 520 | 반환 후보 1(`/api`, HTTP 500) |
 | `spa-refactor-1000` | **25/71** | **9/71** | 422 | 반환 후보 1(`/api`, HTTP 500) |
 | `path-normalization-1000` | **25/71** | **25/71** | 466 | 반환 후보 1(`/api`, HTTP 500) |
+| `browser-navigation-1000` | 25/71 | 25/71 | 467 | 반환 후보 1 |
+| `browser-routerlink-1000` | 25/71 | 25/71 | 604 | 반환 후보 1 |
+| `browser-action-capture-full-1000` | 25/71 | 25/71 | 443 | 반환 후보 1 |
+| `browser-luna-full-1000` | 25/71 | 25/71 | 471 | 반환 후보 1 |
 
 SecLists 실행은 root `/`, `/api`, `/rest`, `/socket.io` 네 곳을 선택했다. 네 ffuf 프로세스 모두 150초 제한으로 종료됐다. DB에서 확인되는 서로 다른 wordlist 형태의 GET 경로는 각 root별로 **74, 73, 50, 0개**, 합계 197개다. 이는 wordlist 174개 × root 4개 = 696개 조합을 모두 서버에 보낸 실험이 아니다. HTTP transaction에 남은 경로 형태로 센 수치이므로 ffuf만의 정확한 전송 건수로 사용하지 않는다. 프록시 진행 기록은 실행 전 사용 1건과 프록시 허용 399건으로 총 400건이며, DB에 적재된 transaction은 397건이다. 프록시는 후속 요청 121건을 예산으로 보류했다. 목록의 `profile`(106번째), `users`(158번째)는 해당 root에서 시도된 구간에 들어가지 않았다.
 
