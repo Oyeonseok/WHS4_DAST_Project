@@ -7,6 +7,8 @@ import { localizeActivityMessage, localizeAuditEventType } from '../src/lib/acti
 import { isValidTagBatchSize, resolveExecutionLimits } from '../src/lib/scan.ts';
 import { scopeCollectionRequest } from '../src/lib/scope.ts';
 import { auditLevel, readAuditAcknowledgements, saveAuditAcknowledgements } from '../src/lib/audit.ts';
+import { filterFindings, findingVerdict, parseValidationCases, reportCaseForFinding } from '../src/lib/validation.ts';
+import { DEMO_VALIDATIONS } from '../src/data/demo.ts';
 import {
   formatActivityElapsed,
   initialScopeActivityState,
@@ -23,6 +25,32 @@ const event = (id = 8, overrides = {}) => ({ version: 1, event_id: id, scan_id: 
 test('tag batch size accepts only whole observation counts from 1 to 200', () => {
   for (const size of [1, 25, 200]) assert.equal(isValidTagBatchSize(size), true);
   for (const size of [0, 201, 1.5, NaN, Infinity]) assert.equal(isValidTagBatchSize(size), false);
+});
+test('finding filters use Validation decisions, not the Attack review status', () => {
+  const findings = demoSnapshot().findings;
+  assert.equal(findingVerdict(findings.find(item => item.id === 'F-0040'), DEMO_VALIDATIONS), 'tp');
+  assert.deepEqual(filterFindings(findings, DEMO_VALIDATIONS, 'fp').map(item => item.id), ['F-0041']);
+  assert.deepEqual(filterFindings(findings, DEMO_VALIDATIONS, 'duplicate').map(item => item.id), ['F-0038']);
+  assert.deepEqual(filterFindings(findings, DEMO_VALIDATIONS, 'pending').map(item => item.id), ['F-0042', 'F-0039']);
+  assert.deepEqual(filterFindings(findings, DEMO_VALIDATIONS, 'tp').map(item => item.id), ['F-0040']);
+});
+test('validation responses must belong to the selected scan', () => {
+  assert.deepEqual(parseValidationCases({ scan_id: DEMO_SCAN, cases: DEMO_VALIDATIONS }, DEMO_SCAN), DEMO_VALIDATIONS);
+  assert.equal(parseValidationCases({ scan_id: 'other', cases: DEMO_VALIDATIONS }, DEMO_SCAN), null);
+  assert.equal(parseValidationCases({ scan_id: DEMO_SCAN, cases: [{ ...DEMO_VALIDATIONS[0], current_status: 'FUTURE_STATUS' }] }, DEMO_SCAN), null);
+});
+test('reports link only to currently confirmed cases, including known matches', () => {
+  const findings = demoSnapshot().findings;
+  assert.equal(reportCaseForFinding(findings.find(item => item.id === 'F-0040'), DEMO_VALIDATIONS), 'case-demo-40');
+  assert.equal(reportCaseForFinding(findings.find(item => item.id === 'F-0038'), DEMO_VALIDATIONS), 'case-demo-40');
+  assert.equal(reportCaseForFinding(findings.find(item => item.id === 'F-0041'), DEMO_VALIDATIONS), null);
+  const changed = DEMO_VALIDATIONS.map(item => item.case_id === 'case-demo-40' ? { ...item, current_status: 'CONTESTED' } : item);
+  assert.equal(reportCaseForFinding(findings.find(item => item.id === 'F-0038'), changed), null);
+  const revalidating = DEMO_VALIDATIONS.map(item => item.case_id === 'case-demo-40' ? { ...item, processing_phase: 'queued' } : item);
+  assert.equal(findingVerdict(findings.find(item => item.id === 'F-0040'), revalidating), 'pending');
+  assert.equal(findingVerdict(findings.find(item => item.id === 'F-0038'), revalidating), 'inconclusive');
+  assert.equal(reportCaseForFinding(findings.find(item => item.id === 'F-0040'), revalidating), null);
+  assert.equal(reportCaseForFinding(findings.find(item => item.id === 'F-0038'), revalidating), null);
 });
 test('audit acknowledgements persist per scan and invalid storage data is ignored', () => {
   const items = new Map();
@@ -389,7 +417,7 @@ test('stage, scan status, and finding changes update the snapshot', () => {
   assert.equal(next.stage,'Chaining'); assert.equal(next.progress,0);
   next = applyEvent(next,event(9,{type:'scan.status.changed',payload:{status:'completed'}})); assert.equal(next.status,'completed');
   next = applyEvent(next,event(10,{type:'finding.updated',payload:{...next.findings[0],status:'confirmed'}}));
-  assert.equal(next.findings.length,4); assert.equal(next.findings.find(f=>f.id==='F-0042').status,'confirmed');
+  assert.equal(next.findings.length,demoSnapshot().findings.length); assert.equal(next.findings.find(f=>f.id==='F-0042').status,'confirmed');
 });
 test('log retention is bounded while event cursor keeps advancing', () => {
   let next = demoSnapshot();

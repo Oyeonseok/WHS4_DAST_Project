@@ -1155,3 +1155,76 @@ def test_program_registry_persists_and_masks_private_programs(tmp_path: Path) ->
             program_url="http://hackerone.com/not-https",
             visibility="public",
         )
+
+
+def test_validations_api_reports_case_verdicts_and_safe_evidence(tmp_path: Path) -> None:
+    database = _fixture(tmp_path)
+    decision = {"reason": "Bearer abcdef1234567890 leaked", "evidence_ids": ["e1"], "body": "secret-body"}
+    with sqlite3.connect(database) as conn:
+        conn.executescript(
+            """
+            CREATE TABLE validation_cases (
+              case_id TEXT, scan_id TEXT, target_kind TEXT, finding_id TEXT, chain_id TEXT,
+              latest_stage_run_id TEXT, decision_stage_run_id TEXT, processing_phase TEXT,
+              current_status TEXT, decision_json TEXT, known_source_case_id TEXT,
+              severity TEXT, impact_score INTEGER, created_at TEXT, updated_at TEXT
+            );
+            CREATE TABLE validation_attempts (
+              attempt_id TEXT, case_id TEXT, stage_run_id TEXT, attempt_kind TEXT,
+              outcome TEXT, observation_json TEXT
+            );
+            CREATE TABLE validation_evidence (
+              evidence_id TEXT, case_id TEXT, stage_run_id TEXT, details_json TEXT
+            );
+            """
+        )
+        rows = [
+            ("c-confirmed", SCAN_ID, "finding", "f1", None, "stage", "stage", "completed", "CONFIRMED",
+             json.dumps(decision), None, "HIGH", 7),
+            ("c-disproven", SCAN_ID, "finding", "f2", None, "stage", "stage", "completed", "DISPROVEN",
+             json.dumps({"reason": "control matched target"}), None, None, None),
+            ("c-pending", SCAN_ID, "chain", None, "ch1", "stage", None, "queued", None, None, None, None, None),
+            ("c-known", SCAN_ID, "finding", "f3", None, "stage", "stage", "completed", "KNOWN",
+             json.dumps({"reason": "exact metadata match"}), "c-confirmed", None, None),
+            ("c-other", "other-scan", "finding", "f9", None, "stage", "stage", "completed", "CONFIRMED",
+             json.dumps({"reason": "other"}), None, None, None),
+        ]
+        for i, row in enumerate(rows):
+            conn.execute(
+                "INSERT INTO validation_cases VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (*row, f"2026-09-20 01:0{i}:00", f"2026-09-20 01:0{i}:00"),
+            )
+        conn.execute("INSERT INTO validation_attempts VALUES ('a1','c-confirmed','stage','target','observed','{\"headers\":\"Cookie: sid=1\"}')")
+        conn.execute("INSERT INTO validation_attempts VALUES ('a2','c-confirmed','stage','negative_control','not_observed','{}')")
+        conn.execute("INSERT INTO validation_evidence VALUES ('e1','c-confirmed','stage','{\"body\":\"secret-body\"}')")
+    app = create_app(result_root=tmp_path)
+
+    async def exercise() -> None:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.get(f"/api/v1/scans/{SCAN_ID}/validations")
+            assert response.status_code == 200
+            body = response.json()
+            assert body["scan_id"] == SCAN_ID
+            by_id = {case["case_id"]: case for case in body["cases"]}
+            assert set(by_id) == {"c-confirmed", "c-disproven", "c-pending", "c-known"}
+            assert by_id["c-confirmed"]["current_status"] == "CONFIRMED"
+            assert by_id["c-confirmed"]["target_id"] == "f1"
+            assert by_id["c-confirmed"]["decision"]["severity"] == "HIGH"
+            assert by_id["c-confirmed"]["evidence"] == {
+                "attempts": {"target": {"observed": 1}, "negative_control": {"not_observed": 1}},
+                "evidence_count": 1,
+            }
+            assert by_id["c-disproven"]["current_status"] == "DISPROVEN"
+            assert by_id["c-disproven"]["decision"]["reason"] == "control matched target"
+            assert by_id["c-known"]["current_status"] == "KNOWN"
+            assert by_id["c-known"]["decision"]["known_source_case_id"] == "c-confirmed"
+            pending = by_id["c-pending"]
+            assert pending["current_status"] is None and pending["processing_phase"] == "queued"
+            assert pending["target_kind"] == "chain" and pending["target_id"] == "ch1"
+            assert "decision" not in pending and "evidence" not in pending
+            for leaked in ("abcdef1234567890", "secret-body", "Cookie", "sid=1"):
+                assert leaked not in response.text
+            assert (await client.get("/api/v1/scans/unknown-scan/validations")).status_code == 404
+
+    asyncio.run(exercise())

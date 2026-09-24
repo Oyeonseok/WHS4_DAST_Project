@@ -710,9 +710,17 @@ def discover_with_katana(
             "katana", target_policy.limits.requests_per_second
         )
 
-    if proxy_url:
-
-        base_command += [
+    # -proxy는 katana 자체가 HTTP 클라이언트로 요청을 보낼 때만 의미가 있다
+    # (Standard 모드, 그리고 아래 Header fallback - 둘 다 katana 내장
+    # 클라이언트/내장 브라우저를 직접 띄우는 구조). CDP 모드(-cwu)는 이미
+    # 떠 있는 Playwright Chromium에 붙기만 하고, 그 브라우저는 OS 레벨
+    # 프록시가 아니라 Playwright 자체의 context.route()/context.on("request")
+    # (playwright_driver.py _guard_request/on_request)로 이미 정책 강제와
+    # 관측을 다 하고 있다 - 그 브라우저는 애초에 --no-proxy-server로 켜져서
+    # -proxy를 준들 반영될 방법이 없다. base_command에 무조건 붙이지 않고
+    # 필요한 두 모드에만 개별적으로 붙인다.
+    proxy_flags = (
+        [
             "-proxy",
             proxy_url,
             # Internal scheduling marker. The policy proxy removes it before
@@ -720,6 +728,9 @@ def discover_with_katana(
             "-H",
             "X-AIDAST-Source: katana",
         ]
+        if proxy_url
+        else []
+    )
 
     # =====================================================
     # Standard
@@ -733,7 +744,7 @@ def discover_with_katana(
 
         command = list(
             base_command
-        )
+        ) + proxy_flags
 
         _append_headers(
             command,
@@ -891,10 +902,14 @@ def discover_with_katana(
                     "Header 방식"
                 )
 
+            # Header fallback은 -cwu 없이 katana가 자체 내장 브라우저를 새로
+            # 띄우는 독립 실행이라(로그인 세션 없음, Playwright 훅도 안 붙음)
+            # 여기는 CDP 모드와 달리 -proxy가 실제로 의미가 있다.
             command = (
                 list(
                     base_command
                 )
+                + proxy_flags
                 + [
                     "-hl",
                     "-xhr",
@@ -1899,15 +1914,29 @@ def discover_endpoints(
             chrome_ws_url = driver.get_chrome_ws_url()
             print()
             print("  [2/2] Katana Headless")
-            headless_results = discover_with_katana(
-                base_url,
-                mode="headless",
-                auth_headers=auth_headers,
-                chrome_ws_url=chrome_ws_url,
-                proxy_url=mitm_proxy_url,
-                target_policy=target_policy,
-                diagnostic_callback=katana_diagnostic,
-            )
+            # katana가 -cwu로 이 브라우저에 별도 CDP 세션을 붙이면 katana
+            # 자신도 같은 target에서 Fetch 도메인을 구독해 결과를 캡처하는데,
+            # Playwright driver의 context.route()가 이미 같은 target의
+            # Fetch 이벤트를 구독 중이라 충돌한다(CDP는 target당 Fetch
+            # 구독자를 하나만 안정적으로 지원) - katana의 캡처 콜백이 전혀
+            # 안 불려서 결과가 항상 0건으로 나오는 원인이었음(실측 확인:
+            # pause 전 Headless raw 0건 -> pause 적용 후 raw 97건). katana
+            # subprocess가 도는 동안은 우리가 동기 대기만 해서 그 창에서
+            # 우리 쪽 트래픽이 나갈 일이 없으므로, 그 구간만 라우팅을
+            # 내려서 katana에게 Fetch 도메인을 양보한다.
+            driver.pause_policy_routing()
+            try:
+                headless_results = discover_with_katana(
+                    base_url,
+                    mode="headless",
+                    auth_headers=auth_headers,
+                    chrome_ws_url=chrome_ws_url,
+                    proxy_url=mitm_proxy_url,
+                    target_policy=target_policy,
+                    diagnostic_callback=katana_diagnostic,
+                )
+            finally:
+                driver.resume_policy_routing()
             diagnose({"skipped": "phase_skipped", "failed": "phase_error"}.get(katana_states.get("headless"), "phase_completed"),
                      phase="katana_headless", count=len(headless_results))
         else:

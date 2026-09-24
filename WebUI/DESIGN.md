@@ -95,6 +95,19 @@ Spacing follows a 4px base with practical steps of 4, 8, 12, 16, 20, 24,
 
 ## 5. Components
 
+### Validation case
+
+- **Structure**: finding title and case ID, textual verdict, reproduction and
+  control attempt counts, redacted decision reason, and linked report when
+  the case is currently confirmed.
+- **Variants**: pending, TP, FP, known match to a confirmed case, and
+  inconclusive. Known matches link their source case rather than claiming
+  independent confirmation.
+- **Accessibility**: verdict text accompanies color; filters use labelled
+  native selects, and detail actions remain keyboard accessible.
+- **Layout**: compact single-column cards with wrapping metadata and a
+  flexible fact row that reflows on mobile.
+
 ### Panel
 
 - **Structure**: section, heading cluster, optional action, body.
