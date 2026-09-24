@@ -398,7 +398,7 @@ class ValidationProfileTests(unittest.TestCase):
         self.assertEqual((first, second), (assessment, assessment))
         self.assertEqual((session_id, resumed_id),
                          ("thread-validation", "thread-validation"))
-        self.assertEqual(commands[0][commands[0].index("--model") + 1], "gpt-5.6-sol")
+        self.assertEqual(commands[0][commands[0].index("--model") + 1], "gpt-6-sol")
         self.assertNotIn("resume", commands[0])
         self.assertEqual(commands[1][-3:], ["resume", "thread-validation", "-"])
 

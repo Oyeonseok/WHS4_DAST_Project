@@ -5,6 +5,7 @@ import json
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from aidast.agents.main import CodexMainAgent
+from aidast.agents.native_pipeline import RECON_MODEL
 from aidast.skills.ffuf_root_selection import PACKAGE, SKILL_NAME
 
 MAX_ENDPOINTS_FOR_AGENT = 800
@@ -95,7 +96,7 @@ def select_ffuf_roots_from_endpoints(
     )
 
     try:
-        result = CodexMainAgent()._run_structured(
+        result = CodexMainAgent(main_model=RECON_MODEL)._run_structured(
             prompt=prompt,
             model_type=FfufRootSelection,
             artifact_name="ffuf-root-selection",

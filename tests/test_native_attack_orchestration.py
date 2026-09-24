@@ -301,7 +301,7 @@ class NativeAttackMainAgentTests(unittest.TestCase):
                 self.assertNotIn("danger-full-access", command)
                 self.assertNotIn("--add-dir", command)
                 self.assertEqual(
-                    command[command.index("--model") + 1], "gpt-5.6-sol"
+                    command[command.index("--model") + 1], "gpt-6-sol"
                 )
                 self.assertTrue(
                     (work / ".codex/agents/aidast-attack.toml").is_file()
@@ -309,7 +309,7 @@ class NativeAttackMainAgentTests(unittest.TestCase):
                 agent_config = (
                     work / ".codex/agents/aidast-attack.toml"
                 ).read_text(encoding="utf-8")
-                self.assertIn('model = "gpt-5.6-sol"', agent_config)
+                self.assertIn('model = "gpt-6-sol"', agent_config)
                 overrides = tomllib.loads("\n".join(
                     command[index + 1]
                     for index, value in enumerate(command[:-1]) if value == "--config"

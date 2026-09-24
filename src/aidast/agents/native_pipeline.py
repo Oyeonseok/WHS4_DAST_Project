@@ -145,13 +145,16 @@ validation. Return only the object required by the output schema.
         ).model_dump(mode="json")
 
 
+RECON_MODEL = "gpt-6-luna"
+
+
 class CodexMainAgent:
     """Uses the locally authenticated Codex CLI as the planning-only Main Agent."""
 
-    DEFAULT_MAIN_MODEL = "gpt-5.6-sol"
-    DEFAULT_ATTACK_MODEL = "gpt-5.6-sol"
-    DEFAULT_CHAINING_MODEL = "gpt-5.6-sol"
-    DEFAULT_VALIDATION_MODEL = "gpt-5.6-sol"
+    DEFAULT_MAIN_MODEL = "gpt-6-sol"
+    DEFAULT_ATTACK_MODEL = "gpt-6-sol"
+    DEFAULT_CHAINING_MODEL = "gpt-6-sol"
+    DEFAULT_VALIDATION_MODEL = "gpt-6-sol"
 
     def __init__(
         self,
