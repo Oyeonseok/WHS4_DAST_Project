@@ -1,5 +1,5 @@
 import { useEffect, useReducer, useRef, useState, type ReactNode } from 'react';
-import { DEMO_SCAN } from './data/demo';
+import { DEMO_SCAN, DEMO_VALIDATIONS } from './data/demo';
 import { transportMode, useScanSocket } from './hooks/useScanSocket';
 import {
   formatActivityElapsed,
@@ -25,6 +25,7 @@ import {
   type ScopeExecutionRequirements,
 } from './lib/scan';
 import { scopeCollectionRequest } from './lib/scope';
+import { filterFindings, findingVerdict, knownSourceCase, parseValidationCases, reportCaseForFinding, type FindingVerdict, type ValidationCase, type ValidationStatus } from './lib/validation';
 
 const pages = ['Overview', 'Scopes / Programs', 'Scans', 'Findings', 'Validation', 'Reports', 'Audit log', 'Settings'] as const;
 type Page = typeof pages[number];
@@ -147,6 +148,23 @@ const demoFindingTitleEn: Record<string, string> = {
   'F-0041': 'Input reflected in search response',
   'F-0040': 'Server version disclosed in response header',
   'F-0039': 'Response security header missing',
+  'F-0038': 'Server version disclosed again',
+};
+const verdictLabels: Record<FindingVerdict, string> = {
+  tp: 'TP · verified',
+  fp: 'FP · disproven',
+  duplicate: 'Matched earlier case',
+  pending: 'Awaiting validation',
+  inconclusive: 'No final verdict',
+};
+const validationStatusLabels: Record<ValidationStatus, string> = {
+  CONFIRMED: 'TP · verified', DISPROVEN: 'FP · disproven', KNOWN: 'Matched earlier case',
+  OUT_OF_SCOPE: 'Out of scope verdict', UNDERPOWERED: 'Insufficient impact proof',
+  BLOCKED: 'Validation blocked', INCONCLUSIVE: 'No final verdict', CONTESTED: 'Conflicting verdict',
+};
+const demoReport: ReportSummary = {
+  report_id: 'DEMO-Report', scan_id: DEMO_SCAN, case_id: 'case-demo-40',
+  platform: 'local', title: '서버 버전 노출', created_at: '2026-09-20T05:26:24Z',
 };
 
 export default function App() {
@@ -154,6 +172,7 @@ export default function App() {
   const [page, setPage] = useState<Page>(getPage);
   const [search, setSearch] = useState('');
   const [severity, setSeverity] = useState('All severities');
+  const [verdictFilter, setVerdictFilter] = useState<FindingVerdict | 'all'>('all');
   const [privateVisible, setPrivateVisible] = useState(false);
   const [modal, setModal] = useState<'new' | 'scan-progress' | 'scope' | 'scope-workflow' | 'verified-scope' | 'finding' | 'report' | null>(null);
   const [selectedFinding, setSelectedFinding] = useState<Finding | null>(null);
@@ -229,6 +248,10 @@ export default function App() {
   const [auditAckError, setAuditAckError] = useState('');
   const [auditRevision, setAuditRevision] = useState(0);
   const [reports, setReports] = useState<ReportSummary[]>([]);
+  const [validationCases, setValidationCases] = useState<readonly ValidationCase[]>(demo ? DEMO_VALIDATIONS : []);
+  const [validationScanId, setValidationScanId] = useState<string | null>(demo ? DEMO_SCAN : null);
+  const [validationError, setValidationError] = useState('');
+  const [validationRevision, setValidationRevision] = useState(0);
   const [reportError, setReportError] = useState('');
   const [reportScanId, setReportScanId] = useState<string | null>(null);
   const [reportPreview, setReportPreview] = useState(sampleReport);
@@ -254,8 +277,9 @@ export default function App() {
   const scanElapsedSeconds = scanSummary
     ? Math.max(0, Math.floor(((scanSummary.finished_at ? Date.parse(scanSummary.finished_at) : scanClock) - Date.parse(scanSummary.started_at)) / 1000))
     : 0;
-  const reportDraftStatus: ReportDraftStatus = reportScanId === scanId
-    ? reports.some(item => item.scan_id === scanId) ? 'present' : 'absent'
+  const reportDraftStatus: ReportDraftStatus = demo ? 'present' : reportScanId === scanId
+    ? validationScanId !== scanId ? 'loading'
+      : reports.some(item => item.scan_id === scanId && validationCases.some(validation => validation.case_id === item.case_id && validation.processing_phase === 'completed' && validation.current_status === 'CONFIRMED')) ? 'present' : 'absent'
     : reportError ? 'unavailable' : 'loading';
   useEffect(() => {
     if (workflowProgram) {
@@ -301,6 +325,12 @@ export default function App() {
     setWorkflowProgram(current => current ? body.programs!.find(item => item.id === current.id) || current : null);
   };
   useEffect(() => { const changed = () => { setPage(getPage()); setSearch(''); }; window.addEventListener('hashchange', changed); return () => window.removeEventListener('hashchange', changed); }, []);
+  useEffect(() => {
+    const media = window.matchMedia('(max-width: 900px)');
+    const changed = () => setCollapsed(media.matches);
+    media.addEventListener('change', changed);
+    return () => media.removeEventListener('change', changed);
+  }, []);
   useEffect(() => {
     if (!window.matchMedia('(max-width: 660px)').matches) return;
     navigation.current?.querySelector<HTMLElement>('.nav-item.active')?.scrollIntoView({ block: 'nearest', inline: 'center' });
@@ -455,7 +485,13 @@ export default function App() {
     })();
     return () => abort.abort();
   }, [demo, modal, workflowProgram?.id, workflowProgram?.scope_status]);
-  useEffect(() => { if (modal && !dialog.current?.open) dialog.current?.showModal(); else if (!modal && dialog.current?.open) dialog.current.close(); }, [modal]);
+  useEffect(() => {
+    const element = dialog.current;
+    if (modal) {
+      if (!element?.open) element?.showModal();
+      element?.scrollTo(0, 0);
+    } else if (element?.open) element.close();
+  }, [modal]);
   useEffect(() => {
     setAcknowledgedAudit(readAuditAcknowledgements(localStorage, scanId));
     setAuditAckError('');
@@ -495,7 +531,30 @@ export default function App() {
       } catch (e) { if (!abort.signal.aborted) setReportError(e instanceof Error ? e.message : 'Reports could not be loaded.'); }
     })();
     return () => abort.abort();
-  }, [demo, page, scanId]);
+  }, [demo, page, scanId, validationRevision, snapshot?.stage, snapshot?.status]);
+  useEffect(() => {
+    if (demo || !scanId || !['Findings', 'Validation', 'Reports'].includes(page)) return;
+    const abort = new AbortController();
+    setValidationScanId(current => current === scanId ? current : null);
+    setValidationError('');
+    void (async () => {
+      try {
+        const base = import.meta.env.VITE_API_BASE_URL || location.origin;
+        const response = await fetch(new URL(`/api/v1/scans/${encodeURIComponent(scanId)}/validations`, base), { signal: abort.signal, credentials: 'same-origin', cache: 'no-store' });
+        if (!response.ok) throw new Error(`Validation request returned ${response.status}`);
+        const cases = parseValidationCases(await response.json(), scanId);
+        if (!cases) throw new Error('The backend returned invalid validation cases');
+        setValidationCases(cases);
+        setValidationScanId(scanId);
+      } catch (e) {
+        if (!abort.signal.aborted) {
+          setValidationScanId(null);
+          setValidationError(e instanceof Error ? e.message : 'Validation results unavailable');
+        }
+      }
+    })();
+    return () => abort.abort();
+  }, [demo, page, scanId, snapshot?.stage, snapshot?.status, snapshot?.last_event_id, validationRevision]);
   useEffect(() => {
     if (demo || (modal !== null && modal !== 'new')) return;
     const abort = new AbortController();
@@ -750,8 +809,15 @@ export default function App() {
     && `${tk('대시보드 연결', 'Dashboard connection')} ${tr(error)}`.toLowerCase().includes(logSearch.toLowerCase());
   useEffect(() => { if (!paused && stream.current) stream.current.scrollTop = stream.current.scrollHeight; }, [activityLogs.at(-1)?.key, error, scopeClock, paused, logSearch, level, stageFilter, collapsed]);
   const findings = snapshot?.findings || [];
-  const shownFindings = findings.filter(f => `${f.id} ${f.title} ${findingTitle(f)} ${f.endpoint}`.toLowerCase().includes(search.toLowerCase()) && (severity === 'All severities' || f.severity === severity));
-  const reviewCount = findings.filter(f => f.status === 'unreviewed').length;
+  const currentValidations = validationScanId === scanId ? validationCases : [];
+  const validationReady = demo || validationScanId === scanId;
+  const validatedReports = demo ? [demoReport] : reports.filter(item => currentValidations.some(validation => validation.case_id === item.case_id && validation.processing_phase === 'completed' && validation.current_status === 'CONFIRMED'));
+  const shownFindings = filterFindings(findings, currentValidations, validationReady ? verdictFilter : 'all').filter(f => `${f.id} ${f.title} ${findingTitle(f)} ${f.endpoint}`.toLowerCase().includes(search.toLowerCase()) && (severity === 'All severities' || f.severity === severity));
+  const reviewCount = findings.filter(f => findingVerdict(f, currentValidations) === 'pending').length;
+  const selectedValidation = selectedFinding && currentValidations.find(item => item.target_kind === 'finding' && item.target_id === selectedFinding.id);
+  const selectedKnownSource = selectedValidation ? knownSourceCase(selectedValidation, currentValidations) : undefined;
+  const relatedReportCaseId = selectedFinding ? reportCaseForFinding(selectedFinding, currentValidations) : null;
+  const relatedReport = validatedReports.find(item => item.case_id === relatedReportCaseId);
   const approvedScopeCount = demo ? 0 : scopes.length;
   const totalProgramCount = registeredPrograms.length;
   const visiblePrograms = registeredPrograms.filter(item => `${item.visibility === 'private' && !privateVisible ? 'Private program' : item.program} ${item.platform}`.toLowerCase().includes(search.toLowerCase()));
@@ -778,6 +844,12 @@ export default function App() {
   };
   const openReport = async (item: ReportSummary) => {
     setReportError('');
+    if (demo) {
+      setSelectedReport(item);
+      setReportPreview(sampleReport);
+      setModal('report');
+      return;
+    }
     try {
       const base = import.meta.env.VITE_API_BASE_URL || location.origin;
       const response = await fetch(new URL(`/api/v1/reports/${encodeURIComponent(item.report_id)}`, base), { credentials: 'same-origin', cache: 'no-store' });
@@ -785,7 +857,18 @@ export default function App() {
       setSelectedReport(item); setReportPreview(await response.text()); setModal('report');
     } catch (e) { setReportError(e instanceof Error ? e.message : 'The report preview could not be loaded.'); }
   };
-  const findingTable = (rows: Finding[]) => <div className="table-wrap"><table><thead><tr><th>{tr('Severity')}</th><th>{tr('Finding')}</th><th>{tr('Review status')}</th><th><span className="sr-only">{tr('Details')}</span></th></tr></thead><tbody>{rows.map(f => <tr key={f.id}><td><Badge tone={f.severity.toLowerCase()}>{tr(f.severity)}</Badge></td><td><button className="text-button finding-title" onClick={() => inspect(f)}>{findingTitle(f)}</button><small className="mono">{f.id} <span>·</span> {f.endpoint}</small></td><td><Badge tone={f.status === 'confirmed' ? 'success' : ''}>{tr(f.status)}</Badge></td><td><button className="icon-button" aria-label={`${tr('Details')} ${f.id}`} onClick={() => inspect(f)}><Icon name="arrow" size={16}/></button></td></tr>)}</tbody></table>{rows.length === 0 && <p className="table-empty">{tr('No findings match this view.')}</p>}</div>;
+  const findingTable = (rows: Finding[]) => <div className="table-wrap finding-table"><table>
+    <thead><tr><th>{tr('Severity')}</th><th>{tr('Finding')}</th><th>{tr('Validation verdict')}</th><th><span className="sr-only">{tr('Details')}</span></th></tr></thead>
+    <tbody>{rows.map(f => {
+      const verdict = findingVerdict(f, currentValidations);
+      return <tr key={f.id}>
+        <td><Badge tone={f.severity.toLowerCase()}>{tr(f.severity)}</Badge></td>
+        <td><button className="text-button finding-title" onClick={() => inspect(f)}>{findingTitle(f)}</button><small className="mono">{f.id} <span>·</span> {f.endpoint}</small></td>
+        <td><Badge tone={verdict === 'tp' ? 'success' : verdict === 'fp' ? 'critical' : verdict === 'duplicate' ? 'warning' : ''}>{validationReady ? tr(verdictLabels[verdict]) : tr('Checking validation verdict')}</Badge></td>
+        <td><button className="icon-button" aria-label={`${tr('Details')} ${f.id}`} onClick={() => inspect(f)}><Icon name="arrow" size={16}/></button></td>
+      </tr>;
+    })}</tbody>
+  </table>{rows.length === 0 && <p className="table-empty">{tr('No findings match this view.')}</p>}</div>;
   const currentAttackTasks = attackTaskSnapshot?.scan_id === scanId ? attackTaskSnapshot : null;
   const attackTasksContent = <section className="scan-attack-tasks" aria-label={tk("공격 작업과 선택 근거", "Attack tasks and selection evidence")}>
     <div className="scan-attack-tasks-heading"><h3>{tk("공격 작업", "Attack tasks")} <small>{tk(`${currentAttackTasks?.tasks.length ?? 0}개 · 기록된 시도 ${currentAttackTasks?.attempt_count ?? 0}건`, `${currentAttackTasks?.tasks.length ?? 0} tasks · ${currentAttackTasks?.attempt_count ?? 0} recorded attempts`)}</small></h3></div>
@@ -903,7 +986,7 @@ export default function App() {
         <div className="form-grid"><label className="form-field"><span>{tr('Requests per second')} <small>≤ {selectedLimits?.requests_per_second}</small></span><input type="number" min="0.1" step="0.1" max={selectedLimits?.requests_per_second} value={maxRps} onChange={event => setMaxRps(Number(event.target.value))}/></label><label className="form-field"><span>{tr('Concurrency')} <small>≤ {selectedLimits?.concurrency}</small></span><input type="number" min="1" max={selectedLimits?.concurrency} value={maxConcurrency} onChange={event => setMaxConcurrency(Number(event.target.value))}/></label></div>
         <div className="scan-rate-summary" aria-live="polite"><span>{tr('This scan per-target request-rate cap')}</span><strong>{maxRps > 0 ? `${maxRps} ${tr('requests per second unit')}` : tr('Enter a valid request rate')}</strong>{requestInterval !== null && <small>{language === 'ko' ? `평균 ${requestInterval}초에 1회 요청` : `Average one request every ${requestInterval} seconds`}</small>}<p>{tr('Concurrency limits parallel work; it does not multiply the request-rate setting.')} {tr('The generated TargetPolicy may lower this setting further.')}</p></div>
         <div className="form-grid"><label className="form-field"><span>{tr('Timeout seconds')} <small>≤ {selectedLimits?.timeout_seconds}</small></span><input type="number" min="1" max={selectedLimits?.timeout_seconds} value={timeoutSeconds} onChange={event => setTimeoutSeconds(Number(event.target.value))}/></label><label className="form-field"><span>{tr('Maximum depth')} <small>≤ {selectedLimits?.max_depth}</small></span><input type="number" min="0" max={selectedLimits?.max_depth} value={maxDepth} onChange={event => setMaxDepth(Number(event.target.value))}/></label></div>
-        <div className="form-grid"><label className="form-field"><span>{tk('태깅 배치 크기', 'Tag batch size')} <small>1–200</small></span><input type="number" min="1" max="200" step="1" value={tagBatchSize} onChange={event => setTagBatchSize(Number(event.target.value))} aria-describedby="tag-batch-size-hint"/><small id="tag-batch-size-hint">{tk('한 번에 모델에 전달할 관측치 수 · 25건 권장 (모델 호출 제한 300초)', 'Observations per model call · 25 recommended (300-second model timeout)')}</small></label><label className="form-field"><span>{tr('Login behavior')}</span><select value={loginMode} onChange={event => setLoginMode(event.target.value as 'none' | 'runtime-browser')}><option value="none">{tr('No login prompt')}</option><option value="runtime-browser">{tr('Open runtime browser')}</option></select></label></div>
+        <div className="form-grid"><label className="form-field"><span>{tr('Tag batch size')} <small>1–200</small></span><input type="number" min="1" max="200" step="1" value={tagBatchSize} onChange={event => setTagBatchSize(Number(event.target.value))} aria-describedby="tag-batch-size-hint"/><small id="tag-batch-size-hint">{tr('Observations per model call · 25 recommended (300-second model timeout)')}</small></label><label className="form-field"><span>{tr('Login behavior')}</span><select value={loginMode} onChange={event => setLoginMode(event.target.value as 'none' | 'runtime-browser')}><option value="none">{tr('No login prompt')}</option><option value="runtime-browser">{tr('Open runtime browser')}</option></select></label></div>
         {requiredHeader && <label className="form-field"><span className="mono">{requiredHeader.name} <small>{tr('required for every request')}</small></span><input value={platformHandle} onChange={event => setPlatformHandle(event.target.value)} autoComplete="off" maxLength={64} placeholder={tr('Enter the platform username sent in this header')}/></label>}
       </>}
       {launchError && <p className="form-error" role="alert">{launchError}</p>}
@@ -982,9 +1065,68 @@ export default function App() {
         </>}
         {page === 'Scopes / Programs' && <><div className="notice"><Icon name="lock"/><div><strong>{tk(`사용자가 등록한 프로그램 ${totalProgramCount}개. ${approvedScopeCount ? `검증된 스코프 산출물 ${approvedScopeCount}개를 불러왔습니다.` : tr('No executable assets.')}`, `${totalProgramCount} registered programs. ${approvedScopeCount ? `${approvedScopeCount} verified Scope artifacts loaded.` : tr('No executable assets.')}`)}</strong><p>{tr('No programs are preloaded. Registration does not establish authorization; only an explicitly approved, integrity-verified Scope becomes executable.')}</p></div></div>{verifiedScopesPanel}{registeredPrograms.length > 0 ? <><div className="toolbar"><label className="search-field"><Icon name="search" size={16}/><input aria-label={tr('Search programs')} value={search} onChange={e => setSearch(e.target.value)} placeholder={tr('Filter registered programs or platforms…')}/></label><button className="secondary-button" onClick={() => setPrivateVisible(v => !v)}>{tr(privateVisible ? 'Hide private name' : 'Reveal private name')}</button></div><Panel title={tr('Scope intake queue')} subtitle={tk(`로컬 등록 프로그램 ${registeredPrograms.length}개 · 명시적인 승인 또는 거절 결정이 필요합니다`, `${registeredPrograms.length} locally registered programs · explicit approval or rejection required`)}><div className="intake-list">{visiblePrograms.map(item => <div key={item.id}><span className="artifact-icon"><Icon name={item.visibility === 'private' ? 'lock' : 'scope'}/></span><div><strong>{item.visibility === 'private' && !privateVisible ? tr('Private program') : item.program}</strong><p>{item.platform} · {tk("등록", "registered")} {new Date(item.created_at).toLocaleString(language === 'ko' ? 'ko-KR' : 'en-GB')}{item.scope_error ? ` · ${item.scope_error}` : ''}</p></div><div className="intake-actions"><Badge tone={scopeStatusTone(item.scope_status)}>{tr(scopeStatusLabel[item.scope_status])}</Badge><button className="secondary-button" onClick={() => openScopeWorkflow(item)}>{tr(item.scope_status === 'review_required' ? 'Review Yes / No' : item.scope_status === 'collecting' || item.scope_status === 'awaiting_browser' || item.scope_status === 'paused' || item.scope_status === 'cancelling' ? 'View progress' : item.scope_status === 'approved' ? 'View result' : 'Collect Scope')}</button></div></div>)}{visiblePrograms.length === 0 && <p className="table-empty">{tr('No registered programs match this filter.')}</p>}</div></Panel></> : <Panel title={tr('No programs registered')} subtitle={tr('Start with a program policy URL')}><Empty title={tr('Your Scope queue is empty')}>{tr('Choose Add program, enter the bug bounty program URL, and select Public or Private. Nothing is added automatically.')}</Empty></Panel>}</>}
         {page === 'Scans' && <>{!demo && <div className="toolbar"><label>{tr('Persisted scan')} <select aria-label={tr('Select persisted scan')} value={scanId} onChange={event => setScanId(event.target.value)}>{!scanOptions.some(item => item.scan_id === scanId) && scanId && <option value={scanId}>{scanId}</option>}{scanOptions.map(item => <option key={item.scan_id} value={item.scan_id}>{item.targets?.length ? `${item.targets[0]}${item.targets.length > 1 ? tk(` 외 ${item.targets.length - 1}개`, ` + ${item.targets.length - 1} more`) : ''} · ${item.scan_id.slice(0, 13)}` : item.scan_id} · {tr(item.status)}</option>)}</select></label><button className="secondary-button" onClick={refresh}>{tr('Reload snapshot')}</button></div>}{scanPanel}{!demo && attackTasksContent}<Panel title={tr('Run artifacts & provenance')} subtitle={tr('Mapped to the existing aidast pipeline')}><div className="artifact-list">{[['Scope.json + Approval.json','Scope',tr('Policy, approved assets, and integrity hashes')],['Recon.db + Surface.json','Recon',tr('Observed assets, origins, endpoints, and sessions')],['Handoff.json','Handoff',tr('Hashes and roles of immutable source artifacts')],['Pipeline.db','Attack → Validation','stage_runs · attack_tasks · findings · chain_candidates'],['Report.md + Report.json','Report',tr('Validated local draft; no automatic submission')]].map(([name,s,description]) => <div key={name}><span className="artifact-icon"><Icon name="report"/></span><div><strong className="mono">{name}</strong><p>{description}</p></div><Badge>{tr(s)}</Badge></div>)}</div></Panel></>}
-        {page === 'Findings' && <><div className="toolbar"><label className="search-field"><Icon name="search" size={16}/><input aria-label={tr('Search findings')} value={search} onChange={e => setSearch(e.target.value)} placeholder={tr('Search finding, ID, or endpoint…')}/></label><select aria-label={tr('Filter severity')} value={severity} onChange={e => setSeverity(e.target.value)}>{['All severities','CRITICAL','HIGH','MEDIUM','LOW','INFO'].map(s => <option key={s} value={s}>{tr(s)}</option>)}</select></div><Panel title={tr('Scan findings')} subtitle={language === 'ko' ? `${shownFindings.length}개 결과 · ${demo ? '합성 데이터' : scanId}` : `${shownFindings.length} results · ${demo ? 'synthetic data' : scanId}`}>{findingTable(shownFindings)}</Panel><p className="muted footnote">{tr('Review statuses follow Pipeline.db: unreviewed, confirmed, rejected, resolved.')}</p></>}
-        {page === 'Validation' && <><div className="notice"><Icon name="check"/><div><strong>{language === 'ko' ? `${reviewCount}개 후보가 증거 검토를 기다리고 있습니다` : `${reviewCount} candidates await evidence review`}</strong><p>{tr('Validation requires reproduction, a meaningful control, and redacted evidence. UI actions cannot confirm a vulnerability.')}</p></div></div><Panel title={tr('Validation queue')} subtitle={tr('Finding candidates awaiting a final verdict')}>{findingTable(findings.filter(f => f.status === 'unreviewed'))}</Panel><Panel title={tr('Evidence requirements')} subtitle={tr('Before promotion to a confirmed case')}><div className="checklist">{['Reproduce within the approved scope and identity boundary','Compare positive and negative controls','Link request / response evidence with secrets removed','Record the final verdict and reproducibility limits'].map((text,i) => <div key={text}><span>{String(i+1).padStart(2,'0')}</span><p>{tr(text)}</p><Badge>{tr('Required')}</Badge></div>)}</div></Panel><p className="muted footnote">{tr('The live validation-case API is not connected in this MVP. This queue reflects finding review status only.')}</p></>}
-        {page === 'Reports' && <>{reportError && <div className="error-banner" role="alert"><span>{reportError}</span><button onClick={() => setReportError('')}>{tr('Dismiss')}</button></div>}<Panel title={tr('Local report drafts')} subtitle={tr('Integrity-checked local artifacts · never submitted automatically')}>{demo ? <div className="report-card"><div className="report-illustration"><Icon name="report" size={42}/></div><div><Badge tone="warning">{tr('DEMO DRAFT')}</Badge><h3>{tr('Server version disclosure')}</h3><p>{tr('A synthetic report showing finding, evidence, impact, and remediation sections.')}</p><small className="mono">F-0040 · {tr('LOW')} · Markdown</small><div className="button-row"><button className="secondary-button" onClick={() => { setSelectedReport(null); setReportPreview(sampleReport); setModal('report'); }}>{tr('Preview draft')}</button><button className="primary-button" onClick={() => download('DEMO-Report.md', language === 'ko' ? sampleReport : sampleReportEn)}>{tr('Download demo .md')} <Icon name="arrow" size={14}/></button></div></div></div> : reports.length ? <div className="report-list">{reports.map(item => <div className="report-card" key={item.report_id}><div className="report-illustration"><Icon name="report" size={42}/></div><div><Badge tone="success">{tr('LOCAL DRAFT')}</Badge><h3>{item.title}</h3><p>{item.platform} · {tk("케이스", "case")} {item.case_id}</p><small className="mono">{item.report_id} · {new Date(item.created_at).toLocaleString(language === 'ko' ? 'ko-KR' : 'en-GB')}</small><div className="button-row"><button className="secondary-button" onClick={() => void openReport(item)}>{tr('Preview draft')}</button></div></div></div>)}</div> : <Empty title={tr('No report draft for this scan')}>{tr('Validated report artifacts will appear here after the existing CLI report workflow creates an integrity-bound draft.')}</Empty>}</Panel></>}
+        {page === 'Findings' && <>
+          {validationError && <div className="error-banner" role="alert">{tr('Validation results unavailable')}</div>}
+          <div className="toolbar finding-filters">
+            <label className="search-field"><Icon name="search" size={16}/><input aria-label={tr('Search findings')} value={search} onChange={e => setSearch(e.target.value)} placeholder={tr('Search finding, ID, or endpoint…')}/></label>
+            <select aria-label={tr('Filter severity')} value={severity} onChange={e => setSeverity(e.target.value)}>{['All severities','CRITICAL','HIGH','MEDIUM','LOW','INFO'].map(s => <option key={s} value={s}>{tr(s)}</option>)}</select>
+            <select aria-label={tr('Filter validation verdict')} value={verdictFilter} onChange={e => {
+              const selected = e.target.value;
+              if (selected === 'all' || selected === 'tp' || selected === 'fp' || selected === 'duplicate' || selected === 'pending' || selected === 'inconclusive') setVerdictFilter(selected);
+            }} disabled={!validationReady}>
+              <option value="all">{tr('All verdicts')}</option>
+              {(['tp', 'fp', 'duplicate', 'pending', 'inconclusive'] as const).map(value => <option key={value} value={value}>{tr(verdictLabels[value])}</option>)}
+            </select>
+            {!demo && <button className="secondary-button" onClick={() => setValidationRevision(value => value + 1)}>{tr('Refresh validation results')}</button>}
+          </div>
+          <Panel title={tr('Scan findings')} subtitle={language === 'ko' ? `${shownFindings.length}개 결과 · ${demo ? '합성 데이터' : scanId}` : `${shownFindings.length} results · ${demo ? 'synthetic data' : scanId}`}>{findingTable(shownFindings)}</Panel>
+          <p className="muted footnote">{tr('TP and FP come from Validation cases, not Attack review status. Known matches point to an earlier confirmed case.')}</p>
+        </>}
+        {page === 'Validation' && <>
+          <div className="notice"><Icon name="check"/><div>
+            <strong>{tr('Candidates awaiting a verdict')} · {reviewCount}</strong>
+            <p>{tr('Validation shows persisted decisions and redacted evidence counts; a candidate is not a confirmed vulnerability.')}</p>
+          </div></div>
+          {validationError && <div className="error-banner" role="alert">{tr('Validation results unavailable')}</div>}
+          <Panel title={tr('Validation cases')} subtitle={tr('Reproduction, controls, and final decision')} action={!demo && <button className="secondary-button" onClick={() => setValidationRevision(value => value + 1)}>{tr('Refresh validation results')}</button>}>
+            {!validationReady ? <p className="table-empty">{tr('Checking validation verdict')}</p> : currentValidations.length ? <div className="validation-cases">{currentValidations.map(item => {
+              const finding = findings.find(candidate => item.target_kind === 'finding' && candidate.id === item.target_id);
+              const counts = item.evidence?.attempts;
+              const attempts = (kind: string) => Object.values(counts?.[kind] || {}).reduce((total, count) => total + count, 0);
+              const linked = validatedReports.find(report => report.case_id === item.case_id);
+              const known = knownSourceCase(item, currentValidations);
+              const statusLabel = item.current_status === 'KNOWN' && !known ? verdictLabels.inconclusive
+                : item.processing_phase === 'completed' && item.current_status ? validationStatusLabels[item.current_status] : verdictLabels.pending;
+              return <article className="validation-case" key={item.case_id}>
+                <div className="validation-case-heading"><div><strong>{finding ? findingTitle(finding) : item.target_id}</strong><small className="mono">{item.case_id} · {item.target_kind === 'chain' ? tr('Chain') : item.target_id}</small></div>
+                  <Badge tone={item.processing_phase === 'completed' && item.current_status === 'CONFIRMED' ? 'success' : item.processing_phase === 'completed' && item.current_status === 'DISPROVEN' ? 'critical' : known ? 'warning' : ''}>{tr(statusLabel)}</Badge>
+                </div>
+                <dl className="validation-facts"><div><dt>{tr('Target attempts')}</dt><dd>{attempts('target')}</dd></div><div><dt>{tr('Control attempts')}</dt><dd>{attempts('positive_control') + attempts('negative_control')}</dd></div><div><dt>{tr('Evidence references')}</dt><dd>{item.evidence?.evidence_count ?? 0}</dd></div></dl>
+                {item.processing_phase === 'completed' && item.decision?.reason && <p><strong>{tr('Decision reason')}</strong> {item.decision.reason}</p>}
+                {known && <p><strong>{tr('Matched confirmed case')}</strong> <code>{item.decision?.known_source_case_id}</code></p>}
+                {item.processing_phase === 'completed' && linked && <button className="secondary-button" onClick={() => void openReport(linked)}>{tr('Open related report')} <Icon name="arrow" size={14}/></button>}
+              </article>;
+            })}</div> : <p className="table-empty">{tr('No validation cases for this scan.')}</p>}
+          </Panel>
+          <Panel title={tr('Findings awaiting validation')} subtitle={tr('No final Validation case yet')}>{findingTable(findings.filter(f => findingVerdict(f, currentValidations) === 'pending'))}</Panel>
+        </>}
+        {page === 'Reports' && <>
+          {reportError && <div className="error-banner" role="alert"><span>{reportError}</span><button onClick={() => setReportError('')}>{tr('Dismiss')}</button></div>}
+          {validationError && <div className="error-banner" role="alert">{tr('Validation results unavailable')}</div>}
+          <Panel title={tr('Local report drafts')} subtitle={tr('Integrity-checked local artifacts · never submitted automatically')} action={!demo && <button className="secondary-button" onClick={() => setValidationRevision(value => value + 1)}>{tr('Refresh validation results')}</button>}>
+            {!validationReady ? <p className="table-empty">{tr('Checking validation verdict')}</p>
+              : validatedReports.length ? <div className="report-list">{validatedReports.map(item => <div className="report-card" key={item.report_id}>
+                <div className="report-illustration"><Icon name="report" size={42}/></div><div>
+                  <Badge tone={demo ? 'warning' : 'success'}>{tr(demo ? 'DEMO DRAFT' : 'LOCAL DRAFT')}</Badge>
+                  <h3>{demo ? tr('Server version disclosure') : item.title}</h3>
+                  <p>{demo ? tr('A synthetic report showing finding, evidence, impact, and remediation sections.') : `${item.platform} · ${tr('Case')} ${item.case_id}`}</p>
+                  <small className="mono">{demo ? 'F-0040 · LOW · Markdown' : item.report_id}</small>
+                  <div className="button-row"><button className="secondary-button" onClick={() => void openReport(item)}>{tr('Preview draft')}</button></div>
+                </div>
+              </div>)}</div>
+              : <Empty title={tr('No report draft for this scan')}>{tr('Only reports linked to currently confirmed Validation cases are shown.')}</Empty>}
+          </Panel>
+        </>}
         {page === 'Audit log' && <>
           <div className="notice"><Icon name="logs"/><div><strong>{tk('작업과 문제 기록', 'Work and problem history')}</strong><p>{tk('선택한 스캔의 작업 단계, 결과, 실패 정보를 확인합니다. 요청 본문과 인증정보는 표시하지 않습니다.', 'Review the selected scan’s work, outcomes, and failures. Request bodies and credentials are not displayed.')}</p></div></div>
           {auditError && <div className="error-banner" role="alert"><span>{auditError}</span><button onClick={() => setAuditRevision(value => value + 1)}>{tk('다시 불러오기', 'Retry')}</button></div>}
@@ -1049,6 +1191,20 @@ export default function App() {
     <dialog ref={dialog} onCancel={closeDialog} onClose={closeDialog} aria-labelledby="dialog-title">
       <div className="dialog-heading"><h2 id="dialog-title">{modal === 'new' ? tr('Start a new scan') : modal === 'scan-progress' ? tk("스캔 진행 상황", "Scan progress") : modal === 'scope' ? tr('Add bug bounty program') : modal === 'scope-workflow' ? tr(workflowProgram?.scope_status === 'approved' ? 'View approved Scope' : 'Collect and review Scope') : modal === 'verified-scope' ? tk("검증된 Scope 내용", "Verified Scope details") : modal === 'report' ? tr(demo ? 'Demo report preview' : 'Local report preview') : selectedFinding?.id}</h2><button className="icon-button" aria-label={tr('Close dialog')} onClick={closeDialog}>×</button></div>
       {modal === 'new' ? newScanContent : modal === 'scan-progress' ? scanProgressContent : modal === 'scope' ? scopeIntakeContent : modal === 'scope-workflow' ? scopeWorkflowContent : modal === 'verified-scope' ? (catalogScopeSummaryOnly ? catalogScopeSummaryContent : catalogScopeError ? <p className="form-error" role="alert">{catalogScopeError}</p> : catalogScopeDraft && catalogScopeApproval ? <VerifiedScopeDetails draft={catalogScopeDraft} approval={catalogScopeApproval} language={language} onScan={() => scanFromScope(catalogScopeDraft.scope_id)}/> : <p className="form-empty">{tk("검증된 Scope 내용을 불러오는 중입니다…", "Loading verified Scope details…")}</p>) : modal === 'report' ? <><pre className="report-preview">{demo ? language === 'ko' ? sampleReport : sampleReportEn : reportPreview}</pre><div className="button-row"><button className="primary-button" onClick={() => download(`${selectedReport?.report_id || 'DEMO-Report'}.md`, demo ? language === 'ko' ? sampleReport : sampleReportEn : reportPreview)}>{tr('Download .md')} <Icon name="arrow" size={14}/></button></div></> : selectedFinding && <><Badge tone={selectedFinding.severity.toLowerCase()}>{tr(selectedFinding.severity)}</Badge><h3 className="finding-detail-title">{findingTitle(selectedFinding)}</h3><dl className="detail-grid"><div><dt>{tr('Endpoint')}</dt><dd className="mono">{selectedFinding.endpoint}</dd></div><div><dt>{tr('Classification')}</dt><dd>{selectedFinding.cwe}</dd></div><div><dt>{tr('Review status')}</dt><dd>{tr(selectedFinding.status)}</dd></div><div><dt>{tr('Source')}</dt><dd>{tr(demo ? 'Synthetic fixture' : 'Pipeline finding')}</dd></div></dl><div className="notice"><Icon name="shield"/><p>{tr(demo ? 'This is synthetic evidence for UI demonstration. No listed program was tested.' : 'Evidence details require a redacted evidence endpoint. The summary alone is not proof of a vulnerability.')}</p></div><button className="secondary-button" onClick={() => { setModal(null); go('Validation'); }}>{tr('Open validation queue')} <Icon name="arrow" size={14}/></button></>}
+      {modal === 'finding' && selectedFinding && <section className="finding-verdict">
+        <h3>{tr('Validation verdict')}</h3>
+        <Badge tone={selectedValidation?.processing_phase === 'completed' && selectedValidation.current_status === 'CONFIRMED' ? 'success' : selectedValidation?.processing_phase === 'completed' && selectedValidation.current_status === 'DISPROVEN' ? 'critical' : selectedKnownSource ? 'warning' : ''}>
+          {validationReady ? tr(verdictLabels[findingVerdict(selectedFinding, currentValidations)]) : tr('Checking validation verdict')}
+        </Badge>
+        {selectedValidation?.processing_phase === 'completed' && selectedValidation.decision?.reason && <p><strong>{tr('Decision reason')}</strong> {selectedValidation.decision.reason}</p>}
+        {selectedKnownSource && <p>
+          <strong>{tr('Matched confirmed case')}</strong> <code>{selectedKnownSource.case_id}</code>
+          {selectedKnownSource.target_kind === 'finding' && <span> · {findings.find(item => item.id === selectedKnownSource.target_id)?.title || selectedKnownSource.target_id}</span>}
+        </p>}
+        {selectedValidation?.evidence && <p>{tr('Target attempts')} {Object.values(selectedValidation.evidence.attempts.target || {}).reduce((total, count) => total + count, 0)} · {tr('Control attempts')} {['positive_control', 'negative_control'].reduce((total, kind) => total + Object.values(selectedValidation.evidence?.attempts[kind] || {}).reduce((sum, count) => sum + count, 0), 0)} · {tr('Evidence references')} {selectedValidation.evidence.evidence_count ?? 0}</p>}
+        {relatedReport && <button className="primary-button" onClick={() => void openReport(relatedReport)}>{tr('Open related report')} <Icon name="arrow" size={14}/></button>}
+        {reportError && <p className="form-error" role="alert">{reportError}</p>}
+      </section>}
     </dialog>
   </div>;
 }

@@ -74,9 +74,9 @@ WebSocket이 같은 출처에서 연결되어야 하므로 반드시 대시보�
 | Overview | 현재 스캔 상태, 단계별 진행률, 취약점 분포와 최근 활동 |
 | Scope / Programs | 프로그램 등록, Scope 수집, 초안 검토와 Yes/No 승인, 승인된 Scope 내용 재조회 |
 | Scans | 승인된 Scope 기반 새 스캔 시작과 저장된 스캔 선택 |
-| Findings | 심각도·검색 필터와 취약점 후보 상세 정보 |
-| Validation | 검증 후보와 필요한 증거 확인 |
-| Reports | 무결성이 확인된 로컬 보고서 초안 조회·다운로드 |
+| Findings | 취약점 후보 검색·심각도 및 TP/FP/기존 사례 필터, 검증 판정 요약과 관련 보고서 연결 |
+| Validation | 검증 케이스의 TP/FP·기존 사례·판정 보류, 재현/대조군·증거 건수와 판정 근거 조회 |
+| Reports | 현재 TP 검증 케이스와 연결된 무결성 확인 로컬 초안 조회·다운로드 |
 | Audit log | 민감정보를 제거한 상태 변경 이력 |
 | Settings | 연결 상태, 결과 저장 위치, 언어와 화면 설정 |
 
@@ -171,6 +171,11 @@ GET /api/v1/scans/{scan_id}
 ```
 
 스캔 단계는 `Scope`, `Recon`, `Attack`, `Chaining`, `Validation`, `Report` 순서입니다.
+`GET /api/v1/scans/{scan_id}/validations`는 저장된 검증 케이스의 판정,
+민감정보를 제거한 사유와 재현·대조군 시도 건수만 반환합니다. `CONFIRMED`는 TP,
+`DISPROVEN`은 FP로 표시합니다. `KNOWN`은 이전 확정 케이스와의 일치이며
+독립적인 TP로 세지 않고 원본 케이스를 가리킵니다. 다른 판정은 TP/FP로 단정하지
+않습니다. 보고서는 현재 `CONFIRMED`인 케이스와 연결될 때만 화면에 표시합니다.
 Recon 실행 중에는 진행률 아래에 현재 작업 종류(자산 탐색, DNS 확인, HTTP 응답 확인 등)를 표시합니다.
 작업명은 서버가 고정된 목록에서 선택하며 대상 URL이나 요청 내용은 포함하지 않습니다.
 확정된 Validation case가 있으면 지원 플랫폼의 Report 초안이 자동 생성됩니다.

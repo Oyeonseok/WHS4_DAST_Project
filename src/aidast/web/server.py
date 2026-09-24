@@ -297,6 +297,15 @@ def create_app(
         except (OSError, sqlite3.Error) as exc:
             raise HTTPException(status_code=503, detail="attack task projection unavailable") from exc
 
+    @app.get("/api/v1/scans/{scan_id}/validations")
+    async def validations(scan_id: str) -> dict[str, Any]:
+        try:
+            return projector.validations(scan_id)
+        except ScanNotFoundError:
+            raise
+        except (OSError, sqlite3.Error) as exc:
+            raise HTTPException(status_code=503, detail="validation projection unavailable") from exc
+
     @app.get("/api/v1/scans/{scan_id}/audit")
     async def audit_log(scan_id: str) -> dict[str, Any]:
         try:

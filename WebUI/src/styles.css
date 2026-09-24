@@ -510,3 +510,33 @@ html[lang=ko] .eyebrow{font-size:13px;font-weight:600;color:var(--accent)}
   .scan-summary-panel .panel-heading{display:grid;grid-template-columns:minmax(0,1fr)}
   .scan-summary-panel .scan-panel-actions{justify-content:flex-start}
 }
+.finding-filters{flex-wrap:wrap;justify-content:flex-start}
+.finding-filters .search-field{flex:1 1 220px}
+.finding-filters select{flex:1 1 150px;min-height:40px}
+.validation-cases{display:grid;gap:12px;padding:16px}
+.validation-case{min-width:0;padding:18px;border:1px solid var(--line);border-radius:7px;background:var(--panel);display:grid;gap:13px}
+.validation-case-heading{display:flex;align-items:flex-start;justify-content:space-between;flex-wrap:wrap;gap:12px}
+.validation-case-heading>div{min-width:0}
+.validation-case-heading strong{display:block;font-size:16px;line-height:1.5;overflow-wrap:anywhere}
+.validation-case-heading small{display:block;color:var(--muted);font-size:12px;overflow-wrap:anywhere}
+.validation-case p,.finding-verdict p{font-size:14px;line-height:1.6;overflow-wrap:anywhere}
+.validation-case p strong,.finding-verdict p strong{margin-right:7px}
+.validation-case>.secondary-button{justify-self:start}
+.validation-facts{display:flex;flex-wrap:wrap;gap:12px;margin:0}
+.validation-facts>div{min-width:115px;padding:9px 12px;border-radius:6px;background:var(--soft)}
+.validation-facts dt{font-size:12px;color:var(--muted)}
+.validation-facts dd{margin:4px 0 0;font-size:16px;font-variant-numeric:tabular-nums}
+.finding-verdict{display:grid;justify-items:start;gap:13px;margin-top:22px;padding-top:20px;border-top:1px solid var(--line)}
+.finding-verdict h3{font-size:17px}
+@media(max-width:660px){
+  .finding-table table,.finding-table tbody{display:block;width:100%;min-width:0}
+  .finding-table thead{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}
+  .finding-table tr{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:7px 12px;padding:14px;border-bottom:1px solid var(--line)}
+  .finding-table tr:last-child{border-bottom:0}
+  .finding-table td{display:block;min-width:0;width:auto!important;padding:0!important;border:0}
+  .finding-table td:first-child,.finding-table td:nth-child(2){grid-column:1/-1}
+  .finding-table td:nth-child(3){grid-column:1;align-self:center}
+  .finding-table td:last-child{grid-column:2;align-self:center}
+  .finding-table td .badge{white-space:normal;text-align:left}
+  .finding-table td small{overflow-wrap:anywhere}
+}
