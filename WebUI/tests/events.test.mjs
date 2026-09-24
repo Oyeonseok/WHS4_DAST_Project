@@ -4,7 +4,7 @@ import { parseEvent, parseSnapshot, applyEvent, applyOrderedEvent, displayStageS
 import { demoSnapshot, DEMO_SCAN } from '../src/data/demo.ts';
 import { initialLanguage, translate } from '../src/lib/i18n.ts';
 import { localizeActivityMessage, localizeAuditEventType } from '../src/lib/activityMessages.ts';
-import { resolveExecutionLimits } from '../src/lib/scan.ts';
+import { isValidTagBatchSize, resolveExecutionLimits } from '../src/lib/scan.ts';
 import { scopeCollectionRequest } from '../src/lib/scope.ts';
 import { auditLevel, readAuditAcknowledgements, saveAuditAcknowledgements } from '../src/lib/audit.ts';
 import {
@@ -20,6 +20,10 @@ import {
 } from '../src/lib/activity.ts';
 
 const event = (id = 8, overrides = {}) => ({ version: 1, event_id: id, scan_id: DEMO_SCAN, occurred_at: '2026-09-20T06:00:00Z', type: 'log.appended', payload: { stage: 'Attack', level: 'info', message: 'Redacted fixture event' }, ...overrides });
+test('tag batch size accepts only whole observation counts from 1 to 200', () => {
+  for (const size of [1, 25, 200]) assert.equal(isValidTagBatchSize(size), true);
+  for (const size of [0, 201, 1.5, NaN, Infinity]) assert.equal(isValidTagBatchSize(size), false);
+});
 test('audit acknowledgements persist per scan and invalid storage data is ignored', () => {
   const items = new Map();
   const storage = { getItem: key => items.get(key) ?? null, setItem: (key, value) => { items.set(key, value); } };
