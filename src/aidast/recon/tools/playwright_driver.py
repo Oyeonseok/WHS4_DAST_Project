@@ -919,6 +919,37 @@ class PlaywrightDriver:
         prefix = str(prefix).rstrip("/") or "/"
         return prefix == "/" or path == prefix or path.startswith(prefix + "/")
 
+    def pause_policy_routing(self) -> None:
+        """katana처럼 -cwu로 이 브라우저에 별도 CDP 세션을 붙이는 도구는
+        자기 자신도 같은 target에 Fetch 도메인을 직접 구독한다(katana
+        내부에서 요청/응답을 캡처해 크롤 결과를 쌓는 방식). CDP의 Fetch
+        도메인은 target당 구독자를 안정적으로 하나만 지원하는데, 우리
+        context.route()가 이미 같은 target의 Fetch 이벤트를 구독하고
+        있어서 katana 세션과 충돌한다 - Playwright가 이벤트를 먼저/대신
+        가져가면 katana 쪽 콜백이 전혀 안 불려서, 페이지는 정상 로드되는데
+        (그래서 hang은 없음) katana는 결과를 하나도 캡처하지 못해 exit 0 +
+        0건으로 조용히 끝난다. 실측으로 확인됨(katana subprocess가 도는
+        동안은 우리가 동기 대기만 해서 그 사이 이 브라우저로 우리 쪽
+        트래픽이 나갈 일이 없어, 그 창만 양보해도 정책이 실제로 뚫리는
+        구간은 생기지 않는다). 반드시 resume_policy_routing()으로 복원할
+        것(finally로 감쌀 것).
+        """
+        if self.context is None or self.target_policy is None:
+            return
+        try:
+            self.context.unroute("**/*", self._guard_request)
+        except Exception:
+            pass
+
+    def resume_policy_routing(self) -> None:
+        """pause_policy_routing()으로 내린 Fetch 정책 구독을 복원한다."""
+        if self.context is None or self.target_policy is None:
+            return
+        try:
+            self.context.route("**/*", self._guard_request)
+        except Exception:
+            pass
+
     def _register_context_handlers(
         self,
     ) -> None:
@@ -1840,16 +1871,18 @@ class PlaywrightDriver:
         if self.context is None:
             return False
 
+        if self._chrome_process is None:
+            return False
+
+        # self.context.storage_state()는 CDP 호출에 타임아웃이 없어서,
+        # 브라우저 프로세스는 살아있는데 CDP가 응답 없는 상태(hang)가 되면
+        # 이 함수 자체가 영원히 안 끝나는 문제가 실측으로 확인됐다. 여기서는
+        # 순수 프로세스 생존만 확인하고, "진짜" liveness(CDP 응답성)는 이미
+        # 타임아웃이 걸려 있는 다음 단계 호출들(session_is_valid(),
+        # page.goto(timeout=...))에 맡긴다.
         try:
-
-            # 단순 pages Property가 아니라
-            # 실제 Browser 호출을 수행해 검사
-            self.context.storage_state()
-
-            return True
-
+            return self._chrome_process.poll() is None
         except Exception:
-
             return False
 
     # =====================================================
@@ -2719,35 +2752,43 @@ class PlaywrightDriver:
                 if not element.is_visible():
                     continue
 
+                # Angular 등 SPA는 후보를 모으고 나서도 계속 리렌더링/DOM
+                # 교체가 일어나서, 이 사이 후보가 stale해지는 race가 흔하다.
+                # 아래 호출들에 명시적 timeout이 없으면 Playwright 기본값인
+                # 30초를 그대로 물려받아, 후보 하나가 stale일 때마다 최대
+                # 30초씩 날아갈 수 있다(최대 max_actions_per_page개까지
+                # 누적되면 상호작용 단계 전체가 사실상 멈춘 것처럼 보인다 -
+                # 실측으로 확인된 hang의 원인 중 하나). 결과를 못 얻는 후보는
+                # 빠르게 포기하고 다음으로 넘어가도록 짧은 timeout을 준다.
                 text = (
-                    element.inner_text()
+                    element.inner_text(timeout=2000)
                     or ""
                 ).strip().lower()
 
                 aria_label = (
                     element.get_attribute(
-                        "aria-label"
+                        "aria-label", timeout=2000
                     )
                     or ""
                 ).lower()
 
                 title = (
                     element.get_attribute(
-                        "title"
+                        "title", timeout=2000
                     )
                     or ""
                 ).lower()
 
                 element_id = (
                     element.get_attribute(
-                        "id"
+                        "id", timeout=2000
                     )
                     or ""
                 ).lower()
 
                 name = (
                     element.get_attribute(
-                        "name"
+                        "name", timeout=2000
                     )
                     or ""
                 ).lower()
@@ -2788,7 +2829,8 @@ class PlaywrightDriver:
                         """
                         el =>
                             el.tagName.toLowerCase()
-                        """
+                        """,
+                        timeout=2000,
                     )
                 )
 
@@ -2796,7 +2838,7 @@ class PlaywrightDriver:
 
                     button_type = (
                         element.get_attribute(
-                            "type"
+                            "type", timeout=2000
                         )
                         or ""
                     ).lower()
@@ -2806,7 +2848,8 @@ class PlaywrightDriver:
                             """
                             el =>
                                 !!el.closest('form')
-                            """
+                            """,
+                            timeout=2000,
                         )
                     )
 
