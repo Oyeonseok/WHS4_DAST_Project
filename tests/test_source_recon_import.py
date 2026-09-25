@@ -144,3 +144,50 @@ def test_lab_benchmark_expands_only_loopback_attack_policy(tmp_path: Path) -> No
     scope = (result.recon_database.parent / "Scope.md").read_text(encoding="utf-8")
     assert "disposable local lab fixtures" in scope
     assert "- http://127.0.0.1:5001/" in scope
+
+
+def test_lab_benchmark_preserves_readme_claims_without_confirming_them(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "app.py").write_text(SOURCE, encoding="utf-8")
+    (source / "README.md").write_text('''
+# Fixture Bank
+
+### Implemented Vulnerabilities
+
+1. **Authentication**
+   - Weak JWT implementation
+   - No session expiration
+
+2. **Transactions**
+   - Negative amount transfers possible
+
+## Installation
+''', encoding="utf-8")
+    result = import_flask_source(
+        source, target_url="http://127.0.0.1:5001/",
+        result_root=tmp_path / "result", approved_by="fixture-operator",
+        source_ref="fixture-commit", lab_benchmark=True,
+    )
+
+    assert result.benchmark_catalog_count == 3
+    assert result.benchmark_catalog is not None
+    catalog = json.loads(result.benchmark_catalog.read_text(encoding="utf-8"))
+    assert [item["title"] for item in catalog["items"]] == [
+        "Weak JWT implementation",
+        "No session expiration",
+        "Negative amount transfers possible",
+    ]
+    with sqlite3.connect(result.recon_database) as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM benchmark_catalog_items"
+        ).fetchone() == (3,)
+        assert conn.execute(
+            "SELECT DISTINCT assessment_status FROM benchmark_catalog_items"
+        ).fetchall() == [("declared_unassessed",)]
+    with sqlite3.connect(result.pipeline_database) as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM benchmark_catalog_items"
+        ).fetchone() == (3,)

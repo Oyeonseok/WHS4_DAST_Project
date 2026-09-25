@@ -12,6 +12,7 @@ from aidast.attack.coverage import (
     coverage_status,
     ensure_coverage_manifest,
     transition_coverage,
+    _credential_role,
 )
 from aidast.attack.db_cli import transition_task
 from aidast.attack.models import AttackStageResult
@@ -40,6 +41,10 @@ def user(user_id):
 
 def test_imported_information_disclosure_uses_general_evidence_workflow() -> None:
     assert VULNERABILITY_SKILLS["source_leak"] == "hunt-misc"
+
+
+def test_jwt_coverage_requests_an_issued_authenticated_token() -> None:
+    assert _credential_role("jwt_crypto", "unauthenticated") == "authenticated"
 
 
 def test_brute_force_prefers_verifier_secret_over_replacement_password() -> None:

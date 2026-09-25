@@ -21,6 +21,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from aidast.benchmarks.catalog import parse_implemented_vulnerabilities
 from aidast.orchestration.scope import ScopeCoordinator
 from aidast.pipeline.lifecycle import finish_stage_run, start_stage_run
 from aidast.pipeline.materialize import materialize_pipeline
@@ -82,6 +83,8 @@ class SourceImportResult:
     endpoint_count: int
     parameter_count: int
     vulnerability_signal_count: int
+    benchmark_catalog_count: int
+    benchmark_catalog: Path | None
 
 
 _PATH_PARAMETER = re.compile(r"<(?:(?P<type>[A-Za-z_][\w]*):)?(?P<name>[A-Za-z_][\w]*)>")
@@ -485,6 +488,9 @@ def import_flask_source(
         raise SourceImportError("approved_by must not be blank")
 
     endpoints = extract_flask_endpoints(root)
+    benchmark_catalog = (
+        parse_implemented_vulnerabilities(root) if lab_benchmark else None
+    )
     scan_id = db.new_id("scan")
     scope_id = db.new_id("scope")
     run_dir = result / "Runs" / scan_id
@@ -619,6 +625,21 @@ def import_flask_source(
                 "vulnerability_tags": list(item.vulnerability_tags),
                 "vulnerability_evidence": dict(item.vulnerability_evidence),
             })
+        if benchmark_catalog is not None:
+            conn.executemany(
+                """INSERT INTO benchmark_catalog_items
+                (catalog_item_id,scan_id,ordinal,category,title,source_path,
+                 source_line,source_ref,source_sha256)
+                VALUES (?,?,?,?,?,?,?,?,?)""",
+                [
+                    (
+                        db.new_id("catalog"), scan_id, item.ordinal, item.category,
+                        item.title, item.source_path, item.source_line, source_ref,
+                        benchmark_catalog.source_sha256,
+                    )
+                    for item in benchmark_catalog.items
+                ],
+            )
         conn.execute(
             "UPDATE scans SET status='completed',finished_at=CURRENT_TIMESTAMP WHERE scan_id=?",
             (scan_id,),
@@ -635,12 +656,31 @@ def import_flask_source(
         "source_ref": source_ref, "source_sha256": _source_digest(root),
         "endpoint_count": len(endpoint_rows), "parameter_count": parameter_count,
         "vulnerability_signal_count": vulnerability_count,
+        "benchmark_catalog_count": (
+            len(benchmark_catalog.items) if benchmark_catalog is not None else 0
+        ),
         "vulnerability_counts": dict(sorted(Counter(
             tag for endpoint in endpoint_rows for tag in endpoint["vulnerability_tags"]
         ).items())),
         "endpoints": endpoint_rows,
     }
     inventory_path.write_text(json.dumps(inventory, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    catalog_path: Path | None = None
+    if benchmark_catalog is not None:
+        catalog_path = run_dir / "BenchmarkCatalog.json"
+        catalog_path.write_text(json.dumps({
+            "schema_version": "1.0",
+            "scan_id": scan_id,
+            "source_ref": source_ref,
+            "source_path": benchmark_catalog.source_path,
+            "source_sha256": benchmark_catalog.source_sha256,
+            "count": len(benchmark_catalog.items),
+            "semantics": (
+                "Upstream-declared benchmark claims; each remains unassessed until "
+                "independent Attack and Validation evidence exists."
+            ),
+            "items": [item.to_dict() for item in benchmark_catalog.items],
+        }, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     review_path = run_dir / "ReconReview.json"
     review_path.write_text(json.dumps({
         "schema_version": "1.0", "scan_id": scan_id, "status": "completed",
@@ -653,6 +693,9 @@ def import_flask_source(
         "counts": {
             "endpoints": len(endpoint_rows), "parameters": parameter_count,
             "vulnerability_signals": vulnerability_count,
+            "benchmark_catalog_items": (
+                len(benchmark_catalog.items) if benchmark_catalog is not None else 0
+            ),
         },
     }, indent=2) + "\n", encoding="utf-8")
 
@@ -709,6 +752,11 @@ def import_flask_source(
         hash_artifact(review_path, root=run_dir, role="recon-review", media_type="application/json"),
         hash_artifact(inventory_path, root=run_dir, role="source-inventory", media_type="application/json"),
     ]
+    if catalog_path is not None:
+        artifacts.append(hash_artifact(
+            catalog_path, root=run_dir, role="benchmark-catalog",
+            media_type="application/json",
+        ))
     for name, role, media_type in (
         ("Scope.md", "scope-markdown", "text/markdown"),
         ("Scope.json", "scope", "application/json"),
@@ -719,9 +767,19 @@ def import_flask_source(
     handoff = HandoffManifest(
         scan_id=scan_id, stage_run_id=stage_run_id, producer_stage="recon",
         consumer_stage="review", db_path="Recon.db", artifacts=artifacts,
-        counts={"assets": 1, "endpoints": len(endpoint_rows), "parameters": parameter_count},
+        counts={
+            "assets": 1, "endpoints": len(endpoint_rows),
+            "parameters": parameter_count,
+            "benchmark_catalog_items": (
+                len(benchmark_catalog.items) if benchmark_catalog is not None else 0
+            ),
+        },
         metadata={"scope_id": scope_id, "source_ref": source_ref,
-                  "source_sha256": inventory["source_sha256"], "imported": True},
+                  "source_sha256": inventory["source_sha256"], "imported": True,
+                  "benchmark_catalog_items": (
+                      len(benchmark_catalog.items)
+                      if benchmark_catalog is not None else 0
+                  )},
     )
     handoff_path = run_dir / "Handoff.json"
     handoff_path.write_text(handoff.model_dump_json(indent=2) + "\n", encoding="utf-8")
@@ -732,4 +790,8 @@ def import_flask_source(
         handoff=handoff_path, inventory=inventory_path,
         endpoint_count=len(endpoint_rows), parameter_count=parameter_count,
         vulnerability_signal_count=vulnerability_count,
+        benchmark_catalog_count=(
+            len(benchmark_catalog.items) if benchmark_catalog is not None else 0
+        ),
+        benchmark_catalog=catalog_path,
     )
