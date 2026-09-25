@@ -16,7 +16,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-RECON_SCHEMA_VERSION = 8
+RECON_SCHEMA_VERSION = 9
 
 SCHEMA = """
 -- WAL은 -wal/-shm 보조 파일에 mmap 기반 공유 락이 필요한데, WSL에서
@@ -166,6 +166,29 @@ CREATE TABLE IF NOT EXISTS surface_signals (
     detected_at TEXT DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (origin_id) REFERENCES origins(origin_id)
 );
+
+CREATE TABLE IF NOT EXISTS benchmark_catalog_items (
+    catalog_item_id TEXT PRIMARY KEY,
+    scan_id TEXT NOT NULL,
+    ordinal INTEGER NOT NULL CHECK(ordinal > 0),
+    category TEXT NOT NULL CHECK(length(trim(category)) > 0),
+    title TEXT NOT NULL CHECK(length(trim(title)) > 0),
+    source_path TEXT NOT NULL CHECK(length(trim(source_path)) > 0),
+    source_line INTEGER NOT NULL CHECK(source_line > 0),
+    source_ref TEXT NOT NULL CHECK(length(trim(source_ref)) > 0),
+    source_sha256 TEXT NOT NULL CHECK(length(source_sha256) = 64),
+    assessment_status TEXT NOT NULL DEFAULT 'declared_unassessed'
+        CHECK(assessment_status IN (
+            'declared_unassessed','mapped_runtime','mapped_static',
+            'confirmed','not_reproduced','unsupported','duplicate'
+        )),
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (scan_id) REFERENCES scans(scan_id),
+    UNIQUE(scan_id, ordinal),
+    UNIQUE(scan_id, category, title)
+);
+CREATE INDEX IF NOT EXISTS idx_benchmark_catalog_scan_status
+    ON benchmark_catalog_items(scan_id, assessment_status, ordinal);
 
 CREATE TABLE IF NOT EXISTS pipeline_runs (
     pipeline_run_id TEXT PRIMARY KEY,

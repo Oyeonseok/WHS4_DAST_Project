@@ -259,7 +259,14 @@ def _credential_references(
 def _credential_role(vuln_class: str, required_role: str) -> str:
     # IDOR is inherently a cross-identity differential even when the source
     # route itself was annotated as unauthenticated.
-    return "authenticated" if vuln_class == "idor" else required_role
+    # JWT mutation needs a real, opaque benchmark token as its baseline. The
+    # source route may itself be public (for example /login), but testing token
+    # verification without any issued token only creates a false auth blocker.
+    return (
+        "authenticated"
+        if vuln_class in {"idor", "jwt_crypto"}
+        else required_role
+    )
 
 
 def _task_fixtures(

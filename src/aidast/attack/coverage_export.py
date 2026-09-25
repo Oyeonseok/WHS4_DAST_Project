@@ -123,6 +123,19 @@ def export_coverage_results(
                ORDER BY e.normalized_path,e.method,c.vuln_class,c.coverage_id""",
             (scan_id, scan_id),
         ).fetchall()
+        has_catalog = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' "
+            "AND name='benchmark_catalog_items'"
+        ).fetchone() is not None
+        catalog_rows = (
+            conn.execute(
+                """SELECT ordinal,category,title,source_path,source_line,source_ref,
+                          source_sha256,assessment_status
+                   FROM benchmark_catalog_items WHERE scan_id=? ORDER BY ordinal""",
+                (scan_id,),
+            ).fetchall()
+            if has_catalog else []
+        )
 
     records: list[dict[str, Any]] = []
     for row in rows:
@@ -147,6 +160,10 @@ def export_coverage_results(
     attack_counts = Counter(item["attack"]["status"] for item in records)
     validation_counts = Counter(item["validation"]["status"] for item in records)
     report_counts = Counter(item["report"]["status"] for item in records)
+    catalog_records = [dict(row) for row in catalog_rows]
+    catalog_counts = Counter(
+        item["assessment_status"] for item in catalog_records
+    )
     payload = {
         "schema_version": "1.0",
         "scan_id": scan_id,
@@ -154,6 +171,15 @@ def export_coverage_results(
         "attack_statuses": dict(sorted(attack_counts.items())),
         "validation_statuses": dict(sorted(validation_counts.items())),
         "report_statuses": dict(sorted(report_counts.items())),
+        "benchmark_catalog": {
+            "total": len(catalog_records),
+            "assessment_statuses": dict(sorted(catalog_counts.items())),
+            "semantics": (
+                "Upstream-declared claims are a completeness denominator, not "
+                "findings; only independent Validation may confirm a claim."
+            ),
+            "items": catalog_records,
+        },
         "items": records,
     }
     _publish(
@@ -169,6 +195,8 @@ def export_coverage_results(
         f"- Attack: `{dict(sorted(attack_counts.items()))}`",
         f"- Validation: `{dict(sorted(validation_counts.items()))}`",
         f"- Report: `{dict(sorted(report_counts.items()))}`",
+        f"- Upstream benchmark catalog: {len(catalog_records)} claims "
+        f"`{dict(sorted(catalog_counts.items()))}`",
         "",
         "A source annotation is not automatically a confirmed vulnerability. Reports are",
         "withheld unless independent Validation reaches `CONFIRMED`.",
@@ -197,4 +225,6 @@ def export_coverage_results(
         "attack_statuses": dict(sorted(attack_counts.items())),
         "validation_statuses": dict(sorted(validation_counts.items())),
         "report_statuses": dict(sorted(report_counts.items())),
+        "benchmark_catalog_total": len(catalog_records),
+        "benchmark_catalog_statuses": dict(sorted(catalog_counts.items())),
     }

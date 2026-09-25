@@ -126,6 +126,11 @@ def main(
                 "endpoints": imported.endpoint_count,
                 "parameters": imported.parameter_count,
                 "vulnerability_signals": imported.vulnerability_signal_count,
+                "benchmark_catalog_items": imported.benchmark_catalog_count,
+                "benchmark_catalog": (
+                    str(imported.benchmark_catalog)
+                    if imported.benchmark_catalog is not None else None
+                ),
                 "next_command": (
                     f"aidast resume {imported.scan_id} "
                     f"--result-root {args.result_root.expanduser().resolve()}"
