@@ -464,13 +464,64 @@ class CandidateIntegrityGate:
             raise CandidateIntegrityError("confirmed_attempts")
         for row in rows:
             stage = self.conn.execute(
-                """SELECT s.status,s.stage FROM attack_tasks t JOIN stage_runs s
+                """SELECT s.status,s.stage,t.status,s.stage_run_id
+                FROM attack_tasks t JOIN stage_runs s
                 ON s.stage_run_id=t.stage_run_id WHERE t.task_id=? AND t.scan_id=?""",
                 (row["task_id"], scan_id),
             ).fetchone()
-            if stage is None or stage[0] != "completed" or stage[1] != "attack":
+            if (
+                stage is None
+                or stage[1] != "attack"
+                or stage[2] != "completed"
+                or (
+                    stage[0] != "completed"
+                    and not self._has_completed_resume_lineage(
+                        scan_id=scan_id, source_stage_run_id=stage[3]
+                    )
+                )
+            ):
                 raise CandidateIntegrityError("durable_attack_stage")
         return rows
+
+    def _has_completed_resume_lineage(
+        self, *, scan_id: str, source_stage_run_id: str
+    ) -> bool:
+        """Return whether a later completed Attack run durably adopted a failed run.
+
+        Attack work is committed incrementally. A process timeout may therefore leave
+        a completed task (and confirmed evidence) inside an otherwise failed stage.
+        Resuming creates a new immutable stage rather than rewriting that evidence.
+        Follow the explicit ``resume_from_stage_run_id`` links recorded on its tasks;
+        evidence is durable only when that lineage reaches a completed Attack stage.
+        """
+        frontier = {source_stage_run_id}
+        visited: set[str] = set()
+        while frontier:
+            parent = frontier.pop()
+            if parent in visited:
+                continue
+            visited.add(parent)
+            rows = self.conn.execute(
+                """SELECT DISTINCT s.stage_run_id,s.status,t.payload_json
+                FROM stage_runs s JOIN attack_tasks t
+                  ON t.stage_run_id=s.stage_run_id AND t.scan_id=s.scan_id
+                WHERE s.scan_id=? AND s.stage='attack'""",
+                (scan_id,),
+            ).fetchall()
+            for stage_run_id, status, payload_json in rows:
+                try:
+                    resumed_from = json.loads(payload_json).get(
+                        "resume_from_stage_run_id"
+                    )
+                except (json.JSONDecodeError, AttributeError, TypeError):
+                    continue
+                if resumed_from != parent:
+                    continue
+                if status == "completed":
+                    return True
+                if status == "failed" and stage_run_id not in visited:
+                    frontier.add(stage_run_id)
+        return False
 
     def _source_requests(self, scan_id: str, spec: dict[str, Any], attempts: list[sqlite3.Row],
                          base_url: str) -> None:

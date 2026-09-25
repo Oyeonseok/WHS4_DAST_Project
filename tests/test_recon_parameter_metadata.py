@@ -197,10 +197,10 @@ def test_recon_schema_version_tracks_metadata_without_downgrading_live_database(
     database = tmp_path / "Recon.db"
     with db.connect(database) as connection:
         assert connection.execute("PRAGMA user_version").fetchone()[0] == db.RECON_SCHEMA_VERSION == 8
-        connection.execute("PRAGMA user_version=11")
+        connection.execute("PRAGMA user_version=12")
         connection.commit()
     with db.connect(database) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 11
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 12
 
 
 def test_proxy_capture_enriches_existing_endpoint_parameters(tmp_path) -> None:

@@ -79,11 +79,18 @@ class HandoffManifest(BaseModel):
 
 
 def _resolve_artifact(path: str, root: Path) -> Path:
-    root = Path(root).resolve(strict=True)
-    resolved = (root / _relative_path(path)).resolve(strict=True)
-    if not resolved.is_relative_to(root) or not resolved.is_file():
+    # Keep the caller's absolute path spelling for public results.  On macOS,
+    # resolving a tempfile path rewrites /var/... to /private/var/..., which
+    # makes otherwise portable handoffs appear to move.  Containment and file
+    # checks still use canonical paths, so preserving the display path does
+    # not weaken the traversal/symlink boundary.
+    display_root = Path(root).expanduser().absolute()
+    canonical_root = display_root.resolve(strict=True)
+    display_path = display_root / _relative_path(path)
+    resolved = display_path.resolve(strict=True)
+    if not resolved.is_relative_to(canonical_root) or not resolved.is_file():
         raise ValueError("artifact must be a regular file inside the handoff root")
-    return resolved
+    return display_path
 
 
 def _digest(path: Path) -> tuple[str, int]:

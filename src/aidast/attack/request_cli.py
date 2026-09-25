@@ -25,6 +25,7 @@ from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_ope
 from uuid import uuid4
 
 from aidast.core.http_safety import merge_hackerone_identity
+from aidast.validation.execution.credentials import PipelineCredentialResolver
 
 
 MAX_REQUEST_BODY_BYTES = 200_000
@@ -378,6 +379,50 @@ def _request_data(item: dict) -> tuple[dict[str, str], bytes | None]:
     if body is not None and len(body) > MAX_REQUEST_BODY_BYTES:
         raise RequestGuardError("request body exceeds the bounded size")
     return headers, body
+
+
+def _credential_headers(
+    db_path: Path, *, scan_id: str, task_id: str, item: dict,
+) -> tuple[str | None, dict[str, str]]:
+    reference = item.get("credential_reference_id")
+    if reference is None:
+        return None, {}
+    if not isinstance(reference, str) or not reference:
+        raise RequestGuardError("credential_reference_id must be one opaque identifier")
+    with closing(sqlite3.connect(db_path)) as conn:
+        task = conn.execute(
+            "SELECT payload_json FROM attack_tasks WHERE task_id=? AND scan_id=?",
+            (task_id, scan_id),
+        ).fetchone()
+        row = conn.execute(
+            """SELECT identity_role FROM credential_references
+               WHERE credential_reference_id=? AND scan_id=?""",
+            (reference, scan_id),
+        ).fetchone()
+    if task is None or row is None:
+        raise RequestGuardError("credential reference is not bound to this scan")
+    try:
+        payload = json.loads(task[0] or "{}")
+    except json.JSONDecodeError as exc:
+        raise RequestGuardError("Attack task payload is invalid") from exc
+    allowed = {
+        entry.get("credential_reference_id")
+        for entry in payload.get("credential_references", [])
+        if isinstance(entry, dict)
+    }
+    if reference not in allowed:
+        raise RequestGuardError("credential reference is not authorized for this task")
+    required_role = str(payload.get("required_identity_role") or "unknown")
+    actual_role = str(row[0])
+    if required_role not in {"authenticated", "unknown"} and actual_role not in {
+        required_role, "authenticated",
+    }:
+        raise RequestGuardError("credential reference has an incompatible identity role")
+    try:
+        headers = PipelineCredentialResolver(db_path)(reference)
+    except (ImportError, OSError, sqlite3.Error, ValueError) as exc:
+        raise RequestGuardError("credential reference is unavailable") from exc
+    return reference, headers
 
 
 def _value_hash(value: object) -> str:
@@ -780,6 +825,13 @@ def guarded_request(
         raise RequestGuardError("unsupported HTTP method")
     policy = _select_policy(policy_path, url, method)
     headers, body = _request_data(item)
+    credential_reference_id, credential_headers = _credential_headers(
+        db_path, scan_id=scan_id, task_id=task_id, item=item,
+    )
+    supplied_names = {name.casefold() for name in headers}
+    if supplied_names & {name.casefold() for name in credential_headers}:
+        raise RequestGuardError("request headers cannot override resolved credentials")
+    headers = credential_headers | headers
     headers = merge_hackerone_identity(
         headers, policy.get("hackerone_username")
     )
@@ -908,6 +960,7 @@ def guarded_request(
         "reference_id": endpoint_reference_id,
     }
     result_metadata["risk_class"] = risk_class
+    result_metadata["credential_reference_id"] = credential_reference_id
     _set_status(
         db_path, request_id, status="completed", response_status=status_code,
         response_bytes=len(response_body),

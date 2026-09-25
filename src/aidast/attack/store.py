@@ -185,7 +185,9 @@ class AttackStore:
                 if len(rows) != 1:
                     raise AttackStoreError("run_id is required when database has multiple runs")
                 run_id = rows[0][0]
-            return cls(path.resolve(), conn, run_id)
+            # The connection uses the canonical URI, but public CLI results
+            # retain the absolute spelling supplied by the operator.
+            return cls(path, conn, run_id)
         except Exception:
             conn.close()
             raise
@@ -882,19 +884,22 @@ def materialize_attack_database(handoff_path: Path, output_dir: Path, *,
     Source files are referenced by relative paths and hashes. A fresh schema is
     published exclusively; no source tables or historical rows are copied.
     """
-    source = Path(handoff_path).expanduser().resolve(strict=True)
+    source = Path(handoff_path).expanduser().absolute()
+    source_real = source.resolve(strict=True)
     raw_output = Path(output_dir).expanduser().absolute()
     if any(
         part.is_symlink() and not _trusted_root_symlink(part)
         for part in (raw_output, *raw_output.parents)
     ):
         raise AttackStoreError("review output must not traverse a symlink")
-    output = raw_output.resolve()
-    if output.is_relative_to(source.parent) or source.is_relative_to(output):
+    output = raw_output
+    output_real = output.resolve()
+    if output_real.is_relative_to(source_real.parent) or source_real.is_relative_to(output_real):
         raise AttackStoreError("review output must be separate from the immutable handoff directory")
     manifest, manifest_bytes, database, database_digest = _verify_handoff(source)
     manifest_digest = _sha(manifest_bytes)
     target = output / "Attack.db"
+    target_real = output_real / "Attack.db"
     if target.exists() or target.is_symlink():
         store = AttackStore.open(target, run_id=run_id)
         run = store.get_run()
@@ -907,8 +912,10 @@ def materialize_attack_database(handoff_path: Path, output_dir: Path, *,
             raise AttackStoreError("existing review database has different source provenance")
         return store
     identifier = _identifier(run_id or "attack_" + uuid.uuid4().hex)
-    output.mkdir(parents=True, exist_ok=True)
-    handle, staging_name = tempfile.mkstemp(prefix=".attack-", suffix=".db", dir=output)
+    output_real.mkdir(parents=True, exist_ok=True)
+    handle, staging_name = tempfile.mkstemp(
+        prefix=".attack-", suffix=".db", dir=output_real,
+    )
     os.close(handle)
     staging = Path(staging_name)
     conn = None
@@ -922,7 +929,10 @@ def materialize_attack_database(handoff_path: Path, output_dir: Path, *,
                 source_manifest_sha256,source_database_sha256,source_manifest_path,source_database_path,
                 scope_digest,policy_digest,catalog_digest) VALUES (?,?,?,?,?,?,?,?,?,?)""",
                 (identifier, manifest.scan_id, manifest.manifest_id, manifest_digest,
-                database_digest, os.path.relpath(source, output), os.path.relpath(database, output), role_digests.get("scope", ""),
+                database_digest,
+                os.path.relpath(source_real, output_real),
+                os.path.relpath(database.resolve(strict=True), output_real),
+                role_digests.get("scope", ""),
                 role_digests.get("target-policy", role_digests.get("target_policy",
                     role_digests.get("policy", ""))), catalog_digest))
             initial = AttackStore(staging, conn, identifier)
@@ -936,7 +946,7 @@ def materialize_attack_database(handoff_path: Path, output_dir: Path, *,
         _require_standalone_database(database)
         if source.read_bytes() != manifest_bytes:
             raise AttackStoreError("handoff changed while materializing review database")
-        os.link(staging, target)  # Exclusive publication: never overwrite another run.
+        os.link(staging, target_real)  # Exclusive publication: never overwrite another run.
         return AttackStore.open(target, run_id=identifier)
     finally:
         if conn is not None:

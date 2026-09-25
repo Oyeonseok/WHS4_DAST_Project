@@ -117,6 +117,80 @@ def test_runner_does_not_reuse_blind_validation_session():
     assert runner.agent_id.startswith("eligibility_agent_")
 
 
+def test_explicit_loopback_lab_scope_is_deterministic_without_agent_call():
+    fake = Mock()
+    runner = CodexEligibilityRunner(fake)
+    allowed = (
+        "Non-destructive active security testing with GET, HEAD, OPTIONS, "
+        "and POST is authorized."
+    )
+    scope = f"""# Scope
+This is an intentionally vulnerable application.
+| Type | Asset | Eligibility | Maximum severity | Description |
+|---|---|---|---|---|
+| URL | http://127.0.0.1:5001/ | eligible | critical | Operator-provided intentionally vulnerable benchmark target |
+## Allowed activities
+- {allowed}
+## Safe harbor
+Authorization is limited to this intentionally vulnerable training target.
+## Ambiguities requiring review
+
+- 명시된 내용 없음.
+"""
+    result = runner.assess(request_fixture(
+        scope_markdown=scope,
+        endpoint="http://127.0.0.1:5001/",
+        method="GET",
+    ))
+    assert result.eligibility == "ELIGIBLE"
+    assert result.scope_quote == allowed
+    assert result.replay_allowed is True
+    fake._run_structured.assert_not_called()
+
+
+def test_loopback_fallback_rejects_unlisted_method_and_uses_agent():
+    fake = Mock()
+    fake._run_structured.return_value = eligible_assessment()
+    runner = CodexEligibilityRunner(fake)
+    scope = """This is an intentionally vulnerable application.
+| URL | http://127.0.0.1:5001/ | eligible | critical | Operator-provided intentionally vulnerable benchmark target |
+Non-destructive active security testing with GET, HEAD, OPTIONS, and POST is authorized.
+Authorization is limited to this intentionally vulnerable training target.
+## Ambiguities requiring review
+
+- 명시된 내용 없음.
+"""
+    assert runner.assess(request_fixture(
+        scope_markdown=scope, endpoint="http://127.0.0.1:5001/", method="DELETE",
+    )) is fake._run_structured.return_value
+    fake._run_structured.assert_called_once()
+
+
+def test_loopback_benchmark_scope_allows_bounded_delete_without_agent():
+    fake = Mock()
+    runner = CodexEligibilityRunner(fake)
+    scope = """# Scope
+This is an intentionally vulnerable application.
+| Type | Asset | Eligibility | Maximum severity | Description |
+|---|---|---|---|---|
+| URL | http://127.0.0.1:5001/ | eligible | critical | Operator-provided intentionally vulnerable benchmark target |
+## Allowed activities
+- Non-destructive active security testing with GET, HEAD, OPTIONS, and POST is authorized.
+- Bounded active security testing with PUT, PATCH, and DELETE against disposable local lab fixtures is authorized; state may be reset between cases.
+## Safe harbor
+Authorization is limited to this intentionally vulnerable training target.
+## Ambiguities requiring review
+
+- 명시된 내용 없음.
+"""
+    result = runner.assess(request_fixture(
+        scope_markdown=scope, endpoint="http://127.0.0.1:5001/item", method="DELETE",
+    ))
+    assert result.eligibility == "ELIGIBLE"
+    assert "disposable local lab fixtures" in result.scope_quote
+    fake._run_structured.assert_not_called()
+
+
 def test_runner_limits_policy_decision_and_correction():
     fake = Mock()
     fake._run_structured.return_value = eligible_assessment()

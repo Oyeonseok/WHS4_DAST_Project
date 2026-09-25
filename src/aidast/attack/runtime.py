@@ -149,11 +149,16 @@ def prepare_review(
     """
     if mode != "plan" or allow_network is not False or approval_token is not None:
         raise ReviewPreparationError("only offline plan mode is supported; active/network execution is unavailable")
-    source = Path(handoff_path).expanduser().resolve()
+    # Preserve the operator-visible spelling of absolute paths while using
+    # canonical paths for all containment decisions.  This matters on macOS,
+    # where /var and /private/var name the same location.
+    source = Path(handoff_path).expanduser().absolute()
+    source_real = source.resolve()
     raw_output = Path(output_dir).expanduser().absolute()
     if raw_output.is_symlink():
         raise ReviewPreparationError("review output must not be a symlink")
-    output = raw_output.resolve()
+    output = raw_output
+    output_real = output.resolve()
     try:
         manifest_bytes = source.read_bytes()
         manifest = HandoffManifest.model_validate_json(manifest_bytes)
@@ -162,7 +167,7 @@ def prepare_review(
         artifacts = manifest.verify_artifacts(root=source.parent)
         db_path = artifacts[manifest.db_path]
         _require_standalone_database(db_path)
-        if output == source.parent or source.is_relative_to(output):
+        if output_real == source_real.parent or source_real.is_relative_to(output_real):
             raise ReviewPreparationError("review output must not replace the handoff directory")
         reader = database_reader or SQLiteEvidenceReader()
         snapshot = reader.read(db_path, manifest.scan_id)
@@ -210,7 +215,7 @@ def prepare_review(
         legacy_config = dict(config, schema_version="1.0", handoff_path=str(source), db_path=str(db_path))
         legacy_config.pop("handoff_path_base")
         legacy_config.pop("db_path_base")
-        _publish(output, resources, legacy_config=_json_bytes(legacy_config))
+        _publish(output_real, resources, legacy_config=_json_bytes(legacy_config))
         return ReviewPlan(manifest.scan_id, manifest.manifest_id, output,
                           output / "config.json", output / "evidence-review-queue.json", tasks)
     except ReviewPreparationError:

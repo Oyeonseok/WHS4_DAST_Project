@@ -238,7 +238,7 @@ def test_recon_snapshot_drives_downstream_pipeline_without_mutation() -> None:
             source_before
         ).hexdigest()
         with sqlite3.connect(pipeline_path) as connection:
-            assert connection.execute("PRAGMA user_version").fetchone()[0] == 11
+            assert connection.execute("PRAGMA user_version").fetchone()[0] == 12
             assert connection.execute(
                 "SELECT scope_sha256 FROM validation_scope_bindings WHERE scan_id='scan'"
             ).fetchone() == (hashlib.sha256(b"# Approved").hexdigest(),)

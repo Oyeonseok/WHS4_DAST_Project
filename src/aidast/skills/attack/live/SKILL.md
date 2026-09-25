@@ -43,6 +43,12 @@ configuration. The shared DB contains both Recon and Attack records.
   created by this task wait for the operator's single `y/N` envelope decision.
   Destructive or bulk actions are rejected. Do not retry in parallel or attempt
   another transport while approval is pending.
+- Do not skip an otherwise bounded state-changing task merely because an
+  approval envelope is not already present. Submit the exact request through
+  the configured helper; the helper creates the request-bound envelope and
+  waits for the operator. Skip only after an explicit denial, timeout, policy
+  rejection, or when no safe single-object proof exists. This does not
+  pre-authorize the request and never bypasses the operator decision.
 
 # Attack loop
 
@@ -52,15 +58,43 @@ configuration. The shared DB contains both Recon and Attack records.
    then read only the other entries in `hunt_skill_names`. Main already selected
    those entries from Recon technologies, parameters, annotations, and response
    behavior. Do not search for, infer, or load any other Hunt Skill.
-3. The selected vulnerability Skill list is capped at eight. Process it in the
-   configured order and never read a whole Skill library into the prompt.
-4. Match each selected Skill to its exact entry in `attack_tasks`. Transition
+3. In normal mode the selected vulnerability Skill list is capped at eight.
+   When every configured task contains a `coverage_id`, this is exhaustive
+   coverage mode: process every configured task independently and load every
+   distinct Skill named by that bounded batch. Never substitute an unlisted
+   endpoint or vulnerability class for a coverage task.
+4. Match each selected Skill to its exact entry in `attack_tasks`. In exhaustive
+   coverage mode, one task represents exactly one endpoint and one source
+   vulnerability annotation. Test only its `endpoint_id`, `method`,
+   `normalized_path`, `injection_location`, and `parameter_name`. Transition
    that task to `running` before any probe. If it is inapplicable, transition it
-   directly from `pending` to `skipped` with a short reason.
+   directly from `pending` to `skipped` with a short reason that identifies one
+   of: missing authentication identity, TargetPolicy/Scope exclusion, or an
+   unsupported safe test contract.
+   Perform this applicability pass first for the whole bounded batch. Transition
+   obvious blockers immediately; do not spend model time inventing credentials,
+   seed objects, forbidden brute-force traffic, external callbacks, or unsafe
+   mutation workflows that are absent from the Recon DB.
+   When `credential_references` are present, they are opaque identifiers plus
+   non-secret labels and roles. Select only an ID listed on that exact task and
+   pass it to the trusted request helper as `credential_reference_id`. Never
+   resolve it yourself, place a token/cookie in `headers`, or print a resolved
+   value. IDOR differentials must use two distinct listed references.
+   `test_fixtures` are non-secret Recon/Pipeline facts bound to this task. Use
+   their exact object IDs and matching `credential_label` instead of claiming a
+   seed object is missing. Never treat a fixture fact as proof of a
+   vulnerability; it only supplies the owned/foreign controls needed to run the
+   test. Do not substitute guessed production identifiers.
 5. For each running Skill, follow its discovery and confirmation criteria while
    staying inside Scope. A status code by itself never confirms a vulnerability.
-   Before a probe, query prior `attack_attempts` across all Attack stage runs and
-   skip an equivalent method, URL, identity role, and payload variant.
+   Before a probe, query prior `attack_attempts` across all Attack stage runs.
+   Skip an equivalent method, URL, identity role, payload variant, **and
+   vulnerability-class task** only when the current task already owns durable
+   evidence. An equivalent request made by another coverage task is useful
+   context but does not satisfy the current annotation: replay it through the
+   current task when that bounded response is required to reach this Skill's
+   independent confirmation or negative gate. Never mark a task unsupported
+   solely because another vulnerability class already requested the endpoint.
 6. If the task contains a compatible `template_id`, write only a bounded target
    binding JSON object containing an existing `endpoint_id`, method, URL,
    parameter name/location, and optional non-secret headers. Invoke the template
@@ -91,6 +125,12 @@ configuration. The shared DB contains both Recon and Attack records.
    request fingerprint in `commit-attempt`, including the current `task_id`,
    after each useful positive or negative result. Use `commit-fact` for reusable
    non-secret facts.
+
+   An authenticated request JSON may add exactly one opaque reference:
+
+   ```json
+   {"method":"GET","url":"https://target.test/api/me","headers":{},"credential_reference_id":"credref_existing"}
+   ```
 8. When observed behavior satisfies the active Skill's confirmation criteria,
    write a minimal redacted evidence JSON and use `commit-finding`. Include all
    supporting open attempt IDs in `lead_attempt_ids` and the official
@@ -104,9 +144,11 @@ configuration. The shared DB contains both Recon and Attack records.
    fact is useful context but is never a substitute for this promotion. When an
    exact safe-method request can test a Validation profile's declared impact path,
    include it as `impact_development_contract`; otherwise omit it.
-9. Close all leads for the task, then transition it to `completed`. Continue
-   until every configured task is `completed` or `skipped`. Chaining is not part
-   of this stage; a future Chaining Agent owns that work.
+9. Close all leads for the task, then transition it to `completed`. A coverage
+   task with no request/attempt evidence must be `skipped` with the exact blocker
+   reason; never mark it completed merely to empty the queue. Continue until
+   every configured task is `completed` or `skipped`. Chaining is not part of
+   this stage; a future Chaining Agent owns that work.
 
 # Lead closure gate
 

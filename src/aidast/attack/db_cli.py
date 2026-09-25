@@ -188,7 +188,7 @@ def transition_task(
         conn.execute("PRAGMA foreign_keys=ON")
         _completed_scan(conn, scan_id)
         row = conn.execute(
-            """SELECT t.status,s.status FROM attack_tasks t
+            """SELECT t.status,s.status,t.payload_json FROM attack_tasks t
                JOIN stage_runs s ON s.stage_run_id=t.stage_run_id
                WHERE t.task_id=? AND t.scan_id=? AND t.stage_run_id=?""",
             (task_id, scan_id, stage_run_id),
@@ -202,6 +202,20 @@ def transition_task(
             ).fetchone()[0]
             if open_leads:
                 raise ValueError("Attack task has unresolved leads")
+            try:
+                task_payload = json.loads(row[2] or "{}")
+            except json.JSONDecodeError as exc:
+                raise ValueError("Attack task payload is invalid") from exc
+            if task_payload.get("coverage_id"):
+                attempt_count = conn.execute(
+                    "SELECT COUNT(*) FROM attack_attempts WHERE task_id=?",
+                    (task_id,),
+                ).fetchone()[0]
+                if not attempt_count:
+                    raise ValueError(
+                        "coverage Attack tasks require a durable attempt before completion; "
+                        "mark the task skipped with a precise reason when no safe probe exists"
+                    )
         timestamp = "CURRENT_TIMESTAMP"
         conn.execute(
             f"""UPDATE attack_tasks SET status=?,error_message=?,

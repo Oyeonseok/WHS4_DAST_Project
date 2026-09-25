@@ -36,22 +36,31 @@ class ChainingCoordinator:
         with closing(sqlite3.connect(self._db_path)) as conn, conn:
             conn.execute("PRAGMA foreign_keys=ON")
             attack = conn.execute(
-                """SELECT stage_run_id,status FROM stage_runs
+                """SELECT stage_run_id,status,rowid FROM stage_runs
                    WHERE scan_id=? AND stage='attack'
-                   ORDER BY created_at DESC LIMIT 1""",
+                   ORDER BY rowid DESC LIMIT 1""",
                 (scan_id,),
             ).fetchone()
             if attack is None or attack[1] != "completed":
                 raise ChainingCoordinatorError("Chaining requires a completed Attack stage")
             prior = conn.execute(
-                """SELECT stage_run_id,status FROM stage_runs
+                """SELECT stage_run_id,status,rowid FROM stage_runs
                    WHERE scan_id=? AND stage='chaining'
-                   ORDER BY created_at DESC LIMIT 1""",
+                   ORDER BY rowid DESC LIMIT 1""",
                 (scan_id,),
             ).fetchone()
-            if prior is not None and prior[1] in {"pending", "running", "completed", "skipped"}:
+            if prior is not None and prior[1] in {"pending", "running"}:
                 raise ChainingCoordinatorError(
                     f"Chaining stage already exists for this scan: {prior[0]} ({prior[1]})"
+                )
+            if (
+                prior is not None
+                and prior[1] in {"completed", "skipped"}
+                and attack[2] <= prior[2]
+            ):
+                raise ChainingCoordinatorError(
+                    f"Chaining stage already covers the latest Attack stage: "
+                    f"{prior[0]} ({prior[1]})"
                 )
             findings = conn.execute(
                 """SELECT f.finding_id,f.endpoint_id,f.vuln_type,f.title
@@ -184,7 +193,7 @@ class ChainingCoordinator:
                 "SELECT candidate_id,status FROM chain_candidates WHERE scan_id=?", (scan_id,)
             ).fetchall()
             chains = conn.execute(
-                "SELECT chain_id FROM finding_chains WHERE scan_id=?", (scan_id,)
+                "SELECT chain_id,status FROM finding_chains WHERE scan_id=?", (scan_id,)
             ).fetchall()
             executions = conn.execute(
                 """SELECT execution_id,status,chain_id FROM chain_executions
@@ -207,13 +216,18 @@ class ChainingCoordinator:
             ).fetchone()[0]
         candidate_status = dict(candidates)
         new_candidates = set(candidate_status) - existing_candidates
-        new_chains = {row[0] for row in chains} - existing_chains
+        chain_status = {row[0]: row[1] for row in chains}
+        new_chains = set(chain_status) - existing_chains
         execution_status = {row[0]: (row[1], row[2]) for row in executions}
         new_executions = set(execution_status) - existing_executions
         if set(result.candidate_ids) != new_candidates:
             raise ChainingCoordinatorError("Chaining result does not match committed candidates")
         if set(result.chain_ids) != new_chains:
             raise ChainingCoordinatorError("Chaining result does not match committed chains")
+        if any(chain_status[item] != "demonstrated" for item in new_chains):
+            raise ChainingCoordinatorError(
+                "Every replayed chain must be committed as demonstrated"
+            )
         if set(result.execution_ids) != new_executions:
             raise ChainingCoordinatorError("Chaining result does not match committed executions")
         if any(execution_status[item][0] == "running" for item in new_executions):

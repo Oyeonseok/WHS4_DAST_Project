@@ -341,7 +341,15 @@ class NativeAttackMainAgentTests(unittest.TestCase):
                     "identifier parameter",
                     config["hunt_skill_selection_reasons"]["hunt-idor"],
                 )
-                self.assertEqual(config["hunt_skill_root"], str(work / "hunt-skills"))
+                self.assertEqual(config["hunt_skill_root"], "hunt-skills")
+                self.assertEqual(
+                    config["hunt_skill_documents"]["hunt-idor"]["path"],
+                    "hunt-skills/hunt-idor/SKILL.md",
+                )
+                self.assertEqual(
+                    len(config["hunt_skill_documents"]["hunt-idor"]["sha256"]),
+                    64,
+                )
                 self.assertEqual(config["attack_tasks"][0]["task_id"], "task_one")
                 self.assertEqual(config["attack_templates"], [])
                 output = Path(command[command.index("--output-last-message") + 1])
@@ -554,7 +562,7 @@ class NativeAttackDatabaseCliTests(unittest.TestCase):
                 stored_runtime[5], canonical_sha256(normalized_impact)
             )
             self.assertTrue(all(len(value) == 64 for value in stored_runtime[1::2]))
-            self.assertEqual(schema_version, 11)
+            self.assertEqual(schema_version, 12)
 
             second_attempt = root / "second-attempt.json"
             second_attempt.write_text(json.dumps({
