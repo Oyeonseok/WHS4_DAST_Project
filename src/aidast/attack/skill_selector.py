@@ -267,6 +267,37 @@ def select_relevant_attack_skills(
         if "identifier" in value or "personal_data" in value:
             match("hunt-idor", 55, "Recon data-role annotation")
 
+    # A passive source import records only a bounded vulnerability class and
+    # source location, never payloads, credentials, or response claims. Treat
+    # each distinct class as a planning signal; Attack and Validation must
+    # still produce independent HTTP evidence before a finding can exist.
+    source_markers = {
+        str(key or "").casefold()
+        for kind, key, _value in observations
+        if str(kind or "").casefold() == "source_vulnerability"
+    }
+    source_skill_map = {
+        # The score orders a bounded eight-skill validation batch by likely
+        # impact. It does not assert that the vulnerability exists.
+        "sqli": (("hunt-sqli", 20_000),),
+        "idor": (("hunt-idor", 19_000),),
+        "auth_bypass": (("hunt-auth-bypass", 18_000),),
+        "ssrf": (("hunt-ssrf", 17_000),),
+        "xss": (("hunt-xss", 16_000),),
+        "file_upload": (("hunt-file-upload", 15_000),),
+        "lfi": (("hunt-lfi", 14_000),),
+        "jwt_crypto": (("hunt-jwt-crypto", 13_000), ("hunt-session", 12_500)),
+        "api_misconfig": (("hunt-api-misconfig", 12_000),),
+        "source_leak": (("hunt-misc", 11_000),),
+        "brute_force": (("hunt-brute-force", 10_000),),
+        "csrf": (("hunt-csrf", 9_000),),
+        "llm_ai": (("hunt-llm-ai", 8_000),),
+        "race_condition": (("hunt-race-condition", 7_000),),
+    }
+    for marker in sorted(source_markers):
+        for skill, score in source_skill_map.get(marker, ()):
+            match(skill, score, "operator-provided source marker")
+
     header_text = _text(*(value for row in observations + signals + transactions for value in row))
     if _cors_response_signal(observations, signals, transactions):
         match("hunt-cors", 100, "CORS response signal")

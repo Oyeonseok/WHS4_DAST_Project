@@ -26,7 +26,7 @@ class ValidationSchemaTests(unittest.TestCase):
         self.conn.commit()
 
     def test_schema_version_and_tables(self):
-        self.assertEqual(self.conn.execute("PRAGMA user_version").fetchone()[0], 11)
+        self.assertEqual(self.conn.execute("PRAGMA user_version").fetchone()[0], 12)
         columns = {row[1] for row in self.conn.execute("PRAGMA table_info(validation_cases)")}
         self.assertNotIn("known_similarity", columns)
         self.assertIn("scope_sha256", columns)
@@ -184,7 +184,7 @@ class ValidationSchemaTests(unittest.TestCase):
                 PRAGMA user_version=8;
             """)
             migrate_live_pipeline_schema(connection)
-            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 11)
+            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 12)
             self.assertEqual(connection.execute(
                 "SELECT request_id,policy_sha256,result_json FROM attack_http_requests"
             ).fetchone(), ("request", None, "{}"))
@@ -214,7 +214,7 @@ class ValidationSchemaTests(unittest.TestCase):
         self.assertEqual(self.conn.execute(
             "SELECT attempt_id,case_id FROM validation_attempts"
         ).fetchall(), [("attempt", "case")])
-        self.assertEqual(self.conn.execute("PRAGMA user_version").fetchone()[0], 11)
+        self.assertEqual(self.conn.execute("PRAGMA user_version").fetchone()[0], 12)
         self.assertEqual(self.conn.execute("PRAGMA foreign_key_check").fetchall(), [])
 
     def test_v9_to_latest_migration_preserves_legacy_rows_and_is_idempotent(self):
@@ -237,7 +237,7 @@ class ValidationSchemaTests(unittest.TestCase):
         migrate_live_pipeline_schema(self.conn)
         schema = self.conn.execute("SELECT type,name,sql FROM sqlite_master ORDER BY name").fetchall()
         migrate_live_pipeline_schema(self.conn)
-        self.assertEqual(self.conn.execute("PRAGMA user_version").fetchone()[0], 11)
+        self.assertEqual(self.conn.execute("PRAGMA user_version").fetchone()[0], 12)
         self.assertEqual(self.conn.execute("SELECT * FROM validation_http_requests").fetchall(), before)
         self.assertEqual(self.conn.execute("SELECT type,name,sql FROM sqlite_master ORDER BY name").fetchall(), schema)
         self.assertEqual(self.conn.execute("PRAGMA foreign_key_check").fetchall(), [])
@@ -264,7 +264,7 @@ class ValidationSchemaTests(unittest.TestCase):
         ).fetchall()
         migrate_live_pipeline_schema(self.conn)
 
-        self.assertEqual(self.conn.execute("PRAGMA user_version").fetchone()[0], 11)
+        self.assertEqual(self.conn.execute("PRAGMA user_version").fetchone()[0], 12)
         self.assertEqual(self.conn.execute(
             "SELECT case_id,scope_sha256 FROM validation_cases"
         ).fetchall(), [("legacy", None)])

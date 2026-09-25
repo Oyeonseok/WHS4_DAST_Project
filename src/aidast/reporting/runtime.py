@@ -34,6 +34,14 @@ def _sha(value: str | bytes) -> str:
 
 def _path(value: Path, *, existing: bool = False) -> Path:
     path = Path(value).expanduser().absolute()
+    # macOS exposes its system temporary directories through root-owned
+    # aliases (/var -> /private/var and /tmp -> /private/tmp).  Canonicalize
+    # only those fixed OS aliases before checking the remaining path so a
+    # caller-created symlink is still rejected.
+    for alias in (Path("/var"), Path("/tmp")):
+        if alias.is_symlink() and path.is_relative_to(alias):
+            path = alias.resolve(strict=True) / path.relative_to(alias)
+            break
     if any(item.is_symlink() for item in (path, *path.parents)):
         raise ReportError("report paths must not traverse symlinks")
     path = path.resolve(strict=existing)

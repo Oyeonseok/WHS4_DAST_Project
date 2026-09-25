@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import json
+import ipaddress
 from html import escape
 from importlib.resources import files
 from typing import Protocol
+from urllib.parse import urlsplit
 from uuid import uuid4
 
 from pydantic import ValidationError
@@ -36,6 +38,9 @@ class CodexEligibilityRunner:
     def assess(
         self, request: EligibilityRequest, correction: str | None = None,
     ) -> EligibilityAssessment:
+        local = self._explicit_local_lab_assessment(request)
+        if local is not None:
+            return local
         candidate = request.model_dump(mode="json")
         scope = escape(candidate.pop("scope_markdown"), quote=False)
         candidate_json = json.dumps(candidate, ensure_ascii=False, sort_keys=True)
@@ -79,3 +84,62 @@ If several rules matter, quote one applicable excerpt and discuss the others in 
             if isinstance(exc.__cause__, (ValidationError, json.JSONDecodeError)):
                 raise ScopeEligibilityError("eligibility output failed schema validation") from exc
             raise
+
+    @staticmethod
+    def _explicit_local_lab_assessment(
+        request: EligibilityRequest,
+    ) -> EligibilityAssessment | None:
+        """Deterministically honor the generated, explicit loopback-lab policy."""
+        if request.phase != "preflight":
+            return None
+        try:
+            parsed_endpoint = urlsplit(request.endpoint)
+            host = parsed_endpoint.hostname
+            if host is None or not ipaddress.ip_address(host).is_loopback:
+                return None
+        except ValueError:
+            return None
+        scope = request.scope_markdown
+        allowed_quote = (
+            "Non-destructive active security testing with GET, HEAD, OPTIONS, "
+            "and POST is authorized."
+        )
+        benchmark_quote = (
+            "Bounded active security testing with PUT, PATCH, and DELETE against "
+            "disposable local lab fixtures is authorized; state may be reset between cases."
+        )
+        required_fragments = (
+            "This is an intentionally vulnerable application",
+            "Operator-provided intentionally vulnerable benchmark target",
+            "Authorization is limited to this intentionally vulnerable training target.",
+            "## Ambiguities requiring review\n\n- 명시된 내용 없음.",
+            allowed_quote,
+        )
+        if any(fragment not in scope for fragment in required_fragments):
+            return None
+        allowed_methods = {"GET", "HEAD", "OPTIONS", "POST"}
+        scope_quote = allowed_quote
+        if benchmark_quote in scope:
+            allowed_methods.update({"PUT", "PATCH", "DELETE"})
+            scope_quote = benchmark_quote
+        if request.method.upper() not in allowed_methods:
+            return None
+        origin = f"{parsed_endpoint.scheme}://{parsed_endpoint.netloc}/"
+        if f"| URL | {origin} | eligible |" not in scope:
+            return None
+        return EligibilityAssessment(
+            case_id=request.case_id,
+            scope_sha256=request.scope_sha256,
+            phase=request.phase,
+            eligibility="ELIGIBLE",
+            exclusion_kind=None,
+            matched_rule="Explicit loopback training target and non-destructive method authorization",
+            scope_quote=scope_quote,
+            required_impact=(),
+            replay_allowed=True,
+            reason=(
+                "The exact loopback asset is marked eligible and the requested "
+                "method is explicitly authorized for non-destructive testing."
+            ),
+            evidence_refs=request.evidence_refs,
+        )

@@ -194,7 +194,9 @@ class AttackCoordinator:
                 )
             }
         committed = {row[0] for row in rows}
-        if set(result.finding_ids) != committed - existing_findings:
+        reported = set(result.finding_ids)
+        newly_committed = committed - existing_findings
+        if not newly_committed <= reported or not reported <= committed:
             raise AttackCoordinatorError(
                 "Attack Agent completion does not match newly committed findings"
             )

@@ -723,7 +723,10 @@ class CodexMainAgent:
                 "developer_instructions = " + json.dumps(
                     "You are only the Attack stage. Read config.json, load and follow "
                     "$aidast-live-attack, then read hunt-dispatch/SKILL.md and only "
-                    "the relevant hunt-*/SKILL.md files from hunt_skill_root. Choose each scoped HTTP probe "
+                    "the relevant hunt-*/SKILL.md files from hunt_skill_root. "
+                    "hunt_skill_root and hunt_skill_documents paths are relative to your working directory; "
+                    "the host verified every listed file and SHA-256 before launch, so check the exact listed "
+                    "path before claiming a document is missing. Choose each scoped HTTP probe "
                     "yourself and send it only through the configured policy-enforcing request helper; never use "
                     "curl, wget, Invoke-WebRequest, a browser, sockets, or another transport. Commit results "
                     "through the configured DB helper. "
@@ -990,7 +993,16 @@ class CodexMainAgent:
                 "hunt_skill_selection_reasons": selection_reasons,
                 "attack_tasks": attack_tasks,
                 "attack_templates": template_descriptors(selected_skill_names),
-                "hunt_skill_root": str(work_dir / "hunt-skills"),
+                "hunt_skill_root": "hunt-skills",
+                "hunt_skill_documents": {
+                    name: {
+                        "path": f"hunt-skills/{name}/SKILL.md",
+                        "sha256": hashlib.sha256(
+                            (work_dir / "hunt-skills" / name / "SKILL.md").read_bytes()
+                        ).hexdigest(),
+                    }
+                    for name in skill_names
+                },
                 "attack_mode": "wapt-blackbox",
             }
             (work_dir / "config.json").write_text(

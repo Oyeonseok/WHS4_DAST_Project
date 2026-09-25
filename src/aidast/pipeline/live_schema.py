@@ -60,6 +60,61 @@ CREATE INDEX IF NOT EXISTS idx_attack_http_budget
 CREATE INDEX IF NOT EXISTS idx_attack_http_active
     ON attack_http_requests(stage_run_id, status);
 
+CREATE TABLE IF NOT EXISTS attack_coverage_items (
+    coverage_id TEXT PRIMARY KEY NOT NULL,
+    coverage_key TEXT NOT NULL UNIQUE CHECK(length(coverage_key)=64),
+    scan_id TEXT NOT NULL REFERENCES scans(scan_id),
+    endpoint_id TEXT NOT NULL REFERENCES endpoints(endpoint_id),
+    annotation_id TEXT NOT NULL REFERENCES endpoint_annotations(annotation_id),
+    vuln_class TEXT NOT NULL CHECK(length(trim(vuln_class)) > 0),
+    skill_name TEXT NOT NULL CHECK(length(trim(skill_name)) > 0),
+    injection_location TEXT NOT NULL DEFAULT 'endpoint',
+    parameter_name TEXT NOT NULL DEFAULT '',
+    required_identity_role TEXT NOT NULL DEFAULT 'unauthenticated',
+    status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN (
+        'pending','running','tested_negative','candidate','confirmed',
+        'blocked_auth','policy_excluded','unsupported',
+        'error_retryable','error_terminal'
+    )),
+    disposition_reason TEXT,
+    attempt_count INTEGER NOT NULL DEFAULT 0 CHECK(attempt_count >= 0),
+    last_stage_run_id TEXT REFERENCES stage_runs(stage_run_id),
+    last_task_id TEXT REFERENCES attack_tasks(task_id),
+    finding_id TEXT REFERENCES findings(finding_id),
+    source_policy_sha256 TEXT CHECK(
+        source_policy_sha256 IS NULL OR length(source_policy_sha256)=64
+    ),
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(scan_id, endpoint_id, annotation_id)
+);
+CREATE INDEX IF NOT EXISTS idx_attack_coverage_status
+    ON attack_coverage_items(scan_id, status, vuln_class);
+CREATE INDEX IF NOT EXISTS idx_attack_coverage_endpoint
+    ON attack_coverage_items(scan_id, endpoint_id);
+
+CREATE TABLE IF NOT EXISTS attack_coverage_events (
+    event_id TEXT PRIMARY KEY NOT NULL,
+    coverage_id TEXT NOT NULL REFERENCES attack_coverage_items(coverage_id),
+    scan_id TEXT NOT NULL REFERENCES scans(scan_id),
+    stage_run_id TEXT REFERENCES stage_runs(stage_run_id),
+    task_id TEXT REFERENCES attack_tasks(task_id),
+    previous_status TEXT,
+    next_status TEXT NOT NULL,
+    reason TEXT NOT NULL CHECK(length(trim(reason)) > 0),
+    attempt_id TEXT REFERENCES attack_attempts(attempt_id),
+    request_id TEXT REFERENCES attack_http_requests(request_id),
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_attack_coverage_events_item
+    ON attack_coverage_events(coverage_id, created_at);
+CREATE TRIGGER IF NOT EXISTS attack_coverage_events_no_update
+BEFORE UPDATE ON attack_coverage_events
+BEGIN SELECT RAISE(ABORT, 'coverage events are append-only'); END;
+CREATE TRIGGER IF NOT EXISTS attack_coverage_events_no_delete
+BEFORE DELETE ON attack_coverage_events
+BEGIN SELECT RAISE(ABORT, 'coverage events are append-only'); END;
+
 CREATE TABLE IF NOT EXISTS attack_authorization_envelopes (
     envelope_id TEXT PRIMARY KEY NOT NULL,
     scan_id TEXT NOT NULL REFERENCES scans(scan_id),
@@ -666,7 +721,7 @@ def _remove_known_similarity(conn: sqlite3.Connection) -> None:
 
 
 def migrate_live_pipeline_schema(conn: sqlite3.Connection) -> None:
-    """Upgrade only a writable Recon snapshot copy to shared pipeline v11."""
+    """Upgrade only a writable Recon snapshot copy to shared pipeline v12."""
     from aidast.pipeline.schema import migrate_pipeline_schema
 
     migrate_pipeline_schema(conn)
@@ -674,4 +729,4 @@ def migrate_live_pipeline_schema(conn: sqlite3.Connection) -> None:
     _remove_known_similarity(conn)
     _add_attack_attempt_columns(conn)
     _add_live_columns(conn)
-    conn.execute("PRAGMA user_version=11")
+    conn.execute("PRAGMA user_version=12")

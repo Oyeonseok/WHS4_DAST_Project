@@ -48,6 +48,10 @@ def _file_sha(path: Path) -> str:
 
 def _path(value: Path, *, existing: bool = False) -> Path:
     path = Path(value).expanduser().absolute()
+    for alias in (Path("/var"), Path("/tmp")):
+        if alias.is_symlink() and path.is_relative_to(alias):
+            path = alias.resolve(strict=True) / path.relative_to(alias)
+            break
     if any(item.is_symlink() for item in (path, *path.parents)):
         raise ReportError("report paths must not traverse symlinks")
     path = path.resolve(strict=existing)

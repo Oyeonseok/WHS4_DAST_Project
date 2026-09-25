@@ -547,6 +547,16 @@ class ValidationCoordinatorTests(unittest.TestCase):
         self.assertEqual(request.title, "IDOR fixture")
         self.assertEqual(request.claimed_impact, "Cross-user read")
 
+    def test_explicit_finding_validation_survives_later_failed_chaining(self):
+        with db.connect(self.path) as conn:
+            failed = start_stage_run(conn, scan_id="scan", stage="chaining")
+            finish_stage_run(conn, failed, status="failed", error_message="fixture")
+        result = ValidationCoordinator(
+            db_path=self.path, agent=FakeAgent(), reproduction=FakePort(),
+            policy_provider=lambda endpoint, method: self.policy,
+        ).run("scan", finding_id="finding")
+        self.assertEqual(result.summary["statuses"], {"CONFIRMED": 1})
+
     def test_missing_scope_binding_refused_before_starting_stage(self):
         with db.connect(self.path) as conn:
             conn.execute("DELETE FROM validation_scope_bindings")
@@ -723,6 +733,43 @@ class ValidationCoordinatorTests(unittest.TestCase):
         self.assertEqual(
             staged.eligibility_view()["reproduction_spec_sha256"], persisted_digest,
         )
+
+    def test_candidate_gate_accepts_completed_task_adopted_by_completed_resume(self):
+        with db.connect(self.path) as conn:
+            conn.execute(
+                """UPDATE stage_runs SET status='failed',
+                   error_message='coordinator timed out' WHERE stage_run_id='attack_stage'"""
+            )
+            resumed = start_stage_run(
+                conn, scan_id="scan", stage="attack", stage_run_id="resumed_attack"
+            )
+            resumed_task = create_task(
+                conn, stage_run_id=resumed, skill_name="hunt-idor",
+                payload={"resume_from_stage_run_id": "attack_stage"},
+            )
+            transition_task(conn, resumed_task, status="skipped")
+            finish_stage_run(conn, resumed, status="completed")
+            conn.commit()
+
+            candidate = CandidateIntegrityGate(conn).validate_finding(
+                case_id="case", scan_id="scan", finding_id="finding",
+            )
+
+        self.assertEqual(candidate.finding_id, "finding")
+
+    def test_candidate_gate_rejects_completed_task_without_completed_resume(self):
+        with db.connect(self.path) as conn:
+            conn.execute(
+                """UPDATE stage_runs SET status='failed',
+                   error_message='coordinator timed out' WHERE stage_run_id='attack_stage'"""
+            )
+            conn.commit()
+            with self.assertRaisesRegex(
+                CandidateIntegrityError, "durable_attack_stage"
+            ):
+                CandidateIntegrityGate(conn).validate_finding(
+                    case_id="case", scan_id="scan", finding_id="finding",
+                )
 
     def test_candidate_gate_rejects_runtime_incompatible_with_profile_signal(self):
         from aidast.validation import canonical_sha256, validate_runtime_contract

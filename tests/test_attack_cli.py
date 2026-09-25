@@ -504,7 +504,7 @@ class AttackCliTests(unittest.TestCase):
                     commit_finding(database, "scan", payload)
 
                 with closing(sqlite3.connect(database)) as conn:
-                    self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], 11)
+                    self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], 12)
                     for table in (
                         "findings", "attack_requests", "finding_reproduction_specs",
                     ):

@@ -108,7 +108,9 @@ class ValidationCoordinator:
         with closing(sqlite3.connect(self.db_path)) as conn:
             conn.execute("PRAGMA foreign_keys=ON")
             conn.row_factory = sqlite3.Row
-            self._require_scan_ready(conn, scan_id)
+            self._require_scan_ready(
+                conn, scan_id, finding_only=finding_id is not None,
+            )
             repo = ValidationRepository(conn)
             # Hold the write lock until acquisition and policy binding both commit.
             # A competing invocation cannot mutate the winning run's provenance.
@@ -225,13 +227,26 @@ class ValidationCoordinator:
         return scope
 
     @staticmethod
-    def _require_scan_ready(conn: sqlite3.Connection, scan_id: str) -> None:
+    def _require_scan_ready(
+        conn: sqlite3.Connection, scan_id: str, *, finding_only: bool = False,
+    ) -> None:
         scan = conn.execute("SELECT status FROM scans WHERE scan_id=?", (scan_id,)).fetchone()
         if scan is None:
             raise ValidationCoordinatorError("unknown scan")
+        if finding_only:
+            attack = conn.execute(
+                """SELECT 1 FROM stage_runs WHERE scan_id=? AND stage='attack'
+                   AND status='completed' ORDER BY rowid DESC LIMIT 1""",
+                (scan_id,),
+            ).fetchone()
+            if attack is None:
+                raise ValidationCoordinatorError(
+                    "finding Validation requires a completed Attack stage"
+                )
+            return
         chain = conn.execute(
             """SELECT status FROM stage_runs WHERE scan_id=? AND stage='chaining'
-            ORDER BY created_at DESC LIMIT 1""", (scan_id,),
+            ORDER BY rowid DESC LIMIT 1""", (scan_id,),
         ).fetchone()
         if chain is None or chain[0] not in {"completed", "skipped"}:
             raise ValidationCoordinatorError("Validation requires a completed or skipped Chaining stage")
