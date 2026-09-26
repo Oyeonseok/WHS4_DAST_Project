@@ -196,7 +196,7 @@ def test_learned_dynamic_routes_retain_observations_without_duplicate_surface(tm
 def test_recon_schema_version_tracks_metadata_without_downgrading_live_database(tmp_path) -> None:
     database = tmp_path / "Recon.db"
     with db.connect(database) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == db.RECON_SCHEMA_VERSION == 9
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == db.RECON_SCHEMA_VERSION == 10
         connection.execute("PRAGMA user_version=12")
         connection.commit()
     with db.connect(database) as connection:

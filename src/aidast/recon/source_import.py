@@ -22,6 +22,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from aidast.benchmarks.catalog import parse_implemented_vulnerabilities
+from aidast.benchmarks.vulnbank_catalog import vulnbank_catalog_hints
 from aidast.orchestration.scope import ScopeCoordinator
 from aidast.pipeline.lifecycle import finish_stage_run, start_stage_run
 from aidast.pipeline.materialize import materialize_pipeline
@@ -94,15 +95,47 @@ _VULNERABILITY_PATTERNS = (
     ("ssrf", re.compile(r"\bssrf\b|server[- ]side request forgery", re.I)),
     ("idor", re.compile(r"\bidor\b|\bbola\b|object reference", re.I)),
     ("csrf", re.compile(r"\bcsrf\b|cross[- ]site request forgery", re.I)),
-    ("jwt_crypto", re.compile(r"\bjwt\b|token (?:never|does not) expire|weak token", re.I)),
-    ("file_upload", re.compile(r"file upload|upload.*(?:type|extension|size)", re.I)),
-    ("lfi", re.compile(r"path traversal|local file inclusion|\blfi\b", re.I)),
+    ("jwt_crypto", re.compile(
+        r"\bjwt\b|token (?:never|does not) expire|weak token|weak secret key", re.I,
+    )),
+    ("session", re.compile(
+        r"session expiration|server-side token invalidation|token exposure|"
+        r"token stored in localstorage|token vulnerabilities", re.I,
+    )),
+    ("file_upload", re.compile(
+        r"file upload|unrestricted file|upload.*(?:type|extension|size)|"
+        r"no file type|no file size|unsafe file nam|content-type validation", re.I,
+    )),
+    ("lfi", re.compile(
+        r"path traversal|directory traversal|local file inclusion|\blfi\b", re.I,
+    )),
     ("brute_force", re.compile(r"rate limit|brute force", re.I)),
-    ("source_leak", re.compile(r"information disclosure|sensitive data|error exposure|debug", re.I)),
-    ("auth_bypass", re.compile(r"broken auth|no auth|authorization (?:check|validation)|privilege", re.I)),
+    ("source_leak", re.compile(
+        r"information disclosure|sensitive data|error exposure|debug|plaintext|"
+        r"excessive data|query exposure|system information exposure|api keys? returned|"
+        r"card detail", re.I,
+    )),
+    ("auth_bypass", re.compile(
+        r"broken auth|no auth|missing auth|authorization (?:check|validation|gap)|"
+        r"no verification|privilege|broken object property", re.I,
+    )),
     ("race_condition", re.compile(r"race condition|atomicity", re.I)),
-    ("api_misconfig", re.compile(r"mass assignment|field name injection|no input validation", re.I)),
-    ("llm_ai", re.compile(r"prompt injection|context injection|system prompt", re.I)),
+    ("api_misconfig", re.compile(
+        r"mass assignment|field name injection|no input validation|"
+        r"no .* validation|predictable (?:card|reference|authorization)", re.I,
+    )),
+    ("business_logic", re.compile(
+        r"negative amount|negative .* possible|no (?:transaction|payment) limits?|"
+        r"no validation on recipient|missing (?:payment|transaction) limits?|"
+        r"idempotency|replay protection", re.I,
+    )),
+    ("llm_ai", re.compile(
+        r"prompt injection|context injection|system prompt|ai-based information|"
+        r"ai role override|direct database access through ai|ai-assisted unauthorized", re.I,
+    )),
+    ("graphql", re.compile(
+        r"\bgraphql\b|schema introspection|depth / complexity", re.I,
+    )),
 )
 
 
@@ -546,6 +579,7 @@ def import_flask_source(
             (annotation_run, scan_id, db.now(), db.now()),
         )
         endpoint_rows: list[dict] = []
+        endpoint_bindings: dict[tuple[str, str], tuple[str, str]] = {}
         vulnerability_count = 0
         parameter_count = 0
         for item in endpoints:
@@ -584,6 +618,9 @@ def import_flask_source(
                 """SELECT observation_id FROM endpoint_observations
                 WHERE endpoint_id=? ORDER BY observed_at DESC LIMIT 1""", (endpoint_id,),
             ).fetchone()[0]
+            endpoint_bindings[(item.method, item.path)] = (
+                str(endpoint_id), str(observation_id),
+            )
             function_tag = _function_tag(item)
             conn.execute(
                 """INSERT INTO endpoint_annotations
@@ -606,12 +643,21 @@ def import_flask_source(
                      rationale,
                      1.0, db.now()),
                 )
-                db.insert_observation(
-                    conn, origin_id=origin_id, obs_type="source_vulnerability",
-                    key=tag, value=f"{tag} source marker at {item.source_file}:{item.source_line}",
-                    source="flask_source_import",
+                conn.execute(
+                    """INSERT INTO observations
+                    (observation_id,origin_id,type,key,value,source)
+                    VALUES (?,?,?,?,?,?)""",
+                    (
+                        db.new_id("obs"), origin_id, "source_vulnerability", tag,
+                        f"{tag} source marker at {item.source_file}:{item.source_line}",
+                        "flask_source_import",
+                    ),
                 )
-                db.insert_surface_signal(conn, origin_id=origin_id, signal_type=tag, value=item.path)
+                conn.execute(
+                    """INSERT INTO surface_signals
+                    (signal_id,origin_id,signal_type,value) VALUES (?,?,?,?)""",
+                    (db.new_id("signal"), origin_id, tag, item.path),
+                )
                 vulnerability_count += 1
             endpoint_rows.append({
                 "method": item.method, "path": item.path,
@@ -626,6 +672,9 @@ def import_flask_source(
                 "vulnerability_evidence": dict(item.vulnerability_evidence),
             })
         if benchmark_catalog is not None:
+            catalog_ids = {
+                item.ordinal: db.new_id("catalog") for item in benchmark_catalog.items
+            }
             conn.executemany(
                 """INSERT INTO benchmark_catalog_items
                 (catalog_item_id,scan_id,ordinal,category,title,source_path,
@@ -633,13 +682,60 @@ def import_flask_source(
                 VALUES (?,?,?,?,?,?,?,?,?)""",
                 [
                     (
-                        db.new_id("catalog"), scan_id, item.ordinal, item.category,
+                        catalog_ids[item.ordinal], scan_id, item.ordinal, item.category,
                         item.title, item.source_path, item.source_line, source_ref,
                         benchmark_catalog.source_sha256,
                     )
                     for item in benchmark_catalog.items
                 ],
             )
+            for hint in vulnbank_catalog_hints(benchmark_catalog):
+                binding = endpoint_bindings.get((hint.method, hint.path))
+                if binding is None:
+                    raise SourceImportError(
+                        "pinned VulnBank catalog mapping references a missing route: "
+                        f"{hint.method} {hint.path}"
+                    )
+                endpoint_id, observation_id = binding
+                catalog_item = benchmark_catalog.items[hint.ordinal - 1]
+                catalog_run = db.new_id("annotation_run")
+                annotation_id = db.new_id("annotation")
+                conn.execute(
+                    """INSERT INTO annotation_runs
+                    (annotation_run_id,scan_id,model,prompt_version,
+                     taxonomy_version,status,started_at,finished_at)
+                    VALUES (?,?,'pinned-vulnbank-catalog','1','1','completed',?,?)""",
+                    (catalog_run, scan_id, db.now(), db.now()),
+                )
+                conn.execute(
+                    """INSERT INTO endpoint_annotations
+                    (annotation_id,observation_id,annotation_run_id,category,tag,
+                     rationale,confidence,created_at)
+                    VALUES (?,?,?,?,?,?,?,?)""",
+                    (
+                        annotation_id, observation_id, catalog_run,
+                        "benchmark_catalog_vulnerability", hint.vuln_class,
+                        f"Pinned VulnBank README claim #{hint.ordinal}: "
+                        f"{catalog_item.title}. This is an attack hypothesis, not proof.",
+                        1.0, db.now(),
+                    ),
+                )
+                conn.execute(
+                    """INSERT INTO benchmark_catalog_mappings
+                    (catalog_item_id,annotation_id,endpoint_id,vuln_class)
+                    VALUES (?,?,?,?)""",
+                    (
+                        catalog_ids[hint.ordinal], annotation_id, endpoint_id,
+                        hint.vuln_class,
+                    ),
+                )
+                conn.execute(
+                    """UPDATE benchmark_catalog_items
+                       SET assessment_status='mapped_runtime'
+                       WHERE catalog_item_id=?""",
+                    (catalog_ids[hint.ordinal],),
+                )
+                vulnerability_count += 1
         conn.execute(
             "UPDATE scans SET status='completed',finished_at=CURRENT_TIMESTAMP WHERE scan_id=?",
             (scan_id,),

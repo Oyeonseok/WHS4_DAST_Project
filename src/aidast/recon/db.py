@@ -16,7 +16,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-RECON_SCHEMA_VERSION = 9
+RECON_SCHEMA_VERSION = 10
 
 SCHEMA = """
 -- WAL은 -wal/-shm 보조 파일에 mmap 기반 공유 락이 필요한데, WSL에서
@@ -189,6 +189,19 @@ CREATE TABLE IF NOT EXISTS benchmark_catalog_items (
 );
 CREATE INDEX IF NOT EXISTS idx_benchmark_catalog_scan_status
     ON benchmark_catalog_items(scan_id, assessment_status, ordinal);
+
+CREATE TABLE IF NOT EXISTS benchmark_catalog_mappings (
+    catalog_item_id TEXT PRIMARY KEY,
+    annotation_id TEXT NOT NULL UNIQUE,
+    endpoint_id TEXT NOT NULL,
+    vuln_class TEXT NOT NULL CHECK(length(trim(vuln_class)) > 0),
+    mapping_kind TEXT NOT NULL DEFAULT 'pinned_benchmark'
+        CHECK(mapping_kind IN ('pinned_benchmark')),
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (catalog_item_id) REFERENCES benchmark_catalog_items(catalog_item_id),
+    FOREIGN KEY (annotation_id) REFERENCES endpoint_annotations(annotation_id),
+    FOREIGN KEY (endpoint_id) REFERENCES endpoints(endpoint_id)
+);
 
 CREATE TABLE IF NOT EXISTS pipeline_runs (
     pipeline_run_id TEXT PRIMARY KEY,

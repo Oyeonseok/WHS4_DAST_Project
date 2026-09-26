@@ -205,7 +205,13 @@ class AttackCoordinator:
                 "new Attack findings require atomic reproduction specs"
             )
         new_attempts = [row for row in attempt_rows if row[0] not in existing_attempts]
-        unresolved = [row[0] for row in attempt_rows if row[1] == "lead"]
+        # A failed or interrupted earlier stage may have persisted a useful
+        # lead before it could either promote or close it.  That historical
+        # evidence belongs to the coverage retry which owns the old task; it
+        # must not make an otherwise self-contained later batch impossible to
+        # finish.  The current agent is authoritative only for attempts created
+        # after its stage snapshot.
+        unresolved = [row[0] for row in new_attempts if row[1] == "lead"]
         if unresolved:
             raise AttackCoordinatorError(
                 f"Attack Agent left {len(unresolved)} unresolved lead(s)"

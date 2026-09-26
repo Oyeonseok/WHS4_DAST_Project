@@ -333,6 +333,22 @@ def commit_finding(db_path: Path, scan_id: str, payload_path: Path) -> dict:
         if len(skills) != 1:
             raise ValueError("reproduction attempts must have exactly one Hunt Skill")
         attack_skill_name = next(iter(skills))
+        task_placeholders = ",".join("?" for _ in source_attempts)
+        task_rows = conn.execute(
+            f"SELECT payload_json FROM attack_tasks WHERE task_id IN ({task_placeholders})",
+            tuple(row[1] for row in source_attempts),
+        ).fetchall()
+        exhaustive_coverage = False
+        for task_row in task_rows:
+            try:
+                task_payload = json.loads(task_row[0] or "{}")
+            except json.JSONDecodeError as exc:
+                raise ValueError("Attack task payload is invalid") from exc
+            exhaustive_coverage = exhaustive_coverage or bool(task_payload.get("coverage_id"))
+        if exhaustive_coverage and reproduction.get("runtime_contract") is None:
+            raise ValueError(
+                "exhaustive coverage findings require an immutable runtime contract"
+            )
         source_request_ids = reproduction.get("source_request_ids")
         if (not isinstance(source_request_ids, list) or not source_request_ids
                 or any(not isinstance(value, str) or not value for value in source_request_ids)

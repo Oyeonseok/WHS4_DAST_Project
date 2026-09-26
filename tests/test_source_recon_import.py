@@ -67,6 +67,38 @@ def test_source_rationale_preserves_bounded_vulnerability_evidence(tmp_path: Pat
     assert "IDOR" in evidence["idor"]
 
 
+def test_source_import_preserves_benchmark_specific_vulnerability_classes(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "app.py").write_text('''
+from flask import Flask
+app = Flask(__name__)
+
+@app.route("/graphql", methods=["POST"])
+def graphql():
+    # Vulnerability: Enabled GraphQL schema introspection
+    # Vulnerability: Missing GraphQL depth / complexity controls
+    return {}
+
+@app.route("/transfer", methods=["POST"])
+def transfer():
+    # Vulnerability: Negative amount transfers possible
+    # Vulnerability: No transaction limits
+    return {}
+
+@app.route("/session")
+def session():
+    # Vulnerability: No session expiration
+    # Vulnerability: No server-side token invalidation
+    return {}
+''', encoding="utf-8")
+
+    endpoints = {item.path: item for item in extract_flask_endpoints(tmp_path)}
+    assert endpoints["/graphql"].vulnerability_tags == ("graphql",)
+    assert endpoints["/transfer"].vulnerability_tags == ("business_logic",)
+    assert endpoints["/session"].vulnerability_tags == ("session",)
+
+
 def test_mixed_route_does_not_copy_post_markers_to_get(tmp_path: Path) -> None:
     (tmp_path / "app.py").write_text('''
 from flask import Flask, request

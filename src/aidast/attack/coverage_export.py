@@ -92,6 +92,11 @@ def export_coverage_results(
     report_root = (
         Path(report_root).expanduser().absolute() if report_root is not None else None
     )
+    # Refresh Validation-derived coverage and its one-to-one benchmark catalog
+    # projection before taking the export snapshot.
+    from aidast.attack.coverage import coverage_status
+
+    coverage_status(database, scan_id)
     with sqlite3.connect(database) as conn:
         conn.row_factory = sqlite3.Row
         scan = conn.execute(
@@ -127,15 +132,44 @@ def export_coverage_results(
             "SELECT 1 FROM sqlite_master WHERE type='table' "
             "AND name='benchmark_catalog_items'"
         ).fetchone() is not None
-        catalog_rows = (
-            conn.execute(
+        has_catalog_mappings = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' "
+            "AND name='benchmark_catalog_mappings'"
+        ).fetchone() is not None
+        if has_catalog_mappings:
+            catalog_rows = conn.execute(
+                """WITH latest_validation AS (
+                       SELECT v.* FROM validation_cases v
+                       JOIN (
+                           SELECT finding_id, MAX(rowid) AS latest_rowid
+                           FROM validation_cases
+                           WHERE scan_id=? AND finding_id IS NOT NULL
+                           GROUP BY finding_id
+                       ) latest ON latest.latest_rowid=v.rowid
+                   )
+                   SELECT b.ordinal,b.category,b.title,b.source_path,b.source_line,
+                          b.source_ref,b.source_sha256,b.assessment_status,
+                          m.annotation_id,m.endpoint_id,m.vuln_class,
+                          c.coverage_id,c.status coverage_status,c.finding_id,
+                          v.case_id,v.current_status validation_status
+                   FROM benchmark_catalog_items b
+                   LEFT JOIN benchmark_catalog_mappings m
+                     ON m.catalog_item_id=b.catalog_item_id
+                   LEFT JOIN attack_coverage_items c
+                     ON c.annotation_id=m.annotation_id AND c.scan_id=b.scan_id
+                   LEFT JOIN latest_validation v ON v.finding_id=c.finding_id
+                   WHERE b.scan_id=? ORDER BY b.ordinal""",
+                (scan_id, scan_id),
+            ).fetchall()
+        elif has_catalog:
+            catalog_rows = conn.execute(
                 """SELECT ordinal,category,title,source_path,source_line,source_ref,
                           source_sha256,assessment_status
                    FROM benchmark_catalog_items WHERE scan_id=? ORDER BY ordinal""",
                 (scan_id,),
             ).fetchall()
-            if has_catalog else []
-        )
+        else:
+            catalog_rows = []
 
     records: list[dict[str, Any]] = []
     for row in rows:

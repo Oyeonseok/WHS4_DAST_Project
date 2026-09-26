@@ -414,6 +414,29 @@ class SharedValidationReportingTests(unittest.TestCase):
             ("report", "failed"),
         )
 
+    def test_auto_report_retries_only_source_context_hash_mismatch(self):
+        evidence = self.complete()
+        self.conn.commit()
+
+        class Writer:
+            calls = 0
+
+            def write(inner, context):
+                inner.calls += 1
+                draft = self.draft(context, evidence)
+                if inner.calls == 1:
+                    draft["source_context_sha256"] = "0" * 64
+                return draft
+
+        writer = Writer()
+        results = generate_scan_reports(
+            self.path, self.path.parent.parent / "ReportRun" / "retry",
+            scan_id="scan", platform="hackerone", writer=writer,
+        )
+
+        self.assertEqual(writer.calls, 2)
+        self.assertEqual(results[0]["status"], "drafted")
+
     def test_report_platform_detects_supported_hosts_only(self):
         self.assertEqual(report_platform_for_program_url("https://hackerone.com/example"), "hackerone")
         self.assertEqual(report_platform_for_program_url("https://bugcrowd.com/engagements/example"), "bugcrowd")

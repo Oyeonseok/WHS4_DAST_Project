@@ -90,7 +90,8 @@ def main(
     if (len(arguments) > 1 and arguments[0] == "attack"
             and arguments[1] not in {
                 "review", "plan", "status", "approve", "revoke", "execute",
-                "coverage-plan", "coverage-status", "coverage-export", "exhaustive",
+                "coverage-plan", "coverage-status", "coverage-requeue",
+                "coverage-export", "exhaustive",
                 "benchmark-vulnbank",
                 "-h", "--help",
             }):
@@ -492,6 +493,18 @@ def _parser() -> argparse.ArgumentParser:
     )
     coverage_status_parser.add_argument("database", type=Path, help="shared Pipeline.db")
     coverage_status_parser.add_argument("--scan-id", required=True, type=_scan_identifier)
+    coverage_requeue_parser = attack_commands.add_parser(
+        "coverage-requeue",
+        help="explicitly reopen selected terminal coverage dispositions",
+    )
+    coverage_requeue_parser.add_argument("database", type=Path, help="shared Pipeline.db")
+    coverage_requeue_parser.add_argument("--scan-id", required=True, type=_scan_identifier)
+    coverage_requeue_parser.add_argument(
+        "--status", action="append", required=True,
+        choices=("tested_negative", "blocked_auth", "policy_excluded", "unsupported", "error_terminal"),
+        help="terminal disposition to reopen; repeat for multiple statuses",
+    )
+    coverage_requeue_parser.add_argument("--reason", required=True)
     coverage_export_parser = attack_commands.add_parser(
         "coverage-export",
         help="export an Attack, Validation, and Report outcome for every coverage item",
@@ -1689,7 +1702,7 @@ def _run_attack(
 ) -> int:
     operation = args.attack_command
     if operation in {
-        "coverage-plan", "coverage-status", "coverage-export", "exhaustive",
+        "coverage-plan", "coverage-status", "coverage-requeue", "coverage-export", "exhaustive",
         "benchmark-vulnbank",
     }:
         try:
@@ -1699,6 +1712,16 @@ def _run_attack(
                 result = ensure_coverage_manifest(args.database, args.scan_id).to_dict()
             elif operation == "coverage-status":
                 result = coverage_status(args.database, args.scan_id).to_dict()
+            elif operation == "coverage-requeue":
+                from aidast.attack.coverage import requeue_coverage
+
+                result = {
+                    "scan_id": args.scan_id,
+                    "requeued": requeue_coverage(
+                        args.database, args.scan_id, args.status, reason=args.reason,
+                    ),
+                    "statuses": sorted(set(args.status)),
+                }
             elif operation == "coverage-export":
                 from aidast.attack.coverage_export import export_coverage_results
 
