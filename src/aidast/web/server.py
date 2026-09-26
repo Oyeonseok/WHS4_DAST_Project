@@ -315,6 +315,17 @@ def create_app(
         except (OSError, sqlite3.Error) as exc:
             raise HTTPException(status_code=503, detail="audit projection unavailable") from exc
 
+    @app.get("/api/v1/scans/{scan_id}/recon-activity")
+    async def recon_activity(
+        scan_id: str, before: int | None = Query(default=None, ge=1)
+    ) -> dict[str, Any]:
+        try:
+            return projector.recon_activity(scan_id, before)
+        except ScanNotFoundError:
+            raise
+        except (OSError, sqlite3.Error) as exc:
+            raise HTTPException(status_code=503, detail="recon activity projection unavailable") from exc
+
     @app.get("/api/v1/reports")
     async def report_list(scan_id: str | None = None) -> dict[str, Any]:
         if scan_id is not None:

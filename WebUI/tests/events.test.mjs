@@ -6,6 +6,8 @@ import { initialLanguage, translate } from '../src/lib/i18n.ts';
 import { localizeActivityMessage, localizeAuditEventType } from '../src/lib/activityMessages.ts';
 import { isValidTagBatchSize, resolveExecutionLimits } from '../src/lib/scan.ts';
 import { scopeCollectionRequest } from '../src/lib/scope.ts';
+import { activityHeightBounds, clampPanelWidth, panelBounds } from '../src/lib/layout.ts';
+import { resolveTransportMode } from '../src/lib/transport.ts';
 import { auditLevel, readAuditAcknowledgements, saveAuditAcknowledgements } from '../src/lib/audit.ts';
 import { filterFindings, findingVerdict, parseValidationCases, reportCaseForFinding } from '../src/lib/validation.ts';
 import { DEMO_VALIDATIONS } from '../src/data/demo.ts';
@@ -22,6 +24,28 @@ import {
 } from '../src/lib/activity.ts';
 
 const event = (id = 8, overrides = {}) => ({ version: 1, event_id: id, scan_id: DEMO_SCAN, occurred_at: '2026-09-20T06:00:00Z', type: 'log.appended', payload: { stage: 'Attack', level: 'info', message: 'Redacted fixture event' }, ...overrides });
+test('sample preview selects demo transport without replacing the configured live mode', () => {
+  assert.equal(resolveTransportMode('live', ''), 'live');
+  assert.equal(resolveTransportMode('live', '?sample=0'), 'live');
+  assert.equal(resolveTransportMode('live', '?sample=1'), 'demo');
+  assert.equal(resolveTransportMode('demo', '?sample=1'), 'demo');
+});
+test('panel resizing preserves room for the main content at narrow desktop widths', () => {
+  const navigation = panelBounds('navigation', 1101, 350);
+  assert.deepEqual(navigation, { min: 174, max: 251 });
+  const navWidth = clampPanelWidth(320, navigation);
+  const activity = panelBounds('activity', 1101, navWidth);
+  assert.deepEqual(activity, { min: 280, max: 350 });
+  assert.equal(clampPanelWidth(540, activity), 350);
+  assert.equal(clampPanelWidth(10, activity), 280);
+  assert.deepEqual(panelBounds('navigation', 901, 540), { min: 174, max: 320 });
+  assert.deepEqual(panelBounds('navigation', 821, 540), { min: 174, max: 320 });
+});
+test('bottom activity panel height stays within the visible viewport', () => {
+  assert.deepEqual(activityHeightBounds(844, 144), { min: 220, max: 700 });
+  assert.equal(clampPanelWidth(800, activityHeightBounds(844, 144)), 700);
+  assert.deepEqual(activityHeightBounds(300, 144), { min: 160, max: 160 });
+});
 test('tag batch size accepts only whole observation counts from 1 to 200', () => {
   for (const size of [1, 25, 200]) assert.equal(isValidTagBatchSize(size), true);
   for (const size of [0, 201, 1.5, NaN, Infinity]) assert.equal(isValidTagBatchSize(size), false);
@@ -150,6 +174,43 @@ test('structured scan log metadata survives event parsing and stream merging', (
   assert.ok(parsed);
   const next = applyEvent(demoSnapshot(), parsed);
   assert.equal(mergeActivityLogs(next.logs, []).at(-1).message_code, 'pipeline.started');
+});
+test('recon history pages preserve every URL event and reject invalid cursors', async () => {
+  const { parseReconActivityPage, mergeReconActivityLogs } = await import('../src/lib/events.ts');
+  const url = `https://example.com/${'a'.repeat(220)}`;
+  const discovery = id => event(id, {
+    payload: {
+      stage: 'Recon', level: 'info', message: 'Recon activity',
+      message_code: 'recon.activity',
+      message_params: { phase: 'endpoint_discovery', state: 'found', method: 'GET', url, response_status: 200 },
+    },
+  });
+  const page = { events: [discovery(604), discovery(603)], next_before: 603 };
+  assert.deepEqual(parseReconActivityPage(page, DEMO_SCAN)?.logs.map(log => [log.id, log.message_params.url]), [[604, url], [603, url]]);
+  assert.equal(parseReconActivityPage(page, DEMO_SCAN)?.nextBefore, 603);
+  assert.equal(parseReconActivityPage(page, 'other-scan'), null);
+  assert.equal(parseReconActivityPage({ ...page, events: [...page.events].reverse() }, DEMO_SCAN), null);
+  assert.equal(parseReconActivityPage({ ...page, next_before: 999 }, DEMO_SCAN), null);
+  const history = parseReconActivityPage(page, DEMO_SCAN).logs;
+  assert.deepEqual(mergeReconActivityLogs([history[0], { ...history[0], id: 605 }, { ...history[0], id: 601, message_code: 'stage.started' }], history).map(log => log.id), [605, 604, 603]);
+});
+test('discovered URL records retain HTTP evidence and ignore unrelated recon events', async () => {
+  const { reconDiscoveries } = await import('../src/lib/events.ts');
+  const makeLog = (id, url, response_status) => ({
+    id, time: '2026-09-25T07:00:00Z', stage: 'Recon', level: 'info',
+    message: 'Recon activity', message_code: 'recon.activity',
+    message_params: { phase: 'endpoint_discovery', state: 'found', method: 'GET', url, source: 'katana', response_status },
+  });
+  const logs = [
+    makeLog(4, 'https://example.com/ok', 200),
+    makeLog(3, 'https://example.com/missing', 404),
+    makeLog(2, 'https://example.com/ok', 404),
+    { ...makeLog(1, 'https://example.com/ignored', 200), message_params: { phase: 'katana_standard', state: 'finished', count: 3 } },
+  ];
+  assert.deepEqual(reconDiscoveries(logs), [
+    { method: 'GET', url: 'https://example.com/ok', source: 'katana', responseStatus: 200 },
+    { method: 'GET', url: 'https://example.com/missing', source: 'katana', responseStatus: 404 },
+  ]);
 });
 test('scope collection and scan logs merge into one chronological activity stream', () => {
   const merged = mergeActivityLogs(

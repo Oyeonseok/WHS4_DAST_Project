@@ -953,6 +953,50 @@ class DashboardProjector:
         self.snapshot(scan_id)
         return self.stored_events_after(scan_id, after)
 
+    RECON_ACTIVITY_PAGE = 200
+
+    def recon_activity(self, scan_id: str, before: int | None = None) -> dict[str, Any]:
+        """Page sanitized Recon activity log events newest-first by event_id cursor."""
+        if before is not None and before < 1:
+            raise ProjectionError("event cursor must be positive")
+        self.snapshot(scan_id)
+        upper = before if before is not None else 2**62
+        events: list[dict[str, Any]] = []
+        with self._lock, closing(sqlite3.connect(self.event_database)) as conn:
+            conn.row_factory = sqlite3.Row
+            for row in conn.execute(
+                """SELECT event_id,source_key,occurred_at,event_type,payload_json FROM web_events
+                WHERE scan_id=? AND event_id<? AND event_type='log.appended'
+                AND json_extract(payload_json,'$.message_code')='recon.activity'
+                ORDER BY event_id DESC""",
+                (scan_id, upper),
+            ):
+                stored = _event_payload(row)
+                activity = validated_activity(stored.get("message_params"))
+                if activity is None:
+                    continue
+                payload: dict[str, Any] = {
+                    "stage": _stage(stored.get("stage")),
+                    "level": "error" if activity["state"] == "failed"
+                    else "success" if activity["state"] == "finished" else "info",
+                    "message": "Recon activity",
+                    "message_code": "recon.activity",
+                    "message_params": activity,
+                }
+                events.append({
+                    "version": 1,
+                    "event_id": int(row["event_id"]),
+                    "scan_id": scan_id,
+                    "occurred_at": row["occurred_at"],
+                    "type": "log.appended",
+                    "payload": payload,
+                })
+                if len(events) > self.RECON_ACTIVITY_PAGE:
+                    break
+        more = len(events) > self.RECON_ACTIVITY_PAGE
+        events = events[: self.RECON_ACTIVITY_PAGE]
+        return {"events": events, "next_before": events[-1]["event_id"] if more else None}
+
     def cursor(self, scan_id: str) -> int:
         with self._lock, closing(sqlite3.connect(self.event_database)) as conn:
             return int(

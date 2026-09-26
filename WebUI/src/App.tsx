@@ -13,8 +13,8 @@ import {
   shouldPollScopeJob,
   type ScopeActivityEvent,
 } from './lib/activity';
-import { displayStageStatus, stages, type Finding, type ReportDraftStatus, type Snapshot } from './lib/events';
-import { localizeActivityMessage, localizeAuditEventType } from './lib/activityMessages';
+import { displayStageStatus, mergeReconActivityLogs, parseReconActivityPage, reconDiscoveries, stages, type Finding, type Log, type ReportDraftStatus, type Snapshot } from './lib/events';
+import { localizeActivityMessage, localizeAuditEventType, reconActivityPurpose } from './lib/activityMessages';
 import { auditLevel, readAuditAcknowledgements, saveAuditAcknowledgements, type AuditEntry } from './lib/audit';
 import { initialLanguage, translate, type Language } from './lib/i18n';
 import {
@@ -25,7 +25,9 @@ import {
   type ScopeExecutionRequirements,
 } from './lib/scan';
 import { scopeCollectionRequest } from './lib/scope';
+import { activityHeightBounds, clampPanelWidth, panelBounds } from './lib/layout';
 import { filterFindings, findingVerdict, knownSourceCase, parseValidationCases, reportCaseForFinding, type FindingVerdict, type ValidationCase, type ValidationStatus } from './lib/validation';
+import { ResizeHandle } from './components/ResizeHandle';
 
 const pages = ['Overview', 'Scopes / Programs', 'Scans', 'Findings', 'Validation', 'Reports', 'Audit log', 'Settings'] as const;
 type Page = typeof pages[number];
@@ -182,6 +184,11 @@ export default function App() {
   const [paused, setPaused] = useState(false);
   const [compact, setCompact] = useState(false);
   const [collapsed, setCollapsed] = useState(() => window.matchMedia('(max-width: 900px)').matches);
+  const [viewportWidth, setViewportWidth] = useState(() => window.innerWidth);
+  const [viewportHeight, setViewportHeight] = useState(() => window.innerHeight);
+  const [navigationPreference, setNavigationPreference] = useState(() => Number(localStorage.getItem('aidast:navigation-width')) || 214);
+  const [activityPreference, setActivityPreference] = useState(() => Number(localStorage.getItem('aidast:activity-width')) || 350);
+  const [activityHeightPreference, setActivityHeightPreference] = useState(() => Number(localStorage.getItem('aidast:activity-height')) || 620);
   const [theme, setTheme] = useState<ThemeChoice>(savedTheme);
   const [resolvedTheme, setResolvedTheme] = useState<'dark' | 'light'>('dark');
   const [language, setLanguage] = useState<Language>(initialLanguage);
@@ -189,6 +196,11 @@ export default function App() {
   const navigation = useRef<HTMLElement>(null);
   const stream = useRef<HTMLDivElement>(null);
   const demo = transportMode === 'demo';
+  const samplePreview = demo && import.meta.env.VITE_TRANSPORT === 'live';
+  const sampleUrl = new URL(location.href);
+  sampleUrl.searchParams.set('sample', '1');
+  const liveUrl = new URL(location.href);
+  liveUrl.searchParams.delete('sample');
   const configuredScanId = demo ? DEMO_SCAN : import.meta.env.VITE_SCAN_ID || '';
   const [scanId, setScanId] = useState<string>(configuredScanId);
   const [scanOptions, setScanOptions] = useState<ScanSummary[]>([]);
@@ -239,6 +251,11 @@ export default function App() {
   const [attackTaskSnapshot, setAttackTaskSnapshot] = useState<AttackTaskSnapshot | null>(null);
   const [attackTaskError, setAttackTaskError] = useState('');
   const [attackTaskRevision, setAttackTaskRevision] = useState(0);
+  const [reconHistory, setReconHistory] = useState<{ scanId: string; logs: Log[]; nextBefore: number | null } | null>(null);
+  const [reconLoading, setReconLoading] = useState(false);
+  const [reconError, setReconError] = useState('');
+  const [reconRevision, setReconRevision] = useState(0);
+  const reconAbort = useRef<AbortController | null>(null);
   const [auditEntries, setAuditEntries] = useState<AuditEntry[]>([]);
   const [auditError, setAuditError] = useState('');
   const [auditSearch, setAuditSearch] = useState('');
@@ -269,6 +286,9 @@ export default function App() {
     ? Math.max(0, Math.floor((scopeClock - Date.parse(scopeStartedAt)) / 1000))
     : 0;
   const scopeElapsedLabel = formatActivityElapsed(scopeElapsedSeconds, language);
+  const navigationWidth = clampPanelWidth(navigationPreference, panelBounds('navigation', viewportWidth, activityPreference));
+  const activityWidth = clampPanelWidth(activityPreference, panelBounds('activity', viewportWidth, navigationWidth));
+  const activityHeight = clampPanelWidth(activityHeightPreference, activityHeightBounds(viewportHeight, viewportWidth <= 660 ? 144 : 80));
   const scanSummary = scanOptions.find(item => item.scan_id === scanId);
   const scanTargets = scanSummary?.targets || [];
   const scanTargetLabel = scanTargets.length
@@ -331,6 +351,14 @@ export default function App() {
     media.addEventListener('change', changed);
     return () => media.removeEventListener('change', changed);
   }, []);
+  useEffect(() => {
+    const resized = () => { setViewportWidth(window.innerWidth); setViewportHeight(window.innerHeight); };
+    window.addEventListener('resize', resized);
+    return () => window.removeEventListener('resize', resized);
+  }, []);
+  useEffect(() => { localStorage.setItem('aidast:navigation-width', String(navigationPreference)); }, [navigationPreference]);
+  useEffect(() => { localStorage.setItem('aidast:activity-width', String(activityPreference)); }, [activityPreference]);
+  useEffect(() => { localStorage.setItem('aidast:activity-height', String(activityHeightPreference)); }, [activityHeightPreference]);
   useEffect(() => {
     if (!window.matchMedia('(max-width: 660px)').matches) return;
     navigation.current?.querySelector<HTMLElement>('.nav-item.active')?.scrollIntoView({ block: 'nearest', inline: 'center' });
@@ -404,6 +432,52 @@ export default function App() {
     const timer = snapshot?.status === 'running' ? window.setInterval(() => void load(), 3000) : undefined;
     return () => { abort.abort(); if (timer !== undefined) window.clearInterval(timer); };
   }, [demo, scanId, modal, page, snapshot?.status, snapshot?.stage, attackTaskRevision]);
+  useEffect(() => {
+    if (demo || !scanId || modal !== 'scan-progress' || snapshot?.scan_id !== scanId) return;
+    const abort = new AbortController();
+    reconAbort.current = abort;
+    setReconHistory({ scanId, logs: [], nextBefore: null });
+    setReconLoading(true);
+    setReconError('');
+    void (async () => {
+      try {
+        const base = import.meta.env.VITE_API_BASE_URL || location.origin;
+        const response = await fetch(new URL(`/api/v1/scans/${encodeURIComponent(scanId)}/recon-activity`, base), { signal: abort.signal, credentials: 'same-origin', cache: 'no-store' });
+        if (!response.ok) throw new Error('Could not load recon history.');
+        const page = parseReconActivityPage(await response.json(), scanId);
+        if (!page) throw new Error('Could not load recon history.');
+        if (!abort.signal.aborted) setReconHistory({ scanId, logs: page.logs, nextBefore: page.nextBefore });
+      } catch {
+        if (!abort.signal.aborted) setReconError('Could not load recon history.');
+      } finally {
+        if (!abort.signal.aborted) setReconLoading(false);
+      }
+    })();
+    return () => { abort.abort(); reconAbort.current = null; };
+  }, [demo, scanId, modal, snapshot?.scan_id, reconRevision]);
+  const loadMoreRecon = async () => {
+    const before = reconHistory?.scanId === scanId ? reconHistory.nextBefore : null;
+    const abort = reconAbort.current;
+    if (before === null || !abort || reconLoading) return;
+    setReconLoading(true);
+    setReconError('');
+    try {
+      const base = import.meta.env.VITE_API_BASE_URL || location.origin;
+      const url = new URL(`/api/v1/scans/${encodeURIComponent(scanId)}/recon-activity`, base);
+      url.searchParams.set('before', String(before));
+      const response = await fetch(url, { signal: abort.signal, credentials: 'same-origin', cache: 'no-store' });
+      if (!response.ok) throw new Error('Could not load recon history.');
+      const page = parseReconActivityPage(await response.json(), scanId);
+      if (!page || page.logs.some(log => log.id >= before)) throw new Error('Could not load recon history.');
+      if (!abort.signal.aborted) setReconHistory(current => current?.scanId === scanId
+        ? { scanId, logs: mergeReconActivityLogs(current.logs, page.logs), nextBefore: page.nextBefore }
+        : current);
+    } catch {
+      if (!abort.signal.aborted) setReconError('Could not load recon history.');
+    } finally {
+      if (!abort.signal.aborted) setReconLoading(false);
+    }
+  };
   useEffect(() => {
     if (demo) return;
     const abort = new AbortController();
@@ -488,6 +562,8 @@ export default function App() {
   useEffect(() => {
     const element = dialog.current;
     if (modal) {
+      element?.style.removeProperty('width');
+      element?.style.removeProperty('height');
       if (!element?.open) element?.showModal();
       element?.scrollTo(0, 0);
     } else if (element?.open) element.close();
@@ -884,13 +960,17 @@ export default function App() {
     {currentAttackTasks && currentAttackTasks.tasks.length === 0 && <p className="scan-progress-empty">{snapshot?.stage === 'Scope' || snapshot?.stage === 'Recon' ? tk("정찰이 끝나면 공격 작업이 생성됩니다.", "Attack tasks will be created after recon finishes.") : tk("아직 생성된 공격 작업이 없습니다.", "No attack tasks have been created yet.")}</p>}
     {!currentAttackTasks && !attackTaskError && <p className="scan-progress-empty">{tk("공격 작업을 불러오는 중입니다.", "Loading attack tasks.")}</p>}
   </section>;
-  const reconActivity = snapshot?.logs.filter(log => log.message_code === 'recon.activity') ?? [];
-  const latestReconActivity = reconActivity.at(-1);
+  const reconActivity = mergeReconActivityLogs(snapshot?.logs ?? [], reconHistory?.scanId === scanId ? reconHistory.logs : []);
+  const latestReconActivity = reconActivity[0];
+  const discoveredUrls = reconDiscoveries(reconActivity);
+  const observedUrls = discoveredUrls.filter(item => item.responseStatus !== null && item.responseStatus >= 200 && item.responseStatus < 400).length;
+  const latestReconPhase = latestReconActivity?.message_params?.phase;
+  const latestReconState = latestReconActivity?.message_params?.state;
   const scanControls = !demo && (snapshot?.status === 'running' || snapshot?.status === 'paused') ? <>
     <button className="secondary-button" onClick={() => void changePause(snapshot.status === 'running' ? 'pause' : 'continue')} disabled={!!pauseBusy || cancelling}>{pauseBusy === 'pause' ? tk("일시정지 처리 중…", "Pausing…") : pauseBusy === 'continue' ? tk("계속 처리 중…", "Continuing…") : snapshot.status === 'running' ? tk("일시정지", "Pause") : tk("계속", "Continue")}</button>
     <button className="secondary-button" onClick={() => void cancelScan()} disabled={cancelling || !!pauseBusy}>{cancelPhase === 'requesting' ? tk("취소 요청 전달 중…", "Sending cancellation request…") : cancelling ? tk("취소 확인 중…", "Confirming cancellation…") : tk("스캔 취소", "Cancel scan")}</button>
   </> : null;
-  const scanPanel = <Panel className="scan-summary-panel" title={demo ? tr('Local lab · API assessment') : scanTargetLabel} subtitle={demo ? tr('Synthetic fixture · isolated from program inventory') : `${snapshot?.program_name ? `${snapshot.program_name} · ` : ''}${scanId}`} action={<div className="scan-panel-actions"><Badge tone={snapshot?.status === 'failed' ? 'critical' : snapshot?.status === 'completed' ? 'success' : 'warning'}><span className="dot"/>{cancelling ? tk("취소 처리 중", "Cancelling") : tr(snapshot?.status || state)}</Badge>{scanControls}{!demo && retryAction === 'resume' && <button className="secondary-button" onClick={resumeScan} disabled={resuming}>{resuming ? tk("재실행 요청 중…", "Requesting rerun…") : tk("실패 단계부터 재실행", "Rerun from failed stage")}</button>}{!demo && retryAction === 'rescan' && <button className="secondary-button" onClick={openRepeatScan}>{tk("정찰부터 다시 스캔", "Rescan from recon")}</button>}{!demo && scanId && <button className="secondary-button" onClick={() => setModal('scan-progress')}>{tk("진행 창 열기", "Open progress window")}</button>}</div>}>
+  const scanPanel = <Panel className="scan-summary-panel" title={demo ? tr('Local lab · API assessment') : scanTargetLabel} subtitle={demo ? tr('Synthetic fixture · isolated from program inventory') : `${snapshot?.program_name ? `${snapshot.program_name} · ` : ''}${scanId}`} action={<div className="scan-panel-actions"><Badge tone={snapshot?.status === 'failed' ? 'critical' : snapshot?.status === 'completed' ? 'success' : 'warning'}><span className="dot"/>{cancelling ? tk("취소 처리 중", "Cancelling") : tr(snapshot?.status || state)}</Badge>{scanControls}{!demo && retryAction === 'resume' && <button className="secondary-button" onClick={resumeScan} disabled={resuming}>{resuming ? tk("재실행 요청 중…", "Requesting rerun…") : tk("실패 단계부터 재실행", "Rerun from failed stage")}</button>}{!demo && retryAction === 'rescan' && <button className="secondary-button" onClick={openRepeatScan}>{tk("정찰부터 다시 스캔", "Rescan from recon")}</button>}{!demo && scanId && <button className="secondary-button" onClick={() => setModal('scan-progress')}>{snapshot?.stage === 'Recon' ? tk("도구 작업·발견 URL 보기", "View tools and URLs") : tk("진행 창 열기", "Open progress window")}</button>}</div>}>
     {snapshot ? <><Pipeline snapshot={snapshot} language={language} reportDraft={reportDraftStatus}/>{cancelling && <p className="scan-stop-status" role="status">{cancelPhase === 'requesting' ? tk("취소 요청을 서버에 전달하고 있습니다.", "Sending the cancellation request to the server.") : tk("취소 요청을 접수했습니다. 실행 프로세스 종료와 저장된 상태 갱신을 확인하고 있습니다.", "Cancellation requested. Checking the process exit and saved status.")}</p>}{snapshot.status === 'paused' && !cancelling && <p className="scan-stop-status" role="status">{tk("스캔 일시정지 중 · 같은 실행을 이어가려면 ‘계속’을 누르세요.", "Scan paused. Select Continue to resume the same run.")}</p>}{snapshot.status === 'cancelled' && <p className="scan-stop-status is-done" role="status">{tk("스캔 취소 완료 · 실행 프로세스가 종료됐고 스캔 상태가 취소됨으로 저장됐습니다.", "Scan cancelled. The process exited and the cancelled status was saved.")}</p>}<div className="scan-stats"><div><span>{tr('Scan ID')}</span><strong className="mono">{snapshot.scan_id}</strong></div><div><span>{tr('Endpoints')}</span><strong>{snapshot.endpoints}</strong></div><div><span>{tk('기록된 HTTP 요청', 'Recorded HTTP requests')}</span><strong>{snapshot.requests.toLocaleString()}</strong>{snapshot.per_target_budget != null && <small>{tk('대상별 상한', 'Per-target limit')} {snapshot.per_target_budget.toLocaleString()}</small>}</div><div className="progress-stat"><span>{tr(snapshot.stage)} {tr('progress')} <b>{snapshot.progress}%</b></span><progress max="100" value={snapshot.progress} aria-label={`${tr(snapshot.stage)} ${tr('progress')}`}/></div></div>{snapshot.service_endpoints !== undefined && <p className="scan-recon-summary"><strong>{tk("서비스 URL 후보", "Candidate service URLs")}</strong> {tk(`${snapshot.service_endpoints}개`, `${snapshot.service_endpoints} candidates`)} <span>{tk(`· 실제 HTTP 응답 관측 ${snapshot.live_endpoints ?? 0}개`, `· ${snapshot.live_endpoints ?? 0} observed HTTP responses`)}</span></p>}{snapshot.stage === 'Recon' && <p className="scan-recon-summary"><strong>{tk("최근 정찰 작업", "Latest recon task")}</strong> {latestReconActivity ? localizeActivityMessage(language, latestReconActivity) : tk('이 실행에는 도구별 정찰 기록이 아직 없습니다.', 'This run has no tool-level recon records yet.')}</p>}{resumeError && <p className="form-error" role="alert">{resumeError}</p>}{pauseError && <p className="form-error" role="alert">{pauseError}</p>}{cancelError && <p className="form-error" role="alert">{cancelError}</p>}</> : <Empty title={tr(state === 'offline' ? 'Backend unavailable' : state === 'idle' ? 'No scan selected' : 'Loading scan snapshot')}>{tr(state === 'idle' ? 'Start a scan from an approved Scope to show its snapshot and activity here.' : 'Connect the REST snapshot endpoint to display scan state. Demo data is never substituted in live mode.')}</Empty>}
   </Panel>;
   const scanProgressContent = <div className="scan-progress-dialog">
@@ -901,7 +981,7 @@ export default function App() {
       <Badge tone={snapshot?.status === 'failed' ? 'critical' : snapshot?.status === 'completed' ? 'success' : 'warning'}>{cancelling ? tk("취소 처리 중", "Cancelling") : tr(snapshot?.status || state)}</Badge>
     </div>
     <div className="scan-progress-stats"><div><span>{tk("현재 단계", "Current stage")}</span><strong>{tr(snapshot?.stage || 'Waiting')}</strong></div><div><span>{tk("단계 진행률", "Stage progress")}</span><strong>{snapshot?.progress ?? 0}%</strong></div><div><span>{tk("경과 시간", "Elapsed time")}</span><strong role="timer">{formatActivityElapsed(scanElapsedSeconds, language)}</strong></div><div><span>{tk("기록된 HTTP 요청", "Recorded HTTP requests")}</span><strong>{snapshot?.requests.toLocaleString() ?? 0}</strong>{snapshot?.per_target_budget != null && <small>{tk("대상별 상한", "Per-target limit")} {snapshot.per_target_budget.toLocaleString()}</small>}</div></div>
-    {snapshot?.service_endpoints !== undefined && <p className="scan-recon-summary"><strong>{tk("정찰 URL", "Recon URLs")}</strong> {tk(`전체 ${snapshot.endpoints}개 · 서비스 후보 ${snapshot.service_endpoints}개 · 실제 HTTP 응답 관측 ${snapshot.live_endpoints ?? 0}개`, `${snapshot.endpoints} total · ${snapshot.service_endpoints} service candidates · ${snapshot.live_endpoints ?? 0} observed HTTP responses`)}</p>}
+    {snapshot?.service_endpoints !== undefined && <p className="scan-recon-summary"><strong>{tk("정찰 URL", "Recon URLs")}</strong> {tk(`전체 ${snapshot.endpoints}개 · 서비스 후보 ${snapshot.service_endpoints}개 · HTTP 응답 관측 ${snapshot.live_endpoints ?? 0}개 (404 포함 가능)`, `${snapshot.endpoints} total · ${snapshot.service_endpoints} service candidates · ${snapshot.live_endpoints ?? 0} HTTP responses observed (may include 404)`)}</p>}
     <progress aria-label={tk("스캔 단계 진행률", "Scan stage progress")} max="100" value={snapshot?.progress ?? 0}/>
     {cancelling && <p className="scan-stop-status" role="status">{cancelPhase === 'requesting' ? tk("취소 요청을 서버에 전달하고 있습니다.", "Sending the cancellation request to the server.") : tk("취소 요청 접수됨 · 실행 프로세스 종료와 저장된 상태 갱신을 확인하는 중입니다.", "Cancellation requested. Checking that the process exited and the saved status updated.")}</p>}
     {snapshot?.status === 'running' && !cancelling && <p className="scan-progress-working" role="status"><span className="dot"/> {tk(`${tr(snapshot.stage)} 단계 작업 중 · ${formatActivityElapsed(scanElapsedSeconds, language)}`, `${tr(snapshot.stage)} stage running · ${formatActivityElapsed(scanElapsedSeconds, language)}`)}{snapshot.progress === 0 ? tk(" · 다음 진행 이벤트를 기다리고 있습니다.", " · waiting for the next progress event.") : ''}</p>}
@@ -910,10 +990,24 @@ export default function App() {
     {snapshot?.status === 'cancelled' && <p className="scan-stop-status is-done" role="status">{tk("스캔 취소 완료 · 실행 프로세스가 종료됐고 스캔 상태가 취소됨으로 저장됐습니다. 다시 검사하려면 새 스캔을 시작하세요.", "Scan cancelled. The process exited and the cancelled status was saved. Start a new scan to test again.")}</p>}
     {resumeError && <p className="form-error" role="alert">{resumeError}</p>}
     {error && <p className="form-error" role="alert">{tr(error)}</p>}
-    {(snapshot?.stage === 'Recon' || reconActivity.length > 0) && <section className="scan-recon-activity" aria-label={tk("정찰 작업", "Recon tasks")}>
+    {(snapshot?.stage === 'Recon' || reconActivity.length > 0) && <section className="scan-discoveries" aria-label={tk("발견 URL과 HTTP 응답", "Discovered URLs and HTTP responses")}>
+      <div className="scan-discoveries-heading"><h3>{tk("발견 URL", "Discovered URLs")}</h3><span>{tk(`기록 ${discoveredUrls.length}개 · HTTP 2xx/3xx ${observedUrls}개`, `${discoveredUrls.length} recorded · ${observedUrls} HTTP 2xx/3xx`)}</span></div>
+      <p className="scan-discoveries-note">{tk("HTTP 상태는 해당 요청의 응답 기록입니다. 404는 유효 경로로 확인되지 않았으며, 200 응답도 기능 동작까지 검증한 것은 아닙니다.", "HTTP status is the recorded response to that request. A 404 does not confirm a valid route, and a 200 does not prove the feature works.")}</p>
+      {discoveredUrls.length ? <ul className="scan-discoveries-list">{discoveredUrls.map(item => <li key={`${item.method} ${item.url}`}>
+        <div><code>{item.method} {item.url}</code><span className={item.responseStatus === 404 || item.responseStatus === null || item.responseStatus >= 500 ? 'uncertain' : ''}>{item.responseStatus === null ? tk("HTTP 응답 미확인", "No HTTP response") : item.responseStatus === 404 ? tk("404 · 유효 경로 미확인", "404 · route unconfirmed") : `HTTP ${item.responseStatus} ${tk("응답 관측", "observed")}`}</span></div>
+        {item.source && <small>{tk("발견 출처", "Discovery source")} · {item.source}</small>}
+      </li>)}</ul> : <p className="scan-discoveries-empty">{snapshot?.service_endpoints ? tk("서비스 후보 수는 갱신됐지만 개별 URL 기록은 아직 도착하지 않았습니다. 정찰 결과가 정리되면 여기에 표시됩니다.", "Service counts updated, but individual URL records have not arrived yet. They appear after recon results are consolidated.") : tk("아직 기록된 URL이 없습니다.", "No URLs have been recorded yet.")}</p>}
+    </section>}
+    {(snapshot?.stage === 'Recon' || reconActivity.length > 0 || reconLoading || !!reconError) && <section className="scan-recon-activity" aria-label={tk("정찰 작업", "Recon tasks")}>
       <h3>{tk("정찰 작업", "Recon tasks")} <small>{tk(`${reconActivity.length}개 기록`, `${reconActivity.length} records`)}</small></h3>
-      {latestReconActivity && <p className="scan-recon-current"><strong>{tk("최근 작업", "Latest task")}</strong> {localizeActivityMessage(language, latestReconActivity)}</p>}
-      {reconActivity.length > 0 ? <div className="scan-recon-timeline">{reconActivity.slice(-30).reverse().map(log => <article key={log.id} className={log.level}><time dateTime={log.time}>{new Date(log.time).toLocaleTimeString(language === 'ko' ? 'ko-KR' : 'en-GB',{hour12:false})}</time><span>{localizeActivityMessage(language, log)}</span></article>)}</div> : <p className="scan-progress-empty">{tk("이 실행에는 도구별 정찰 기록이 없습니다. 새 기록이 도착하면 여기에 표시됩니다.", "This run has no tool-level recon records yet. New records will appear here.")}</p>}
+      {latestReconActivity && <div className="scan-recon-current"><p><strong>{latestReconState === 'started' ? tk("진행 중인 도구 작업", "Tool task in progress") : tk("최근 도구 기록", "Latest tool record")}</strong> {localizeActivityMessage(language, latestReconActivity)}</p>{reconActivityPurpose(language, latestReconPhase) && <p>{reconActivityPurpose(language, latestReconPhase)}</p>}</div>}
+      {reconActivity.length > 0 ? <div className="scan-recon-timeline">{reconActivity.map(log => <article key={log.id} className={log.level}><time dateTime={log.time}>{new Date(log.time).toLocaleTimeString('en-GB',{hour12:false})}</time><span>{localizeActivityMessage(language, log)}{log.message_params?.state === 'started' && reconActivityPurpose(language, log.message_params.phase) && <small>{reconActivityPurpose(language, log.message_params.phase)}</small>}</span></article>)}</div> : !reconLoading && <p className="scan-progress-empty">{tk("이 실행에는 도구별 정찰 기록이 없습니다. 새 기록이 도착하면 여기에 표시됩니다.", "This run has no tool-level recon records yet.")}</p>}
+      {(reconLoading || reconError || reconHistory?.scanId === scanId && reconHistory.nextBefore !== null) && <div className="scan-recon-pagination">
+        {reconLoading && <span role="status">{tr('Loading recon history…')}</span>}
+        {reconError && <span role="alert">{tr(reconError)}</span>}
+        {reconError && reconHistory?.nextBefore === null && <button className="secondary-button" onClick={() => setReconRevision(value => value + 1)}>{tr('Retry loading recon history')}</button>}
+        {reconHistory?.scanId === scanId && reconHistory.nextBefore !== null && <button className="secondary-button" onClick={() => void loadMoreRecon()} disabled={reconLoading}>{tr('Load earlier recon records')}</button>}
+      </div>}
     </section>}
     {!demo && attackTasksContent}
     <div className="scan-progress-log"><h3>{tk("스캔 활동", "Scan activity")} <small>{tk(`${snapshot?.logs.length ?? 0}개 기록`, `${snapshot?.logs.length ?? 0} records`)}</small></h3><div>{snapshot?.logs.slice(-50).map(log => <article key={log.id} className={log.level}><time dateTime={log.time}>{new Date(log.time).toLocaleTimeString(language === 'ko' ? 'ko-KR' : 'en-GB',{hour12:false})}</time><span>{tr(log.stage)}</span><p>{localizeActivityMessage(language, log)}</p></article>)}{!snapshot?.logs.length && <p className="scan-progress-empty">{tk("스캔 상태를 불러오는 중입니다. 기록이 도착하면 여기에 표시됩니다.", "Loading scan status. New records will appear here.")}</p>}</div></div>
@@ -1037,14 +1131,16 @@ export default function App() {
 
   return <div className={`app-shell ${compact ? 'compact-mode' : ''}`}>
     <a className="skip-link" href="#main-content">{tr('Skip to content')}</a>
-    <aside className="sidebar"><div className="brand" aria-label="DDalGak"><div className="brand-copy"><strong>DDalGak</strong><small>{tr('AI DAST tool')}</small></div><span className="brand-mobile" aria-hidden="true">DD</span></div>
+    <aside id="sidebar" className="sidebar" style={viewportWidth > 820 ? { width: navigationWidth } : undefined}><div className="brand" aria-label="DDalGak"><div className="brand-copy"><strong>DDalGak</strong><small>{tr('AI DAST tool')}</small></div><span className="brand-mobile" aria-hidden="true">DD</span></div>
       <nav ref={navigation} aria-label={tr('Main navigation')}><p className="nav-label">{tr('OPERATIONS')}</p>{pages.map((p,i) => <button key={p} aria-label={pageLabel(p)} title={pageLabel(p)} className={`nav-item ${p === 'Settings' ? 'mobile-settings-nav' : ''} ${page === p ? 'active' : ''}`} onClick={() => go(p)} aria-current={page === p ? 'page' : undefined}><Icon name={symbols[i]}/><span>{p === 'Scopes / Programs' ? <><span className="desktop-nav-label">{pageLabel(p)}</span><span className="mobile-nav-label">{tk("스코프", "Scope")}</span></> : pageLabel(p)}</span>{i === 1 && <em>{totalProgramCount}</em>}{i === 3 && snapshot && <em>{findings.length}</em>}</button>)}</nav>
       <div className="sidebar-bottom"><button aria-label={tr('Settings')} title={tr('Settings')} className={`nav-item ${page === 'Settings' ? 'active' : ''}`} aria-current={page === 'Settings' ? 'page' : undefined} onClick={() => go('Settings')}><Icon name="settings"/><span>{tr('Settings')}</span></button><div className="operator"><div className="avatar">LO</div><div><strong>{tr('Local operator')}</strong><small>{tr(demo ? 'Demo workspace' : 'Backend session')}</small></div><span className="dot"/></div></div>
+      {viewportWidth > 820 && <ResizeHandle className="navigation-resizer" label={tk('탐색 메뉴 너비 조절', 'Resize navigation menu')} controls="sidebar" value={navigationWidth} direction={1} bounds={() => panelBounds('navigation', window.innerWidth, activityWidth)} onResize={setNavigationPreference}/>}
     </aside>
-      <div className="main-shell"><header className="topbar"><div className="breadcrumb">{tr('Workspace')} <span>/</span> <strong>{pageLabel(page)}</strong></div><div className="top-actions"><label className="language-select"><span className="sr-only">{tr('Language')}</span><select aria-label={tr('Language')} value={language} onChange={event => setLanguage(event.target.value as Language)}><option value="ko">한국어</option><option value="en">English</option></select></label><button className="icon-button theme-toggle" title={tr(`Switch to ${resolvedTheme === 'dark' ? 'light' : 'dark'} mode`)} aria-label={tr(`Switch to ${resolvedTheme === 'dark' ? 'light' : 'dark'} mode`)} onClick={() => setTheme(resolvedTheme === 'dark' ? 'light' : 'dark')}><Icon name={resolvedTheme === 'dark' ? 'sun' : 'moon'} size={16}/></button></div></header>
-      {demo && <div className="demo-strip"><Icon name="terminal" size={14}/><span>{tr('DEMO DATA')}<b>·</b>{tr('A synthetic workflow. No network scans or program activity.')}</span><button onClick={() => go('Settings')}>{tr('Connection details')} <Icon name="arrow" size={13}/></button></div>}
-      <div className={`workspace-grid ${collapsed ? 'activity-collapsed' : ''}`}><main id="main-content" tabIndex={-1} className="content-column">
+      <div className="main-shell" style={viewportWidth > 820 ? { marginLeft: navigationWidth } : undefined}><header className="topbar"><div className="breadcrumb">{tr('Workspace')} <span>/</span> <strong>{pageLabel(page)}</strong></div><div className="top-actions"><label className="language-select"><span className="sr-only">{tr('Language')}</span><select aria-label={tr('Language')} value={language} onChange={event => setLanguage(event.target.value as Language)}><option value="ko">한국어</option><option value="en">English</option></select></label><button className="icon-button theme-toggle" title={tr(`Switch to ${resolvedTheme === 'dark' ? 'light' : 'dark'} mode`)} aria-label={tr(`Switch to ${resolvedTheme === 'dark' ? 'light' : 'dark'} mode`)} onClick={() => setTheme(resolvedTheme === 'dark' ? 'light' : 'dark')}><Icon name={resolvedTheme === 'dark' ? 'sun' : 'moon'} size={16}/></button></div></header>
+      {demo && <div className={`demo-strip ${samplePreview ? 'sample-preview' : ''}`}><Icon name="terminal" size={14}/><span>{tr('DEMO DATA')}<b>·</b>{tr('A synthetic workflow. No network scans or program activity.')}</span><button onClick={samplePreview ? () => location.assign(liveUrl.href) : () => go('Settings')}>{samplePreview ? tk('실제 데이터로 돌아가기', 'Return to live data') : tr('Connection details')} <Icon name="arrow" size={13}/></button></div>}
+      <div className={`workspace-grid ${collapsed ? 'activity-collapsed' : ''}`} style={viewportWidth > 1100 && !collapsed ? { gridTemplateColumns: `minmax(0,1fr) ${activityWidth}px` } : undefined}><main id="main-content" tabIndex={-1} className="content-column">
         <div className="page-heading"><div><p className="eyebrow">{tr(page === 'Overview' ? 'YOUR OPERATIONS, AT A GLANCE' : 'AI DAST / WORKSPACE')}</p><h1>{tr(page === 'Overview' ? 'Security overview' : page)}</h1><p>{tr(page === 'Overview' ? 'From approved scope to evidence you can stand behind.' : page === 'Scopes / Programs' ? 'Program inventory is a starting point. Approved scope defines execution.' : page === 'Scans' ? 'One deterministic pipeline. Traceable decisions at every stage.' : page === 'Findings' ? 'Signals become findings. Validation establishes the verdict.' : page === 'Validation' ? 'Reproduction, controls, and evidence before confirmation.' : page === 'Reports' ? 'Reviewable local drafts. Nothing is submitted automatically.' : page === 'Audit log' ? 'Trace the decisions and provenance behind each run.' : 'Connection, privacy, and display preferences.')}</p></div><span className="heading-tag">{demo ? tk("데모 / 042", "Demo / 042") : tk("라이브 / V1", "Live / V1")}</span></div>
+        {!demo && (page === 'Findings' || page === 'Validation' || page === 'Reports') && <div className="scope-page-actions"><div><strong>{tk('예시 데이터', 'Example data')}</strong><p>{tk('취약점 · 검증 · 보고서 예시를 실제 스캔 결과와 분리해 살펴봅니다.', 'Explore synthetic findings, validations, and reports separately from live scans.')}</p></div><a className="secondary-button" href={sampleUrl.href}>{tk('예시 보기', 'View examples')}</a></div>}
         {page === 'Scopes / Programs' && <div className="scope-page-actions"><div><strong>{tr('Scope intake')}</strong><p>{tr('Register a bug bounty program before collecting and approving its executable Scope.')}</p></div><button className="primary-button" onClick={() => { setScopeError(''); setModal('scope'); }}><Icon name="plus" size={15}/>{tr('Add program')}</button></div>}
         {page === 'Scans' && <div className="scope-page-actions"><div><strong>{tr('Start scan')}</strong><p>{tr('Choose a verified approved Scope and configure a new scan.')}</p></div><button className="primary-button" onClick={openNewScan}><Icon name="plus" size={15}/>{tr('New scan')}</button></div>}
         {page === 'Overview' && <>
@@ -1159,7 +1255,9 @@ export default function App() {
         </>}
         {page === 'Settings' && <><Panel title={tr('Connection')} subtitle={tr('Configured at build time; no secrets in browser settings')}><dl className="detail-grid"><div><dt>{tr('Transport')}</dt><dd><Badge tone={demo ? 'warning' : 'success'}>{tr(demo ? 'Demo / local fixture' : 'Live / read-only')}</Badge></dd></div><div><dt>{tr('Connection state')}</dt><dd>{tr(state)}</dd></div><div><dt>{tr('Result storage')}</dt><dd className="mono">{tr(resultRoot || 'Unavailable')}</dd></div><div><dt>{tr('Snapshot endpoint')}</dt><dd className="mono">GET /api/v1/scans/:id</dd></div><div><dt>{tr('Delta stream')}</dt><dd className="mono">/ws/scans/:id?after=:event_id</dd></div><div><dt>{tr('Protocol')}</dt><dd>{tr('Version 1 · contiguous event IDs')}</dd></div><div><dt>{tr('Activity retention')}</dt><dd>{tr('Latest 500 events in memory')}</dd></div></dl><div className="panel-bottom"><p>{tr('Set VITE_TRANSPORT=live and VITE_SCAN_ID to connect an implemented backend. Live mode never falls back to demo data.')}</p><button className="secondary-button" onClick={refresh}>{tr(demo ? 'Restart demo' : 'Reload snapshot')}</button></div></Panel><Panel title={tr('Workspace preferences')} subtitle={tr('Theme is saved locally; operational data is never uploaded')}><div className="setting-row"><div><h3>{tr('Appearance')}</h3><p>{tr('Follow the system theme or keep this workspace light or dark.')}</p></div><select aria-label={tr('Color theme')} value={theme} onChange={event => setTheme(event.target.value as ThemeChoice)}><option value="system">{tr('System')}</option><option value="dark">{tr('Dark')}</option><option value="light">{tr('Light')}</option></select></div><div className="setting-row"><div><h3>{tr('Language')}</h3><p>{tr('Choose the dashboard display language.')}</p></div><select aria-label={tr('Language')} value={language} onChange={event => setLanguage(event.target.value as Language)}><option value="ko">한국어</option><option value="en">English</option></select></div><div className="setting-row"><div><h3>{tr('Compact density')}</h3><p>{tr('Reduce spacing in data tables and activity.')}</p></div><input aria-label={tr('Compact density')} type="checkbox" checked={compact} onChange={e => setCompact(e.target.checked)}/></div><div className="setting-row"><div><h3>{tr('Reveal private program name')}</h3><p>{tr('Hidden by default. Resets when the page reloads.')}</p></div><input aria-label={tr('Reveal private program name')} type="checkbox" checked={privateVisible} onChange={e => setPrivateVisible(e.target.checked)}/></div></Panel><Panel title={tr('Backend integration remaining')} subtitle={tr('Implemented boundaries stay separate from future operator workflows')}><ul className="integration-list"><li>{tr('Authentication and authorization for any deployment beyond the loopback-only local operator.')}</li><li>{tr('Evidence-backed Validation case decisions and review actions.')}</li><li>{tr('Report generation and platform submission remain explicit CLI/operator actions.')}</li></ul></Panel></>}
       </main>
-      <aside className={`activity-panel ${collapsed ? 'collapsed' : ''}`} aria-label={tr('Persistent live activity')}>
+      <aside id="activity-panel" className={`activity-panel ${collapsed ? 'collapsed' : ''}`} aria-label={tr('Persistent live activity')} style={viewportWidth > 820 && viewportWidth <= 900 ? { left: navigationWidth, ...(!collapsed ? { height: activityHeight } : {}) } : viewportWidth <= 1100 && !collapsed ? { height: activityHeight } : undefined}>
+        {viewportWidth > 1100 && !collapsed && <ResizeHandle className="activity-resizer" label={tk('실시간 활동 패널 너비 조절', 'Resize live activity panel')} controls="activity-panel" value={activityWidth} direction={-1} bounds={() => panelBounds('activity', window.innerWidth, navigationWidth)} onResize={setActivityPreference}/>}
+        {viewportWidth <= 1100 && !collapsed && <ResizeHandle className="activity-height-resizer" axis="vertical" label={tk('실시간 활동 패널 높이 조절', 'Resize live activity panel height')} controls="activity-panel" value={activityHeight} direction={-1} bounds={() => activityHeightBounds(window.innerHeight, window.innerWidth <= 660 ? 144 : 80)} onResize={setActivityHeightPreference}/>}
         <div className="activity-heading"><div><Icon name="terminal" size={17}/><h2>{tr('Live activity')}</h2></div><button className="icon-button" onClick={() => setCollapsed(v => !v)} aria-label={tr(collapsed ? 'Expand activity' : 'Collapse activity')} aria-expanded={!collapsed}>{collapsed ? '+' : '−'}</button></div>
         {!collapsed && <>
           {(scopeActive || scanId || demo) && <div className="activity-source">
@@ -1183,7 +1281,6 @@ export default function App() {
             {hasActivity && visibleLogs.length === 0 && !showDashboardError && !showScopeWorking && <p className="table-empty">{tr('No matching events.')}</p>}
             {hasActivity && <div className="stream-end"><span className="dot"/>{scopeActive ? tk(`스코프 수집 진행 중 · ${scopeElapsedLabel}`, `Scope collection running · ${scopeElapsedLabel}`) : tr(paused ? 'Following paused · events still arrive' : snapshot?.status === 'running' ? 'Waiting for the next event' : 'End of available activity')}</div>}
           </div>
-          <footer className="activity-footer"><Icon name="lock" size={13}/><p>{tr(demo ? 'Fixtures contain no credentials. Live events must be redacted by the server.' : 'Server-side redaction required. Never stream tokens, cookies, or sensitive bodies.')}</p></footer>
         </>}
       </aside>
       </div>
