@@ -386,7 +386,9 @@ class DashboardProjector:
                 if active_task is not None:
                     activity = _RECON_ACTIVITY.get(str(active_task["stage"]).upper(), "Running Recon task")
                 elif conn.execute(
-                    "SELECT 1 FROM pipeline_runs WHERE scan_id=? LIMIT 1", (scan_id,)
+                    """SELECT 1 FROM pipeline_runs WHERE scan_id=? AND
+                    status IN ('success','failed','skipped','completed') LIMIT 1""",
+                    (scan_id,),
                 ).fetchone():
                     activity = "Processing Recon results"
         stage_statuses: dict[str, str] = {}
@@ -410,10 +412,63 @@ class DashboardProjector:
                     (current["stage_run_id"],),
                 ).fetchone()[0]
             )
+        if stage_name == "Recon" and "pipeline_runs" in tables:
+            task_total, task_done = conn.execute(
+                """SELECT count(*), count(*) FILTER (
+                    WHERE p.status IN ('success','failed','skipped','completed')
+                ) FROM pipeline_runs p JOIN (
+                    SELECT max(rowid) AS latest_row FROM pipeline_runs
+                    WHERE scan_id=? AND task_id IS NOT NULL GROUP BY task_id
+                ) latest ON latest.latest_row=p.rowid""",
+                (scan_id,),
+            ).fetchone()
+        if stage_name == "Validation" and current is not None and "validation_cases" in tables:
+            task_total, task_done = conn.execute(
+                """SELECT count(*), COALESCE(sum(CASE processing_phase
+                    WHEN 'blind_replay' THEN 25
+                    WHEN 'developing' THEN 25
+                    WHEN 'unblinding' THEN 75
+                    WHEN 'completed' THEN 100
+                    ELSE 0 END), 0)
+                FROM validation_cases WHERE scan_id=? AND latest_stage_run_id=?""",
+                (scan_id, current["stage_run_id"]),
+            ).fetchone()
+            task_total *= 100
+        if stage_name == "Report" and "validation_cases" in tables:
+            cases = conn.execute(
+                """SELECT case_id FROM validation_cases WHERE scan_id=?
+                AND current_status='CONFIRMED' AND processing_phase='completed'
+                AND decision_stage_run_id=latest_stage_run_id""",
+                (scan_id,),
+            ).fetchall()
+            task_total, task_done = len(cases) * 2, 0
+            for case in cases:
+                case_id = str(case["case_id"])
+                directory = (case_id if re.fullmatch(r"[A-Za-z0-9_-]{1,128}", case_id)
+                             else "case_" + hashlib.sha256(case_id.encode()).hexdigest())
+                report_path = self.result_root / "ReportRun" / scan_id / directory / "Report.db"
+                if not report_path.is_file() or report_path.is_symlink():
+                    continue
+                try:
+                    report_path.resolve().relative_to(self.result_root)
+                    with closing(self._source(report_path)) as report:
+                        run = report.execute(
+                            "SELECT report_id FROM report_runs WHERE scan_id=? AND case_id=?",
+                            (scan_id, case_id),
+                        ).fetchone()
+                        if run is not None:
+                            task_done += 1
+                            if report.execute(
+                                "SELECT 1 FROM report_drafts WHERE report_id=?",
+                                (run["report_id"],),
+                            ).fetchone():
+                                task_done += 1
+                except (OSError, sqlite3.Error, ValueError):
+                    continue
         if current is not None and current["status"] in {"completed", "skipped"}:
             progress = 100
         elif task_total:
-            progress = round(task_done / task_total * 100)
+            progress = min(99, round(task_done / task_total * 100))
         else:
             progress = 0
 
@@ -696,8 +751,12 @@ class DashboardProjector:
         now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
         if previous:
             changes: list[tuple[str, dict[str, Any]]] = []
-            if state["stage"] != previous.get("stage"):
-                changes.append(("stage.status.changed", {"stage": state["stage"]}))
+            if (state["stage"] != previous.get("stage")
+                    or state["stage_statuses"] != previous.get("stage_statuses")):
+                changes.append(("stage.status.changed", {
+                    "stage": state["stage"],
+                    "stage_statuses": state["stage_statuses"],
+                }))
             if state["status"] != previous.get("status"):
                 changes.append(("scan.status.changed", {"status": state["status"]}))
             if any(state[key] != previous.get(key) for key in (
