@@ -6,7 +6,7 @@ import json
 import sqlite3
 from contextlib import closing
 from pathlib import Path
-from typing import Any, Callable, Iterable, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Callable, Iterable, Literal, Protocol
 
 from pydantic import ValidationError as PydanticValidationError
 
@@ -14,6 +14,7 @@ from aidast.pipeline.lifecycle import finish_stage_run, resume_validation_stage_
 from aidast.recon.policy import TargetPolicy
 
 from ..core.decision import DecisionEngine, DecisionInput
+from ..core.profile_evidence import evaluate_profile_evidence, fit_profile_audit
 from ..core.integrity import CandidateIntegrityError, CandidateIntegrityGate, ValidatedCandidate
 from ..core.matching import KnownCandidate, KnownMatcher, MATCHER_VERSION
 from ..contracts.eligibility import (
@@ -27,6 +28,15 @@ from ..contracts.models import (BlindAssessment, ClaimComparison, ValidationStag
 from ..persistence.repository import ValidationRepository
 from ..contracts.models import PrerequisiteResolverPort, ReproductionObservation, ReproductionPort
 from ..contracts.impact_development import impact_action_document
+from ..contracts.runtime_semantics import (
+    bound_profile_proof_assessment, bound_source_leak_axis_citations,
+)
+from .blind_consistency import bound_revalidated_assessment
+
+if TYPE_CHECKING:
+    from ..execution.impact_development import (
+        ImpactDevelopmentRequest, VerifiedImpactPreconditions,
+    )
 
 
 class ValidationCoordinatorError(RuntimeError):
@@ -48,13 +58,19 @@ class PolicyProvider(Protocol):
 
 
 def _impact_planning_context(candidate: ValidatedCandidate,
-                             observations: tuple[dict[str, Any], ...]
+                             observations: tuple[dict[str, Any], ...], *,
+                             verified_preconditions: tuple[dict[str, Any], ...] = ()
                              ) -> tuple[dict[str, Any], ...]:
     """Give the planner only gated request provenance and non-secret marker receipts."""
-    return (*observations, {
+    provenance = ({
         "context_kind": "verified_attack_source_requests",
         "requests": list(candidate.source_requests),
-    }, {
+    },)
+    verified = ({
+        "context_kind": "verified_impact_precondition_observations",
+        "observations": list(verified_preconditions),
+    },) if verified_preconditions else ()
+    return (*observations, *provenance, *verified, {
         "context_kind": "immutable_impact_execution_capabilities",
         "capabilities": [{
             "contract_id": action.contract_id,
@@ -64,10 +80,6 @@ def _impact_planning_context(candidate: ValidatedCandidate,
             "request": action.request.model_dump(mode="json"),
             "assertions": [assertion.model_dump(mode="json") for assertion in action.assertions],
             "credential_roles": list(action.credential_roles),
-            "precondition_observation": (
-                action.precondition_observation.model_dump(mode="json")
-                if action.precondition_observation is not None else None
-            ),
             "contract_sha256": canonical_sha256(impact_action_document(action)),
         } for action in candidate.impact_development_actions],
     })
@@ -82,7 +94,11 @@ class ValidationCoordinator:
                  scope_source: ScopePolicySource | None = None,
                  prerequisite_resolver: PrerequisiteResolverPort | None = None,
                  impact_development_port: Callable | None = None,
-                 impact_agent_factory: Callable[[str], Any] | None = None):
+                 impact_agent_factory: Callable[[str], Any] | None = None,
+                 impact_precondition_verifier: Callable[
+                     [ValidatedCandidate, ImpactDevelopmentRequest],
+                     VerifiedImpactPreconditions | dict[str, Any] | None,
+                 ] | None = None):
         self.db_path = Path(db_path).expanduser().resolve()
         self.agent = agent
         self.eligibility_agent = eligibility_agent
@@ -94,6 +110,7 @@ class ValidationCoordinator:
         self.prerequisite_resolver = prerequisite_resolver
         self.impact_development_port = impact_development_port
         self.impact_agent_factory = impact_agent_factory
+        self.impact_precondition_verifier = impact_precondition_verifier
         self._impact_agents: list[Any] = []
         self._impact_development_records: list[dict[str, Any]] = []
         self.engine = DecisionEngine()
@@ -412,6 +429,7 @@ class ValidationCoordinator:
                        allow_impact_hypotheses: bool) -> bool:
         self._impact_development_records = []
         version = case["state_version"]
+        development_admission_reason: str | None = None
 
         def stop_incomplete_replay(observations, evidence_ids):
             if not any(self._nonproof_transport_observation(item) for item in observations):
@@ -528,12 +546,58 @@ class ValidationCoordinator:
                 ).fetchall()
                 evidence_ids.extend(row[0] for row in development_evidence
                                     if row[0] not in evidence_ids)
+            pre_impact = conn.execute(
+                """SELECT evidence_id,details_json,content_sha256 FROM validation_evidence
+                   WHERE case_id=? AND stage_run_id=?
+                     AND evidence_kind='blind_assessment_pre_impact'""",
+                (case["case_id"], stage_run_id),
+            ).fetchone()
+            pre_impact_raw_axes = None
+            if pre_impact is not None:
+                try:
+                    pre_impact_document = json.loads(pre_impact["details_json"])
+                    if canonical_sha256(pre_impact_document) != pre_impact["content_sha256"]:
+                        raise ValueError("pre-impact digest mismatch")
+                    stored_raw_axes = pre_impact_document.get("raw_axes")
+                    if (stored_raw_axes is not None
+                            and (not isinstance(stored_raw_axes, list)
+                                 or len(stored_raw_axes) != 3
+                                 or any(type(score) is not int or not 0 <= score <= 3
+                                        for score in stored_raw_axes))):
+                        raise ValueError("pre-impact raw axes are invalid")
+                    pre_impact_raw_axes = stored_raw_axes
+                except (TypeError, ValueError) as exc:
+                    raise ValidationCoordinatorError("stored pre-impact assessment is invalid") from exc
+                evidence_ids.append(pre_impact[0])
+            profile_audit_id = self._profile_evidence_audit(
+                conn, repo, candidate, case["case_id"], stage_run_id,
+                assessment, observations, raw_axes=pre_impact_raw_axes,
+            )
+            evidence_ids.append(profile_audit_id)
             evidence_ids.append(assessment_evidence)
             development_used = bool(conn.execute(
                 "SELECT 1 FROM validation_development_actions WHERE case_id=? AND stage_run_id=? LIMIT 1",
                 (case["case_id"], stage_run_id),
             ).fetchone())
         else:
+            sealed_preimpact = None
+            if resuming:
+                saved = conn.execute(
+                    """SELECT details_json,content_sha256 FROM validation_evidence
+                       WHERE case_id=? AND stage_run_id=?
+                         AND evidence_kind='blind_assessment_pre_impact'""",
+                    (case["case_id"], stage_run_id),
+                ).fetchall()
+                if len(saved) > 1:
+                    raise ValidationCoordinatorError("multiple pre-impact assessments in one stage")
+                if saved:
+                    document = json.loads(saved[0]["details_json"])
+                    if (canonical_sha256(document) != saved[0]["content_sha256"]
+                            or not isinstance(document.get("effective_assessment"), dict)):
+                        raise ValidationCoordinatorError("stored pre-impact assessment is invalid")
+                    sealed_preimpact = BlindAssessment.model_validate_json(
+                        canonical_json(document["effective_assessment"])
+                    )
             recovered = self._completed_batch(conn, case["case_id"], stage_run_id) if resuming else None
             if recovered is None:
                 if self.reproduction is None:
@@ -575,26 +639,43 @@ class ValidationCoordinator:
                 evidence_ids += extra_evidence
                 if stop_incomplete_replay(observations, evidence_ids):
                     return True
-            try:
-                assessment = self._assessment(blind_view, tuple(observations))
-            except ValidationCoordinatorError:
-                repo.finalize(
-                    case["case_id"], stage_run_id=stage_run_id, expected_version=version,
-                    status="INCONCLUSIVE", decision={"reason": "agent_schema_invalid",
-                    "phase": "blind_assessment"}, evidence_ids=evidence_ids,
-                )
-                return True
+            if sealed_preimpact is not None:
+                assessment = sealed_preimpact
+                development_evidence = conn.execute(
+                    """SELECT evidence_id FROM validation_evidence
+                       WHERE case_id=? AND stage_run_id=?
+                         AND development_action_id IS NOT NULL
+                       ORDER BY created_at,evidence_id""",
+                    (case["case_id"], stage_run_id),
+                ).fetchall()
+                evidence_ids = [row[0] for row in development_evidence] + evidence_ids
+                development_used = bool(conn.execute(
+                    "SELECT 1 FROM validation_development_actions "
+                    "WHERE case_id=? AND stage_run_id=? LIMIT 1",
+                    (case["case_id"], stage_run_id),
+                ).fetchone())
+            else:
+                try:
+                    assessment = self._assessment(blind_view, tuple(observations))
+                except ValidationCoordinatorError:
+                    repo.finalize(
+                        case["case_id"], stage_run_id=stage_run_id, expected_version=version,
+                        status="INCONCLUSIVE", decision={"reason": "agent_schema_invalid",
+                        "phase": "blind_assessment"}, evidence_ids=evidence_ids,
+                    )
+                    return True
             self._validate_assessment_refs(assessment, case["case_id"], evidence_ids, observations)
-            development_used = False
-            if assessment.blocker_axis in {
+            if sealed_preimpact is None:
+                development_used = False
+            if sealed_preimpact is None and assessment.blocker_axis in {
                 "identity_auth", "state_setup", "encoding_transport", "timing_concurrency"
             } and self._development_unavailable_reason(
                 candidate, assessment.blocker_axis
             ) is None:
                 development_used = True
-                succeeded, development_evidence = self._develop(
+                succeeded, development_evidence, development_admission_reason = self._develop(
                     repo, candidate, stage_run_id, assessment.blocker_axis,
-                    policy=policy,
+                    policy=policy, observations=tuple(observations),
                 )
                 evidence_ids = development_evidence + evidence_ids
                 repo.set_processing_phase(
@@ -621,11 +702,77 @@ class ValidationCoordinator:
                     self._validate_assessment_refs(
                         assessment, case["case_id"], evidence_ids, observations
                     )
-            if (allow_impact_hypotheses and self.impact_development_port is not None
+            raw_axes = [assessment.impact_boundary.score,
+                        assessment.impact_sensitivity.score,
+                        assessment.impact_actor_requirements.score]
+            runtime = candidate.staged._blind_case.runtime_contract
+            proof_bounded, proof_rule = bound_profile_proof_assessment(
+                candidate.profile.profile, runtime, assessment,
+            )
+            if (case.get("current_status") == "UNDERPOWERED" or
+                    (allow_impact_hypotheses and self.impact_development_port is not None
+                     and candidate.impact_development_actions)
+                    or proof_rule is not None
+                    or candidate.profile.profile.target_expected_signal.kind
+                       == "hunt-source-leak_verified"):
+                existing_audits = conn.execute(
+                    """SELECT evidence_id,details_json,content_sha256 FROM validation_evidence
+                       WHERE case_id=? AND stage_run_id=?
+                         AND evidence_kind='blind_assessment_pre_impact'""",
+                    (case["case_id"], stage_run_id),
+                ).fetchall()
+                if len(existing_audits) > 1:
+                    raise ValidationCoordinatorError("multiple pre-impact assessments in one stage")
+                if existing_audits:
+                    existing = existing_audits[0]
+                    if sealed_preimpact is None:
+                        raise ValidationCoordinatorError("pre-impact assessment state is missing")
+                    evidence_ids.append(existing["evidence_id"])
+                else:
+                    assessment, pre_impact_audit = bound_revalidated_assessment(
+                        conn, case, stage_run_id, assessment,
+                    )
+                    assessment, _ = bound_profile_proof_assessment(
+                        candidate.profile.profile, runtime, assessment,
+                    )
+                    assessment, grounding_rules = bound_source_leak_axis_citations(
+                        candidate.profile.profile, assessment, observations,
+                    )
+                    pre_impact_audit["effective_axes"] = [
+                        assessment.impact_boundary.score,
+                        assessment.impact_sensitivity.score,
+                        assessment.impact_actor_requirements.score,
+                    ]
+                    if proof_rule is not None:
+                        pre_impact_audit["profile_proof_rule"] = proof_rule
+                    pre_impact_audit["axis_grounding_rules"] = list(grounding_rules)
+                    pre_impact_audit["effective_assessment"] = assessment.model_dump(mode="json")
+                    pre_impact_document = canonical_json(pre_impact_audit)
+                    evidence_ids.append(repo.add_evidence(
+                        case_id=case["case_id"], stage_run_id=stage_run_id,
+                        evidence_kind="blind_assessment_pre_impact",
+                        details=pre_impact_audit,
+                        content_sha256=canonical_sha256(pre_impact_audit),
+                        content_length=len(pre_impact_document.encode("utf-8")),
+                    ))
+            else:
+                assessment = proof_bounded
+            from ..core.decision import evaluate_impact
+            impact_before_development = evaluate_impact(
+                assessment.impact_boundary.score,
+                assessment.impact_sensitivity.score,
+                assessment.impact_actor_requirements.score,
+            )
+            if (assessment.reproduced is True and impact_before_development.underpowered
+                    and allow_impact_hypotheses
+                    and self.impact_development_port is not None
                     and candidate.impact_development_actions):
                 assessment = self._develop_impact(
                     repo, candidate, stage_run_id, assessment,
                     observations=tuple(observations), evidence_ids=evidence_ids,
+                )
+                repo.set_processing_phase(
+                    case["case_id"], stage_run_id=stage_run_id, phase="blind_replay",
                 )
             assessment_sha = candidate.staged.freeze_assessment(assessment)
             assessment_evidence = repo.add_evidence(
@@ -638,6 +785,11 @@ class ValidationCoordinator:
                 case["case_id"], stage_run_id=stage_run_id, expected_version=version,
                 assessment_sha256=assessment_sha,
             )
+            profile_audit_id = self._profile_evidence_audit(
+                conn, repo, candidate, case["case_id"], stage_run_id,
+                assessment, observations, raw_axes=raw_axes,
+            )
+            evidence_ids.append(profile_audit_id)
         gate = CandidateIntegrityGate(conn)
         if case["target_kind"] == "chain":
             current_candidate = gate.validate_chain(
@@ -714,7 +866,11 @@ class ValidationCoordinator:
                     assessment_id=eligibility_id, evidence_ids=tuple(evidence_ids),
                 )
             # Recovery can load the same sealed rows in a different attempt order.
-            post_evidence_ids = tuple(sorted(evidence_ids))
+            # Audit-only findings must not influence the scope eligibility Agent.
+            post_evidence_ids = tuple(sorted(
+                evidence_id for evidence_id in evidence_ids
+                if evidence_id != profile_audit_id
+            ))
             summaries = repo.eligibility_evidence_summaries(
                 case_id=case["case_id"], stage_run_id=stage_run_id,
                 evidence_ids=post_evidence_ids,
@@ -753,6 +909,9 @@ class ValidationCoordinator:
         )
         from ..core.decision import evaluate_impact
         impact_result = evaluate_impact(*impact_tuple)
+        contradictory_reproduction = bool(
+            assessment.reproduced is False and targets and all(targets)
+        )
         development_unavailable_reason = (
             self._development_unavailable_reason(candidate, assessment.blocker_axis)
             if assessment.blocker_axis in {
@@ -771,6 +930,7 @@ class ValidationCoordinator:
             ),
             topology_or_unknown_cause=(
                 assessment.blocker_axis == "environment_topology"
+                or contradictory_reproduction
                 or (
                     assessment.reproduced is None
                     and assessment.blocker_axis is None
@@ -793,8 +953,14 @@ class ValidationCoordinator:
             "claim_comparison": comparison.model_dump(mode="json"),
             "evidence_ids": evidence_ids,
         }
+        if contradictory_reproduction:
+            decision["blind_replay_consistency"] = "assessment_denied_positive_replay"
         if development_unavailable_reason is not None:
             decision["development_unavailable_reason"] = development_unavailable_reason
+        if development_admission_reason is not None:
+            decision["development_admission_reason"] = development_admission_reason
+            if development_admission_reason == "previous_development_outcome_unknown":
+                status = "INCONCLUSIVE"
         if self._impact_development_records:
             decision["impact_development"] = self._impact_development_records
         if status == "UNDERPOWERED" and allow_impact_hypotheses:
@@ -1037,6 +1203,52 @@ class ValidationCoordinator:
         return observations, [row["evidence_id"] for row in rows]
 
     @staticmethod
+    def _profile_evidence_audit(
+        conn: sqlite3.Connection, repo: ValidationRepository,
+        candidate: ValidatedCandidate, case_id: str, stage_run_id: str,
+        assessment: BlindAssessment, observations: Iterable[dict[str, Any]],
+        *, raw_axes: list[int] | None = None,
+    ) -> str:
+        """Seal one replay-grounded semantic audit per case/stage/assessment."""
+        rows = conn.execute(
+            """SELECT evidence_id,details_json,content_sha256 FROM validation_evidence
+               WHERE case_id=? AND stage_run_id=?
+                 AND evidence_kind='blind_profile_evidence_audit'""",
+            (case_id, stage_run_id),
+        ).fetchall()
+        if len(rows) > 1:
+            raise ValidationCoordinatorError("multiple profile evidence audits in one stage")
+        if rows:
+            row = rows[0]
+            try:
+                document = json.loads(row["details_json"])
+                if (canonical_sha256(document) != row["content_sha256"]
+                        or document["assessment_sha256"] != canonical_sha256(
+                            assessment.model_dump(mode="json"))
+                        or document["profile_sha256"] != candidate.profile.profile_sha256
+                        or document["case_id"] != case_id
+                        or document["stage_run_id"] != stage_run_id):
+                    raise ValueError("audit binding mismatch")
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ValidationCoordinatorError("stored profile evidence audit is invalid") from exc
+            return row["evidence_id"]
+        audit = evaluate_profile_evidence(
+            candidate.profile.profile, candidate.profile.profile_sha256,
+            assessment, observations, raw_axes=raw_axes,
+            runtime_contract=candidate.staged._blind_case.runtime_contract,
+        )
+        audit["target_kind"] = candidate.staged._blind_case.target_kind
+        audit["stage_run_id"] = stage_run_id
+        audit = fit_profile_audit(audit)
+        encoded = canonical_json(audit)
+        return repo.add_evidence(
+            case_id=case_id, stage_run_id=stage_run_id,
+            evidence_kind="blind_profile_evidence_audit", details=audit,
+            content_sha256=canonical_sha256(audit),
+            content_length=len(encoded.encode("utf-8")),
+        )
+
+    @staticmethod
     def _load_frozen_assessment(conn: sqlite3.Connection, case_id: str,
                                 stage_run_id: str,
                                 expected_sha256: str) -> tuple[BlindAssessment, str]:
@@ -1139,8 +1351,8 @@ class ValidationCoordinator:
 
     def _develop(self, repo: ValidationRepository, candidate: ValidatedCandidate,
                  stage_run_id: str, blocker_axis: str, *,
-                 policy: TargetPolicy) -> tuple[bool, list[str]]:
-        repo.set_processing_phase(candidate.case_id, stage_run_id=stage_run_id, phase="developing")
+                 policy: TargetPolicy,
+                 observations: tuple[dict[str, Any], ...]) -> tuple[bool, list[str], str | None]:
         actions = [item for item in candidate.profile.profile.allowed_development_actions
                    if item.blocker_axis == blocker_axis][:2]
         if getattr(self.prerequisite_resolver, "requires_contract", False):
@@ -1149,7 +1361,7 @@ class ValidationCoordinator:
             actions = [item for item in actions
                        if (item.action_type, blocker_axis) in available]
         if not actions or self.prerequisite_resolver is None:
-            return False, []
+            return False, [], "development_action_not_allowed"
         stored = {
             row["ordinal"]: row for row in repo.conn.execute(
                 """SELECT action_id,ordinal,action_type,blocker_axis,status,details_json
@@ -1169,7 +1381,31 @@ class ValidationCoordinator:
             (item.action_type, item.blocker_axis): item
             for item in candidate.development_actions
         }
+        skipped_unchanged = False
+        dispatched = False
         for ordinal, action in enumerate(actions, 1):
+            contract = contracts.get((action.action_type, blocker_axis))
+            admission_sha = canonical_sha256({
+                "blocker_axis": blocker_axis,
+                "action_type": action.action_type,
+                "action_contract": contract.model_dump(mode="json") if contract else None,
+                "blind_case_sha256": candidate.staged.blind_case_sha256,
+                "scope_sha256": repo.read_case(candidate.case_id)["scope_sha256"],
+                "policy_sha256": canonical_sha256(policy.model_dump(mode="json")),
+                "source_authorizations": sorted({
+                    item.get("authorization_source") for item in candidate.source_requests
+                    if item.get("authorization_source") is not None
+                }),
+                "observations": sorted(({
+                    "attempt_kind": item["attempt_kind"],
+                    "ordinal": item["details"].get("ordinal"),
+                    "outcome": item["outcome"],
+                    "signal_observed": item["signal_observed"],
+                    "blocker_axis": item["blocker_axis"],
+                    "content_sha256": item["content_sha256"],
+                    "content_length": item["content_length"],
+                } for item in observations), key=canonical_json),
+            })
             previous = stored.get(ordinal)
             if previous is not None:
                 if (
@@ -1180,12 +1416,30 @@ class ValidationCoordinator:
                         "stored development action no longer matches the profile"
                     )
                 if previous["status"] == "succeeded":
-                    return True, evidence_ids
+                    return True, evidence_ids, None
                 if previous["status"] == "failed":
                     continue
                 raise ValidationCoordinatorError(
                     "development action has an unsafe resumable state"
                 )
+            prior = repo.conn.execute(
+                """SELECT status,details_json FROM validation_development_actions
+                   WHERE case_id=? AND stage_run_id<>? AND action_type=? AND blocker_axis=?
+                   ORDER BY rowid DESC LIMIT 1""",
+                (candidate.case_id, stage_run_id, action.action_type, blocker_axis),
+            ).fetchone()
+            if prior is not None and prior["status"] == "outcome_unknown":
+                return False, evidence_ids, "previous_development_outcome_unknown"
+            if prior is not None and json.loads(prior["details_json"]).get(
+                "admission_sha256"
+            ) == admission_sha:
+                if prior["status"] in {"failed", "succeeded"}:
+                    skipped_unchanged = True
+                    continue
+            repo.set_processing_phase(
+                candidate.case_id, stage_run_id=stage_run_id, phase="developing",
+            )
+            dispatched = True
             action_id = repo.add_development_action(
                 case_id=candidate.case_id, stage_run_id=stage_run_id,
                 ordinal=ordinal, blocker_axis=blocker_axis,
@@ -1224,6 +1478,7 @@ class ValidationCoordinator:
                             "reason": "development_request_outcome_unknown",
                             "error_type": type(exc).__name__,
                             "request_ids": [row[0] for row in unknown],
+                            "admission_sha256": admission_sha,
                         },
                     )
                     raise ValidationCoordinatorError(
@@ -1235,6 +1490,7 @@ class ValidationCoordinator:
                         details={
                             "reason": "development_result_integrity_failed",
                             "error_type": type(exc).__name__,
+                            "admission_sha256": admission_sha,
                         },
                     )
                     raise
@@ -1245,6 +1501,7 @@ class ValidationCoordinator:
                     "request_ids": [],
                 }
                 succeeded = False
+            result["admission_sha256"] = admission_sha
             encoded = canonical_json(result).encode("utf-8")
             evidence_id = repo.add_evidence(
                 case_id=candidate.case_id, stage_run_id=stage_run_id,
@@ -1257,8 +1514,10 @@ class ValidationCoordinator:
                 action_id, succeeded=succeeded, details=result,
             )
             if succeeded:
-                return True, evidence_ids
-        return False, evidence_ids
+                return True, evidence_ids, None
+        return False, evidence_ids, (
+            "unchanged_completed_development" if skipped_unchanged and not dispatched else None
+        )
 
     def _validate_development_ledger(
         self, conn: sqlite3.Connection, *, candidate: ValidatedCandidate,
@@ -1305,6 +1564,7 @@ class ValidationCoordinator:
         from ..execution.impact_development import (
             ImpactDevelopmentObservation, ImpactDevelopmentPlan,
             ImpactHypothesisExecutor,
+            VerifiedImpactPreconditions,
         )
         from .impact_runner import CodexImpactDevelopmentRunner
 
@@ -1313,6 +1573,8 @@ class ValidationCoordinator:
             assessment.impact_sensitivity.score,
             assessment.impact_actor_requirements.score,
         )
+        if not initial.underpowered:
+            return assessment
         available_paths = {
             action.path_id for action in candidate.impact_development_actions
         }
@@ -1329,7 +1591,6 @@ class ValidationCoordinator:
         )
         if not requests:
             return assessment
-        planning_context = _impact_planning_context(candidate, observations)
         runner = None
 
         def port(request, hypothesis_id):
@@ -1352,6 +1613,75 @@ class ValidationCoordinator:
                 "SELECT evidence_id FROM validation_evidence WHERE case_id=? AND stage_run_id=?",
                 (candidate.case_id, stage_run_id),
             )}
+
+        actions = {action.path_id: action for action in candidate.impact_development_actions}
+        known_sources = {item["request_id"] for item in candidate.source_requests}
+
+        def verified_receipt(request):
+            if not request.required_preconditions:
+                return None, None, None
+            action = actions[request.path_id]
+            action_sha = canonical_sha256(impact_action_document(action))
+            rows = repo.conn.execute(
+                """SELECT evidence_id,details_json,content_sha256 FROM validation_evidence
+                   WHERE case_id=? AND stage_run_id=?
+                     AND evidence_kind='impact_precondition_verification'""",
+                (candidate.case_id, stage_run_id),
+            ).fetchall()
+            matched = []
+            for row in rows:
+                document = json.loads(row["details_json"])
+                if document.get("path_id") == request.path_id:
+                    matched.append((row, document))
+            if len(matched) > 1:
+                raise ValidationCoordinatorError("multiple impact precondition receipts")
+            if matched:
+                row, document = matched[0]
+                if canonical_sha256(document) != row["content_sha256"]:
+                    raise ValidationCoordinatorError("stored impact precondition receipt changed")
+                receipt = VerifiedImpactPreconditions.model_validate(document)
+                receipt_id = row["evidence_id"]
+            else:
+                if self.impact_precondition_verifier is None:
+                    return None, None, "precondition_verifier_missing"
+                try:
+                    raw = self.impact_precondition_verifier(candidate, request)
+                except (LookupError, ValueError):
+                    return None, None, "precondition_probe_failed"
+                if raw is None:
+                    return None, None, "precondition_evidence_missing"
+                try:
+                    receipt = VerifiedImpactPreconditions.model_validate(
+                        raw.model_dump(mode="json")
+                        if isinstance(raw, VerifiedImpactPreconditions) else raw
+                    )
+                except (TypeError, ValueError):
+                    return None, None, "precondition_receipt_invalid"
+                receipt_id = None
+            try:
+                executor.validate_precondition_receipt(
+                    request, receipt, action_sha256=action_sha,
+                    known_evidence_ids=known_evidence(),
+                    known_source_request_ids=known_sources,
+                )
+                if (action.precondition_observation is not None
+                        and action.precondition_observation.source_request_id
+                        not in receipt.source_request_ids):
+                    raise ValueError("action source receipt is not cited")
+            except (ValueError, TypeError):
+                if matched:
+                    raise ValidationCoordinatorError("stored impact precondition receipt is invalid")
+                return None, None, "precondition_receipt_unbound"
+            if receipt_id is None:
+                document = receipt.model_dump(mode="json")
+                encoded = canonical_json(document)
+                receipt_id = repo.add_evidence(
+                    case_id=candidate.case_id, stage_run_id=stage_run_id,
+                    evidence_kind="impact_precondition_verification",
+                    details=document, content_sha256=canonical_sha256(document),
+                    content_length=len(encoded.encode("utf-8")),
+                )
+            return receipt, receipt_id, None
 
         developed = initial
         results = []
@@ -1385,7 +1715,38 @@ class ValidationCoordinator:
                 continue
             else:
                 plan_data = stored.get("plan")
+                receipt, receipt_id, admission_reason = verified_receipt(request)
                 if plan_data is None:
+                    if admission_reason is not None:
+                        plan = ImpactDevelopmentPlan(
+                            path_id=request.path_id,
+                            proposal_sha256=request.proposal_sha256,
+                            disposition="skip", preconditions_satisfied=False,
+                            evidence_ids=request.supporting_evidence_ids,
+                            reason=admission_reason,
+                        )
+                        plan_data = plan.model_dump(mode="json")
+                        agent_id = "native_impact_admission"
+                        repo.record_impact_plan(
+                            hypothesis_id, agent_id=agent_id, plan=plan_data,
+                        )
+                        self._impact_development_records.append({
+                            "hypothesis_id": hypothesis_id, "agent_id": agent_id,
+                            "status": "skipped", "plan": plan_data,
+                        })
+                        continue
+                    repo.set_processing_phase(
+                        candidate.case_id, stage_run_id=stage_run_id,
+                        phase="developing",
+                    )
+                    verified_preconditions = (
+                        ({**receipt.model_dump(mode="json"), "evidence_id": receipt_id},)
+                        if receipt is not None else ()
+                    )
+                    planning_context = _impact_planning_context(
+                        candidate, observations,
+                        verified_preconditions=verified_preconditions,
+                    )
                     if runner is None:
                         factory = self.impact_agent_factory or (
                             lambda skill_name: CodexImpactDevelopmentRunner(
@@ -1400,7 +1761,15 @@ class ValidationCoordinator:
                             raw_plan if isinstance(raw_plan, ImpactDevelopmentPlan)
                             else ImpactDevelopmentPlan.model_validate(raw_plan)
                         )
-                        executor._validate_plan(request, plan, known_evidence())
+                        executor._validate_plan(
+                            request, plan, known_evidence(),
+                            {item["request_id"] for item in candidate.source_requests},
+                        )
+                        if (receipt_id is not None and plan.disposition == "execute"
+                                and receipt_id not in plan.evidence_ids):
+                            raise ValidationCoordinatorError(
+                                "impact plan did not cite verified precondition evidence"
+                            )
                     except Exception:
                         repo.fail_impact_hypothesis(hypothesis_id)
                         raise
@@ -1412,8 +1781,20 @@ class ValidationCoordinator:
                         hypothesis_id, agent_id=agent_id, plan=plan_data,
                     )
                 else:
+                    if admission_reason is not None:
+                        raise ValidationCoordinatorError(
+                            "saved impact plan has no verified precondition receipt"
+                        )
                     plan = ImpactDevelopmentPlan.model_validate(plan_data)
-                    executor._validate_plan(request, plan, known_evidence())
+                    executor._validate_plan(
+                        request, plan, known_evidence(),
+                        {item["request_id"] for item in candidate.source_requests},
+                    )
+                    if (receipt_id is not None and plan.disposition == "execute"
+                            and receipt_id not in plan.evidence_ids):
+                        raise ValidationCoordinatorError(
+                            "saved impact plan did not cite verified precondition evidence"
+                        )
                 if plan_data["disposition"] == "skip":
                     self._impact_development_records.append({
                         "hypothesis_id": hypothesis_id, "agent_id": agent_id,

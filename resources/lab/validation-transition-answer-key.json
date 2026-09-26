@@ -1,0 +1,99 @@
+{
+  "fixture_kind": "synthetic_validation_transition_oracle",
+  "candidate_id": "vuln-bank:curated:GET:/debug/users:excessive_data_exposure",
+  "real_agent_axis_trials": {
+    "verified_marker": "ready",
+    "minimal_threshold": "awaits_distinct_official_observation",
+    "weak_marker": "ready",
+    "false_marker": "ready",
+    "no_action": "ready",
+    "partial_boundary": "awaits_distinct_official_observation"
+  },
+  "proof_negative_controls": {
+    "weak_source_signal": {
+      "expected_gate": "runtime_profile_semantics",
+      "target_assertion": {"kind": "body_contains", "expected": "users"}
+    }
+  },
+  "assertion_expectations": {
+    "verified_marker": [
+      {"assertion_id": "password-field-name", "kind": "body_contains", "expected": "\"password\":", "passed": true},
+      {"assertion_id": "seeded-admin-account", "kind": "json_equals", "path": ["users", 0, "account_number"], "expected": "ADMIN001", "passed": true}
+    ],
+    "minimal_threshold": [
+      {"assertion_id": "password-field-name", "kind": "body_contains", "expected": "\"password\":", "passed": true},
+      {"assertion_id": "seeded-admin-account", "kind": "json_equals", "path": ["users", 0, "account_number"], "expected": "ADMIN001", "passed": true}
+    ],
+    "false_marker": [
+      {"assertion_id": "password-field-name", "kind": "body_contains", "expected": "\"password\":", "passed": true},
+      {"assertion_id": "seeded-admin-account", "kind": "json_equals", "path": ["users", 0, "account_number"], "expected": "ADMIN001", "passed": true},
+      {"assertion_id": "absent-admin-marker", "kind": "json_equals", "path": ["users", 0, "account_number"], "expected": "ADMIN999", "actual": "ADMIN001", "passed": false}
+    ],
+    "partial_boundary": [
+      {"assertion_id": "password-field-name", "kind": "body_contains", "expected": "\"password\":", "passed": true},
+      {"assertion_id": "seeded-admin-account", "kind": "json_equals", "path": ["users", 0, "account_number"], "expected": "ADMIN001", "passed": true}
+    ]
+  },
+  "cases": {
+    "verified_marker": {
+      "expected_baseline_status": "UNDERPOWERED",
+      "expected_baseline_axes": [1, 0, 2],
+      "expected_final_status": "CONFIRMED",
+      "fixture_final_axes": [1, 2, 2],
+      "expected_hypothesis_status": "succeeded",
+      "expected_impact_outcome": "observed",
+      "expected_native_gets": 1,
+      "require_developing_phase": true
+    },
+    "minimal_threshold": {
+      "expected_baseline_status": "UNDERPOWERED",
+      "expected_baseline_axes": [1, 0, 0],
+      "expected_final_status": "CONFIRMED",
+      "fixture_final_axes": [1, 2, 0],
+      "expected_hypothesis_status": "succeeded",
+      "expected_impact_outcome": "observed",
+      "expected_native_gets": 1,
+      "require_developing_phase": true
+    },
+    "weak_marker": {
+      "expected_baseline_status": "UNDERPOWERED",
+      "expected_baseline_axes": [1, 0, 2],
+      "expected_final_status": "UNDERPOWERED",
+      "fixture_final_axes": [1, 0, 2],
+      "expected_hypothesis_status": "skipped",
+      "expected_impact_outcome": null,
+      "expected_native_gets": 0,
+      "require_developing_phase": false
+    },
+    "false_marker": {
+      "expected_baseline_status": "UNDERPOWERED",
+      "expected_baseline_axes": [1, 0, 2],
+      "expected_final_status": "UNDERPOWERED",
+      "fixture_final_axes": [1, 0, 2],
+      "expected_hypothesis_status": "succeeded",
+      "expected_impact_outcome": "not_observed",
+      "expected_native_gets": 1,
+      "require_developing_phase": true
+    },
+    "no_action": {
+      "expected_baseline_status": "UNDERPOWERED",
+      "expected_baseline_axes": [1, 0, 2],
+      "expected_final_status": "UNDERPOWERED",
+      "fixture_final_axes": [1, 0, 2],
+      "expected_hypothesis_status": "planned",
+      "expected_impact_outcome": null,
+      "expected_native_gets": 0,
+      "require_developing_phase": false
+    },
+    "partial_boundary": {
+      "expected_baseline_status": "UNDERPOWERED",
+      "expected_baseline_axes": [0, 0, 2],
+      "expected_final_status": "UNDERPOWERED",
+      "fixture_final_axes": [0, 2, 2],
+      "expected_hypothesis_status": "succeeded",
+      "expected_impact_outcome": "observed",
+      "expected_native_gets": 1,
+      "require_developing_phase": true
+    }
+  }
+}

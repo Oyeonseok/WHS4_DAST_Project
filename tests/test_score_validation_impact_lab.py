@@ -19,9 +19,13 @@ EXPECTED = {
     "response_status": 200,
     "assertion_kind": "body_contains",
     "assertion_expected": '"password":',
-    "marker_json_path": ["users", "*", "username"],
-    "marker_assertion_id": "seeded-admin-username",
-    "marker_assertion_expected": '"username":"admin"',
+    "marker_json_path": ["users", 0, "account_number"],
+    "marker_assertion_id": "seeded-admin-account",
+    "marker_assertion_kind": "json_equals",
+    "marker_assertion_expected": "ADMIN001",
+    "marker_source_url": "https://github.com/Commando-X/vuln-bank/blob/5e5ea5425fcf309373a0655dd111ecfb45037cbf/database.py#L255",
+    "marker_source_sha256": "071e9a655508f6c6790cc01620a8a680681165defa5a141c017729e3280b793b",
+    "marker_source_line": 255,
     "signal_kind": "hunt_source_leak_bounded_impact_observed",
 }
 
@@ -101,7 +105,8 @@ def _fixture() -> tuple[sqlite3.Connection, sqlite3.Row]:
                         "kind": EXPECTED["assertion_kind"],
                         "expected": EXPECTED["assertion_expected"]},
                        {"assertion_id": EXPECTED["marker_assertion_id"],
-                        "kind": EXPECTED["assertion_kind"],
+                        "kind": EXPECTED["marker_assertion_kind"],
+                        "path": EXPECTED["marker_json_path"],
                         "expected": EXPECTED["marker_assertion_expected"]}],
         "credential_roles": [],
         "precondition_observation": {
@@ -110,6 +115,9 @@ def _fixture() -> tuple[sqlite3.Connection, sqlite3.Row]:
             "response_status": 200,
             "marker_json_path": EXPECTED["marker_json_path"],
             "marker_assertion_id": EXPECTED["marker_assertion_id"],
+            "marker_source": {"url": EXPECTED["marker_source_url"],
+                              "file_sha256": EXPECTED["marker_source_sha256"],
+                              "line": EXPECTED["marker_source_line"]},
         },
     }]}
     from aidast.validation import ImpactDevelopmentRuntimeContract
@@ -132,7 +140,7 @@ def _fixture() -> tuple[sqlite3.Connection, sqlite3.Row]:
                           "expected_sha256": marker_digest, "actual_sha256": marker_digest,
                           "passed": True,
                       }, {
-                          "assertion_id": EXPECTED["marker_assertion_id"], "kind": "body_contains",
+                          "assertion_id": EXPECTED["marker_assertion_id"], "kind": "json_equals",
                           "expected_sha256": admin_digest, "actual_sha256": admin_digest,
                           "passed": True,
                       }]}}

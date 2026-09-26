@@ -67,8 +67,13 @@ def _decision_has_impact_proof(conn: sqlite3.Connection, case: sqlite3.Row,
                 or list(receipt.marker_json_path) != expected["marker_json_path"]
                 or receipt.response_status != expected["response_status"]
                 or receipt.marker_assertion_id != expected["marker_assertion_id"]
+                or receipt.marker_source is None
+                or receipt.marker_source.url != expected["marker_source_url"]
+                or receipt.marker_source.file_sha256 != expected["marker_source_sha256"]
+                or receipt.marker_source.line != expected["marker_source_line"]
                 or not any(item.assertion_id == receipt.marker_assertion_id
-                           and item.kind == expected["assertion_kind"]
+                           and item.kind == expected["marker_assertion_kind"]
+                           and list(item.path) == expected["marker_json_path"]
                            and item.expected == expected["marker_assertion_expected"]
                            for item in action.assertions)
                 or receipt.source_request_id not in json.loads(spec["source_request_ids_json"])):
@@ -161,11 +166,11 @@ def _decision_has_impact_proof(conn: sqlite3.Connection, case: sqlite3.Row,
         action_sha = canonical_sha256(impact_action_document(action))
         details = json.loads(evidence[0]["details_json"])
         marker_sha = canonical_sha256(expected["assertion_expected"])
-        admin_sha = canonical_sha256(expected["marker_assertion_expected"])
+        source_marker_sha = canonical_sha256(expected["marker_assertion_expected"])
         assertions = details["evaluation"]["assertions"]
-        def observed_assertion(assertion_id: str, digest: str) -> bool:
+        def observed_assertion(assertion_id: str, kind: str, digest: str) -> bool:
             return any(item["assertion_id"] == assertion_id
-                       and item["kind"] == expected["assertion_kind"]
+                       and item["kind"] == kind
                        and item["expected_sha256"] == digest
                        and item["actual_sha256"] == digest
                        and item["passed"] is True for item in assertions)
@@ -174,8 +179,8 @@ def _decision_has_impact_proof(conn: sqlite3.Connection, case: sqlite3.Row,
                 or details["contract_sha256"] != action_sha
                 or details["path_id"] != expected["path_id"]
                 or details["evaluation"]["signal_observed"] is not True
-                or not observed_assertion("password-field-name", marker_sha)
-                or not observed_assertion(expected["marker_assertion_id"], admin_sha)):
+                or not observed_assertion("password-field-name", expected["assertion_kind"], marker_sha)
+                or not observed_assertion(expected["marker_assertion_id"], expected["marker_assertion_kind"], source_marker_sha)):
             return False
         request_ids = observation["details"]["request_ids"]
         if len(request_ids) != 1:

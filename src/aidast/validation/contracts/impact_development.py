@@ -11,14 +11,21 @@ from .models import Digest, Identifier, StrictContract
 from .runtime_contract import HttpRequestTemplate, ResponseAssertion
 
 
+class ImpactMarkerSource(StrictContract):
+    url: Annotated[str, Field(min_length=1, max_length=2048)]
+    file_sha256: Digest
+    line: int = Field(ge=1)
+
+
 class ImpactPreconditionObservation(StrictContract):
     """Non-secret marker receipt from a previously verified safe request."""
 
     source_request_id: Identifier
     response_sha256: Digest
     response_status: int = Field(ge=100, le=599)
-    marker_json_path: tuple[str, ...] = Field(min_length=1, max_length=8)
+    marker_json_path: tuple[str | int, ...] = Field(min_length=1, max_length=8)
     marker_assertion_id: Identifier
+    marker_source: ImpactMarkerSource | None = None
 
     @field_validator("marker_json_path", mode="before")
     @classmethod
@@ -87,6 +94,8 @@ def impact_action_document(action: ImpactDevelopmentActionContract) -> dict[str,
     document = action.model_dump(mode="json")
     if document["precondition_observation"] is None:
         document.pop("precondition_observation")
+    elif document["precondition_observation"]["marker_source"] is None:
+        document["precondition_observation"].pop("marker_source")
     return document
 
 
