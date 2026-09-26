@@ -418,8 +418,16 @@ class ScopeCoordinator:
             "",
         ]
         lines.extend(cls._render_asset_table(analysis.in_scope_assets))
+        # A deterministic deny-wins checker can consume these bullets without
+        # having to interpret the richer human-review table above.
+        lines.extend(
+            f"- {asset.asset}" for asset in analysis.in_scope_assets
+        )
         lines.extend(["", "## Out-of-scope assets", ""])
         lines.extend(cls._render_asset_table(analysis.out_of_scope_assets))
+        lines.extend(
+            f"- {asset.asset}" for asset in analysis.out_of_scope_assets
+        )
         lines.extend(cls._render_list_section("Allowed activities", analysis.allowed_activities))
         lines.extend(
             cls._render_list_section("Prohibited activities", analysis.prohibited_activities)

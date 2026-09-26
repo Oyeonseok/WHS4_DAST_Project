@@ -132,6 +132,33 @@ class NativeChainingCoordinatorTests(unittest.TestCase):
             self.assertEqual(result.status, "SKIPPED")
             self.assertEqual(main.calls, [])
 
+    def test_completed_chaining_reruns_only_after_a_new_attack_stage(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            database, _ = completed_attack_pipeline(root)
+            scope, policy = root / "Scope.md", root / "TargetPolicy.json"
+            scope.write_text("# approved", encoding="utf-8")
+            policy.write_text("{}", encoding="utf-8")
+            main = FakeChainingMain()
+            coordinator = ChainingCoordinator(
+                agent=main, db_path=database, scope_path=scope, policy_path=policy,
+            )
+
+            coordinator.run("scan_chain")
+            with self.assertRaisesRegex(
+                ChainingCoordinatorError, "covers the latest Attack stage",
+            ):
+                coordinator.run("scan_chain")
+
+            with closing(sqlite3.connect(database)) as conn:
+                attack_stage = start_stage_run(
+                    conn, scan_id="scan_chain", stage="attack",
+                )
+                finish_stage_run(conn, attack_stage, status="completed")
+
+            self.assertEqual(coordinator.run("scan_chain").status, "COMPLETED")
+            self.assertEqual(len(main.calls), 2)
+
     def test_agent_must_resolve_every_candidate(self) -> None:
         class OpenCandidateMain(FakeChainingMain):
             def run_chaining_orchestrator(self, **kwargs) -> ChainingStageResult:
@@ -379,7 +406,7 @@ class ChainingDatabaseCliTests(unittest.TestCase):
                 ).fetchone(), ("succeeded", "chain_execution"))
                 self.assertEqual(conn.execute(
                     "SELECT status FROM finding_chains WHERE chain_id='chain_execution'"
-                ).fetchone(), ("proposed",))
+                ).fetchone(), ("demonstrated",))
                 self.assertEqual(conn.execute(
                     "SELECT COUNT(*) FROM chain_execution_bindings"
                 ).fetchone()[0], 1)

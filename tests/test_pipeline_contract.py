@@ -58,11 +58,15 @@ class PipelineSchemaTests(unittest.TestCase):
                 connection.close()
 
     def test_future_schema_version_is_not_downgraded(self):
-        self.conn.execute("PRAGMA user_version=8")
+        future_version = db.RECON_SCHEMA_VERSION + 1
+        self.conn.execute(f"PRAGMA user_version={future_version}")
         self.conn.commit()
         connection = db.init_db(self.path)
         try:
-            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 8)
+            self.assertEqual(
+                connection.execute("PRAGMA user_version").fetchone()[0],
+                future_version,
+            )
         finally:
             connection.close()
 

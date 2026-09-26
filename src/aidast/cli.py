@@ -38,6 +38,7 @@ from aidast.recon.models import ReconPlan, ReconPlanTarget, ReconStep
 from aidast.recon.policy import TargetPolicy, validate_policy_for_target
 from aidast.recon.profiles import EXECUTION_PROFILES, grounded_scope_request_rate
 from aidast.recon.surface import export_surface
+from aidast.recon.source_import import SourceImportError, import_flask_source
 from aidast.pipeline.lifecycle import finish_stage_run, start_stage_run
 from aidast.pipeline.locations import scan_run_directory
 from aidast.pipeline.materialize import materialize_pipeline
@@ -88,7 +89,11 @@ def main(
     # Keep the original `attack HANDOFF [--output-dir DIR]` invocation.
     if (len(arguments) > 1 and arguments[0] == "attack"
             and arguments[1] not in {
-                "review", "plan", "status", "approve", "revoke", "execute", "-h", "--help",
+                "review", "plan", "status", "approve", "revoke", "execute",
+                "coverage-plan", "coverage-status", "coverage-requeue",
+                "coverage-export", "exhaustive",
+                "benchmark-vulnbank",
+                "-h", "--help",
             }):
         arguments.insert(1, "review")
     args = parser.parse_args(arguments)
@@ -105,6 +110,35 @@ def main(
             return _run_scope(args, parser)
         if args.command == "recon":
             return _run_recon(args)
+        if args.command == "import-recon":
+            imported = import_flask_source(
+                args.source,
+                target_url=args.target_url,
+                result_root=args.result_root,
+                approved_by=args.approved_by,
+                source_ref=args.source_ref,
+                lab_benchmark=args.lab_benchmark,
+            )
+            print(json.dumps({
+                "scan_id": imported.scan_id,
+                "recon_database": str(imported.recon_database),
+                "pipeline_database": str(imported.pipeline_database),
+                "handoff": str(imported.handoff),
+                "inventory": str(imported.inventory),
+                "endpoints": imported.endpoint_count,
+                "parameters": imported.parameter_count,
+                "vulnerability_signals": imported.vulnerability_signal_count,
+                "benchmark_catalog_items": imported.benchmark_catalog_count,
+                "benchmark_catalog": (
+                    str(imported.benchmark_catalog)
+                    if imported.benchmark_catalog is not None else None
+                ),
+                "next_command": (
+                    f"aidast resume {imported.scan_id} "
+                    f"--result-root {args.result_root.expanduser().resolve()}"
+                ),
+            }, ensure_ascii=False))
+            return 0
         if args.command == "run":
             # The combined command reuses Recon, then continues through later stages.
             args.execute = True
@@ -150,6 +184,7 @@ def main(
         UpdateError,
         ValidationError,
         ValidationCoordinatorError,
+        SourceImportError,
         FileNotFoundError,
     ) as exc:
         print(f"aidast: {exc}", file=sys.stderr)
@@ -299,6 +334,35 @@ def _parser() -> argparse.ArgumentParser:
     )
     _add_session_options(recon)
 
+    source_import = commands.add_parser(
+        "import-recon",
+        help="create a verified completed Recon handoff from local Flask source",
+    )
+    source_import.add_argument("source", type=Path, help="local Flask source tree")
+    source_import.add_argument(
+        "--target-url", required=True,
+        help="authorized HTTPS target represented by the supplied source",
+    )
+    source_import.add_argument(
+        "--result-root", type=Path, default=RESULT_ROOT,
+        help="result root containing Runs and AttackRuns",
+    )
+    source_import.add_argument(
+        "--by", dest="approved_by", required=True,
+        help="operator recorded on the generated authorization snapshot",
+    )
+    source_import.add_argument(
+        "--source-ref", default="operator-provided-source",
+        help="immutable source commit or version label",
+    )
+    source_import.add_argument(
+        "--lab-benchmark", action="store_true",
+        help=(
+            "authorize bounded mutations, concurrency, and rate-limit checks only "
+            "for a disposable loopback training target"
+        ),
+    )
+
     # run 명령어
     run = commands.add_parser(
         "run",
@@ -378,6 +442,10 @@ def _parser() -> argparse.ArgumentParser:
     resume = commands.add_parser("resume", help="continue a persisted scan from its first unfinished stage")
     resume.add_argument("scan_id", type=_scan_identifier)
     resume.add_argument("--result-root", type=Path, default=RESULT_ROOT)
+    resume.add_argument(
+        "--codex-timeout", type=_positive_int, default=300,
+        help="maximum Codex time per resumed agent call in seconds (default: 300)",
+    )
 
     # attack 명령어
     attack = commands.add_parser(
@@ -414,6 +482,66 @@ def _parser() -> argparse.ArgumentParser:
         elif operation == "execute":
             command.add_argument("--authorization", type=Path, required=True,
                                  help="authorization document for the trusted verifier")
+    coverage_plan = attack_commands.add_parser(
+        "coverage-plan",
+        help="materialize exhaustive endpoint-by-vulnerability items from Recon DB",
+    )
+    coverage_plan.add_argument("database", type=Path, help="shared Pipeline.db")
+    coverage_plan.add_argument("--scan-id", required=True, type=_scan_identifier)
+    coverage_status_parser = attack_commands.add_parser(
+        "coverage-status", help="inspect exhaustive Attack coverage progress",
+    )
+    coverage_status_parser.add_argument("database", type=Path, help="shared Pipeline.db")
+    coverage_status_parser.add_argument("--scan-id", required=True, type=_scan_identifier)
+    coverage_requeue_parser = attack_commands.add_parser(
+        "coverage-requeue",
+        help="explicitly reopen selected terminal coverage dispositions",
+    )
+    coverage_requeue_parser.add_argument("database", type=Path, help="shared Pipeline.db")
+    coverage_requeue_parser.add_argument("--scan-id", required=True, type=_scan_identifier)
+    coverage_requeue_parser.add_argument(
+        "--status", action="append", required=True,
+        choices=("tested_negative", "blocked_auth", "policy_excluded", "unsupported", "error_terminal"),
+        help="terminal disposition to reopen; repeat for multiple statuses",
+    )
+    coverage_requeue_parser.add_argument("--reason", required=True)
+    coverage_export_parser = attack_commands.add_parser(
+        "coverage-export",
+        help="export an Attack, Validation, and Report outcome for every coverage item",
+    )
+    coverage_export_parser.add_argument("database", type=Path, help="shared Pipeline.db")
+    coverage_export_parser.add_argument("--scan-id", required=True, type=_scan_identifier)
+    coverage_export_parser.add_argument("--output-dir", required=True, type=Path)
+    coverage_export_parser.add_argument(
+        "--report-root", type=Path,
+        help="optional root containing per-case Report.md drafts",
+    )
+    exhaustive = attack_commands.add_parser(
+        "exhaustive",
+        help="execute every Recon DB coverage item in bounded native-agent batches",
+    )
+    exhaustive.add_argument("database", type=Path, help="shared Pipeline.db")
+    exhaustive.add_argument("--scan-id", required=True, type=_scan_identifier)
+    exhaustive.add_argument("--scope", type=Path, required=True)
+    exhaustive.add_argument("--policy", type=Path, required=True)
+    exhaustive.add_argument("--batch-size", type=_positive_int, default=10)
+    exhaustive.add_argument("--max-batches", type=_positive_int, default=100)
+    exhaustive.add_argument("--retry-limit", type=_positive_int, default=3)
+    exhaustive.add_argument("--codex-timeout", type=_positive_int, default=86400)
+    benchmark = attack_commands.add_parser(
+        "benchmark-vulnbank",
+        help="run the disposable loopback VulnBank Attack, Validation, and Report benchmark",
+    )
+    benchmark.add_argument("database", type=Path, help="shared Pipeline.db")
+    benchmark.add_argument("--scan-id", required=True, type=_scan_identifier)
+    benchmark.add_argument("--scope", type=Path, required=True)
+    benchmark.add_argument("--policy", type=Path, required=True)
+    benchmark.add_argument("--target-url", default="http://127.0.0.1:5001/")
+    benchmark.add_argument("--output-dir", type=Path, required=True)
+    benchmark.add_argument("--batch-size", type=_positive_int, default=5)
+    benchmark.add_argument("--max-batches", type=_positive_int, default=100)
+    benchmark.add_argument("--retry-limit", type=_positive_int, default=3)
+    benchmark.add_argument("--codex-timeout", type=_positive_int, default=86400)
 
     # validate 명령어
     validation = commands.add_parser(
@@ -1573,6 +1701,93 @@ def _run_attack(
     args: argparse.Namespace, *, workflow: AttackWorkflow | None = None,
 ) -> int:
     operation = args.attack_command
+    if operation in {
+        "coverage-plan", "coverage-status", "coverage-requeue", "coverage-export", "exhaustive",
+        "benchmark-vulnbank",
+    }:
+        try:
+            from aidast.attack.coverage import coverage_status, ensure_coverage_manifest
+
+            if operation == "coverage-plan":
+                result = ensure_coverage_manifest(args.database, args.scan_id).to_dict()
+            elif operation == "coverage-status":
+                result = coverage_status(args.database, args.scan_id).to_dict()
+            elif operation == "coverage-requeue":
+                from aidast.attack.coverage import requeue_coverage
+
+                result = {
+                    "scan_id": args.scan_id,
+                    "requeued": requeue_coverage(
+                        args.database, args.scan_id, args.status, reason=args.reason,
+                    ),
+                    "statuses": sorted(set(args.status)),
+                }
+            elif operation == "coverage-export":
+                from aidast.attack.coverage_export import export_coverage_results
+
+                result = export_coverage_results(
+                    args.database, args.scan_id, args.output_dir,
+                    report_root=args.report_root,
+                )
+            elif operation == "exhaustive":
+                from aidast.orchestration.coverage_attack import ExhaustiveAttackCoordinator
+
+                result = ExhaustiveAttackCoordinator(
+                    agent=CodexMainAgent(timeout_seconds=args.codex_timeout),
+                    db_path=args.database,
+                    scope_path=args.scope,
+                    policy_path=args.policy,
+                    batch_size=args.batch_size,
+                    max_batches=args.max_batches,
+                    retry_limit=args.retry_limit,
+                ).run(args.scan_id).to_dict()
+            else:
+                from aidast.attack.coverage_export import export_coverage_results
+                from aidast.benchmarks.vulnbank import bootstrap_vulnbank
+                from aidast.orchestration.coverage_attack import ExhaustiveAttackCoordinator
+                from aidast.reporting.auto import generate_scan_reports
+                from aidast.validation import build_native_validation_coordinator
+
+                bootstrap = bootstrap_vulnbank(
+                    args.database, scan_id=args.scan_id,
+                    target_url=args.target_url, scope_path=args.scope,
+                    policy_path=args.policy,
+                )
+                attack_result = ExhaustiveAttackCoordinator(
+                    agent=CodexMainAgent(timeout_seconds=args.codex_timeout),
+                    db_path=args.database, scope_path=args.scope,
+                    policy_path=args.policy, batch_size=args.batch_size,
+                    max_batches=args.max_batches, retry_limit=args.retry_limit,
+                ).run(args.scan_id)
+                coordinator = build_native_validation_coordinator(
+                    db_path=args.database, policy_path=args.policy,
+                    scope_path=args.scope,
+                )
+                validation_errors = {}
+                for finding_id in attack_result.finding_ids:
+                    try:
+                        coordinator.run(args.scan_id, finding_id=finding_id)
+                    except Exception as exc:
+                        validation_errors[finding_id] = str(exc)
+                reports = generate_scan_reports(
+                    args.database, args.output_dir / "Reports",
+                    scan_id=args.scan_id, platform="hackerone",
+                )
+                coverage_result = export_coverage_results(
+                    args.database, args.scan_id, args.output_dir / "CoverageOutcome",
+                    report_root=args.output_dir / "Reports",
+                )
+                result = {
+                    "bootstrap": bootstrap,
+                    "attack": attack_result.to_dict(),
+                    "validation_errors": validation_errors,
+                    "reports": reports,
+                    "coverage": coverage_result,
+                }
+            print(json.dumps(result, ensure_ascii=False, sort_keys=True, default=str))
+            return 0
+        except (OSError, ValueError, RuntimeError, sqlite3.Error) as exc:
+            raise ReviewPreparationError(str(exc)) from exc
     if operation == "review":
         review = prepare_review(args.handoff, args.output_dir)
         print(
@@ -1785,7 +2000,7 @@ def _run_resume(args: argparse.Namespace) -> int:
     except (OSError, ValueError, sqlite3.Error) as exc:
         raise MainAgentError(f"scan cannot resume: {exc}") from exc
     print(f"Resuming {plan.scan_id} from {plan.stage}", flush=True)
-    execute_resume(plan)
+    execute_resume(plan, agent=CodexMainAgent(timeout_seconds=args.codex_timeout))
     print(f"Resumed scan completed: {plan.scan_id}", flush=True)
     return 0
 

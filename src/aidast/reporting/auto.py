@@ -62,12 +62,21 @@ def generate_scan_reports(
     results: list[dict] = []
     try:
         for case_id in cases:
-            result = agent.run(
-                pipeline_db,
-                output_root / _case_directory(case_id),
-                platform=platform,
-                case_id=case_id,
-            )
+            for attempt in range(3):
+                try:
+                    result = agent.run(
+                        pipeline_db,
+                        output_root / _case_directory(case_id),
+                        platform=platform,
+                        case_id=case_id,
+                    )
+                    break
+                except ValueError as exc:
+                    if (
+                        str(exc) != "draft source context hash does not match prepared report"
+                        or attempt == 2
+                    ):
+                        raise
             if result.get("status") != "drafted":
                 raise ReportError(f"report draft was not completed for case {case_id}")
             results.append(result)

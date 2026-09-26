@@ -114,7 +114,7 @@ class PipelineMaterializationTests(unittest.TestCase):
                 "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
             ).fetchall()
         with sqlite3.connect(pipeline_path) as pipeline:
-            self.assertEqual(pipeline.execute("PRAGMA user_version").fetchone()[0], 11)
+            self.assertEqual(pipeline.execute("PRAGMA user_version").fetchone()[0], 12)
             self.assertEqual(
                 pipeline.execute(
                     """SELECT scan_id,source_database_sha256
@@ -150,7 +150,7 @@ class PipelineMaterializationTests(unittest.TestCase):
             migrate_live_pipeline_schema(connection)
             connection.commit()
 
-            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 11)
+            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 12)
             self.assertEqual(
                 connection.execute(
                     "SELECT scan_id FROM pipeline_sources"

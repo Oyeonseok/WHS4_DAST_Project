@@ -70,7 +70,10 @@ class ReviewRuntimeTests(unittest.TestCase):
         self.assertEqual(config["db_path"], "recon.db")
         self.assertEqual(config["db_path_base"], "handoff_directory")
         self.assertEqual(config["handoff_path_base"], "config_directory")
-        self.assertEqual((plan.config_path.parent / config["handoff_path"]).resolve(), self.handoff)
+        self.assertEqual(
+            (plan.config_path.parent / config["handoff_path"]).resolve(),
+            self.handoff.resolve(),
+        )
         self.assertFalse(config["network_enabled"])
         self.assertFalse(config["external_processes_enabled"])
         self.assertNotIn("token=", plan.queue_path.read_text())

@@ -465,7 +465,7 @@ def finish_execution(
         conn.execute(
             """INSERT INTO finding_chains
                (chain_id,scan_id,title,combined_severity,description,status)
-               VALUES (?,?,?,?,?,'proposed')""",
+               VALUES (?,?,?,?,?,'demonstrated')""",
             (
                 chain_id, scan_id,
                 _text(item.get("title"), required=True, maximum=200), severity,

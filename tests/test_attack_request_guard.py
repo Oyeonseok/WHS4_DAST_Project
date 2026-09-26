@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import tempfile
 import time
@@ -12,7 +13,7 @@ from unittest.mock import patch
 
 from aidast.attack.db_cli import transition_task
 from aidast.attack.request_cli import RequestGuardError, guarded_request
-from aidast.pipeline.lifecycle import create_task, start_stage_run
+from aidast.pipeline.lifecycle import create_task, register_credential_reference, start_stage_run
 from aidast.pipeline.live_schema import migrate_live_pipeline_schema
 from aidast.recon import db
 
@@ -127,6 +128,69 @@ def fixture(
 
 
 class AttackRequestGuardTests(unittest.TestCase):
+    def test_opaque_task_bound_credential_is_resolved_without_persistence(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            database, policy, payload, stage, task = fixture(root)
+            with closing(sqlite3.connect(database)) as conn:
+                reference = register_credential_reference(
+                    conn, scan_id="scan", label="user-a",
+                    reference_uri="env://AIDAST_TEST_USER_A", identity_role="user-a",
+                )
+                conn.execute(
+                    "UPDATE attack_tasks SET payload_json=? WHERE task_id=?",
+                    (json.dumps({
+                        "required_identity_role": "authenticated",
+                        "credential_references": [{
+                            "credential_reference_id": reference,
+                            "label": "user-a", "identity_role": "user-a",
+                        }],
+                    }), task),
+                )
+                conn.commit()
+            payload.write_text(json.dumps({
+                "method": "GET", "url": "https://example.test/api/profile",
+                "credential_reference_id": reference,
+            }), encoding="utf-8")
+            opener = FakeOpener()
+            secret = "Bearer secret-must-not-be-persisted"
+            with patch.dict(os.environ, {
+                "AIDAST_TEST_USER_A": json.dumps({"Authorization": secret}),
+            }), patch("aidast.attack.request_cli.build_opener", return_value=opener):
+                result = guarded_request(
+                    database, scan_id="scan", stage_run_id=stage, task_id=task,
+                    policy_path=policy, payload_path=payload,
+                )
+
+            request, _ = opener.calls[0]
+            self.assertEqual(request.get_header("Authorization"), secret)
+            self.assertNotIn(secret, json.dumps(result))
+            with closing(sqlite3.connect(database)) as conn:
+                persisted = " ".join(str(value) for value in conn.execute(
+                    "SELECT result_json,error_message FROM attack_http_requests"
+                ).fetchone())
+            self.assertNotIn(secret, persisted)
+            self.assertIn(reference, persisted)
+
+    def test_credential_must_be_listed_on_exact_task(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            database, policy, payload, stage, task = fixture(root)
+            with closing(sqlite3.connect(database)) as conn:
+                reference = register_credential_reference(
+                    conn, scan_id="scan", label="user-a",
+                    reference_uri="env://AIDAST_TEST_USER_A", identity_role="user-a",
+                )
+            payload.write_text(json.dumps({
+                "method": "GET", "url": "https://example.test/api/profile",
+                "credential_reference_id": reference,
+            }), encoding="utf-8")
+            with self.assertRaisesRegex(RequestGuardError, "not authorized for this task"):
+                guarded_request(
+                    database, scan_id="scan", stage_run_id=stage, task_id=task,
+                    policy_path=policy, payload_path=payload,
+                )
+
     def test_hackerone_identity_header_overrides_untrusted_payload_header(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
