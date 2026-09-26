@@ -573,6 +573,9 @@ html[lang=ko] .eyebrow{font-size:13px;font-weight:600;color:var(--accent)}
 .scope-page-actions .primary-button{flex-shrink:0;white-space:nowrap}
 .verified-scope-row{flex-wrap:wrap}
 .scope-page-actions a.secondary-button{text-decoration:none;white-space:nowrap;flex-shrink:0}
+@media(min-width:661px) and (max-width:1080px){
+  .demo-strip.sample-preview button{display:inline-flex}
+}
 @media(max-width:660px){
   .demo-strip.sample-preview{display:grid;grid-template-columns:14px minmax(0,1fr);align-items:start;gap:4px 8px}
   .demo-strip.sample-preview button{display:inline-flex;grid-column:2;justify-self:start;min-height:38px;margin:0}
