@@ -20,5 +20,9 @@
   "marker_source_sha256": "071e9a655508f6c6790cc01620a8a680681165defa5a141c017729e3280b793b",
   "marker_source_line": 255,
   "signal_kind": "hunt_source_leak_bounded_impact_observed",
+  "required_preconditions": [
+    "An exact same-origin safe-method request already captured by Attack",
+    "A unique non-secret configuration or data marker for the stronger impact"
+  ],
   "proof_requirement": "The real Impact Development agent must choose execute using the bound Attack GET and source-public demo marker; one current-stage native GET must satisfy both the password field-name syntax and the seeded marker assertions; its request and observation evidence must be cited by the final sensitivity score, which rises from at most 1 to at least 2."
 }

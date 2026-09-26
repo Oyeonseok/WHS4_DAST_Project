@@ -125,8 +125,10 @@ def _assertion_facts(
             for item in targets
         ):
             continue
-        results.append({
-            "kind": "assertion_differential",
+        fact = {
+            "kind": ("json_value_differential"
+                     if assertion.kind == "json_path_nonempty_string"
+                     else "assertion_differential"),
             "profile_id": profile_id,
             "runtime_kind": channel,
             "assertion_kind": assertion.kind,
@@ -138,7 +140,11 @@ def _assertion_facts(
             "negative_attempt_id": negative["attempt_id"],
             "negative_evidence_id": negative["evidence_id"],
             "provenance": "contract_bound_adapter_summary",
-        })
+        }
+        if assertion.kind == "json_path_nonempty_string":
+            fact["json_path_sha256"] = canonical_sha256(assertion.path)
+            fact["value_shape"] = "nonempty_string"
+        results.append(fact)
     return results
 
 

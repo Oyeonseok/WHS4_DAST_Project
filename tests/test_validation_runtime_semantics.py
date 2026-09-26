@@ -139,6 +139,18 @@ class ValidationRuntimeSemanticTests(unittest.TestCase):
                           bounded.impact_sensitivity.score,
                           bounded.impact_actor_requirements.score], [1, 0, 2])
         self.assertIn("field name", bounded.impact_sensitivity.reason)
+        value_probe = {"assertion_id": "value", "kind": "json_path_nonempty_string",
+                       "path": ["users", 0, "password"], "expected": True}
+        declared_value = runtime('"password":').model_dump(mode="json")
+        declared_value["target"]["assertions"].append(value_probe)
+        declared_value["negative_control"]["assertions"].append(value_probe)
+        with_value = HttpRuntimeContract.model_validate(declared_value)
+        self.assertIsNone(validate_runtime_semantics(with_value, profile))
+        still_bounded, _ = bound_profile_proof_assessment(profile, with_value, assessment)
+        self.assertEqual(still_bounded.impact_sensitivity.score, 0)
+        declared_value["negative_control"]["assertions"].pop()
+        with self.assertRaisesRegex(RuntimeSemanticError, "same target proof assertions"):
+            validate_runtime_semantics(HttpRuntimeContract.model_validate(declared_value), profile)
         unchanged, rule = bound_profile_proof_assessment(
             profile, runtime('"sourcesContent":'), assessment,
         )

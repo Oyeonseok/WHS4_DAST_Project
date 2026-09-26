@@ -2,7 +2,11 @@
 
 import unittest
 
+from aidast.core.request_broker import BrokerResponse
 from aidast.validation.contracts.models import BlindAssessment, canonical_sha256
+from aidast.validation.contracts.runtime_contract import (
+    evaluate_http_response, validate_runtime_contract,
+)
 from aidast.validation.core.evidence_facts import extract_replay_facts
 from aidast.validation.core.profile_evidence import evaluate_profile_evidence
 from aidast.validation.core.profiles import SkillProfileResolver
@@ -218,6 +222,43 @@ class EvidenceFactExtractionTests(unittest.TestCase):
                 ).facts
                 self.assertEqual(len(facts), 1)
                 self.assertEqual(facts[0]["runtime_kind"], kind)
+
+    def test_source_leak_value_receipt_requires_nonempty_json_value(self):
+        marker = {"assertion_id": "field", "kind": "body_contains",
+                  "expected": '"password":'}
+        value = {"assertion_id": "value", "kind": "json_path_nonempty_string",
+                 "path": ["users", 0, "password"], "expected": True}
+        runtime = {"schema_version": 1,
+                   **{kind: {"request": {"query_parameters": {"v": kind}},
+                             "assertions": [marker, value]}
+                      for kind in ("target", "positive_control", "negative_control")}}
+        contract = validate_runtime_contract(runtime)
+        assertions = contract.target.assertions
+        def evaluated(body):
+            return {"evaluation": evaluate_http_response(
+                BrokerResponse(200, "https://test/debug/users", {}, body),
+                assertions, duration_ms=1,
+            )}
+        target = evaluated(b'{"users":[{"password":"private-seed-hash"}]}')
+        negative = evaluated(b'{"users":[{"password":""}]}')
+        replay = observations("http", target, negative)
+        receipt = extract_replay_facts(
+            "hunt-source-leak", runtime, assessment("error_signature"), replay,
+            replay_status="complete",
+        )
+        values = [fact for fact in receipt.facts
+                  if fact["kind"] == "json_value_differential"]
+        self.assertEqual(len(values), 1)
+        self.assertEqual(values[0]["value_shape"], "nonempty_string")
+        self.assertNotIn("private-seed-hash", str(receipt))
+        field_only = observations("http", evaluated(b'{"users":[{"password":""}]}'),
+                                  negative)
+        self.assertFalse(any(fact["kind"] == "json_value_differential"
+                             for fact in extract_replay_facts(
+                                 "hunt-source-leak", runtime,
+                                 assessment("error_signature"), field_only,
+                                 replay_status="complete",
+                             ).facts))
 
 
 if __name__ == "__main__":

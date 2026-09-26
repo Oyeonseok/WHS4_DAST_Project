@@ -122,20 +122,27 @@ def _contract(candidate: dict) -> tuple[str, str, str, dict, str]:
     else:
         raise ValueError(f"no read-only replay plan for {candidate['candidate_id']}")
     proof = {"assertion_id": "bounded-signal", "kind": "body_contains", "expected": marker}
+    proofs = [proof]
+    if project == "vuln-bank" and path == "/debug/users":
+        proofs.append({
+            "assertion_id": "bounded-nonempty-value",
+            "kind": "json_path_nonempty_string",
+            "path": ["users", 0, "password"], "expected": True,
+        })
     def request(value):
         if location == "query":
             return {} if value is None else {"query_parameters": {slot: value}}
         return {"path_parameters": {slot: value}}
     runtime = validate_runtime_contract({
         "schema_version": 1,
-        "target": {"request": request(target), "assertions": [proof]},
+        "target": {"request": request(target), "assertions": proofs},
         "positive_control": {
             "request": request(positive),
             "assertions": [{"assertion_id": "channel-healthy", "kind": "status_equals",
                             "expected": positive_status}],
         },
         "negative_control": {
-            "request": request(negative), "assertions": [proof],
+            "request": request(negative), "assertions": proofs,
         },
     }).model_dump(mode="json")
     return endpoint, slot, location, runtime, SKILLS[vuln]

@@ -63,6 +63,7 @@ class ResponseAssertion(StrictContract):
     assertion_id: Annotated[str, Field(min_length=1, max_length=128)]
     kind: Literal[
         "status_equals", "header_equals", "body_contains", "json_equals",
+        "json_path_nonempty_string",
         "duration_at_least_ms", "duration_at_most_ms",
     ]
     expected: JsonScalar
@@ -101,11 +102,14 @@ class ResponseAssertion(StrictContract):
         elif self.kind == "json_equals":
             if not self.path:
                 raise ValueError("json_equals requires a bounded JSON path")
+        elif self.kind == "json_path_nonempty_string":
+            if not self.path or self.expected is not True:
+                raise ValueError("json_path_nonempty_string requires a path and expected=true")
         elif type(self.expected) not in {int, float} or not math.isfinite(float(self.expected)) \
                 or float(self.expected) < 0:
             raise ValueError("duration assertions require a finite nonnegative number")
-        if self.kind != "json_equals" and self.path:
-            raise ValueError("JSON path is valid only for json_equals")
+        if self.kind not in {"json_equals", "json_path_nonempty_string"} and self.path:
+            raise ValueError("JSON path is valid only for JSON path assertions")
         if self.kind != "header_equals" and self.header is not None:
             raise ValueError("header is valid only for header_equals")
         return self
@@ -237,13 +241,15 @@ def evaluate_http_response(response: BrokerResponse, assertions: tuple[ResponseA
             actual = header_map.get(assertion.header.casefold())
         elif assertion.kind == "body_contains":
             actual = assertion.expected if assertion.expected in body_text else _MISSING
-        elif assertion.kind == "json_equals":
+        elif assertion.kind in {"json_equals", "json_path_nonempty_string"}:
             if parsed_json is _MISSING:
                 try:
                     parsed_json = json.loads(body_text)
                 except json.JSONDecodeError:
                     parsed_json = None
-            actual = _json_path(parsed_json, assertion.path)
+            value = _json_path(parsed_json, assertion.path)
+            actual = (isinstance(value, str) and bool(value.strip())
+                      if assertion.kind == "json_path_nonempty_string" else value)
         else:
             actual = duration_ms
         if assertion.kind == "duration_at_least_ms":

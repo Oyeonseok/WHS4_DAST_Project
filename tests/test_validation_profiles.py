@@ -207,7 +207,7 @@ class ValidationProfileTests(unittest.TestCase):
         ), comparison)
         self.assertIn("claimed_impact", agent._run_structured.call_args_list[1].kwargs["prompt"])
 
-    def test_codex_runner_resumes_one_native_session_for_unblinding(self):
+    def test_codex_runner_starts_fresh_native_session_for_unblinding(self):
         resolved = SkillProfileResolver().resolve("hunt-idor")
         axis = {"score": 1, "evidence_ids": ("evidence",), "reason": "Evidence-bound score."}
         assessment = BlindAssessment(
@@ -226,7 +226,7 @@ class ValidationProfileTests(unittest.TestCase):
 
         class SessionAgent:
             def __init__(self):
-                self.results = [assessment, comparison]
+                self.results = [assessment, comparison, assessment]
                 self.calls = []
 
             def _run_structured_session(self, **kwargs):
@@ -244,12 +244,15 @@ class ValidationProfileTests(unittest.TestCase):
         }
         runner.assess(blind, ())
         runner.compare({"claimed_impact": "cross-user read"}, assessment.model_dump(mode="json"))
+        runner.assess(blind, ())
 
         self.assertEqual([item["session_id"] for item in agent.calls],
-                         [None, "thread-validation"])
+                         [None, None, None])
         self.assertEqual(agent.calls[0]["work_dir"], agent.calls[1]["work_dir"])
+        self.assertNotEqual(agent.calls[0]["work_dir"], agent.calls[2]["work_dir"])
         self.assertNotIn("claimed_impact", agent.calls[0]["prompt"])
         self.assertIn("claimed_impact", agent.calls[1]["prompt"])
+        self.assertNotIn("claimed_impact", agent.calls[2]["prompt"])
         self.assertTrue(runner.agent_id.startswith("validation_agent_"))
 
     def test_codex_runner_starts_fresh_thread_and_work_dir_for_next_case(self):
@@ -309,12 +312,49 @@ class ValidationProfileTests(unittest.TestCase):
 
         self.assertEqual(
             [item["session_id"] for item in agent.calls],
-            [None, "thread-1", None, "thread-2"],
+            [None, None, None, None],
         )
         self.assertEqual(agent.calls[0]["work_dir"], agent.calls[1]["work_dir"])
         self.assertEqual(agent.calls[2]["work_dir"], agent.calls[3]["work_dir"])
         self.assertNotEqual(agent.calls[0]["work_dir"], agent.calls[2]["work_dir"])
         self.assertEqual(runner.agent_id, stable_agent_id)
+
+    def test_same_case_new_blind_pass_is_fresh_but_correction_resumes(self):
+        resolved = SkillProfileResolver().resolve("hunt-idor")
+        axis = {"score": 0, "evidence_ids": ("evidence",), "reason": "Observed denial."}
+        assessment = BlindAssessment(
+            case_id="case", blind_case_sha256="a" * 64, reproduced=False,
+            signal_types=("authorization_boundary",), target_attempt_ids=("target",),
+            control_attempt_ids=("control",), evidence_ids=("evidence",),
+            impact_boundary=axis, impact_sensitivity=axis,
+            impact_actor_requirements=axis, conclusion="Not reproduced.",
+        )
+
+        class SessionAgent:
+            def __init__(self):
+                self.calls = []
+
+            def _run_structured_session(self, **kwargs):
+                self.calls.append(kwargs)
+                return assessment, kwargs["session_id"] or f"thread-{len(self.calls)}"
+
+        blind = {
+            "case_id": "case", "attack_skill_name": "hunt-idor",
+            "attack_skill_sha256": resolved.attack_skill_sha256,
+            "validation_skill_sha256": resolved.validation_skill_sha256,
+            "validation_profile_sha256": resolved.profile_sha256,
+        }
+        agent = SessionAgent()
+        runner = CodexBlindValidationRunner(agent)
+        self.addCleanup(runner.close)
+        runner.assess(blind, ())
+        runner.assess(blind, ())
+        runner.assess(blind, (), correction="Cite the target observation.")
+
+        self.assertEqual([item["session_id"] for item in agent.calls],
+                         [None, None, "thread-2"])
+        self.assertNotEqual(agent.calls[0]["work_dir"], agent.calls[1]["work_dir"])
+        self.assertEqual(agent.calls[1]["work_dir"], agent.calls[2]["work_dir"])
 
     def test_codex_runner_can_compare_frozen_assessment_in_fresh_thread(self):
         resolved = SkillProfileResolver().resolve("hunt-idor")

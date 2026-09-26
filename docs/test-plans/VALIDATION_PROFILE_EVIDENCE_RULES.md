@@ -156,3 +156,9 @@ A=0의 두 이유(증거 부족과 높은 요구 조건)는 감사 코드로 구
 [읽기 전용 보정기](../../scripts/calibrate_validation_profile_evidence.py)는 공식 후보 정답지의 최종 상태 라벨과 합성 전이 정답지의 축 라벨을 구분한다. 합성 6개 trial의 baseline/final B/S/A가 현 `evaluate_impact()` 임계값과 일치하는지 확인하며, 현재 DB의 감사 기록이 stage·profile·assessment 해시와 내부 인용에 연결됐는지 검증한다. `STATUS_MATCH`는 저장된 최종 상태와 공식 라벨의 일치만 뜻하며 독립적인 결정 증명을 검사하지 않는다. `VALID_BINDING`은 감사 기록의 해시·형식·내부 인용 결합만 뜻하며 실제 취약성이나 축 사실을 확인하지 않는다. 합성 6건은 Agent의 실측 축과 비교한 결과가 아니라 점수 임계값의 자기 일관성 검사다. **공식 정답지에는 58개 프로필별 축 점수가 없다.** 합성 축 점수는 `hunt-source-leak` 실습용이므로 생산 점수 제한의 근거로 승격하지 않는다. 따라서 보정기는 모든 프로필을 `audit`로 남기며, 추가 독립 축 정답이 생기기 전에는 자동 강제를 활성화하지 않는다.
 
 [현재 기록된 보정 결과](../test-results/09.25/validation/PROFILE_EVIDENCE_CALIBRATION.json)는 감사 기능 도입 전 lab DB에 대한 기준선이다. 공식 상태 라벨 10건, 재생 준비 7건, 저장 상태 일치 1건, 합성 축/임계값 일치 6건이며, 새 감사 기록의 유효한 연결은 0건이다. 이전 실행 DB에 감사 기록을 소급해 작성하지 않았다. 새 Validation 실행 후 같은 명령을 다시 사용하면 구조적 사실 추출과 정답지 간격을 확인할 수 있다.
+
+2026-09-26 [새 로컬 GET 기준선](../test-results/09.26/validation/PROFILE_EVIDENCE_BASELINE.md)에서는 통제 평가기로 7건을 재생하고 감사 기록 7건을 생성했다. `hunt-source-leak`의 비어 있지 않은 JSON 값 검사는 값을 저장하지 않는 `json_value_differential` 영수증으로 남는다. 독립 채점은 음성 6건 `PASS`, 양성 1건 `UNRESOLVED`이며, 양성의 민감도 제한은 유지된다. 보정기는 `--candidate-db`·`--answer-db`가 주어지면 출처와 최종 결정 증거를 검사하는 기존 독립 채점 결과를 결합한다. `--axis-labels`에 제공된 B/S/A 라벨은 봉인된 Blind 평가와 대조한 실측 적용 축에 대해 참고 비교만 수행한다. 라벨의 출처는 검증하지 않으며, 합성 전이 정답지는 해당 인자로 받지 않는다. 현재 독립 축 라벨은 0건이다.
+
+[실제 Agent 판정 실험](../test-results/09.26/validation/REAL_AGENT_ACCURACY.md)에서는 준비된 음성 6건이 재개 결과를 포함해 독립 채점 `PASS`였고, 양성 1건은 별도 Impact 실행 계약에서 `CONFIRMED` 및 전용 증거 채점 `PASS`를 받았다. 기본 실행은 양성 `UNDERPOWERED`, PrivacyRequests ClaimComparison 지연으로 끝나므로 이를 단일 설정의 7/7 정확도로 계산하지 않는다.
+
+이후 [단일 실행 재검증](../test-results/09.26/validation/SINGLE_RUN_ACCURACY.md)은 Impact 계약이 있는 하나의 격리 DB에서 실제 Agent로 7건을 순차 실행해 일반 독립 채점 `PASS` 7/7과 Impact 전용 채점 `PASS`를 확인했다. Unblind는 봉인된 Blind 평가를 입력으로 하는 새 세션을 사용한다. 인증 전제 조건이 필요한 3건과 독립 축 정답 라벨은 여전히 범위 밖이다.

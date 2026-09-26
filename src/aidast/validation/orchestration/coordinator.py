@@ -26,6 +26,7 @@ from .eligibility_runner import EligibilityAgentRunner
 from ..contracts.models import (BlindAssessment, ClaimComparison, ValidationStageResult,
                      canonical_json, canonical_sha256)
 from ..persistence.repository import ValidationRepository
+from ..persistence.evidence_policy import sanitize_metadata
 from ..contracts.models import PrerequisiteResolverPort, ReproductionObservation, ReproductionPort
 from ..contracts.impact_development import impact_action_document
 from ..contracts.runtime_semantics import (
@@ -1688,7 +1689,7 @@ class ValidationCoordinator:
                     raise ValidationCoordinatorError("stored impact precondition receipt is invalid")
                 return None, None, "precondition_receipt_unbound"
             if receipt_id is None:
-                document = receipt.model_dump(mode="json")
+                document = sanitize_metadata(receipt.model_dump(mode="json"))
                 encoded = canonical_json(document)
                 receipt_id = repo.add_evidence(
                     case_id=candidate.case_id, stage_run_id=stage_run_id,

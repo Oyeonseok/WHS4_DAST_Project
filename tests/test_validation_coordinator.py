@@ -2189,7 +2189,8 @@ class ValidationCoordinatorTests(unittest.TestCase):
                 "required_preconditions": list(request.required_preconditions),
                 "source_request_ids": ["http"],
                 "evidence_ids": [],
-                "details": {"kind": "trusted_test_receipt"},
+                "details": {"kind": "trusted_test_receipt",
+                            "source_url": "https://example.test/source#L255"},
             }
 
         result = ValidationCoordinator(
@@ -2235,10 +2236,14 @@ class ValidationCoordinatorTests(unittest.TestCase):
             self.assertEqual(json.loads(hypothesis[2])["disposition"], "execute")
             self.assertEqual(json.loads(hypothesis[2])["source_request_ids"], ["http"])
             self.assertTrue(json.loads(hypothesis[3])["signal_observed"])
-            self.assertEqual(conn.execute(
-                "SELECT count(*) FROM validation_evidence "
+            receipts = conn.execute(
+                "SELECT details_json,content_sha256 FROM validation_evidence "
                 "WHERE evidence_kind='impact_precondition_verification'"
-            ).fetchone()[0], 1)
+            ).fetchall()
+            self.assertEqual(len(receipts), 1)
+            self.assertEqual(
+                receipts[0][1], canonical_sha256(json.loads(receipts[0][0])),
+            )
         already_confirmed = ValidationCoordinator(
             db_path=self.path, agent=FakeAgent(), reproduction=FakePort(),
             policy_provider=lambda endpoint, method: self.policy,

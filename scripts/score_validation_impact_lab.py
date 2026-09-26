@@ -13,6 +13,7 @@ from aidast.validation.contracts.runtime_contract import render_http_request
 from aidast.validation.contracts.impact_development import (
     impact_action_document, impact_contract_document,
 )
+from aidast.validation.execution.impact_development import VerifiedImpactPreconditions
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -141,8 +142,46 @@ def _decision_has_impact_proof(conn: sqlite3.Connection, case: sqlite3.Row,
                  AND a.impact_hypothesis_id IS NULL AND e.evidence_kind='observation'""",
             (case["case_id"], case["decision_stage_run_id"]),
         ).fetchall()
-        if (not plan["evidence_ids"]
-                or not set(plan["evidence_ids"]) <= ({row[0] for row in baseline_evidence} & cited)):
+        baseline_ids = {row[0] for row in baseline_evidence}
+        receipt_rows = conn.execute(
+            """SELECT evidence_id,details_json,content_sha256 FROM validation_evidence
+               WHERE case_id=? AND stage_run_id=?
+                 AND evidence_kind='impact_precondition_verification'""",
+            (case["case_id"], case["decision_stage_run_id"]),
+        ).fetchall()
+        if len(receipt_rows) != 1:
+            return False
+        receipt_ids = set()
+        for row in receipt_rows:
+            document = json.loads(row["details_json"])
+            verified = VerifiedImpactPreconditions.model_validate(document)
+            details = document["details"]
+            marker_source = details["marker_source"]
+            expected_source_url = expected["marker_source_url"]
+            if (canonical_sha256(document) != row["content_sha256"]
+                    or document["path_id"] != expected["path_id"]
+                    or document["contract_sha256"] != canonical_sha256(impact_action_document(action))
+                    or list(verified.required_preconditions) != expected["required_preconditions"]
+                    or verified.evidence_ids
+                    or list(verified.source_request_ids) != [receipt.source_request_id]
+                    or details["contract_id"] != expected["contract_id"]
+                    or details["source_request_id"] != receipt.source_request_id
+                    or details["response_sha256"] != receipt.response_sha256
+                    or details["response_status"] != expected["response_status"]
+                    or details["marker_json_path"] != expected["marker_json_path"]
+                    or details["marker_assertion_id"] != expected["marker_assertion_id"]
+                    or details["marker_assertion_expected"] != expected["marker_assertion_expected"]
+                    or marker_source["url"] not in {expected_source_url,
+                                                    expected_source_url.split("#", 1)[0]}
+                    or marker_source["file_sha256"] != expected["marker_source_sha256"]
+                    or marker_source["line"] != expected["marker_source_line"]):
+                return False
+            receipt_ids.add(row["evidence_id"])
+        plan_ids = set(plan["evidence_ids"])
+        if (not plan_ids or not plan_ids & baseline_ids
+                or not plan_ids <= baseline_ids | receipt_ids
+                or not receipt_ids <= plan_ids
+                or not plan_ids & baseline_ids <= cited):
             return False
         attempts = conn.execute(
             """SELECT attempt_id,outcome,signal_observed,finished_at

@@ -10,14 +10,14 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
-from aidast.validation.contracts.models import canonical_sha256
+from aidast.validation.contracts.models import BlindAssessment, canonical_sha256
 from aidast.validation.core.decision import evaluate_impact
 from aidast.validation.core.profile_evidence import PROFILE_EVIDENCE_RULES
 from aidast.validation.core.profile_evidence import RULE_VERSION
 try:
-    from scripts.score_validation_lab import classify_status
+    from scripts.score_validation_lab import classify_status, score_validation_lab
 except ModuleNotFoundError:  # Direct execution from scripts/.
-    from score_validation_lab import classify_status
+    from score_validation_lab import classify_status, score_validation_lab
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -51,7 +51,10 @@ def _valid_fact_bindings(document: dict[str, Any]) -> bool:
 
     for fact in facts:
         if (not isinstance(fact, dict)
-                or fact.get("kind") not in {"assertion_differential", "nonce_callback_differential"}
+                or fact.get("kind") not in {
+                    "assertion_differential", "json_value_differential",
+                    "nonce_callback_differential",
+                }
                 or fact.get("profile_id") != document.get("profile_id")
                 or fact.get("runtime_kind") != document.get("runtime_kind")
                 or fact.get("provenance") != "contract_bound_adapter_summary"
@@ -60,11 +63,18 @@ def _valid_fact_bindings(document: dict[str, Any]) -> bool:
                 or fact.get("negative_attempt_id") not in controls
                 or fact.get("negative_evidence_id") not in negative_evidence):
             return False
-        if fact["kind"] == "assertion_differential":
+        if fact["kind"] in {"assertion_differential", "json_value_differential"}:
             if any(not isinstance(fact.get(key), str)
                    or SHA256.fullmatch(fact[key]) is None
                    for key in ("assertion_id_sha256", "assertion_predicate_sha256",
                                "expected_sha256")) or not isinstance(fact.get("assertion_kind"), str):
+                return False
+            if (fact["kind"] == "json_value_differential"
+                    and (document.get("runtime_kind") not in {"http", "multipart"}
+                         or fact.get("assertion_kind") != "json_path_nonempty_string"
+                         or fact.get("value_shape") != "nonempty_string"
+                         or not isinstance(fact.get("json_path_sha256"), str)
+                         or SHA256.fullmatch(fact["json_path_sha256"]) is None)):
                 return False
         elif (document.get("runtime_kind") != "oob"
               or not isinstance(fact.get("protocols"), list)
@@ -111,17 +121,54 @@ def _load_transition(path: Path, official_ids: set[str]) -> dict[str, Any]:
     return oracle
 
 
-def _audit_status(conn: sqlite3.Connection, case: sqlite3.Row, profile_id: str) -> tuple[str, int]:
+def _load_axis_labels(path: Path | None, ready_ids: set[str]) -> dict[str, dict[str, Any]]:
+    if path is None:
+        return {}
+    document = json.loads(path.read_text(encoding="utf-8"))
+    if (not isinstance(document, dict)
+            or document.get("oracle_kind") != "provided_profile_axis_labels"
+            or not isinstance(document.get("cases"), list)):
+        raise ValueError("provided axis oracle is invalid")
+    labels: dict[str, dict[str, Any]] = {}
+    for row in document["cases"]:
+        if (not isinstance(row, dict)
+                or row.get("candidate_id") not in ready_ids
+                or not isinstance(row.get("profile_id"), str)
+                or row["profile_id"] not in PROFILE_EVIDENCE_RULES
+                or not isinstance(row.get("expected_axes"), list)
+                or len(row["expected_axes"]) != 3
+                or any(type(score) is not int or not 0 <= score <= 3
+                       for score in row["expected_axes"])
+                or not isinstance(row.get("source_refs"), list)
+                or not row["source_refs"]
+                or any(not isinstance(ref, str) or not ref.strip()
+                       for ref in row["source_refs"])):
+            raise ValueError("provided axis label is invalid")
+        if row["candidate_id"] in labels:
+            raise ValueError("duplicate provided axis label")
+        labels[row["candidate_id"]] = row
+    return labels
+
+
+def _axes(value: object) -> list[int] | None:
+    return (value if isinstance(value, list) and len(value) == 3
+            and all(type(score) is int and 0 <= score <= 3 for score in value)
+            else None)
+
+
+def _audit_status(
+    conn: sqlite3.Connection, case: sqlite3.Row, profile_id: str,
+) -> tuple[str, int, list[int] | None, list[int] | None]:
     rows = conn.execute(
         """SELECT stage_run_id,details_json,content_sha256 FROM validation_evidence
            WHERE case_id=? AND evidence_kind='blind_profile_evidence_audit'""",
         (case["case_id"],),
     ).fetchall()
     if not rows:
-        return "MISSING", 0
+        return "MISSING", 0, None, None
     current = [row for row in rows if row["stage_run_id"] == case["decision_stage_run_id"]]
     if len(current) != 1:
-        return "INVALID_BINDING", 0
+        return "INVALID_BINDING", 0, None, None
     row = current[0]
     try:
         document = json.loads(row["details_json"])
@@ -137,20 +184,50 @@ def _audit_status(conn: sqlite3.Connection, case: sqlite3.Row, profile_id: str) 
                 or document.get("assessment_sha256") != case["blind_assessment_sha256"]
                 or not isinstance(document.get("replay_status"), str)
                 or not _valid_fact_bindings(document)):
-            return "INVALID_BINDING", 0
-        return "VALID_BINDING", len(document["facts"])
+            return "INVALID_BINDING", 0, None, None
+        raw_axes = _axes(document.get("raw_axes"))
+        effective_axes = _axes(document.get("effective_axes"))
+        if ("raw_axes" in document and raw_axes is None
+                or "effective_axes" in document and effective_axes is None):
+            return "INVALID_BINDING", 0, None, None
+        frozen_rows = conn.execute(
+            """SELECT details_json,content_sha256 FROM validation_evidence
+               WHERE case_id=? AND stage_run_id=? AND evidence_kind='blind_assessment'""",
+            (case["case_id"], case["decision_stage_run_id"]),
+        ).fetchall()
+        if len(frozen_rows) != 1 or effective_axes is None:
+            return "INVALID_BINDING", 0, None, None
+        frozen = BlindAssessment.model_validate_json(frozen_rows[0]["details_json"])
+        frozen_axes = [frozen.impact_boundary.score, frozen.impact_sensitivity.score,
+                       frozen.impact_actor_requirements.score]
+        if (frozen.case_id != case["case_id"]
+                or canonical_sha256(frozen.model_dump(mode="json"))
+                   != frozen_rows[0]["content_sha256"]
+                or frozen_rows[0]["content_sha256"] != case["blind_assessment_sha256"]
+                or frozen_axes != effective_axes):
+            return "INVALID_BINDING", 0, None, None
+        return "VALID_BINDING", len(document["facts"]), raw_axes, effective_axes
     except (TypeError, ValueError, KeyError):
-        return "INVALID_BINDING", 0
+        return "INVALID_BINDING", 0, None, None
 
 
 def calibrate_profile_evidence(
     official_key: Path, transition_key: Path, mapping_path: Path,
-    pipeline_path: Path,
+    pipeline_path: Path, *, axis_labels: Path | None = None,
+    candidate_inventory: Path | None = None, answer_db: Path | None = None,
 ) -> dict[str, Any]:
     """Measure oracle and audit coverage; never alter production scores or answer keys."""
     official = _load_official(official_key)
     official_by_id = {row["candidate_id"]: row for row in official}
+    if (candidate_inventory is None) != (answer_db is None):
+        raise ValueError("candidate inventory and answer DB must be supplied together")
+    independent_score = (score_validation_lab(
+        candidate_inventory, answer_db, mapping_path, pipeline_path,
+    ) if candidate_inventory is not None and answer_db is not None else None)
     transition = _load_transition(transition_key, set(official_by_id))
+    ready_ids = {row["candidate_id"] for row in official
+                 if row["readiness"] == "GET_REPLAY_READY"}
+    provided_axes = _load_axis_labels(axis_labels, ready_ids)
     mapping = json.loads(mapping_path.read_text(encoding="utf-8"))
     if (not isinstance(mapping, dict)
             or mapping.get("fixture_kind") != "synthetic_attack_claims_for_validation_only"
@@ -163,7 +240,7 @@ def calibrate_profile_evidence(
         raise ValueError("Validation mapping differs from ready official candidates")
     profiles = {
         name: {"official_status_labels": 0, "synthetic_axis_trials": 0,
-               "independent_axis_labels": 0,
+               "independent_axis_labels": 0, "provided_axis_labels": 0,
                "axis_label_provenance": "none", "enforcement_mode": "audit",
                "enforcement_reason": "independent profile-specific B/S/A labels are unavailable"}
         for name in sorted(PROFILE_EVIDENCE_RULES)
@@ -182,7 +259,9 @@ def calibrate_profile_evidence(
                               "expected_status": answer["target_validation_status"],
                               "actual_status": None,
                               "status_comparison": "NEEDS_PREREQUISITES",
-                              "audit_status": "NOT_RUN", "fact_count": 0})
+                              "audit_status": "NOT_RUN", "fact_count": 0,
+                              "audit_reported_raw_axes": None, "actual_effective_axes": None,
+                              "axis_comparison": "NEEDS_PREREQUISITES"})
                 continue
             spec = conn.execute(
                 "SELECT attack_skill_name FROM finding_reproduction_specs WHERE finding_id=?",
@@ -191,6 +270,11 @@ def calibrate_profile_evidence(
             if len(spec) != 1 or spec[0][0] not in profiles:
                 raise ValueError(f"mapped candidate has no packaged profile: {candidate_id}")
             profile_id = spec[0][0]
+            label = provided_axes.get(candidate_id)
+            if label is not None:
+                if label["profile_id"] != profile_id:
+                    raise ValueError(f"provided axis label profile differs: {candidate_id}")
+                profiles[profile_id]["provided_axis_labels"] += 1
             profiles[profile_id]["official_status_labels"] += 1
             stored = conn.execute(
                 """SELECT case_id,current_status,processing_phase,latest_stage_run_id,
@@ -208,14 +292,24 @@ def calibrate_profile_evidence(
             classified = classify_status(answer["target_validation_status"], actual)
             comparison = "STATUS_MATCH" if classified == "PASS" else classified
             matches += comparison == "STATUS_MATCH"
-            audit_status, fact_count = (
-                _audit_status(conn, case, profile_id) if completed else ("NOT_RUN", 0)
+            audit_status, fact_count, raw_axes, effective_axes = (
+                _audit_status(conn, case, profile_id) if completed
+                else ("NOT_RUN", 0, None, None)
+            )
+            axis_comparison = (
+                "NO_AXIS_LABEL" if label is None else
+                "PENDING_AUDIT" if effective_axes is None else
+                "PROVIDED_AXIS_MATCH" if effective_axes == label["expected_axes"] else
+                "PROVIDED_AXIS_MISMATCH"
             )
             valid_audits += audit_status == "VALID_BINDING"
             cases.append({"candidate_id": candidate_id, "profile_id": profile_id,
                           "expected_status": answer["target_validation_status"],
                           "actual_status": actual, "status_comparison": comparison,
-                          "audit_status": audit_status, "fact_count": fact_count})
+                          "audit_status": audit_status, "fact_count": fact_count,
+                          "audit_reported_raw_axes": raw_axes,
+                          "actual_effective_axes": effective_axes,
+                          "axis_comparison": axis_comparison})
     transition_candidate = mapped.get(transition["candidate_id"])
     if not transition_candidate:
         raise ValueError("synthetic axis oracle has no mapped candidate")
@@ -225,6 +319,21 @@ def calibrate_profile_evidence(
     )
     if source_profile != "hunt-source-leak":
         raise ValueError("synthetic transition axes are not bound to hunt-source-leak")
+    score_by_id = ({row["candidate_id"]: row for row in independent_score["cases"]}
+                   if independent_score is not None else {})
+    if (independent_score is not None
+            and (len(score_by_id) != len(independent_score["cases"])
+                 or set(score_by_id) != set(official_by_id))):
+        raise ValueError("independent scorer candidate set differs from official oracle")
+    for row in cases:
+        scored = score_by_id.get(row["candidate_id"])
+        if scored is None:
+            row["independent_score_result"] = "NOT_RUN"
+            continue
+        if (scored["target_validation_status"] != row["expected_status"]
+                or scored.get("actual_validation_status") != row["actual_status"]):
+            raise ValueError("independent scorer result differs from current case binding")
+        row["independent_score_result"] = scored["result"]
     profiles[source_profile]["synthetic_axis_trials"] = len(transition["cases"])
     profiles[source_profile]["axis_label_provenance"] = "synthetic_transition_fixture"
     axis_trials = [{
@@ -240,20 +349,32 @@ def calibrate_profile_evidence(
         "rubric_consistent": True,
     } for scenario_id, row in sorted(transition["cases"].items())]
     return {
-        "schema_version": 2,
+        "schema_version": 4,
         "mode": "read_only_calibration",
         "status_comparison_scope": "stored_current_status_only_no_decision_proof_check",
-        "audit_validation_scope": "hash_schema_and_internal_citation_binding_only",
+        "audit_validation_scope": "hash_schema_internal_citations_and_frozen_assessment_binding",
         "synthetic_axis_scope": "fixture_rubric_consistency_only_no_agent_axis_comparison",
+        "decision_proof_scope": ("source_pinned_lab_scorer" if independent_score is not None
+                                 else "not_checked"),
+        "axis_label_scope": "provided_labels_unverified_for_production_enforcement",
         "official_key_sha256": hashlib.sha256(official_key.read_bytes()).hexdigest(),
         "transition_key_sha256": hashlib.sha256(transition_key.read_bytes()).hexdigest(),
+        "provided_axis_key_sha256": (
+            hashlib.sha256(axis_labels.read_bytes()).hexdigest()
+            if axis_labels is not None else None),
         "summary": {
             "official_status_labels": len(official),
             "ready_official_candidates": len(mapped),
             "stored_status_matches": matches,
+            "evidence_backed_status_matches": sum(
+                row["independent_score_result"] == "PASS" for row in cases),
             "synthetic_axis_trials": len(axis_trials),
             "rubric_consistent_trials": len(axis_trials),
             "current_audits_binding_valid": valid_audits,
+            "independent_axis_labels": 0,
+            "provided_axis_labels": len(provided_axes),
+            "provided_axis_matches": sum(
+                row["axis_comparison"] == "PROVIDED_AXIS_MATCH" for row in cases),
             "profiles": len(profiles),
             "profiles_ready_for_axis_enforcement": sum(
                 profile["enforcement_mode"] == "enforce"
@@ -271,10 +392,18 @@ def main() -> None:
     parser.add_argument("--transition-key", type=Path, default=DEFAULT_TRANSITION)
     parser.add_argument("--mapping", type=Path, default=DEFAULT_BUNDLE / "CandidateFindingMap.json")
     parser.add_argument("--pipeline", type=Path, default=DEFAULT_BUNDLE / "Pipeline.db")
+    parser.add_argument("--axis-labels", type=Path,
+                        help="Provided B/S/A labels for advisory comparison only; synthetic key is rejected")
+    parser.add_argument("--candidate-db", type=Path,
+                        help="CandidateInventory.db for independent final-decision proof scoring")
+    parser.add_argument("--answer-db", type=Path,
+                        help="CandidateAnswerKey.db bound to --candidate-db")
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
     report = calibrate_profile_evidence(
         args.official_key, args.transition_key, args.mapping, args.pipeline,
+        axis_labels=args.axis_labels,
+        candidate_inventory=args.candidate_db, answer_db=args.answer_db,
     )
     if args.output is not None:
         args.output.parent.mkdir(parents=True, exist_ok=True)

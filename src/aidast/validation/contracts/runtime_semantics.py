@@ -19,7 +19,9 @@ class RuntimeSemanticError(ValueError):
     """A valid runtime schema cannot prove the profile's declared signal."""
 
 
-_HTTP_CONTENT_ASSERTIONS = frozenset({"header_equals", "body_contains", "json_equals"})
+_HTTP_CONTENT_ASSERTIONS = frozenset({
+    "header_equals", "body_contains", "json_equals", "json_path_nonempty_string",
+})
 _HTTP_DURATION_ASSERTIONS = frozenset({
     "duration_at_least_ms", "duration_at_most_ms",
 })
@@ -75,8 +77,8 @@ def bound_profile_proof_assessment(
         item for item in runtime.target.assertions
         if item.kind in _HTTP_CONTENT_ASSERTIONS
     ]
-    if (len(content) != 1 or content[0].kind != "body_contains"
-            or content[0].expected != '"password":'):
+    if not any(item.kind == "body_contains" and item.expected == '"password":'
+               for item in content):
         return assessment, None
     rule = "source_leak_field_name_only"
     if assessment.impact_sensitivity.score == 0:

@@ -92,6 +92,27 @@ class ValidationRuntimeContractTests(unittest.TestCase):
         self.assertNotIn("owner", str(result))
         self.assertTrue(all(len(item["actual_sha256"]) == 64 for item in result["assertions"]))
 
+    def test_json_nonempty_string_assertion_proves_value_without_persisting_it(self):
+        assertion = ResponseAssertion(
+            assertion_id="credential-value", kind="json_path_nonempty_string",
+            path=("users", 0, "password"), expected=True,
+        )
+        positive = evaluate_http_response(
+            BrokerResponse(200, "https://test/debug/users", {},
+                           b'{"users":[{"password":"private-seed-hash"}]}'),
+            (assertion,), duration_ms=1,
+        )
+        empty = evaluate_http_response(
+            BrokerResponse(200, "https://test/debug/users", {},
+                           b'{"users":[{"password":""}]}'),
+            (assertion,), duration_ms=1,
+        )
+        self.assertTrue(positive["signal_observed"])
+        self.assertFalse(empty["signal_observed"])
+        self.assertNotIn("private-seed-hash", str(positive))
+        self.assertEqual(positive["assertions"][0]["actual_sha256"],
+                         canonical_sha256(True))
+
     def test_contract_requires_all_three_attempt_kinds(self):
         request = {"request": {}, "assertions": [{
             "assertion_id": "status", "kind": "status_equals", "expected": 200,

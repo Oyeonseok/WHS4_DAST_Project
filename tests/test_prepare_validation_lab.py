@@ -38,6 +38,22 @@ def test_unauthenticated_disclosure_uses_auth_bypass_profile(endpoint: str) -> N
     assert skill == "hunt-auth-bypass"
 
 
+def test_source_leak_lab_probes_value_without_storing_it_in_contract() -> None:
+    _, _, _, runtime, skill = _contract({
+        "candidate_id": "vuln-bank:curated:GET:/debug/users:excessive_data_exposure",
+        "project": "vuln-bank", "endpoint_template": "/debug/users",
+        "vuln_class": "excessive_data_exposure",
+    })
+    assert skill == "hunt-source-leak"
+    target = runtime["target"]["assertions"]
+    assert any(row["kind"] == "body_contains" and row["expected"] == '"password":'
+               for row in target)
+    assert any(row["kind"] == "json_path_nonempty_string"
+               and row["path"] == ["users", 0, "password"]
+               and row["expected"] is True for row in target)
+    assert runtime["negative_control"]["assertions"] == target
+
+
 def test_prepare_seven_isolated_cases_without_leaking_answers(tmp_path: Path) -> None:
     root = Path(__file__).resolve().parents[1]
     source = root / "result/test-runs/validation-candidates"
