@@ -404,6 +404,27 @@ class AttackCliTests(unittest.TestCase):
                 self.assertEqual(stored_json, canonical_json(normalized))
                 self.assertEqual(stored_sha256, canonical_sha256(normalized))
 
+    def test_exhaustive_coverage_finding_requires_runtime_contract(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database, payload, _ = self.protocol_finding_fixture(
+                Path(directory), runtime_kind="multipart",
+                skill_name="hunt-file-upload",
+            )
+            with closing(sqlite3.connect(database)) as conn, conn:
+                conn.execute(
+                    "UPDATE attack_tasks SET payload_json=? WHERE task_id='task'",
+                    (json.dumps({"coverage_id": "coverage-fixture"}),),
+                )
+            document = json.loads(payload.read_text(encoding="utf-8"))
+            document["reproduction"].pop("runtime_contract")
+            payload.write_text(json.dumps(document), encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "immutable runtime contract"):
+                commit_finding(database, "scan", payload)
+
+            with closing(sqlite3.connect(database)) as conn:
+                self.assertEqual(conn.execute("SELECT COUNT(*) FROM findings").fetchone()[0], 0)
+
     def test_protocol_runtime_ingestion_rejects_profile_runtime_mismatch(self):
         with tempfile.TemporaryDirectory() as directory:
             database, payload, _ = self.protocol_finding_fixture(

@@ -19,6 +19,14 @@ def test_export_records_all_three_stage_outcomes(tmp_path: Path) -> None:
             "VALUES ('scan_test','lab','fixture','completed',CURRENT_TIMESTAMP)"
         )
         conn.execute(
+            """INSERT INTO benchmark_catalog_items
+               (catalog_item_id,scan_id,ordinal,category,title,source_path,
+                source_line,source_ref,source_sha256)
+               VALUES ('catalog','scan_test',1,'Fixture','Declared issue',
+                       'README.md',10,'fixture-ref',?)""",
+            ("a" * 64,),
+        )
+        conn.execute(
             "INSERT INTO assets(asset_id,scan_id,identifier,asset_type) "
             "VALUES ('asset','scan_test','127.0.0.1','URL')"
         )
@@ -60,4 +68,8 @@ def test_export_records_all_three_stage_outcomes(tmp_path: Path) -> None:
     assert payload["items"][0]["attack"]["status"] == "tested_negative"
     assert payload["items"][0]["validation"]["status"] == "NOT_APPLICABLE"
     assert payload["items"][0]["report"]["status"] == "WITHHELD"
+    assert payload["benchmark_catalog"]["total"] == 1
+    assert payload["benchmark_catalog"]["assessment_statuses"] == {
+        "declared_unassessed": 1,
+    }
     assert "coverage" in Path(result["markdown"]).read_text(encoding="utf-8")

@@ -11,7 +11,10 @@ from aidast.attack.coverage import (
     _select_parameter,
     coverage_status,
     ensure_coverage_manifest,
+    requeue_coverage,
+    resolve_abandoned_attack_leads,
     transition_coverage,
+    _credential_role,
 )
 from aidast.attack.db_cli import transition_task
 from aidast.attack.models import AttackStageResult
@@ -40,6 +43,10 @@ def user(user_id):
 
 def test_imported_information_disclosure_uses_general_evidence_workflow() -> None:
     assert VULNERABILITY_SKILLS["source_leak"] == "hunt-misc"
+
+
+def test_jwt_coverage_requests_an_issued_authenticated_token() -> None:
+    assert _credential_role("jwt_crypto", "unauthenticated") == "authenticated"
 
 
 def test_brute_force_prefers_verifier_secret_over_replacement_password() -> None:
@@ -164,6 +171,41 @@ def test_coverage_task_cannot_complete_without_a_durable_attempt(tmp_path: Path)
         )
 
 
+def test_abandoned_stage_lead_is_preserved_as_inconclusive(tmp_path: Path) -> None:
+    imported = imported_pipeline(tmp_path)
+    with sqlite3.connect(imported.pipeline_database) as conn:
+        endpoint_id = conn.execute(
+            "SELECT endpoint_id FROM endpoints ORDER BY endpoint_id LIMIT 1"
+        ).fetchone()[0]
+        stage_run_id = start_stage_run(conn, scan_id=imported.scan_id, stage="attack")
+        task_id = create_task(
+            conn, stage_run_id=stage_run_id, skill_name="hunt-sqli",
+        )
+        conn.execute(
+            "UPDATE attack_tasks SET status='failed' WHERE task_id=?", (task_id,),
+        )
+        conn.execute(
+            "UPDATE stage_runs SET status='failed',finished_at=CURRENT_TIMESTAMP "
+            "WHERE stage_run_id=?", (stage_run_id,),
+        )
+        conn.execute(
+            """INSERT INTO attack_attempts
+               (attempt_id,scan_id,task_id,skill_name,endpoint_id,
+                request_fingerprint,outcome)
+               VALUES ('attempt-abandoned',?,?,?,?,?,'lead')""",
+            (imported.scan_id, task_id, "hunt-sqli", endpoint_id, "a" * 64),
+        )
+        assert resolve_abandoned_attack_leads(conn, imported.scan_id) == 1
+        row = conn.execute(
+            "SELECT outcome,resolution_reason,resolved_at FROM attack_attempts "
+            "WHERE attempt_id='attempt-abandoned'"
+        ).fetchone()
+
+    assert row[0] == "inconclusive"
+    assert "coverage retry" in row[1]
+    assert row[2]
+
+
 def test_exhaustive_batches_leave_no_silent_unfinished_items(tmp_path: Path) -> None:
     imported = imported_pipeline(tmp_path)
     agent = UnsupportedCoverageAgent()
@@ -191,6 +233,45 @@ def test_exhaustive_batches_leave_no_silent_unfinished_items(tmp_path: Path) -> 
             "SELECT count(*) FROM attack_coverage_events WHERE next_status='unsupported'"
         ).fetchone() == (4,)
         assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
+
+
+def test_failed_native_batches_reconcile_and_continue_to_other_coverage(
+    tmp_path: Path,
+) -> None:
+    imported = imported_pipeline(tmp_path)
+
+    class TerminalFailureAgent:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def run_attack_orchestrator(self, **kwargs) -> AttackStageResult:
+            self.calls += 1
+            for task in kwargs["attack_tasks"]:
+                transition_task(
+                    kwargs["db_path"], kwargs["scan_id"], kwargs["stage_run_id"],
+                    task["task_id"], "running",
+                )
+                transition_task(
+                    kwargs["db_path"], kwargs["scan_id"], kwargs["stage_run_id"],
+                    task["task_id"], "failed", "bounded proof unavailable",
+                )
+            return AttackStageResult(
+                status="FAILED", scan_id=kwargs["scan_id"],
+                db_path=str(kwargs["db_path"]), stage_run_id=kwargs["stage_run_id"],
+                attack_agent_ids=["coverage-agent"], summary="bounded proof unavailable",
+            )
+
+    agent = TerminalFailureAgent()
+    result = ExhaustiveAttackCoordinator(
+        agent=agent, db_path=imported.pipeline_database,
+        scope_path=imported.recon_database.parent / "Scope.md",
+        policy_path=imported.recon_database.parent / "TargetPolicy.json",
+        batch_size=2, retry_limit=1,
+    ).run(imported.scan_id)
+
+    assert result.coverage["unfinished"] == 0
+    assert result.coverage["by_status"] == {"error_terminal": 4}
+    assert agent.calls == 2
 
 
 def test_coverage_tasks_include_non_secret_owned_object_fixtures(tmp_path: Path) -> None:
@@ -222,6 +303,55 @@ def test_coverage_tasks_include_non_secret_owned_object_fixtures(tmp_path: Path)
         and item["fact_value"]["object_id"] == "41"
         for item in fixtures
     )
+
+
+def test_coverage_task_exposes_all_db_parameters_and_source_context(tmp_path: Path) -> None:
+    imported = imported_pipeline(tmp_path)
+    agent = UnsupportedCoverageAgent()
+
+    ExhaustiveAttackCoordinator(
+        agent=agent, db_path=imported.pipeline_database,
+        scope_path=imported.recon_database.parent / "Scope.md",
+        policy_path=imported.recon_database.parent / "TargetPolicy.json",
+        batch_size=4,
+    ).run(imported.scan_id)
+
+    task = next(item for item in agent.calls[0]["attack_tasks"]
+                if item["vuln_class"] == "sqli")
+    assert {(item["location"], item["name"]) for item in task["parameter_candidates"]} == {
+        ("json", "display_name"), ("path", "user_id"), ("query", "q"),
+    }
+    assert sum(bool(item["preferred"]) for item in task["parameter_candidates"]) == 1
+    assert task["source_context"]["active_annotation"]["tag"] == "sqli"
+    assert "SQL injection" in task["source_context"]["active_annotation"]["rationale"]
+
+
+def test_terminal_coverage_can_be_explicitly_requeued_without_deleting_evidence(
+    tmp_path: Path,
+) -> None:
+    imported = imported_pipeline(tmp_path)
+    agent = UnsupportedCoverageAgent()
+    ExhaustiveAttackCoordinator(
+        agent=agent, db_path=imported.pipeline_database,
+        scope_path=imported.recon_database.parent / "Scope.md",
+        policy_path=imported.recon_database.parent / "TargetPolicy.json",
+        batch_size=4,
+    ).run(imported.scan_id)
+
+    reopened = requeue_coverage(
+        imported.pipeline_database, imported.scan_id, ["unsupported"],
+        reason="planner now consumes complete Recon parameter context",
+    )
+
+    assert reopened == 4
+    with sqlite3.connect(imported.pipeline_database) as conn:
+        assert conn.execute(
+            "SELECT status,count(*) FROM attack_coverage_items GROUP BY status"
+        ).fetchall() == [("pending", 4)]
+        assert conn.execute(
+            "SELECT count(*) FROM attack_coverage_events WHERE next_status='pending'"
+        ).fetchone() == (4,)
+        assert conn.execute("SELECT count(*) FROM attack_tasks").fetchone() == (4,)
 
 
 def test_disruptive_rate_and_concurrency_classes_are_scheduled_last(tmp_path: Path) -> None:

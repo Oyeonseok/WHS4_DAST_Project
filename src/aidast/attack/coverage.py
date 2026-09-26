@@ -21,13 +21,16 @@ VULNERABILITY_SKILLS: dict[str, str] = {
     "api_misconfig": "hunt-api-misconfig",
     "auth_bypass": "hunt-auth-bypass",
     "brute_force": "hunt-brute-force",
+    "business_logic": "hunt-business-logic",
     "csrf": "hunt-csrf",
     "file_upload": "hunt-file-upload",
     "idor": "hunt-idor",
+    "graphql": "hunt-graphql",
     "jwt_crypto": "hunt-jwt-crypto",
     "lfi": "hunt-lfi",
     "llm_ai": "hunt-llm-ai",
     "race_condition": "hunt-race-condition",
+    "session": "hunt-session",
     # The source importer uses source_leak for response-side information
     # disclosure, debug output, and detailed errors. hunt-source-leak is limited
     # to build/source artifacts, so the broader misc workflow is the correct
@@ -102,6 +105,33 @@ def _open_database(path: Path) -> sqlite3.Connection:
     return conn
 
 
+def resolve_abandoned_attack_leads(
+    conn: sqlite3.Connection, scan_id: str,
+) -> int:
+    """Close unpromoted leads owned by terminal failed/cancelled stages.
+
+    An interrupted native agent can persist a lead and then disappear before
+    writing either a Finding or an explicit resolution.  Its task can no
+    longer be resumed because stage/task leases are immutable.  Preserve the
+    attempt and its HTTP evidence, but close the non-terminal interpretation as
+    inconclusive so a fresh coverage task can replay the hypothesis.
+    """
+    cursor = conn.execute(
+        """UPDATE attack_attempts
+           SET outcome='inconclusive',
+               resolution_reason='owning Attack stage ended before the lead was promoted; coverage retry must obtain fresh evidence',
+               resolved_at=CURRENT_TIMESTAMP
+           WHERE scan_id=? AND outcome='lead' AND finding_id IS NULL
+             AND resolved_at IS NULL AND task_id IN (
+               SELECT t.task_id FROM attack_tasks t
+               JOIN stage_runs s ON s.stage_run_id=t.stage_run_id
+               WHERE t.scan_id=? AND s.status IN ('failed','cancelled')
+             )""",
+        (scan_id, scan_id),
+    )
+    return cursor.rowcount
+
+
 def _select_parameter(
     vuln_class: str, parameters: Iterable[sqlite3.Row]
 ) -> tuple[str, str]:
@@ -146,6 +176,76 @@ def _select_parameter(
     return str(selected["location"]), str(selected["name"])
 
 
+def _parameter_candidates(
+    conn: sqlite3.Connection, endpoint_id: str, vuln_class: str,
+) -> list[dict[str, Any]]:
+    """Expose every Recon parameter while retaining one deterministic preference.
+
+    A coverage task is a vulnerability hypothesis for an endpoint, not a promise
+    that the first lexically selected field is the sink.  The previous single
+    field projection hid useful DB evidence from the Attack Agent and caused
+    false ``unsupported`` dispositions.  Values remain absent: this is schema
+    metadata only.
+    """
+    rows = conn.execute(
+        """SELECT name,location,role,data_type,is_identifier
+           FROM parameters WHERE endpoint_id=? ORDER BY location,name""",
+        (endpoint_id,),
+    ).fetchall()
+    preferred_location, preferred_name = _select_parameter(vuln_class, rows)
+    return [
+        {
+            "name": str(row["name"]),
+            "location": str(row["location"]),
+            "role": str(row["role"] or "unknown"),
+            "data_type": str(row["data_type"] or "string"),
+            "is_identifier": bool(row["is_identifier"]),
+            "preferred": (
+                str(row["location"]) == preferred_location
+                and str(row["name"]) == preferred_name
+            ),
+        }
+        for row in rows
+    ]
+
+
+def _source_context(
+    conn: sqlite3.Connection, endpoint_id: str, annotation_id: str,
+) -> dict[str, Any]:
+    """Return bounded, untrusted Recon evidence for one coverage task."""
+    annotation = conn.execute(
+        """SELECT category,tag,rationale FROM endpoint_annotations
+           WHERE annotation_id=?""",
+        (annotation_id,),
+    ).fetchone()
+    related = conn.execute(
+        """SELECT an.category,an.tag,an.rationale
+           FROM endpoint_annotations an
+           JOIN endpoint_observations eo ON eo.observation_id=an.observation_id
+           WHERE eo.endpoint_id=? AND an.annotation_id<>?
+           ORDER BY an.category,an.tag LIMIT 32""",
+        (endpoint_id, annotation_id),
+    ).fetchall()
+    return {
+        "active_annotation": (
+            {
+                "category": str(annotation["category"]),
+                "tag": str(annotation["tag"]),
+                "rationale": str(annotation["rationale"])[:2000],
+            }
+            if annotation is not None else None
+        ),
+        "related_annotations": [
+            {
+                "category": str(row["category"]),
+                "tag": str(row["tag"]),
+                "rationale": str(row["rationale"])[:1000],
+            }
+            for row in related
+        ],
+    }
+
+
 def ensure_coverage_manifest(database: Path, scan_id: str) -> CoverageManifestResult:
     """Create one durable item for every source vulnerability annotation."""
     with closing(_open_database(database)) as conn, conn:
@@ -164,7 +264,9 @@ def ensure_coverage_manifest(database: Path, scan_id: str) -> CoverageManifestRe
                JOIN origins o ON o.origin_id=e.origin_id
                JOIN assets a ON a.asset_id=o.asset_id
                WHERE a.scan_id=? AND ar.scan_id=? AND ar.status='completed'
-                 AND an.category='source_vulnerability'
+                 AND an.category IN (
+                     'source_vulnerability','benchmark_catalog_vulnerability'
+                 )
                  AND COALESCE(e.is_excluded,0)=0
                ORDER BY e.endpoint_id,an.tag,an.annotation_id""",
             (scan_id, scan_id),
@@ -174,13 +276,14 @@ def ensure_coverage_manifest(database: Path, scan_id: str) -> CoverageManifestRe
         for row in rows:
             vuln_class = str(row["tag"]).casefold()
             skill_name = VULNERABILITY_SKILLS.get(vuln_class, "hunt-misc")
-            parameters = conn.execute(
-                """SELECT name,location,role,data_type,is_identifier
-                   FROM parameters WHERE endpoint_id=?
-                   ORDER BY location,name""",
-                (row["endpoint_id"],),
-            ).fetchall()
-            location, parameter = _select_parameter(vuln_class, parameters)
+            parameter_candidates = _parameter_candidates(
+                conn, str(row["endpoint_id"]), vuln_class,
+            )
+            preferred = next(
+                (item for item in parameter_candidates if item["preferred"]), None,
+            )
+            location = str(preferred["location"]) if preferred else "endpoint"
+            parameter = str(preferred["name"]) if preferred else ""
             identity = "authenticated" if row["auth_required"] else "unauthenticated"
             key_fields = {
                 "scan_id": scan_id,
@@ -259,7 +362,14 @@ def _credential_references(
 def _credential_role(vuln_class: str, required_role: str) -> str:
     # IDOR is inherently a cross-identity differential even when the source
     # route itself was annotated as unauthenticated.
-    return "authenticated" if vuln_class == "idor" else required_role
+    # JWT mutation needs a real, opaque benchmark token as its baseline. The
+    # source route may itself be public (for example /login), but testing token
+    # verification without any issued token only creates a false auth blocker.
+    return (
+        "authenticated"
+        if vuln_class in {"idor", "jwt_crypto"}
+        else required_role
+    )
 
 
 def _task_fixtures(
@@ -490,6 +600,12 @@ def claim_coverage_batch(
         test_fixtures = _task_fixtures(
             conn, scan_id, parameter_name=str(row["parameter_name"]),
         )
+        parameter_candidates = _parameter_candidates(
+            conn, str(row["endpoint_id"]), str(row["vuln_class"]),
+        )
+        source_context = _source_context(
+            conn, str(row["endpoint_id"]), str(row["annotation_id"]),
+        )
         task_id = create_task(
             conn, stage_run_id=stage_run_id, skill_name=row["skill_name"],
             endpoint_id=row["endpoint_id"],
@@ -500,9 +616,11 @@ def claim_coverage_batch(
                 "normalized_path": row["normalized_path"],
                 "injection_location": row["injection_location"],
                 "parameter_name": row["parameter_name"],
+                "parameter_candidates": parameter_candidates,
                 "required_identity_role": row["required_identity_role"],
                 "credential_references": credential_references,
                 "test_fixtures": test_fixtures,
+                "source_context": source_context,
             },
         )
         transition_coverage(
@@ -524,11 +642,48 @@ def claim_coverage_batch(
             "normalized_path": row["normalized_path"],
             "injection_location": row["injection_location"],
             "parameter_name": row["parameter_name"],
+            "parameter_candidates": parameter_candidates,
             "required_identity_role": row["required_identity_role"],
             "credential_references": credential_references,
             "test_fixtures": test_fixtures,
+            "source_context": source_context,
         })
     return claimed
+
+
+def requeue_coverage(
+    database: Path, scan_id: str, statuses: Iterable[str], *, reason: str,
+) -> int:
+    """Explicitly reopen selected terminal dispositions after planner changes.
+
+    Existing requests, attempts, findings, and events are preserved.  This is
+    intentionally opt-in so a normal resume never erases a prior conclusion.
+    """
+    selected = {str(status).strip() for status in statuses if str(status).strip()}
+    allowed = TERMINAL_STATUSES - {"confirmed", "candidate"}
+    if not selected or not selected <= allowed:
+        raise ValueError(
+            "requeue statuses must be selected non-candidate terminal statuses"
+        )
+    if not reason.strip():
+        raise ValueError("coverage requeue requires a reason")
+    with closing(_open_database(database)) as conn, conn:
+        placeholders = ",".join("?" for _ in selected)
+        rows = conn.execute(
+            f"""SELECT * FROM attack_coverage_items
+                WHERE scan_id=? AND status IN ({placeholders})""",
+            (scan_id, *sorted(selected)),
+        ).fetchall()
+        for row in rows:
+            _event(conn, row, "pending", reason)
+            conn.execute(
+                """UPDATE attack_coverage_items
+                   SET status='pending',disposition_reason=?,attempt_count=0,
+                       last_stage_run_id=NULL,last_task_id=NULL,updated_at=?
+                   WHERE coverage_id=?""",
+                (reason, now(), row["coverage_id"]),
+            )
+        return len(rows)
 
 
 def reconcile_coverage_batch(
@@ -637,9 +792,51 @@ def refresh_confirmed_coverage(conn: sqlite3.Connection, scan_id: str) -> int:
     return len(rows) + len(regressed)
 
 
+def refresh_catalog_assessments(conn: sqlite3.Connection, scan_id: str) -> int:
+    """Project the linked runtime coverage result onto each benchmark claim."""
+    table = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' "
+        "AND name='benchmark_catalog_mappings'"
+    ).fetchone()
+    if table is None:
+        return 0
+    rows = conn.execute(
+        """SELECT b.catalog_item_id,b.assessment_status,c.status
+           FROM benchmark_catalog_items b
+           JOIN benchmark_catalog_mappings m
+             ON m.catalog_item_id=b.catalog_item_id
+           LEFT JOIN attack_coverage_items c
+             ON c.annotation_id=m.annotation_id AND c.scan_id=b.scan_id
+           WHERE b.scan_id=?""",
+        (scan_id,),
+    ).fetchall()
+    changed = 0
+    for row in rows:
+        coverage_state = str(row["status"] or "pending")
+        if coverage_state == "confirmed":
+            assessment = "confirmed"
+        elif coverage_state == "tested_negative":
+            assessment = "not_reproduced"
+        elif coverage_state in {
+            "blocked_auth", "policy_excluded", "unsupported", "error_terminal",
+        }:
+            assessment = "unsupported"
+        else:
+            assessment = "mapped_runtime"
+        if assessment != row["assessment_status"]:
+            conn.execute(
+                """UPDATE benchmark_catalog_items SET assessment_status=?
+                   WHERE catalog_item_id=?""",
+                (assessment, row["catalog_item_id"]),
+            )
+            changed += 1
+    return changed
+
+
 def coverage_status(database: Path, scan_id: str) -> CoverageStatus:
     with closing(_open_database(database)) as conn, conn:
         refresh_confirmed_coverage(conn, scan_id)
+        refresh_catalog_assessments(conn, scan_id)
         rows = conn.execute(
             """SELECT status,vuln_class,count(*) count
                FROM attack_coverage_items WHERE scan_id=?

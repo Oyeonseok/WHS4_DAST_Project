@@ -13,6 +13,7 @@ from aidast.attack.coverage import (
     coverage_status,
     ensure_coverage_manifest,
     reconcile_coverage_batch,
+    resolve_abandoned_attack_leads,
 )
 from aidast.attack.template_loader import template_ids_for_skill
 from aidast.orchestration.attack import AttackCoordinator, AttackCoordinatorError
@@ -56,6 +57,10 @@ class ExhaustiveAttackCoordinator:
     def run(self, scan_id: str) -> ExhaustiveAttackResult:
         if not self.db_path.is_file() or not self.scope_path.is_file() or not self.policy_path.is_file():
             raise ValueError("exhaustive Attack requires Pipeline.db, Scope.md, and TargetPolicy.json")
+        with closing(sqlite3.connect(self.db_path)) as conn, conn:
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA foreign_keys=ON")
+            resolve_abandoned_attack_leads(conn, scan_id)
         manifest = ensure_coverage_manifest(self.db_path, scan_id)
         if not manifest.total:
             raise ValueError("Recon DB has no source vulnerability coverage annotations")
@@ -109,33 +114,67 @@ class ExhaustiveAttackCoordinator:
                         retry_limit=self.retry_limit,
                     )
                     finish_stage_run(conn, stage_run_id, status="completed")
-            # Operator interrupts and process-level exits must not strand a
-            # running stage or coverage lease. Persist recovery state first,
-            # then re-raise the original BaseException.
-            except BaseException as exc:
-                with closing(sqlite3.connect(self.db_path)) as conn, conn:
-                    conn.row_factory = sqlite3.Row
-                    conn.execute("PRAGMA foreign_keys=ON")
-                    # Preserve per-task terminal evidence even when the native
-                    # orchestrator rejects the batch as a whole (for example,
-                    # one denied authorization among otherwise completed
-                    # tasks).  The normal reconciler adopts findings,
-                    # negatives, and explicit skips; only tasks without a
-                    # terminal disposition remain retryable.
-                    reconcile_coverage_batch(
-                        conn, stage_run_id=stage_run_id,
-                        retry_limit=self.retry_limit,
-                    )
-                    row = conn.execute(
-                        "SELECT status FROM stage_runs WHERE stage_run_id=?",
-                        (stage_run_id,),
-                    ).fetchone()
-                    if row is not None and row[0] == "running":
-                        finish_stage_run(
-                            conn, stage_run_id, status="failed",
-                            error_message=str(exc),
-                        )
+            # A bounded native batch may legitimately fail as a whole after
+            # every task has already persisted a terminal or retryable
+            # disposition (for example, an OOB proof prohibited by policy).
+            # Reconcile that batch and continue with unrelated coverage.  A
+            # user/process interruption and unexpected implementation errors
+            # still propagate after leases are recovered.
+            except AttackCoordinatorError as exc:
+                if self._recover_failed_batch(stage_run_id, exc):
+                    continue
                 raise
+            except BaseException as exc:
+                self._recover_failed_batch(stage_run_id, exc)
+                raise
+        return self._finish_result(scan_id, stages)
+
+    def _recover_failed_batch(
+        self, stage_run_id: str, exc: BaseException,
+    ) -> bool:
+        """Persist evidence, release the lease, and report safe continuation."""
+        with closing(sqlite3.connect(self.db_path)) as conn, conn:
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA foreign_keys=ON")
+            # Preserve per-task terminal evidence even when the native
+            # orchestrator rejects the batch as a whole (for example,
+            # one denied authorization among otherwise completed tasks).
+            reconcile_coverage_batch(
+                conn, stage_run_id=stage_run_id,
+                retry_limit=self.retry_limit,
+            )
+            row = conn.execute(
+                "SELECT status FROM stage_runs WHERE stage_run_id=?",
+                (stage_run_id,),
+            ).fetchone()
+            if row is not None and row[0] == "running":
+                finish_stage_run(
+                    conn, stage_run_id, status="failed",
+                    error_message=str(exc),
+                )
+            open_leads = conn.execute(
+                """SELECT COUNT(*) FROM attack_attempts a
+                   JOIN attack_tasks t ON t.task_id=a.task_id
+                   WHERE t.stage_run_id=? AND a.outcome='lead'
+                     AND a.finding_id IS NULL AND a.resolved_at IS NULL""",
+                (stage_run_id,),
+            ).fetchone()[0]
+            unknown_requests = conn.execute(
+                """SELECT COUNT(*) FROM attack_http_requests
+                   WHERE stage_run_id=?
+                     AND status IN ('reserved','running','outcome_unknown')""",
+                (stage_run_id,),
+            ).fetchone()[0]
+            incomplete_tasks = conn.execute(
+                """SELECT COUNT(*) FROM attack_tasks
+                   WHERE stage_run_id=? AND status IN ('pending','running')""",
+                (stage_run_id,),
+            ).fetchone()[0]
+            return not (open_leads or unknown_requests or incomplete_tasks)
+
+    def _finish_result(
+        self, scan_id: str, stages: list[str],
+    ) -> ExhaustiveAttackResult:
         final = coverage_status(self.db_path, scan_id)
         if final.unfinished:
             raise AttackCoordinatorError(

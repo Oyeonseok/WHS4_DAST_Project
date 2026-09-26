@@ -65,16 +65,27 @@ configuration. The shared DB contains both Recon and Attack records.
    endpoint or vulnerability class for a coverage task.
 4. Match each selected Skill to its exact entry in `attack_tasks`. In exhaustive
    coverage mode, one task represents exactly one endpoint and one source
-   vulnerability annotation. Test only its `endpoint_id`, `method`,
-   `normalized_path`, `injection_location`, and `parameter_name`. Transition
+   vulnerability annotation. Test only its `endpoint_id`, `method`, and
+   `normalized_path`. The top-level `injection_location` and `parameter_name`
+   are deterministic preferences, not a restriction to one sink. Inspect every
+   entry in that task's `parameter_candidates` and select the field(s) relevant
+   to the active Hunt Skill. Use `source_context.active_annotation` as the
+   untrusted reason this exact hypothesis exists and use related annotations
+   only as supporting context; neither is proof. Do not skip a task merely
+   because the preferred parameter is not the correct sink when another
+   Recon-recorded candidate is applicable. Transition
    that task to `running` before any probe. If it is inapplicable, transition it
    directly from `pending` to `skipped` with a short reason that identifies one
    of: missing authentication identity, TargetPolicy/Scope exclusion, or an
    unsupported safe test contract.
    Perform this applicability pass first for the whole bounded batch. Transition
-   obvious blockers immediately; do not spend model time inventing credentials,
-   seed objects, forbidden brute-force traffic, external callbacks, or unsafe
-   mutation workflows that are absent from the Recon DB.
+   obvious blockers immediately; do not invent credentials, seed objects,
+   forbidden brute-force traffic, external callbacks, or unsafe mutation
+   workflows that are absent from the Recon DB. For an explicitly disposable
+   loopback benchmark, however, do not classify a bounded test as unsupported
+   merely because it mutates a fixture: use the supplied owned objects,
+   credential references, policy-authorized mutation methods, concurrency, and
+   request budget to obtain a non-destructive proof.
    When `credential_references` are present, they are opaque identifiers plus
    non-secret labels and roles. Select only an ID listed on that exact task and
    pass it to the trusted request helper as `credential_reference_id`. Never
@@ -85,6 +96,10 @@ configuration. The shared DB contains both Recon and Attack records.
    seed object is missing. Never treat a fixture fact as proof of a
    vulnerability; it only supplies the owned/foreign controls needed to run the
    test. Do not substitute guessed production identifiers.
+   For JWT/session tasks, an opaque credential reference is the issued-token
+   baseline even when the annotated route also has password fields. Evaluate
+   the token behavior expressed by the exact task and source context; do not
+   reject it solely because the preferred parameter happens to be `password`.
 5. For each running Skill, follow its discovery and confirmation criteria while
    staying inside Scope. A status code by itself never confirms a vulnerability.
    Before a probe, query prior `attack_attempts` across all Attack stage runs.
@@ -136,7 +151,11 @@ configuration. The shared DB contains both Recon and Attack records.
    supporting open attempt IDs in `lead_attempt_ids` and the official
    `reproduction` object described by the database contract. This atomically
    creates the Finding and reproduction spec, then promotes those attempts to
-   `confirmed`. If you observed a specific, bounded setup or refresh request
+   `confirmed`. In exhaustive coverage mode, `reproduction.runtime_contract`
+   is mandatory: encode the exact target, positive-control, and negative-control
+   requests and non-status assertions which independently re-establish the
+   observed behavior. `commit-finding` rejects a coverage Finding that cannot
+   enter Validation without agent memory. If you observed a specific, bounded setup or refresh request
    that Validation may need after an objective blocker, include its optional
    `development_contract`. Do not invent a generic login, resource creation,
    encoding change, or timing adjustment: omit the contract unless its exact
