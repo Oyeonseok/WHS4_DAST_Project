@@ -36,6 +36,34 @@ const reconPhaseLabels: Record<string, string> = {
 const reconStateLabels: Record<string, string> = {
   started: '시작', finished: '종료', skipped: '건너뜀', failed: '실패', planned: '작업 범위 결정',
 };
+const reconPurpose: Record<string, string> = {
+  subfinder: '허용된 도메인에서 하위 도메인 이름을 찾습니다.',
+  dnsx: '발견한 이름이 DNS에서 실제 주소로 해석되는지 확인합니다.',
+  naabu: '대상 호스트에서 접근 가능한 포트를 탐색합니다.',
+  nmap: '발견한 포트의 서비스 응답을 확인합니다.',
+  asset_discovery: '승인 범위의 도메인과 호스트를 정리합니다.',
+  dns_resolution: '대상 호스트의 DNS 응답을 확인합니다.',
+  host_port_discovery: '호스트와 포트 후보를 확인합니다.',
+  http_probe: '웹 주소로 요청해 HTTP 응답 여부를 확인합니다.',
+  origin_discovery: '접근 가능한 웹 서비스의 시작 주소를 확인합니다.',
+  endpoint_discovery: '수집한 URL을 정리하고 HTTP 응답 상태와 발견 출처를 기록합니다.',
+  playwright_bootstrap: '브라우저와 로그인 세션을 준비합니다.',
+  playwright_priority: '우선 페이지를 열어 화면과 네트워크 요청을 관찰합니다.',
+  katana_standard: '페이지의 링크와 리소스를 따라 URL 후보를 수집합니다.',
+  katana_headless: '브라우저가 렌더링한 페이지에서 추가 URL 후보를 수집합니다.',
+  playwright_interaction: '화면을 조작하면서 새 페이지와 네트워크 요청을 관찰합니다.',
+  ffuf: '허용된 웹 주소에서 경로 후보의 HTTP 응답을 확인합니다.',
+  api_secondary: 'API 명세와 GraphQL 경로를 추가로 확인합니다.',
+  openapi_detection: 'OpenAPI 명세가 공개되어 있는지 확인합니다.',
+  graphql_detection: 'GraphQL 요청 경로가 있는지 확인합니다.',
+  zap_openapi: '발견한 OpenAPI 명세에서 API 경로를 수집합니다.',
+  zap_graphql: '발견한 GraphQL 스키마에서 요청 경로를 수집합니다.',
+  mitm_capture: '브라우저 요청 중 허용 범위에 맞는 요청을 기록합니다.',
+};
+export function reconActivityPurpose(language: Language, phase: unknown): string {
+  if (typeof phase !== 'string') return '';
+  return language === 'ko' ? reconPurpose[phase] || '' : reconPurposeEn[phase] || '';
+}
 
 export function reconActivityLabel(params: Record<string, string | number>): string {
   if (params.phase === 'endpoint_discovery' && params.state === 'found') {
@@ -135,6 +163,30 @@ const reconPhaseLabelsEn: Record<string, string> = {
 };
 const reconStateLabelsEn: Record<string, string> = {
   started: 'started', finished: 'finished', skipped: 'skipped', failed: 'failed', planned: 'work scope planned',
+};
+const reconPurposeEn: Record<string, string> = {
+  subfinder: 'Find subdomain names under allowed domains.',
+  dnsx: 'Check whether discovered names resolve in DNS.',
+  naabu: 'Discover reachable ports on target hosts.',
+  nmap: 'Check the services responding on discovered ports.',
+  asset_discovery: 'Organize domains and hosts in the approved scope.',
+  dns_resolution: 'Check DNS responses for target hosts.',
+  host_port_discovery: 'Check host and port candidates.',
+  http_probe: 'Request web addresses to observe HTTP responses.',
+  origin_discovery: 'Identify starting addresses for reachable web services.',
+  endpoint_discovery: 'Record collected URLs with their HTTP response and discovery source.',
+  playwright_bootstrap: 'Prepare the browser and login session.',
+  playwright_priority: 'Open priority pages and observe screens and network requests.',
+  katana_standard: 'Follow page links and resources to collect URL candidates.',
+  katana_headless: 'Collect additional URLs from rendered browser pages.',
+  playwright_interaction: 'Interact with pages to observe new screens and requests.',
+  ffuf: 'Check HTTP responses for path candidates at allowed web addresses.',
+  api_secondary: 'Check API specifications and GraphQL routes.',
+  openapi_detection: 'Check whether an OpenAPI specification is available.',
+  graphql_detection: 'Check for a GraphQL request route.',
+  zap_openapi: 'Collect API routes from a discovered OpenAPI specification.',
+  zap_graphql: 'Collect request routes from a discovered GraphQL schema.',
+  mitm_capture: 'Record browser requests that pass the allowed-scope filter.',
 };
 function reconActivityLabelEn(params: Record<string, string | number>): string {
   if (params.phase === 'endpoint_discovery' && params.state === 'found') {

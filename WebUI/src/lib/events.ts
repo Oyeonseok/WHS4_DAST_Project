@@ -39,7 +39,8 @@ const messageMetadata = (v: Record<string, unknown>): boolean =>
   && (v.audit_id === undefined || (text(v.audit_id) && v.audit_id.length > 0 && v.audit_id.length <= 256))
   && (v.message_params === undefined || (record(v.message_params)
     && Object.keys(v.message_params).length <= 8
-    && Object.values(v.message_params).every(item => typeof item === 'number' && Number.isFinite(item) || text(item) && item.length <= 180)));
+    && Object.entries(v.message_params).every(([key, item]) => typeof item === 'number' && Number.isFinite(item)
+      || text(item) && item.length <= (v.message_code === 'recon.activity' && key === 'url' ? 1024 : 180))));
 const stage = (v: unknown): v is Stage => stages.includes(v as Stage);
 const level = (v: unknown): v is Level => ['info', 'success', 'warning', 'error'].includes(v as string);
 const status = (v: unknown) => ['running', 'paused', 'completed', 'failed', 'cancelled', 'pending'].includes(v as string);
@@ -63,6 +64,50 @@ export function parseSnapshot(value: unknown, scanId: string): Snapshot | null {
   if (value.per_target_budget !== undefined && value.per_target_budget !== null && !integer(value.per_target_budget)) return null;
   if (!value.logs.every(l => record(l) && integer(l.id) && l.id <= (value.last_event_id as number) && text(l.time) && Number.isFinite(Date.parse(l.time)) && stage(l.stage) && level(l.level) && text(l.message) && messageMetadata(l))) return null;
   return { ...value, logs: [...new Map((value.logs as Log[]).map(l => [l.id, l])).values()].sort((a,b) => a.id-b.id).slice(-500) } as Snapshot;
+}
+export type ReconActivityPage = { logs: Log[]; nextBefore: number | null };
+export function parseReconActivityPage(value: unknown, scanId: string): ReconActivityPage | null {
+  if (!record(value) || !Array.isArray(value.events) || value.events.length > 200
+    || (value.next_before !== null && (!integer(value.next_before) || value.next_before === 0))) return null;
+  const logs: Log[] = [];
+  for (const raw of value.events) {
+    const event = parseEvent(raw, scanId);
+    if (!event || event.type !== 'log.appended' || event.payload.message_code !== 'recon.activity') return null;
+    logs.push({ ...event.payload, id: event.event_id, time: event.occurred_at });
+  }
+  if (logs.some((log, index) => index > 0 && log.id >= logs[index - 1].id)) return null;
+  if (value.next_before !== null && value.next_before !== logs.at(-1)?.id) return null;
+  return { logs, nextBefore: value.next_before };
+}
+export function mergeReconActivityLogs(snapshotLogs: readonly Log[], historyLogs: readonly Log[]): Log[] {
+  return [...new Map([...snapshotLogs, ...historyLogs]
+    .filter(log => log.message_code === 'recon.activity')
+    .map(log => [log.id, log])).values()].sort((a, b) => b.id - a.id);
+}
+export type ReconDiscovery = {
+  readonly method: string;
+  readonly url: string;
+  readonly source: string;
+  readonly responseStatus: number | null;
+};
+export function reconDiscoveries(logs: readonly Log[]): ReconDiscovery[] {
+  const seen = new Set<string>();
+  const discoveries: ReconDiscovery[] = [];
+  for (const log of logs) {
+    const params = log.message_params;
+    if (log.message_code !== 'recon.activity' || params?.phase !== 'endpoint_discovery'
+      || params.state !== 'found' || typeof params.url !== 'string' || typeof params.method !== 'string') continue;
+    const key = `${params.method} ${params.url}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    discoveries.push({
+      method: params.method,
+      url: params.url,
+      source: typeof params.source === 'string' ? params.source : '',
+      responseStatus: typeof params.response_status === 'number' ? params.response_status : null,
+    });
+  }
+  return discoveries;
 }
 export function applyEvent(snapshot: Snapshot, event: ScanEvent): Snapshot {
   if (event.scan_id !== snapshot.scan_id || event.type === 'heartbeat' || event.event_id <= snapshot.last_event_id) return snapshot;

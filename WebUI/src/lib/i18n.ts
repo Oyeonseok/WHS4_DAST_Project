@@ -351,8 +351,6 @@ const ko: Record<string, string> = {
   'SIMULATED STREAM': '시뮬레이션 스트림',
   'SYNTHETIC SESSION STARTED': '합성 세션 시작',
   'SCAN EVENT STREAM': '스캔 이벤트 스트림',
-  'Fixtures contain no credentials. Live events must be redacted by the server.': '픽스처에는 인증정보가 없습니다. 라이브 이벤트는 서버에서 민감정보를 제거해야 합니다.',
-  'Server-side redaction required. Never stream tokens, cookies, or sensitive bodies.': '서버 측 민감정보 제거가 필요합니다. 토큰, 쿠키 또는 민감한 본문을 스트리밍하지 마세요.',
   'Following paused · events still arrive': '자동 스크롤 일시정지 · 이벤트는 계속 수신 중',
   'Waiting for the next event': '다음 이벤트 대기 중',
   'End of available activity': '사용 가능한 활동의 끝',
@@ -445,6 +443,10 @@ const ko: Record<string, string> = {
   'Validation blocked': '검증 차단',
   'Conflicting verdict': '판정 충돌',
   'Scan workflow': '스캔 워크플로',
+  'Loading recon history…': '정찰 기록을 불러오는 중…',
+  'Load earlier recon records': '이전 정찰 기록 더 보기',
+  'Could not load recon history.': '정찰 기록을 불러오지 못했습니다.',
+  'Retry loading recon history': '정찰 기록 다시 불러오기',
 };
 
 export function translate(language: Language, text: string): string {

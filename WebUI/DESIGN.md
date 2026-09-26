@@ -82,11 +82,13 @@ Spacing follows a 4px base with practical steps of 4, 8, 12, 16, 20, 24,
   the primary task stays dominant and the rail reflows to a sheet when space is
   constrained.
 - The activity rail owns its log scroll; the document owns main-content
-  scroll. Controls and footer remain outside the log scroll region.
+  scroll. Controls remain outside the log scroll region.
 - At desktop sizes the activity rail is `320-350px`, preserving readable
   log lines and filter controls.
 - At `900px` and below the activity rail becomes a fixed, collapsible bottom
   sheet so live state is reachable without scrolling through page content.
+  The expanded sheet fills the viewport below the top bar, up to `620px`, so
+  the scrollable event stream remains readable on shorter screens.
 - At `660px` and below the sheet sits above the 72px bottom navigation.
 - Mobile navigation includes short Korean labels beneath icons and remains
   horizontally scrollable without hiding destinations. The active destination
@@ -94,6 +96,17 @@ Spacing follows a 4px base with practical steps of 4, 8, 12, 16, 20, 24,
 - Primary content must reflow without horizontal scrolling at `390px`.
 
 ## 5. Components
+
+### Synthetic result preview
+
+- The live Findings, Validation, and Reports screens offer one explicit
+  example-data entry point. It loads the existing synthetic workflow in
+  memory, without mixing examples into persisted scan results.
+- The demo strip identifies the synthetic state and offers a return to the
+  same live screen. Preview navigation never writes a scan, verdict, or report
+  to the backend.
+- Use the existing secondary action and warning/demo treatments; the entry
+  point must wrap without hiding its action on mobile.
 
 ### Validation case
 
@@ -135,7 +148,7 @@ Spacing follows a 4px base with practical steps of 4, 8, 12, 16, 20, 24,
 ### Activity rail
 
 - **Structure**: header, source status, stage progress, search and filters,
-  follow control, scrollable event stream, redaction footer. Scope collection
+  follow control, scrollable event stream. Scope collection
   events and scan events share one chronological stream but retain explicit
   `스코프 수집` and `스캔 · {단계}` source labels.
 - **Variants**: desktop rail, tablet sheet, mobile sheet, collapsed.
@@ -146,6 +159,10 @@ Spacing follows a 4px base with practical steps of 4, 8, 12, 16, 20, 24,
 - **Motion**: no decorative motion; event arrival relies on scroll position and
   visual emphasis.
 - **Layout**: fixed controls around one bounded `.log-stream` scroll owner.
+- **Recon history**: the scan progress dialog shows individual, sanitized URL
+  discoveries with method, response evidence, and source. It pages older
+  records on demand rather than cutting the stream to the latest entries;
+  the older-record control announces loading, completion, and errors in text.
 - **Live cadence**: while Scope collection is active, a non-persisted
   `작업 중 · N초` row and status badge update once per second. Persisted backend
   events remain the authoritative phase history; the timer only fills quiet
