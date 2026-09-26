@@ -70,19 +70,48 @@ class ImpactDevelopmentPlan(StrictContract):
     disposition: Literal["execute", "skip"]
     preconditions_satisfied: bool
     evidence_ids: tuple[Identifier, ...] = Field(min_length=1, max_length=128)
+    source_request_ids: tuple[Identifier, ...] = Field(default=(), max_length=128)
     reason: str = Field(min_length=1, max_length=4_000)
 
-    @field_validator("evidence_ids", mode="before")
+    @field_validator("evidence_ids", "source_request_ids", mode="before")
     @classmethod
     def json_array_evidence(cls, value: Any) -> Any:
         return tuple(value) if isinstance(value, list) else value
 
     @model_validator(mode="after")
     def consistent_disposition(self) -> "ImpactDevelopmentPlan":
-        if len(self.evidence_ids) != len(set(self.evidence_ids)):
-            raise ValueError("impact development plan evidence IDs must be unique")
+        if (len(self.evidence_ids) != len(set(self.evidence_ids))
+                or len(self.source_request_ids) != len(set(self.source_request_ids))):
+            raise ValueError("impact development plan citation IDs must be unique")
         if (self.disposition == "execute") != self.preconditions_satisfied:
             raise ValueError("impact execution requires satisfied preconditions")
+        return self
+
+
+class VerifiedImpactPreconditions(StrictContract):
+    """Trusted, action-bound proof that every declared prerequisite was checked."""
+
+    path_id: Identifier
+    contract_sha256: Digest
+    required_preconditions: tuple[str, ...] = Field(min_length=1, max_length=16)
+    evidence_ids: tuple[Identifier, ...] = Field(default=(), max_length=128)
+    source_request_ids: tuple[Identifier, ...] = Field(default=(), max_length=128)
+    details: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("required_preconditions", "evidence_ids", "source_request_ids",
+                     mode="before")
+    @classmethod
+    def json_arrays(cls, value: Any) -> Any:
+        return tuple(value) if isinstance(value, list) else value
+
+    @model_validator(mode="after")
+    def unique_bound_evidence(self) -> "VerifiedImpactPreconditions":
+        if (len(self.required_preconditions) != len(set(self.required_preconditions))
+                or len(self.evidence_ids) != len(set(self.evidence_ids))
+                or len(self.source_request_ids) != len(set(self.source_request_ids))):
+            raise ValueError("precondition receipts require unique terms and citations")
+        if not self.evidence_ids and not self.source_request_ids:
+            raise ValueError("precondition receipt has no cited observation")
         return self
 
 
@@ -160,11 +189,31 @@ class ImpactHypothesisExecutor:
     def _validate_plan(
         request: ImpactDevelopmentRequest, plan: ImpactDevelopmentPlan,
         known_evidence_ids: set[str],
+        known_source_request_ids: set[str] | frozenset[str] = frozenset(),
     ) -> None:
         if plan.path_id != request.path_id or plan.proposal_sha256 != request.proposal_sha256:
             raise ImpactDevelopmentError("impact plan changed the proposal binding")
         if not set(plan.evidence_ids) <= known_evidence_ids:
             raise ImpactDevelopmentError("impact plan cites unknown evidence")
+        if not set(plan.source_request_ids) <= known_source_request_ids:
+            raise ImpactDevelopmentError("impact plan cites unknown source request")
+
+    @staticmethod
+    def validate_precondition_receipt(
+        request: ImpactDevelopmentRequest, receipt: VerifiedImpactPreconditions, *,
+        action_sha256: str, known_evidence_ids: set[str],
+        known_source_request_ids: set[str],
+    ) -> None:
+        if (receipt.path_id != request.path_id
+                or receipt.contract_sha256 != action_sha256):
+            raise ImpactDevelopmentError("impact precondition receipt changed the action binding")
+        if (len(receipt.required_preconditions) != len(request.required_preconditions)
+                or set(receipt.required_preconditions) != set(request.required_preconditions)):
+            raise ImpactDevelopmentError("impact precondition receipt omits a declared prerequisite")
+        if not set(receipt.evidence_ids) <= known_evidence_ids:
+            raise ImpactDevelopmentError("impact precondition receipt cites unknown evidence")
+        if not set(receipt.source_request_ids) <= known_source_request_ids:
+            raise ImpactDevelopmentError("impact precondition receipt cites unknown source request")
 
     @staticmethod
     def _validate_observation(

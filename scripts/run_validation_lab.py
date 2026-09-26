@@ -8,14 +8,21 @@ from pathlib import Path
 
 from aidast.validation import NativePrerequisiteResolver, ValidationCoordinator
 from aidast.validation.core.policy import TargetPolicyProvider
+from aidast.validation.execution.native_impact import NativeImpactDevelopmentPort
 
 try:
     from scripts.validation_lab_negative_proof import (
         LabNegativeProofHttpPort, load_lab_negative_proofs,
     )
+    from scripts.run_validation_impact_lab import (
+        IMPACT_CANDIDATE, verify_impact_lab_preconditions,
+    )
 except ModuleNotFoundError:  # Direct `python scripts/run_validation_lab.py`.
     from validation_lab_negative_proof import (
         LabNegativeProofHttpPort, load_lab_negative_proofs,
+    )
+    from run_validation_impact_lab import (
+        IMPACT_CANDIDATE, verify_impact_lab_preconditions,
     )
 
 
@@ -24,20 +31,35 @@ DEFAULT_CANDIDATES = ROOT / "result/test-runs/validation-candidates"
 
 
 def run_lab(*, bundle: Path, candidate_root: Path = DEFAULT_CANDIDATES,
-            finding_id: str | None = None) -> list[dict]:
+            finding_id: str | None = None, agent=None,
+            eligibility_agent=None) -> list[dict]:
     """Validate exact staged cases; the separate answer key is never loaded."""
     mapping_path = bundle / "CandidateFindingMap.json"
     mapping = json.loads(mapping_path.read_text(encoding="utf-8"))
+    impact_case = mapping.get("impact_lab")
+    if impact_case is not None and (
+        not isinstance(impact_case, dict)
+        or impact_case.get("candidate_id") != IMPACT_CANDIDATE
+        or not any(all(item.get(key) == value for key, value in impact_case.items())
+                   for item in mapping["cases"])
+    ):
+        raise ValueError("declared Impact lab case does not match the staged mapping")
     proofs = load_lab_negative_proofs(
         inventory_path=candidate_root / "CandidateInventory.db",
         mapping_path=mapping_path, pipeline_path=bundle / "Pipeline.db",
         observations_path=candidate_root / "LocalControlObservations.json",
     )
     port = LabNegativeProofHttpPort(proofs)
+    policy_provider = TargetPolicyProvider(bundle / "TargetPolicy.json")
     coordinator = ValidationCoordinator(
-        db_path=bundle / "Pipeline.db", agent=None, reproduction=port,
-        policy_provider=TargetPolicyProvider(bundle / "TargetPolicy.json"),
+        db_path=bundle / "Pipeline.db", agent=agent,
+        eligibility_agent=eligibility_agent, reproduction=port,
+        policy_provider=policy_provider,
         prerequisite_resolver=NativePrerequisiteResolver(),
+        impact_development_port=(NativeImpactDevelopmentPort(policy_provider=policy_provider)
+                                 if impact_case is not None else None),
+        impact_precondition_verifier=(verify_impact_lab_preconditions
+                                      if impact_case is not None else None),
     )
     selected = [case for case in mapping["cases"]
                 if finding_id is None or case["finding_id"] == finding_id]

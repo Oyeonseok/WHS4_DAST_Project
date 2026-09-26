@@ -1,0 +1,699 @@
+{
+  "schema_version": 2,
+  "mode": "read_only_calibration",
+  "status_comparison_scope": "stored_current_status_only_no_decision_proof_check",
+  "audit_validation_scope": "hash_schema_and_internal_citation_binding_only",
+  "synthetic_axis_scope": "fixture_rubric_consistency_only_no_agent_axis_comparison",
+  "official_key_sha256": "9bc241353aa7dde248b1c27da0cb7015c8ef246544648b28115df7db5ee37a84",
+  "transition_key_sha256": "5bf09cb0d42746402156602abb0366f2d7fadca94b7900dfba233a988410e0ef",
+  "summary": {
+    "official_status_labels": 10,
+    "ready_official_candidates": 7,
+    "stored_status_matches": 1,
+    "synthetic_axis_trials": 6,
+    "rubric_consistent_trials": 6,
+    "current_audits_binding_valid": 0,
+    "profiles": 58,
+    "profiles_ready_for_axis_enforcement": 0
+  },
+  "profiles": {
+    "hunt-api-misconfig": {
+      "official_status_labels": 0,
+      "synthetic_axis_trials": 0,
+      "independent_axis_labels": 0,
+      "axis_label_provenance": "none",
+      "enforcement_mode": "audit",
+      "enforcement_reason": "independent profile-specific B/S/A labels are unavailable"
+    },
+    "hunt-aspnet": {
+      "official_status_labels": 0,
+      "synthetic_axis_trials": 0,
+      "independent_axis_labels": 0,
+      "axis_label_provenance": "none",
+      "enforcement_mode": "audit",
+      "enforcement_reason": "independent profile-specific B/S/A labels are unavailable"
+    },
+    "hunt-ato": {
+      "official_status_labels": 0,
+      "synthetic_axis_trials": 0,
+      "independent_axis_labels": 0,
+      "axis_label_provenance": "none",
+      "enforcement_mode": "audit",
+      "enforcement_reason": "independent profile-specific B/S/A labels are unavailable"
+    },
+    "hunt-auth-bypass": {
+      "official_status_labels": 0,
+      "synthetic_axis_trials": 0,
+      "independent_axis_labels": 0,
+      "axis_label_provenance": "none",
+      "enforcement_mode": "audit",
+      "enforcement_reason": "independent profile-specific B/S/A labels are unavailable"
+    },
+    "hunt-brute-force": {
+      "official_status_labels": 0,
+      "synthetic_axis_trials": 0,
+      "independent_axis_labels": 0,
+      "axis_label_provenance": "none",
+      "enforcement_mode": "audit",
+      "enforcement_reason": "independent profile-specific B/S/A labels are unavailable"
+    },
+    "hunt-business-logic": {
+      "official_status_labels": 0,
+      "synthetic_axis_trials": 0,
+      "independent_axis_labels": 0,
+      "axis_label_provenance": "none",
+      "enforcement_mode": "audit",
+      "enforcement_reason": "independent profile-specific B/S/A labels are unavailable"
+    },
+    "hunt-cache-poison": {
+      "official_status_labels": 0,
+      "synthetic_axis_trials": 0,
+      "independent_axis_labels": 0,
+      "axis_label_provenance": "none",
+      "enforcement_mode": "audit",
+      "enforcement_reason": "independent profile-specific B/S/A labels are unavailable"
+    },
+    "hunt-captcha-bypass": {
+      "official_status_labels": 0,
+      "synthetic_axis_trials": 0,
+      "independent_axis_labels": 0,
+      "axis_label_provenance": "none",
+      "enforcement_mode": "audit",
+      "enforcement_reason": "independent profile-specific B/S/A labels are unavailable"
+    },
+    "hunt-cicd": {
+      "official_status_labels": 0,
+      "synthetic_axis_trials": 0,
+      "independent_axis_labels": 0,
+      "axis_label_provenance": "none",
+      "enforcement_mode": "audit",
+      "enforcement_reason": "independent profile-specific B/S/A labels are unavailable"
+    },
+    "hunt-clickjacking": {
+      "official_status_labels": 0,
+      "synthetic_axis_trials": 0,
+      "independent_axis_labels": 0,
+      "axis_label_provenance": "none",
+      "enforcement_mode": "audit",
+      "enforcement_reason": "independent profile-specific B/S/A labels are unavailable"
+    },
+    "hunt-cloud-misconfig": {
+      "official_status_labels": 0,
+      "synthetic_axis_trials": 0,
+      "independent_axis_labels": 0,
+      "axis_label_provenance": "none",
+      "enforcement_mode": "audit",
+      "enforcement_reason": "independent profile-specific B/S/A labels are unavailable"
+    },
+    "hunt-cors": {
+      "official_status_labels": 0,
+      "synthetic_axis_trials": 0,
+      "independent_axis_labels": 0,
+      "axis_label_provenance": "none",
+      "enforcement_mode": "audit",
+      "enforcement_reason": "independent profile-specific B/S/A labels are unavailable"
+    },
+    "hunt-csrf": {
+      "official_status_labels": 0,
+      "synthetic_axis_trials": 0,
+      "independent_axis_labels": 0,
+      "axis_label_provenance": "none",
+      "enforcement_mode": "audit",
+      "enforcement_reason": "independent profile-specific B/S/A labels are unavailable"
+    },
+    "hunt-deserialization": {
+      "official_status_labels": 0,
+      "synthetic_axis_trials": 0,
+      "independent_axis_labels": 0,
+      "axis_label_provenance": "none",
+      "enforcement_mode": "audit",
+      "enforcement_reason": "independent profile-specific B/S/A labels are unavailable"
+    },
+    "hunt-dispatch": {
+      "official_status_labels": 0,
+      "synthetic_axis_trials": 0,
+      "independent_axis_labels": 0,
+      "axis_label_provenance": "none",
+      "enforcement_mode": "audit",
+      "enforcement_reason": "independent profile-specific B/S/A labels are unavailable"
+    },
+    "hunt-dom": {
+      "official_status_labels": 0,
+      "synthetic_axis_trials": 0,
+      "independent_axis_labels": 0,
+      "axis_label_provenance": "none",
+      "enforcement_mode": "audit",
+      "enforcement_reason": "independent profile-specific B/S/A labels are unavailable"
+    },
+    "hunt-exceptional-conditions": {
+      "official_status_labels": 0,
+      "synthetic_axis_trials": 0,
+      "independent_axis_labels": 0,
+      "axis_label_provenance": "none",
+      "enforcement_mode": "audit",
+      "enforcement_reason": "independent profile-specific B/S/A labels are unavailable"
+    },
+    "hunt-file-upload": {
+      "official_status_labels": 0,
+      "synthetic_axis_trials": 0,
+      "independent_axis_labels": 0,
+      "axis_label_provenance": "none",
+      "enforcement_mode": "audit",
+      "enforcement_reason": "independent profile-specific B/S/A labels are unavailable"
+    },
+    "hunt-fintech-graphql": {
+      "official_status_labels": 0,
+      "synthetic_axis_trials": 0,
+      "independent_axis_labels": 0,
+      "axis_label_provenance": "none",
+      "enforcement_mode": "audit",
+      "enforcement_reason": "independent profile-specific B/S/A labels are unavailable"
+    },
+    "hunt-forgot-password": {
+      "official_status_labels": 0,
+      "synthetic_axis_trials": 0,
+      "independent_axis_labels": 0,
+      "axis_label_provenance": "none",
+      "enforcement_mode": "audit",
+      "enforcement_reason": "independent profile-specific B/S/A labels are unavailable"
+    },
+    "hunt-graphql": {
+      "official_status_labels": 0,
+      "synthetic_axis_trials": 0,
+      "independent_axis_labels": 0,
+      "axis_label_provenance": "none",
+      "enforcement_mode": "audit",
+      "enforcement_reason": "independent profile-specific B/S/A labels are unavailable"
+    },
+    "hunt-grpc": {
+      "official_status_labels": 0,
+      "synthetic_axis_trials": 0,
+      "independent_axis_labels": 0,
+      "axis_label_provenance": "none",
+      "enforcement_mode": "audit",
+      "enforcement_reason": "independent profile-specific B/S/A labels are unavailable"
+    },
+    "hunt-host-header": {
+      "official_status_labels": 0,
+      "synthetic_axis_trials": 0,
+      "independent_axis_labels": 0,
+      "axis_label_provenance": "none",
+      "enforcement_mode": "audit",
+      "enforcement_reason": "independent profile-specific B/S/A labels are unavailable"
+    },
+    "hunt-html-injection": {
+      "official_status_labels": 0,
+      "synthetic_axis_trials": 0,
+      "independent_axis_labels": 0,
+      "axis_label_provenance": "none",
+      "enforcement_mode": "audit",
+      "enforcement_reason": "independent profile-specific B/S/A labels are unavailable"
+    },
+    "hunt-http-smuggling": {
+      "official_status_labels": 0,
+      "synthetic_axis_trials": 0,
+      "independent_axis_labels": 0,
+      "axis_label_provenance": "none",
+      "enforcement_mode": "audit",
+      "enforcement_reason": "independent profile-specific B/S/A labels are unavailable"
+    },
+    "hunt-idor": {
+      "official_status_labels": 4,
+      "synthetic_axis_trials": 0,
+      "independent_axis_labels": 0,
+      "axis_label_provenance": "none",
+      "enforcement_mode": "audit",
+      "enforcement_reason": "independent profile-specific B/S/A labels are unavailable"
+    },
+    "hunt-jwt-crypto": {
+      "official_status_labels": 0,
+      "synthetic_axis_trials": 0,
+      "independent_axis_labels": 0,
+      "axis_label_provenance": "none",
+      "enforcement_mode": "audit",
+      "enforcement_reason": "independent profile-specific B/S/A labels are unavailable"
+    },
+    "hunt-k8s": {
+      "official_status_labels": 0,
+      "synthetic_axis_trials": 0,
+      "independent_axis_labels": 0,
+      "axis_label_provenance": "none",
+      "enforcement_mode": "audit",
+      "enforcement_reason": "independent profile-specific B/S/A labels are unavailable"
+    },
+    "hunt-laravel": {
+      "official_status_labels": 0,
+      "synthetic_axis_trials": 0,
+      "independent_axis_labels": 0,
+      "axis_label_provenance": "none",
+      "enforcement_mode": "audit",
+      "enforcement_reason": "independent profile-specific B/S/A labels are unavailable"
+    },
+    "hunt-ldap": {
+      "official_status_labels": 0,
+      "synthetic_axis_trials": 0,
+      "independent_axis_labels": 0,
+      "axis_label_provenance": "none",
+      "enforcement_mode": "audit",
+      "enforcement_reason": "independent profile-specific B/S/A labels are unavailable"
+    },
+    "hunt-lfi": {
+      "official_status_labels": 0,
+      "synthetic_axis_trials": 0,
+      "independent_axis_labels": 0,
+      "axis_label_provenance": "none",
+      "enforcement_mode": "audit",
+      "enforcement_reason": "independent profile-specific B/S/A labels are unavailable"
+    },
+    "hunt-llm-ai": {
+      "official_status_labels": 0,
+      "synthetic_axis_trials": 0,
+      "independent_axis_labels": 0,
+      "axis_label_provenance": "none",
+      "enforcement_mode": "audit",
+      "enforcement_reason": "independent profile-specific B/S/A labels are unavailable"
+    },
+    "hunt-mfa-bypass": {
+      "official_status_labels": 0,
+      "synthetic_axis_trials": 0,
+      "independent_axis_labels": 0,
+      "axis_label_provenance": "none",
+      "enforcement_mode": "audit",
+      "enforcement_reason": "independent profile-specific B/S/A labels are unavailable"
+    },
+    "hunt-misc": {
+      "official_status_labels": 0,
+      "synthetic_axis_trials": 0,
+      "independent_axis_labels": 0,
+      "axis_label_provenance": "none",
+      "enforcement_mode": "audit",
+      "enforcement_reason": "independent profile-specific B/S/A labels are unavailable"
+    },
+    "hunt-nextjs": {
+      "official_status_labels": 0,
+      "synthetic_axis_trials": 0,
+      "independent_axis_labels": 0,
+      "axis_label_provenance": "none",
+      "enforcement_mode": "audit",
+      "enforcement_reason": "independent profile-specific B/S/A labels are unavailable"
+    },
+    "hunt-nodejs": {
+      "official_status_labels": 0,
+      "synthetic_axis_trials": 0,
+      "independent_axis_labels": 0,
+      "axis_label_provenance": "none",
+      "enforcement_mode": "audit",
+      "enforcement_reason": "independent profile-specific B/S/A labels are unavailable"
+    },
+    "hunt-nosqli": {
+      "official_status_labels": 0,
+      "synthetic_axis_trials": 0,
+      "independent_axis_labels": 0,
+      "axis_label_provenance": "none",
+      "enforcement_mode": "audit",
+      "enforcement_reason": "independent profile-specific B/S/A labels are unavailable"
+    },
+    "hunt-ntlm-info": {
+      "official_status_labels": 0,
+      "synthetic_axis_trials": 0,
+      "independent_axis_labels": 0,
+      "axis_label_provenance": "none",
+      "enforcement_mode": "audit",
+      "enforcement_reason": "independent profile-specific B/S/A labels are unavailable"
+    },
+    "hunt-oauth": {
+      "official_status_labels": 0,
+      "synthetic_axis_trials": 0,
+      "independent_axis_labels": 0,
+      "axis_label_provenance": "none",
+      "enforcement_mode": "audit",
+      "enforcement_reason": "independent profile-specific B/S/A labels are unavailable"
+    },
+    "hunt-open-redirect": {
+      "official_status_labels": 0,
+      "synthetic_axis_trials": 0,
+      "independent_axis_labels": 0,
+      "axis_label_provenance": "none",
+      "enforcement_mode": "audit",
+      "enforcement_reason": "independent profile-specific B/S/A labels are unavailable"
+    },
+    "hunt-race-condition": {
+      "official_status_labels": 0,
+      "synthetic_axis_trials": 0,
+      "independent_axis_labels": 0,
+      "axis_label_provenance": "none",
+      "enforcement_mode": "audit",
+      "enforcement_reason": "independent profile-specific B/S/A labels are unavailable"
+    },
+    "hunt-rag-vector": {
+      "official_status_labels": 0,
+      "synthetic_axis_trials": 0,
+      "independent_axis_labels": 0,
+      "axis_label_provenance": "none",
+      "enforcement_mode": "audit",
+      "enforcement_reason": "independent profile-specific B/S/A labels are unavailable"
+    },
+    "hunt-rce": {
+      "official_status_labels": 0,
+      "synthetic_axis_trials": 0,
+      "independent_axis_labels": 0,
+      "axis_label_provenance": "none",
+      "enforcement_mode": "audit",
+      "enforcement_reason": "independent profile-specific B/S/A labels are unavailable"
+    },
+    "hunt-saml": {
+      "official_status_labels": 0,
+      "synthetic_axis_trials": 0,
+      "independent_axis_labels": 0,
+      "axis_label_provenance": "none",
+      "enforcement_mode": "audit",
+      "enforcement_reason": "independent profile-specific B/S/A labels are unavailable"
+    },
+    "hunt-session": {
+      "official_status_labels": 0,
+      "synthetic_axis_trials": 0,
+      "independent_axis_labels": 0,
+      "axis_label_provenance": "none",
+      "enforcement_mode": "audit",
+      "enforcement_reason": "independent profile-specific B/S/A labels are unavailable"
+    },
+    "hunt-shadow-api": {
+      "official_status_labels": 0,
+      "synthetic_axis_trials": 0,
+      "independent_axis_labels": 0,
+      "axis_label_provenance": "none",
+      "enforcement_mode": "audit",
+      "enforcement_reason": "independent profile-specific B/S/A labels are unavailable"
+    },
+    "hunt-sharepoint": {
+      "official_status_labels": 0,
+      "synthetic_axis_trials": 0,
+      "independent_axis_labels": 0,
+      "axis_label_provenance": "none",
+      "enforcement_mode": "audit",
+      "enforcement_reason": "independent profile-specific B/S/A labels are unavailable"
+    },
+    "hunt-source-leak": {
+      "official_status_labels": 1,
+      "synthetic_axis_trials": 6,
+      "independent_axis_labels": 0,
+      "axis_label_provenance": "synthetic_transition_fixture",
+      "enforcement_mode": "audit",
+      "enforcement_reason": "independent profile-specific B/S/A labels are unavailable"
+    },
+    "hunt-spa-api": {
+      "official_status_labels": 0,
+      "synthetic_axis_trials": 0,
+      "independent_axis_labels": 0,
+      "axis_label_provenance": "none",
+      "enforcement_mode": "audit",
+      "enforcement_reason": "independent profile-specific B/S/A labels are unavailable"
+    },
+    "hunt-springboot": {
+      "official_status_labels": 0,
+      "synthetic_axis_trials": 0,
+      "independent_axis_labels": 0,
+      "axis_label_provenance": "none",
+      "enforcement_mode": "audit",
+      "enforcement_reason": "independent profile-specific B/S/A labels are unavailable"
+    },
+    "hunt-sqli": {
+      "official_status_labels": 2,
+      "synthetic_axis_trials": 0,
+      "independent_axis_labels": 0,
+      "axis_label_provenance": "none",
+      "enforcement_mode": "audit",
+      "enforcement_reason": "independent profile-specific B/S/A labels are unavailable"
+    },
+    "hunt-ssrf": {
+      "official_status_labels": 0,
+      "synthetic_axis_trials": 0,
+      "independent_axis_labels": 0,
+      "axis_label_provenance": "none",
+      "enforcement_mode": "audit",
+      "enforcement_reason": "independent profile-specific B/S/A labels are unavailable"
+    },
+    "hunt-ssti": {
+      "official_status_labels": 0,
+      "synthetic_axis_trials": 0,
+      "independent_axis_labels": 0,
+      "axis_label_provenance": "none",
+      "enforcement_mode": "audit",
+      "enforcement_reason": "independent profile-specific B/S/A labels are unavailable"
+    },
+    "hunt-subdomain": {
+      "official_status_labels": 0,
+      "synthetic_axis_trials": 0,
+      "independent_axis_labels": 0,
+      "axis_label_provenance": "none",
+      "enforcement_mode": "audit",
+      "enforcement_reason": "independent profile-specific B/S/A labels are unavailable"
+    },
+    "hunt-tls-network": {
+      "official_status_labels": 0,
+      "synthetic_axis_trials": 0,
+      "independent_axis_labels": 0,
+      "axis_label_provenance": "none",
+      "enforcement_mode": "audit",
+      "enforcement_reason": "independent profile-specific B/S/A labels are unavailable"
+    },
+    "hunt-websocket": {
+      "official_status_labels": 0,
+      "synthetic_axis_trials": 0,
+      "independent_axis_labels": 0,
+      "axis_label_provenance": "none",
+      "enforcement_mode": "audit",
+      "enforcement_reason": "independent profile-specific B/S/A labels are unavailable"
+    },
+    "hunt-xss": {
+      "official_status_labels": 0,
+      "synthetic_axis_trials": 0,
+      "independent_axis_labels": 0,
+      "axis_label_provenance": "none",
+      "enforcement_mode": "audit",
+      "enforcement_reason": "independent profile-specific B/S/A labels are unavailable"
+    },
+    "hunt-xxe": {
+      "official_status_labels": 0,
+      "synthetic_axis_trials": 0,
+      "independent_axis_labels": 0,
+      "axis_label_provenance": "none",
+      "enforcement_mode": "audit",
+      "enforcement_reason": "independent profile-specific B/S/A labels are unavailable"
+    }
+  },
+  "cases": [
+    {
+      "candidate_id": "juice-shop:case:GET:/api/Users:unauthenticated_disclosure",
+      "profile_id": "hunt-idor",
+      "expected_status": "DISPROVEN",
+      "actual_status": "INCONCLUSIVE",
+      "status_comparison": "UNRESOLVED",
+      "audit_status": "MISSING",
+      "fact_count": 0
+    },
+    {
+      "candidate_id": "juice-shop:case:GET:/api/Feedbacks/:id:unauthenticated_disclosure",
+      "profile_id": "hunt-idor",
+      "expected_status": "DISPROVEN",
+      "actual_status": "BLOCKED",
+      "status_comparison": "UNRESOLVED",
+      "audit_status": "MISSING",
+      "fact_count": 0
+    },
+    {
+      "candidate_id": "juice-shop:case:GET:/api/PrivacyRequests:unauthenticated_disclosure",
+      "profile_id": "hunt-idor",
+      "expected_status": "DISPROVEN",
+      "actual_status": "BLOCKED",
+      "status_comparison": "UNRESOLVED",
+      "audit_status": "MISSING",
+      "fact_count": 0
+    },
+    {
+      "candidate_id": "juice-shop:case:GET:/api/Complaints:unauthenticated_disclosure",
+      "profile_id": "hunt-idor",
+      "expected_status": "DISPROVEN",
+      "actual_status": "BLOCKED",
+      "status_comparison": "UNRESOLVED",
+      "audit_status": "MISSING",
+      "fact_count": 0
+    },
+    {
+      "candidate_id": "vuln-bank:case:GET:/api/billers/by-category/<int:category_id>:sql_injection",
+      "profile_id": "hunt-sqli",
+      "expected_status": "DISPROVEN",
+      "actual_status": "BLOCKED",
+      "status_comparison": "UNRESOLVED",
+      "audit_status": "MISSING",
+      "fact_count": 0
+    },
+    {
+      "candidate_id": "vuln-bank:case:GET:/api/virtual-cards/<int:card_id>/transactions:sql_injection",
+      "profile_id": "hunt-sqli",
+      "expected_status": "DISPROVEN",
+      "actual_status": "BLOCKED",
+      "status_comparison": "UNRESOLVED",
+      "audit_status": "MISSING",
+      "fact_count": 0
+    },
+    {
+      "candidate_id": "vuln-bank:case:GET:/api/v1/payments/<int:payment_id>:bola",
+      "profile_id": null,
+      "expected_status": "DISPROVEN",
+      "actual_status": null,
+      "status_comparison": "NEEDS_PREREQUISITES",
+      "audit_status": "NOT_RUN",
+      "fact_count": 0
+    },
+    {
+      "candidate_id": "vuln-bank:case:GET:/api/v1/payments:bola",
+      "profile_id": null,
+      "expected_status": "DISPROVEN",
+      "actual_status": null,
+      "status_comparison": "NEEDS_PREREQUISITES",
+      "audit_status": "NOT_RUN",
+      "fact_count": 0
+    },
+    {
+      "candidate_id": "vuln-bank:curated:GET:/debug/users:excessive_data_exposure",
+      "profile_id": "hunt-source-leak",
+      "expected_status": "CONFIRMED",
+      "actual_status": "CONFIRMED",
+      "status_comparison": "STATUS_MATCH",
+      "audit_status": "MISSING",
+      "fact_count": 0
+    },
+    {
+      "candidate_id": "vuln-bank:curated:GET:/api/v1/payments/merchant_id/<int:merchant_id>:bola",
+      "profile_id": null,
+      "expected_status": "CONFIRMED",
+      "actual_status": null,
+      "status_comparison": "NEEDS_PREREQUISITES",
+      "audit_status": "NOT_RUN",
+      "fact_count": 0
+    }
+  ],
+  "axis_trials": [
+    {
+      "scenario_id": "false_marker",
+      "profile_id": "hunt-source-leak",
+      "expected_baseline_axes": [
+        1,
+        0,
+        2
+      ],
+      "expected_baseline_status": "UNDERPOWERED",
+      "fixture_final_axes": [
+        1,
+        0,
+        2
+      ],
+      "expected_final_status": "UNDERPOWERED",
+      "real_agent_trial_state": "ready",
+      "observed_agent_axis_comparison": "NOT_AVAILABLE",
+      "label_provenance": "synthetic_transition_fixture",
+      "rubric_consistent": true
+    },
+    {
+      "scenario_id": "minimal_threshold",
+      "profile_id": "hunt-source-leak",
+      "expected_baseline_axes": [
+        1,
+        0,
+        0
+      ],
+      "expected_baseline_status": "UNDERPOWERED",
+      "fixture_final_axes": [
+        1,
+        2,
+        0
+      ],
+      "expected_final_status": "CONFIRMED",
+      "real_agent_trial_state": "awaits_distinct_official_observation",
+      "observed_agent_axis_comparison": "NOT_AVAILABLE",
+      "label_provenance": "synthetic_transition_fixture",
+      "rubric_consistent": true
+    },
+    {
+      "scenario_id": "no_action",
+      "profile_id": "hunt-source-leak",
+      "expected_baseline_axes": [
+        1,
+        0,
+        2
+      ],
+      "expected_baseline_status": "UNDERPOWERED",
+      "fixture_final_axes": [
+        1,
+        0,
+        2
+      ],
+      "expected_final_status": "UNDERPOWERED",
+      "real_agent_trial_state": "ready",
+      "observed_agent_axis_comparison": "NOT_AVAILABLE",
+      "label_provenance": "synthetic_transition_fixture",
+      "rubric_consistent": true
+    },
+    {
+      "scenario_id": "partial_boundary",
+      "profile_id": "hunt-source-leak",
+      "expected_baseline_axes": [
+        0,
+        0,
+        2
+      ],
+      "expected_baseline_status": "UNDERPOWERED",
+      "fixture_final_axes": [
+        0,
+        2,
+        2
+      ],
+      "expected_final_status": "UNDERPOWERED",
+      "real_agent_trial_state": "awaits_distinct_official_observation",
+      "observed_agent_axis_comparison": "NOT_AVAILABLE",
+      "label_provenance": "synthetic_transition_fixture",
+      "rubric_consistent": true
+    },
+    {
+      "scenario_id": "verified_marker",
+      "profile_id": "hunt-source-leak",
+      "expected_baseline_axes": [
+        1,
+        0,
+        2
+      ],
+      "expected_baseline_status": "UNDERPOWERED",
+      "fixture_final_axes": [
+        1,
+        2,
+        2
+      ],
+      "expected_final_status": "CONFIRMED",
+      "real_agent_trial_state": "ready",
+      "observed_agent_axis_comparison": "NOT_AVAILABLE",
+      "label_provenance": "synthetic_transition_fixture",
+      "rubric_consistent": true
+    },
+    {
+      "scenario_id": "weak_marker",
+      "profile_id": "hunt-source-leak",
+      "expected_baseline_axes": [
+        1,
+        0,
+        2
+      ],
+      "expected_baseline_status": "UNDERPOWERED",
+      "fixture_final_axes": [
+        1,
+        0,
+        2
+      ],
+      "expected_final_status": "UNDERPOWERED",
+      "real_agent_trial_state": "ready",
+      "observed_agent_axis_comparison": "NOT_AVAILABLE",
+      "label_provenance": "synthetic_transition_fixture",
+      "rubric_consistent": true
+    }
+  ]
+}

@@ -19,10 +19,18 @@ EXPECTED = {
     "response_status": 200,
     "assertion_kind": "body_contains",
     "assertion_expected": '"password":',
-    "marker_json_path": ["users", "*", "username"],
-    "marker_assertion_id": "seeded-admin-username",
-    "marker_assertion_expected": '"username":"admin"',
+    "marker_json_path": ["users", 0, "account_number"],
+    "marker_assertion_id": "seeded-admin-account",
+    "marker_assertion_kind": "json_equals",
+    "marker_assertion_expected": "ADMIN001",
+    "marker_source_url": "https://github.com/Commando-X/vuln-bank/blob/5e5ea5425fcf309373a0655dd111ecfb45037cbf/database.py#L255",
+    "marker_source_sha256": "071e9a655508f6c6790cc01620a8a680681165defa5a141c017729e3280b793b",
+    "marker_source_line": 255,
     "signal_kind": "hunt_source_leak_bounded_impact_observed",
+    "required_preconditions": [
+        "An exact same-origin safe-method request already captured by Attack",
+        "A unique non-secret configuration or data marker for the stronger impact",
+    ],
 }
 
 
@@ -101,7 +109,8 @@ def _fixture() -> tuple[sqlite3.Connection, sqlite3.Row]:
                         "kind": EXPECTED["assertion_kind"],
                         "expected": EXPECTED["assertion_expected"]},
                        {"assertion_id": EXPECTED["marker_assertion_id"],
-                        "kind": EXPECTED["assertion_kind"],
+                        "kind": EXPECTED["marker_assertion_kind"],
+                        "path": EXPECTED["marker_json_path"],
                         "expected": EXPECTED["marker_assertion_expected"]}],
         "credential_roles": [],
         "precondition_observation": {
@@ -110,6 +119,9 @@ def _fixture() -> tuple[sqlite3.Connection, sqlite3.Row]:
             "response_status": 200,
             "marker_json_path": EXPECTED["marker_json_path"],
             "marker_assertion_id": EXPECTED["marker_assertion_id"],
+            "marker_source": {"url": EXPECTED["marker_source_url"],
+                              "file_sha256": EXPECTED["marker_source_sha256"],
+                              "line": EXPECTED["marker_source_line"]},
         },
     }]}
     from aidast.validation import ImpactDevelopmentRuntimeContract
@@ -132,7 +144,7 @@ def _fixture() -> tuple[sqlite3.Connection, sqlite3.Row]:
                           "expected_sha256": marker_digest, "actual_sha256": marker_digest,
                           "passed": True,
                       }, {
-                          "assertion_id": EXPECTED["marker_assertion_id"], "kind": "body_contains",
+                          "assertion_id": EXPECTED["marker_assertion_id"], "kind": "json_equals",
                           "expected_sha256": admin_digest, "actual_sha256": admin_digest,
                           "passed": True,
                       }]}}
@@ -150,6 +162,7 @@ def _fixture() -> tuple[sqlite3.Connection, sqlite3.Row]:
     conn.execute("INSERT INTO validation_cases VALUES (?,?,?,?,?,?,?,?,?)",
                  ("case", "finding", "CONFIRMED", "completed", "stage", "stage",
                   json.dumps(decision), canonical_sha256(decision), 2))
+    _add_verified_precondition_to_plan(conn)
     return conn, conn.execute("SELECT * FROM validation_cases").fetchone()
 
 
@@ -157,6 +170,106 @@ def test_impact_score_accepts_cited_agent_execution() -> None:
     from scripts.score_validation_impact_lab import _decision_has_impact_proof
     conn, case = _fixture()
     assert _decision_has_impact_proof(conn, case, EXPECTED)
+    conn.close()
+
+
+def _add_verified_precondition_to_plan(conn: sqlite3.Connection) -> None:
+    contract = json.loads(conn.execute(
+        "SELECT impact_development_contract_json FROM finding_reproduction_specs"
+    ).fetchone()[0])
+    action = contract["actions"][0]
+    source = action["precondition_observation"]
+    receipt = {
+        "path_id": EXPECTED["path_id"],
+        "contract_sha256": canonical_sha256(action),
+        "required_preconditions": EXPECTED["required_preconditions"],
+        "evidence_ids": [],
+        "source_request_ids": [source["source_request_id"]],
+        "details": {
+            "contract_id": EXPECTED["contract_id"],
+            "response_sha256": source["response_sha256"],
+            "response_status": source["response_status"],
+            "source_request_id": source["source_request_id"],
+            "marker_json_path": source["marker_json_path"],
+            "marker_assertion_id": source["marker_assertion_id"],
+            "marker_source": {
+                **source["marker_source"],
+                "url": source["marker_source"]["url"].split("#", 1)[0],
+            },
+            "marker_assertion_expected": EXPECTED["marker_assertion_expected"],
+        },
+    }
+    conn.execute("INSERT INTO validation_evidence VALUES (?,?,?,?,?,?,?)",
+                 ("precondition-evidence", "case", "stage", None,
+                  "impact_precondition_verification", canonical_sha256(receipt),
+                  json.dumps(receipt)))
+    hypothesis = conn.execute("SELECT plan_json FROM validation_impact_hypotheses").fetchone()
+    plan = json.loads(hypothesis[0])
+    plan["evidence_ids"].append("precondition-evidence")
+    conn.execute("UPDATE validation_impact_hypotheses SET plan_json=?",
+                 (json.dumps(plan),))
+    decision = json.loads(conn.execute(
+        "SELECT decision_json FROM validation_cases"
+    ).fetchone()[0])
+    decision["impact_development"][0]["plan"] = plan
+    conn.execute("UPDATE validation_cases SET decision_json=?,decision_sha256=?",
+                 (json.dumps(decision), canonical_sha256(decision)))
+
+
+def test_impact_score_accepts_verified_precondition_receipt_in_agent_plan() -> None:
+    from scripts.score_validation_impact_lab import _decision_has_impact_proof
+    conn, case = _fixture()
+    assert _decision_has_impact_proof(conn, case, EXPECTED)
+    conn.close()
+
+
+def test_impact_score_rejects_tampered_precondition_receipt() -> None:
+    from scripts.score_validation_impact_lab import _decision_has_impact_proof
+    conn, _ = _fixture()
+    receipt = json.loads(conn.execute(
+        "SELECT details_json FROM validation_evidence WHERE evidence_id='precondition-evidence'"
+    ).fetchone()[0])
+    receipt["details"]["marker_source"]["file_sha256"] = "0" * 64
+    conn.execute("UPDATE validation_evidence SET details_json=?,content_sha256=? "
+                 "WHERE evidence_id='precondition-evidence'",
+                 (json.dumps(receipt), canonical_sha256(receipt)))
+    case = conn.execute("SELECT * FROM validation_cases").fetchone()
+    assert not _decision_has_impact_proof(conn, case, EXPECTED)
+    conn.close()
+
+
+def test_impact_score_rejects_unrelated_precondition_terms() -> None:
+    from scripts.score_validation_impact_lab import _decision_has_impact_proof
+    conn, _ = _fixture()
+    receipt = json.loads(conn.execute(
+        "SELECT details_json FROM validation_evidence WHERE evidence_id='precondition-evidence'"
+    ).fetchone()[0])
+    receipt["required_preconditions"] = ["An unrelated prerequisite"]
+    conn.execute("UPDATE validation_evidence SET details_json=?,content_sha256=? "
+                 "WHERE evidence_id='precondition-evidence'",
+                 (json.dumps(receipt), canonical_sha256(receipt)))
+    case = conn.execute("SELECT * FROM validation_cases").fetchone()
+    assert not _decision_has_impact_proof(conn, case, EXPECTED)
+    conn.close()
+
+
+def test_impact_score_requires_precondition_receipt_citation() -> None:
+    from scripts.score_validation_impact_lab import _decision_has_impact_proof
+    conn, _ = _fixture()
+    plan = json.loads(conn.execute(
+        "SELECT plan_json FROM validation_impact_hypotheses"
+    ).fetchone()[0])
+    plan["evidence_ids"].remove("precondition-evidence")
+    conn.execute("UPDATE validation_impact_hypotheses SET plan_json=?",
+                 (json.dumps(plan),))
+    decision = json.loads(conn.execute(
+        "SELECT decision_json FROM validation_cases"
+    ).fetchone()[0])
+    decision["impact_development"][0]["plan"] = plan
+    conn.execute("UPDATE validation_cases SET decision_json=?,decision_sha256=?",
+                 (json.dumps(decision), canonical_sha256(decision)))
+    case = conn.execute("SELECT * FROM validation_cases").fetchone()
+    assert not _decision_has_impact_proof(conn, case, EXPECTED)
     conn.close()
 
 

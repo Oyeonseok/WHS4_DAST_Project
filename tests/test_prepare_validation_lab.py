@@ -38,6 +38,22 @@ def test_unauthenticated_disclosure_uses_auth_bypass_profile(endpoint: str) -> N
     assert skill == "hunt-auth-bypass"
 
 
+def test_source_leak_lab_probes_value_without_storing_it_in_contract() -> None:
+    _, _, _, runtime, skill = _contract({
+        "candidate_id": "vuln-bank:curated:GET:/debug/users:excessive_data_exposure",
+        "project": "vuln-bank", "endpoint_template": "/debug/users",
+        "vuln_class": "excessive_data_exposure",
+    })
+    assert skill == "hunt-source-leak"
+    target = runtime["target"]["assertions"]
+    assert any(row["kind"] == "body_contains" and row["expected"] == '"password":'
+               for row in target)
+    assert any(row["kind"] == "json_path_nonempty_string"
+               and row["path"] == ["users", 0, "password"]
+               and row["expected"] is True for row in target)
+    assert runtime["negative_control"]["assertions"] == target
+
+
 def test_prepare_seven_isolated_cases_without_leaking_answers(tmp_path: Path) -> None:
     root = Path(__file__).resolve().parents[1]
     source = root / "result/test-runs/validation-candidates"
@@ -107,7 +123,8 @@ def test_prepare_impact_probe_stages_weak_marker_and_bounded_action(tmp_path: Pa
         source / "LocalControlObservations.json", output,
         live_probe=_recorded_probe(source), identity_probe=_recorded_identity(source),
         impact_probe=True, impact_marker_probe=lambda url: (
-            {"users", "password", "seeded_admin"}, _recorded_probe(source)(url)[1],
+            {"users", "password", "seeded_admin", "seeded_admin_account"},
+            _recorded_probe(source)(url)[1],
         ),
     )
     selected = mapping["impact_lab"]
@@ -120,11 +137,13 @@ def test_prepare_impact_probe_stages_weak_marker_and_bounded_action(tmp_path: Pa
         ).fetchone()
         runtime = json.loads(spec["runtime_contract_json"])
         impact = json.loads(spec["impact_development_contract_json"])
-        assert runtime["target"]["assertions"][0]["expected"] == "users"
+        assert runtime["target"]["assertions"][0]["expected"] == '"password":'
         assert impact["actions"][0]["path_id"] == "bounded-impact-confirmation"
         assert impact["actions"][0]["method"] == "GET"
         assert impact["actions"][0]["assertions"][0]["expected"] == '"password":'
-        assert impact["actions"][0]["assertions"][1]["expected"] == '"username":"admin"'
+        assert impact["actions"][0]["assertions"][1]["kind"] == "json_equals"
+        assert impact["actions"][0]["assertions"][1]["path"] == ["users", 0, "account_number"]
+        assert impact["actions"][0]["assertions"][1]["expected"] == "ADMIN001"
         receipt = impact["actions"][0]["precondition_observation"]
         assert receipt == {
             "source_request_id": json.loads(spec["source_request_ids_json"])[0],
@@ -132,8 +151,13 @@ def test_prepare_impact_probe_stages_weak_marker_and_bounded_action(tmp_path: Pa
                                     json.loads((source / "LocalControlObservations.json").read_text())["observations"]
                                     if item["url"] == "http://127.0.0.1:5001/debug/users"),
             "response_status": 200,
-            "marker_json_path": ["users", "*", "username"],
-            "marker_assertion_id": "seeded-admin-username",
+            "marker_json_path": ["users", 0, "account_number"],
+            "marker_assertion_id": "seeded-admin-account",
+            "marker_source": {
+                "url": "https://github.com/Commando-X/vuln-bank/blob/5e5ea5425fcf309373a0655dd111ecfb45037cbf/database.py#L255",
+                "file_sha256": "071e9a655508f6c6790cc01620a8a680681165defa5a141c017729e3280b793b",
+                "line": 255,
+            },
         }
         candidate = CandidateIntegrityGate(conn).validate_finding(
             case_id="preflight-impact", scan_id=selected["scan_id"],
@@ -152,7 +176,17 @@ def test_prepare_impact_probe_stages_weak_marker_and_bounded_action(tmp_path: Pa
             "context_kind": "verified_attack_source_requests",
             "requests": [candidate.source_requests[0]],
         }
-        assert planning[1]["capabilities"][0]["precondition_observation"] == receipt
+        assert not any(item["context_kind"] == "verified_impact_precondition_observations"
+                       for item in planning)
+        verified_receipt = {"contract_id": "debug-users-password-field", **receipt,
+                            "marker_assertion_expected": "ADMIN001"}
+        trusted = _impact_planning_context(candidate, (),
+                                           verified_preconditions=(verified_receipt,))
+        assert trusted[1] == {
+            "context_kind": "verified_impact_precondition_observations",
+            "observations": [verified_receipt],
+        }
+        assert "precondition_observation" not in planning[-1]["capabilities"][0]
 
 
 def test_prepare_impact_probe_rejects_missing_live_marker(tmp_path: Path) -> None:
@@ -187,7 +221,9 @@ def test_prepare_impact_probe_rejects_marker_from_different_response(tmp_path: P
             source / "LocalControlObservations.json", tmp_path / "impact",
             live_probe=_recorded_probe(source), identity_probe=_recorded_identity(source),
             impact_probe=True,
-            impact_marker_probe=lambda url: ({"users", "password", "seeded_admin"}, "f" * 64),
+            impact_marker_probe=lambda url: (
+                {"users", "password", "seeded_admin", "seeded_admin_account"}, "f" * 64,
+            ),
         )
 
 
@@ -200,10 +236,18 @@ def test_impact_marker_probe_counts_json_keys_only() -> None:
     assert impact_marker_names(b'{"users":[{"note":"password"}]}') == {"users"}
     assert impact_marker_names(b'{"users":[],"password":"redacted"}') == {"users"}
     assert impact_marker_names(
-        b'{"users":[{"username":"admin","password":"redacted"}]}'
+        b'{"users":[{"username": "admin","password":"redacted"}]}'
     ) == {"users", "password", "seeded_admin"}
     assert impact_marker_names(
-        b'{"users": [{"username": "admin", "password": "redacted"}]}'
+        b'{"users": [{"username":"admin", "password": "redacted"}]}'
+    ) == {"users", "password", "seeded_admin"}
+    assert impact_marker_names(
+        b'{"users":[{"username": "admin", "account_number": "ADMIN001", '
+        b'"password": "redacted"}]}'
+    ) == {"users", "password", "seeded_admin", "seeded_admin_account"}
+    assert impact_marker_names(
+        b'{"account_number":"ADMIN001","users":[{"username":"guest","password":"x"},'
+        b'{"username":"admin","account_number":"ADMIN001","password":"x"}]}'
     ) == {"users", "password"}
 
 

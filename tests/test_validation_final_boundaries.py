@@ -615,11 +615,17 @@ class ConditionalEvidenceBoundaryTests(unittest.TestCase):
                         case = conn.execute("SELECT case_id,latest_stage_run_id,blind_assessment_sha256 FROM validation_cases").fetchone()
                         test.assertIsNotNone(case[2])
                         rows = conn.execute("SELECT evidence_id,evidence_kind,content_sha256,content_length FROM validation_evidence WHERE case_id=? AND stage_run_id=?", case[:2]).fetchall()
-                    test.assertEqual(set(request.evidence_refs), {row[0] for row in rows})
+                    test.assertEqual(set(request.evidence_refs), {
+                        row[0] for row in rows
+                        if row[1] != "blind_profile_evidence_audit"
+                    })
                     test.assertEqual({item["evidence_kind"] for item in request.evidence_summaries},
                                      {"observation", "blind_assessment", "claim_comparison"})
                     test.assertEqual({(item["evidence_id"], item["evidence_kind"], item["content_sha256"], item["content_length"])
-                                      for item in request.evidence_summaries}, set(rows))
+                                      for item in request.evidence_summaries}, {
+                                          row for row in rows
+                                          if row[1] != "blind_profile_evidence_audit"
+                                      })
                 return super().assess(request, correction)
 
         eligibility = InspectingEligibility()

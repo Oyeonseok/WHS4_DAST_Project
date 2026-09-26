@@ -47,6 +47,7 @@ BASES = {"juice-shop": "http://127.0.0.1:3001", "vuln-bank": "http://127.0.0.1:5
 SKILLS = {"sql_injection": "hunt-sqli", "unauthenticated_disclosure": "hunt-auth-bypass",
           "excessive_data_exposure": "hunt-source-leak"}
 IMPACT_CANDIDATE = "vuln-bank:curated:GET:/debug/users:excessive_data_exposure"
+SEED_SOURCE_SHA256 = "071e9a655508f6c6790cc01620a8a680681165defa5a141c017729e3280b793b"
 
 
 class _NoRedirect(HTTPRedirectHandler):
@@ -68,7 +69,7 @@ def probe_impact_markers(url: str) -> tuple[set[str], str]:
 
 
 def impact_marker_names(body: bytes) -> set[str]:
-    """Extract only the declared root and users[*].password JSON keys."""
+    """Extract declared JSON keys and the pinned first demo admin record."""
     document = json.loads(body)
     if not isinstance(document, dict) or "users" not in document:
         return set()
@@ -78,11 +79,12 @@ def impact_marker_names(body: bytes) -> set[str]:
         isinstance(user, dict) and "password" in user for user in users
     ):
         names.add("password")
-    if b'"username":"admin"' in body and isinstance(users, list) and any(
-        isinstance(user, dict) and user.get("username") == "admin" and "password" in user
-        for user in users
-    ):
+    admin = users[0] if isinstance(users, list) and users and isinstance(users[0], dict) else {}
+    if admin.get("username") == "admin" and "password" in admin:
         names.add("seeded_admin")
+    if (admin.get("username") == "admin" and admin.get("account_number") == "ADMIN001"
+            and "password" in admin):
+        names.add("seeded_admin_account")
     return names
 
 
@@ -116,24 +118,31 @@ def _contract(candidate: dict) -> tuple[str, str, str, dict, str]:
     elif project == "vuln-bank" and path == "/debug/users":
         endpoint, slot, location = "/debug/{resource}", "resource", "path"
         target, positive, negative = "users", "users", "missing"
-        marker, positive_status = '"password"', 200
+        marker, positive_status = '"password":', 200
     else:
         raise ValueError(f"no read-only replay plan for {candidate['candidate_id']}")
     proof = {"assertion_id": "bounded-signal", "kind": "body_contains", "expected": marker}
+    proofs = [proof]
+    if project == "vuln-bank" and path == "/debug/users":
+        proofs.append({
+            "assertion_id": "bounded-nonempty-value",
+            "kind": "json_path_nonempty_string",
+            "path": ["users", 0, "password"], "expected": True,
+        })
     def request(value):
         if location == "query":
             return {} if value is None else {"query_parameters": {slot: value}}
         return {"path_parameters": {slot: value}}
     runtime = validate_runtime_contract({
         "schema_version": 1,
-        "target": {"request": request(target), "assertions": [proof]},
+        "target": {"request": request(target), "assertions": proofs},
         "positive_control": {
             "request": request(positive),
             "assertions": [{"assertion_id": "channel-healthy", "kind": "status_equals",
                             "expected": positive_status}],
         },
         "negative_control": {
-            "request": request(negative), "assertions": [proof],
+            "request": request(negative), "assertions": proofs,
         },
     }).model_dump(mode="json")
     return endpoint, slot, location, runtime, SKILLS[vuln]
@@ -208,9 +217,13 @@ def prepare_validation_lab(inventory: Path, answers: Path, observations: Path,
         if selected is None:
             raise ValueError("impact marker is missing from the pinned local response")
         names, response_sha = impact_marker_probe(selected["url"])
-        if (not {"users", "password", "seeded_admin"} <= names
+        if (not {"users", "password", "seeded_admin", "seeded_admin_account"} <= names
                 or response_sha != selected["response_body_sha256"]):
             raise ValueError("impact marker or response digest changed")
+        source_file = ROOT / "result/lab/vuln-bank/database.py"
+        if (not source_file.is_file()
+                or hashlib.sha256(source_file.read_bytes()).hexdigest() != SEED_SOURCE_SHA256):
+            raise ValueError("impact marker seed source changed")
     scopes = {}
     for project, base in BASES.items():
         source = ScopePolicySource.from_path(scope_root / project / "Scope.md")
@@ -280,9 +293,6 @@ def prepare_validation_lab(inventory: Path, answers: Path, observations: Path,
                 endpoint, parameter, location, runtime, skill = _contract(candidate)
                 impact_contract = None
                 if impact_probe and candidate_id == IMPACT_CANDIDATE:
-                    runtime["target"]["assertions"][0]["expected"] = "users"
-                    runtime["negative_control"]["assertions"][0]["expected"] = "users"
-                    runtime = validate_runtime_contract(runtime).model_dump(mode="json")
                     impact_contract = ImpactDevelopmentRuntimeContract.model_validate({
                         "schema_version": 1,
                         "actions": [{
@@ -296,17 +306,23 @@ def prepare_validation_lab(inventory: Path, answers: Path, observations: Path,
                                 "kind": "body_contains",
                                 "expected": '"password":',
                             }, {
-                                "assertion_id": "seeded-admin-username",
-                                "kind": "body_contains",
-                                "expected": '"username":"admin"',
+                                "assertion_id": "seeded-admin-account",
+                                "kind": "json_equals",
+                                "path": ["users", 0, "account_number"],
+                                "expected": "ADMIN001",
                             }],
                             "credential_roles": [],
                             "precondition_observation": {
                                 "source_request_id": source_id,
                                 "response_sha256": observation["response_body_sha256"],
                                 "response_status": observation["observed_http_status"],
-                                "marker_json_path": ["users", "*", "username"],
-                                "marker_assertion_id": "seeded-admin-username",
+                                "marker_json_path": ["users", 0, "account_number"],
+                                "marker_assertion_id": "seeded-admin-account",
+                                "marker_source": {
+                                    "url": "https://github.com/Commando-X/vuln-bank/blob/5e5ea5425fcf309373a0655dd111ecfb45037cbf/database.py#L255",
+                                    "file_sha256": SEED_SOURCE_SHA256,
+                                    "line": 255,
+                                },
                             },
                         }],
                     })

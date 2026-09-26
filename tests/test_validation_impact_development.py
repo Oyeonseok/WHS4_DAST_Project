@@ -135,6 +135,69 @@ class ImpactHypothesisExecutorTests(unittest.TestCase):
         self.assertEqual(observations, ())
         self.assertEqual(calls, [])
 
+    def test_plan_keeps_attack_source_requests_out_of_validation_evidence(self):
+        request = self.executor.requests(
+            profile=self.profile, impact=self.impact, evidence_ids=("current-evidence",),
+        )[0]
+        plan = ImpactDevelopmentPlan(
+            path_id=request.path_id, proposal_sha256=request.proposal_sha256,
+            disposition="execute", preconditions_satisfied=True,
+            evidence_ids=("current-evidence",),
+            source_request_ids=("attack-source",),
+            reason="Current replay and a verified source request support the bounded action.",
+        )
+        self.executor._validate_plan(
+            request, plan, {"current-evidence"}, {"attack-source"},
+        )
+        with self.assertRaisesRegex(ImpactDevelopmentError, "unknown source request"):
+            self.executor._validate_plan(
+                request, plan, {"current-evidence"}, {"foreign-source"},
+            )
+        misplaced = plan.model_copy(update={
+            "evidence_ids": ("current-evidence", "attack-source"),
+            "source_request_ids": (),
+        })
+        with self.assertRaisesRegex(ImpactDevelopmentError, "unknown evidence"):
+            self.executor._validate_plan(
+                request, misplaced, {"current-evidence"}, {"attack-source"},
+            )
+
+    def test_verified_preconditions_require_exact_path_contract_and_evidence(self):
+        from aidast.validation.execution.impact_development import (
+            VerifiedImpactPreconditions,
+        )
+        request = self.executor.requests(
+            profile=self.profile, impact=self.impact,
+            evidence_ids=("current-evidence",),
+        )[0]
+        document = {
+            "path_id": request.path_id,
+            "contract_sha256": "a" * 64,
+            "required_preconditions": list(request.required_preconditions),
+            "source_request_ids": ["attack-source"],
+            "evidence_ids": [],
+            "details": {"kind": "trusted_test_receipt"},
+        }
+        receipt = VerifiedImpactPreconditions.model_validate(document)
+        self.executor.validate_precondition_receipt(
+            request, receipt, action_sha256="a" * 64,
+            known_evidence_ids={"current-evidence"},
+            known_source_request_ids={"attack-source"},
+        )
+        for changed in (
+            {**document, "required_preconditions": document["required_preconditions"][:1]},
+            {**document, "contract_sha256": "b" * 64},
+            {**document, "source_request_ids": ["foreign-source"]},
+        ):
+            with self.subTest(changed=changed):
+                with self.assertRaises(ImpactDevelopmentError):
+                    self.executor.validate_precondition_receipt(
+                        request, VerifiedImpactPreconditions.model_validate(changed),
+                        action_sha256="a" * 64,
+                        known_evidence_ids={"current-evidence"},
+                        known_source_request_ids={"attack-source"},
+                    )
+
     def test_codex_runner_receives_only_selected_validation_skill(self):
         request = self.executor.requests(
             profile=self.profile, impact=self.impact, evidence_ids=("evidence",),

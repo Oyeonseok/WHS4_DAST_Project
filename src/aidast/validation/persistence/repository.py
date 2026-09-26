@@ -412,7 +412,9 @@ class ValidationRepository:
                      evidence_id: str | None = None) -> str:
         identifier = evidence_id or new_id("vevidence")
         if (attempt_id is None) == (development_action_id is None) and evidence_kind not in {
-            "blind_assessment", "claim_comparison",
+            "blind_assessment", "blind_assessment_pre_impact",
+            "blind_profile_evidence_audit", "claim_comparison",
+            "impact_precondition_verification",
         }:
             raise ValidationRepositoryError("execution evidence requires exactly one source")
         encoded = canonical_json(sanitize_metadata(details))

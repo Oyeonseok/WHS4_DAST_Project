@@ -472,6 +472,89 @@ class ValidationCoordinatorTests(unittest.TestCase):
             self.assertEqual(conn.execute("SELECT assessment_id FROM validation_eligibility_assessments").fetchone()[0],
                              decision["eligibility_assessment_id"])
 
+    def test_profile_evidence_audit_is_sealed_without_changing_decision(self):
+        result = ValidationCoordinator(
+            db_path=self.path, agent=FakeAgent(), reproduction=FakePort(),
+            policy_provider=lambda endpoint, method: self.policy,
+        ).run("scan")
+        self.assertEqual(result.summary["statuses"], {"CONFIRMED": 1})
+        with db.connect(self.path) as conn:
+            row = conn.execute(
+                "SELECT evidence_id,details_json,content_sha256 FROM validation_evidence "
+                "WHERE evidence_kind='blind_profile_evidence_audit'"
+            ).fetchone()
+            self.assertIsNotNone(row)
+            from aidast.validation.contracts.models import canonical_sha256
+            audit = json.loads(row[1])
+            self.assertEqual(row[2], canonical_sha256(audit))
+            self.assertEqual(audit["profile_id"], "hunt-idor")
+            self.assertEqual(audit["mode"], "audit")
+            self.assertEqual(audit["stage_run_id"], conn.execute(
+                "SELECT latest_stage_run_id FROM validation_cases"
+            ).fetchone()[0])
+            self.assertEqual(audit["axes"]["impact_boundary"]["status"],
+                             "missing_replay_citation")
+            decision = json.loads(conn.execute(
+                "SELECT decision_json FROM validation_cases"
+            ).fetchone()[0])
+            self.assertIn(row[0], decision["evidence_ids"])
+
+    def test_profile_evidence_audit_waits_for_frozen_assessment(self):
+        with patch.object(ValidationRepository, "freeze_blind_assessment",
+                          side_effect=RuntimeError("freeze interrupted")):
+            with self.assertRaisesRegex(ValidationCoordinatorError, "freeze interrupted"):
+                ValidationCoordinator(
+                    db_path=self.path, agent=FakeAgent(), reproduction=FakePort(),
+                    policy_provider=lambda endpoint, method: self.policy,
+                ).run("scan")
+        with db.connect(self.path) as conn:
+            self.assertEqual(conn.execute(
+                "SELECT count(*) FROM validation_evidence "
+                "WHERE evidence_kind='blind_profile_evidence_audit'"
+            ).fetchone()[0], 0)
+
+    def test_profile_audit_resume_restores_pre_impact_raw_axes(self):
+        def cap_sensitivity(profile, runtime, assessment):
+            sensitivity = assessment.impact_sensitivity.model_copy(update={
+                "score": 0, "reason": "Fixture proof cap.",
+            })
+            return assessment.model_copy(update={
+                "impact_sensitivity": sensitivity,
+            }), "fixture_proof_cap"
+
+        with patch("aidast.validation.orchestration.coordinator.bound_profile_proof_assessment",
+                   side_effect=cap_sensitivity), patch.object(
+                       ValidationCoordinator, "_profile_evidence_audit",
+                       side_effect=RuntimeError("audit interrupted")):
+            with self.assertRaisesRegex(ValidationCoordinatorError, "audit interrupted"):
+                ValidationCoordinator(
+                    db_path=self.path, agent=FakeAgent(), reproduction=FakePort(),
+                    policy_provider=lambda endpoint, method: self.policy,
+                ).run("scan")
+        with db.connect(self.path) as conn:
+            stage = conn.execute(
+                "SELECT latest_stage_run_id FROM validation_cases"
+            ).fetchone()[0]
+            self.assertIsNotNone(conn.execute(
+                "SELECT blind_assessment_sha256 FROM validation_cases"
+            ).fetchone()[0])
+            self.assertEqual(conn.execute(
+                "SELECT count(*) FROM validation_evidence "
+                "WHERE evidence_kind='blind_profile_evidence_audit'"
+            ).fetchone()[0], 0)
+
+        ValidationCoordinator(
+            db_path=self.path, agent=FakeAgent(), reproduction=FakePort(),
+            policy_provider=lambda endpoint, method: self.policy,
+        ).resume(stage)
+        with db.connect(self.path) as conn:
+            audit = json.loads(conn.execute(
+                "SELECT details_json FROM validation_evidence "
+                "WHERE evidence_kind='blind_profile_evidence_audit'"
+            ).fetchone()[0])
+            self.assertEqual(audit["raw_axes"], [1, 1, 1])
+            self.assertEqual(audit["effective_axes"], [1, 0, 1])
+
     def test_explicit_negative_proof_requires_every_target_attempt(self):
         result = ValidationCoordinator(
             db_path=self.path, agent=NegativeProofAgent(),
@@ -588,6 +671,196 @@ class ValidationCoordinatorTests(unittest.TestCase):
             self.assertEqual(conn.execute("SELECT scope_sha256 FROM validation_cases").fetchone()[0], scope.scope_sha256)
             self.assertEqual(set(conn.execute("SELECT stage_run_id,scope_sha256 FROM validation_eligibility_assessments")),
                              {(first.stage_run_id, self.scope.scope_sha256), (second.stage_run_id, scope.scope_sha256)})
+
+    def test_same_replay_cannot_gain_impact_from_blind_rescoring_alone(self):
+        first = ValidationCoordinator(
+            db_path=self.path, agent=UnderpoweredAgent(), reproduction=FakePort(),
+            policy_provider=lambda endpoint, method: self.policy,
+        ).run("scan")
+        self.assertEqual(first.summary["statuses"], {"UNDERPOWERED": 1})
+
+        second = ValidationCoordinator(
+            db_path=self.path, agent=FakeAgent(), reproduction=FakePort(),
+            policy_provider=lambda endpoint, method: self.policy,
+        ).run("scan")
+        self.assertEqual(second.summary["statuses"], {"UNDERPOWERED": 1})
+        with db.connect(self.path) as conn:
+            row = conn.execute(
+                "SELECT details_json FROM validation_evidence WHERE stage_run_id=? "
+                "AND evidence_kind='blind_assessment_pre_impact'",
+                (second.stage_run_id,),
+            ).fetchone()
+        self.assertIsNotNone(row)
+        audit = json.loads(row[0])
+        self.assertEqual(audit["prior_stage_run_id"], first.stage_run_id)
+        self.assertEqual(audit["raw_axes"], [1, 1, 1])
+        self.assertEqual(audit["effective_axes"], [0, 1, 1])
+
+        class ChangedResponsePort(FakePort):
+            def execute(self, blind_case, *, attempt_kind, batch_no, ordinal,
+                        attempt_id, **context):
+                result = super().execute(
+                    blind_case, attempt_kind=attempt_kind, batch_no=batch_no,
+                    ordinal=ordinal, attempt_id=attempt_id, **context,
+                )
+                if attempt_kind == "target" and ordinal == 1:
+                    return result.model_copy(update={"content_sha256": "a" * 64})
+                return result
+
+        third = ValidationCoordinator(
+            db_path=self.path, agent=FakeAgent(), reproduction=ChangedResponsePort(),
+            policy_provider=lambda endpoint, method: self.policy,
+        ).run("scan")
+        self.assertEqual(third.summary["statuses"], {"CONFIRMED": 1})
+        with db.connect(self.path) as conn:
+            row = conn.execute(
+                "SELECT details_json FROM validation_evidence WHERE stage_run_id=? "
+                "AND evidence_kind='blind_assessment_pre_impact'",
+                (third.stage_run_id,),
+            ).fetchone()
+        audit = json.loads(row[0])
+        self.assertIsNone(audit["prior_stage_run_id"])
+        self.assertEqual(audit["raw_axes"], audit["effective_axes"])
+
+    def test_blind_reproduction_denial_cannot_confirm_positive_replay(self):
+        class DenyingAgent(FakeAgent):
+            def assess(self, blind_case, observations, correction=None):
+                result = super().assess(blind_case, observations, correction)
+                result["reproduced"] = False
+                return result
+
+        result = ValidationCoordinator(
+            db_path=self.path, agent=DenyingAgent(), reproduction=FakePort(),
+            policy_provider=lambda endpoint, method: self.policy,
+        ).run("scan")
+        self.assertEqual(result.summary["statuses"], {"INCONCLUSIVE": 1})
+
+    def test_resume_reuses_pre_impact_audit_after_interrupted_freeze(self):
+        ValidationCoordinator(
+            db_path=self.path, agent=UnderpoweredAgent(), reproduction=FakePort(),
+            policy_provider=lambda endpoint, method: self.policy,
+        ).run("scan")
+        coordinator = ValidationCoordinator(
+            db_path=self.path, agent=FakeAgent(), reproduction=FakePort(),
+            policy_provider=lambda endpoint, method: self.policy,
+        )
+        with patch.object(ValidationRepository, "freeze_blind_assessment",
+                          side_effect=RuntimeError("interrupted after pre-impact audit")):
+            with self.assertRaisesRegex(ValidationCoordinatorError, "interrupted after pre-impact audit"):
+                coordinator.run("scan")
+        with db.connect(self.path) as conn:
+            stage = conn.execute(
+                "SELECT latest_stage_run_id FROM validation_cases"
+            ).fetchone()[0]
+        result = ValidationCoordinator(
+            db_path=self.path, agent=UnderpoweredAgent(), reproduction=FakePort(),
+            policy_provider=lambda endpoint, method: self.policy,
+        ).resume(stage)
+        self.assertEqual(result.status, "completed")
+        with db.connect(self.path) as conn:
+            count = conn.execute(
+                "SELECT count(*) FROM validation_evidence WHERE stage_run_id=? "
+                "AND evidence_kind='blind_assessment_pre_impact'",
+                (stage,),
+            ).fetchone()[0]
+        self.assertEqual(count, 1)
+
+    def test_resume_restores_development_evidence_for_sealed_pre_impact_assessment(self):
+        ValidationCoordinator(
+            db_path=self.path, agent=UnderpoweredAgent(), reproduction=FakePort(),
+            policy_provider=lambda endpoint, method: self.policy,
+        ).run("scan")
+
+        path = self.path
+
+        class DevelopmentCitingAgent(BlockerAgent):
+            def assess(self, blind_case, observations, correction=None):
+                result = super().assess(blind_case, observations, correction)
+                if all(item["signal_observed"] for item in observations
+                       if item["attempt_kind"] == "target"):
+                    with db.connect(path) as conn:
+                        development_id = conn.execute(
+                            "SELECT evidence_id FROM validation_evidence "
+                            "WHERE evidence_kind='development_observation' "
+                            "ORDER BY created_at DESC LIMIT 1"
+                        ).fetchone()[0]
+                    result["evidence_ids"] = (*result["evidence_ids"], development_id)
+                return result
+
+        coordinator = ValidationCoordinator(
+            db_path=self.path, agent=DevelopmentCitingAgent(),
+            reproduction=BlockThenPassPort(),
+            policy_provider=lambda endpoint, method: self.policy,
+            prerequisite_resolver=SuccessfulPrerequisite(),
+        )
+        with patch.object(ValidationRepository, "freeze_blind_assessment",
+                          side_effect=RuntimeError("interrupted after development audit")):
+            with self.assertRaisesRegex(ValidationCoordinatorError,
+                                        "interrupted after development audit"):
+                coordinator.run("scan")
+        with db.connect(self.path) as conn:
+            stage = conn.execute(
+                "SELECT latest_stage_run_id FROM validation_cases"
+            ).fetchone()[0]
+            development_id = conn.execute(
+                "SELECT evidence_id FROM validation_evidence "
+                "WHERE stage_run_id=? AND evidence_kind='development_observation'",
+                (stage,),
+            ).fetchone()[0]
+
+        resumed = ValidationCoordinator(
+            db_path=self.path, agent=UnderpoweredAgent(), reproduction=FakePort(),
+            policy_provider=lambda endpoint, method: self.policy,
+            prerequisite_resolver=SuccessfulPrerequisite(),
+        )
+        with patch.object(resumed.engine, "decide", wraps=resumed.engine.decide) as decide:
+            result = resumed.resume(stage)
+        self.assertEqual(result.status, "completed")
+        self.assertTrue(decide.call_args.args[0].development_used)
+        with db.connect(self.path) as conn:
+            decision = json.loads(conn.execute(
+                "SELECT decision_json FROM validation_cases"
+            ).fetchone()[0])
+        self.assertIn(development_id, decision["evidence_ids"])
+        self.assertIn(development_id,
+                      decision["blind_assessment"]["evidence_ids"])
+
+    def test_partial_replay_before_resume_does_not_bypass_consistency_cap(self):
+        ValidationCoordinator(
+            db_path=self.path, agent=UnderpoweredAgent(), reproduction=FakePort(),
+            policy_provider=lambda endpoint, method: self.policy,
+        ).run("scan")
+
+        original_add = ValidationRepository.add_attempt
+
+        def interrupt_before_second_attempt(repo, **kwargs):
+            if kwargs["attempt_kind"] == "negative_control":
+                raise RuntimeError("interrupted after one replay attempt")
+            return original_add(repo, **kwargs)
+
+        with self.assertRaisesRegex(ValidationCoordinatorError, "interrupted after one replay attempt"):
+            with patch.object(ValidationRepository, "add_attempt",
+                              new=interrupt_before_second_attempt):
+                ValidationCoordinator(
+                    db_path=self.path, agent=FakeAgent(), reproduction=FakePort(),
+                    policy_provider=lambda endpoint, method: self.policy,
+                ).run("scan")
+        with db.connect(self.path) as conn:
+            stage = conn.execute(
+                "SELECT latest_stage_run_id FROM validation_cases"
+            ).fetchone()[0]
+        result = ValidationCoordinator(
+            db_path=self.path, agent=FakeAgent(), reproduction=FakePort(),
+            policy_provider=lambda endpoint, method: self.policy,
+        ).resume(stage)
+        with db.connect(self.path) as conn:
+            audit = json.loads(conn.execute(
+                "SELECT details_json FROM validation_evidence WHERE stage_run_id=? "
+                "AND evidence_kind='blind_assessment_pre_impact'",
+                (stage,),
+            ).fetchone()[0])
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(audit["effective_axes"], [0, 1, 1])
 
     def test_invalid_eligibility_binding_grounding_and_status_all_fail_closed(self):
         test = self
@@ -1077,6 +1350,66 @@ class ValidationCoordinatorTests(unittest.TestCase):
             self.assertEqual(conn.execute(
                 "SELECT count(DISTINCT batch_no) FROM validation_attempts"
             ).fetchone()[0], 2)
+
+    def test_unchanged_failed_blocker_does_not_repeat_development(self):
+        class FailedPrerequisite:
+            def __init__(self):
+                self.calls = 0
+
+            def perform(self, blind_case, **context):
+                self.calls += 1
+                return {"succeeded": False, "reason": "identity still unavailable", "request_ids": []}
+
+        resolver = FailedPrerequisite()
+        def run(port):
+            return ValidationCoordinator(
+                db_path=self.path, agent=BlockerAgent(), reproduction=port,
+                policy_provider=lambda endpoint, method: self.policy,
+                prerequisite_resolver=resolver,
+            ).run("scan")
+
+        first = run(BlockThenPassPort())
+        self.assertEqual(first.summary["statuses"], {"BLOCKED": 1})
+        self.assertEqual(resolver.calls, 1)
+        second = run(BlockThenPassPort())
+        self.assertEqual(second.summary["statuses"], {"BLOCKED": 1})
+        self.assertEqual(resolver.calls, 1)
+        with db.connect(self.path) as conn:
+            decision = json.loads(conn.execute(
+                "SELECT decision_json FROM validation_cases WHERE finding_id='finding'"
+            ).fetchone()[0])
+            self.assertEqual(decision["development_admission_reason"],
+                             "unchanged_completed_development")
+            self.assertEqual(conn.execute(
+                "SELECT count(*) FROM validation_development_actions"
+            ).fetchone()[0], 1)
+
+        class ChangedBlockPort(BlockThenPassPort):
+            def execute(self, blind_case, **context):
+                result = super().execute(blind_case, **context)
+                if context["attempt_kind"] == "target":
+                    return result.model_copy(update={"content_sha256": "a" * 64})
+                return result
+
+        third = run(ChangedBlockPort())
+        self.assertEqual(third.summary["statuses"], {"BLOCKED": 1})
+        self.assertEqual(resolver.calls, 2)
+        with db.connect(self.path) as conn:
+            conn.execute(
+                "UPDATE validation_development_actions SET status='outcome_unknown' "
+                "WHERE stage_run_id=?", (third.stage_run_id,),
+            )
+            conn.commit()
+        class ChangedAgainPort(ChangedBlockPort):
+            def execute(self, blind_case, **context):
+                result = super().execute(blind_case, **context)
+                if context["attempt_kind"] == "target":
+                    return result.model_copy(update={"content_sha256": "b" * 64})
+                return result
+
+        fourth = run(ChangedAgainPort())
+        self.assertEqual(fourth.summary["statuses"], {"INCONCLUSIVE": 1})
+        self.assertEqual(resolver.calls, 2)
 
     def test_native_development_cannot_succeed_without_request_ledger(self):
         with self.assertRaisesRegex(
@@ -1719,6 +2052,9 @@ class ValidationCoordinatorTests(unittest.TestCase):
             self.assertEqual(conn.execute(
                 "SELECT count(*) FROM validation_evidence WHERE evidence_kind='blind_assessment'"
             ).fetchone()[0], 1)
+            self.assertEqual(conn.execute(
+                "SELECT count(*) FROM validation_evidence WHERE evidence_kind='blind_profile_evidence_audit'"
+            ).fetchone()[0], 1)
 
         resumed_port = FakePort()
         resumed_agent = PreparingCountingAgent()
@@ -1738,6 +2074,9 @@ class ValidationCoordinatorTests(unittest.TestCase):
             ).fetchone()[0], 5)
             self.assertEqual(conn.execute(
                 "SELECT count(*) FROM validation_evidence WHERE evidence_kind='blind_assessment'"
+            ).fetchone()[0], 1)
+            self.assertEqual(conn.execute(
+                "SELECT count(*) FROM validation_evidence WHERE evidence_kind='blind_profile_evidence_audit'"
             ).fetchone()[0], 1)
             self.assertEqual(conn.execute(
                 "SELECT current_status,processing_phase FROM validation_cases"
@@ -1761,7 +2100,7 @@ class ValidationCoordinatorTests(unittest.TestCase):
             canonical_sha256,
         )
 
-        from aidast.validation.contracts.impact_development import impact_contract_document
+        from aidast.validation.contracts.impact_development import impact_action_document, impact_contract_document
         impact_contract = impact_contract_document(ImpactDevelopmentRuntimeContract.model_validate({
             "schema_version": 1,
             "actions": [{
@@ -1799,11 +2138,15 @@ class ValidationCoordinatorTests(unittest.TestCase):
 
             def plan(self, request, *, evidence):
                 self.requests.append((request, evidence))
+                receipts = [observation["evidence_id"] for item in evidence
+                            if item.get("context_kind") == "verified_impact_precondition_observations"
+                            for observation in item["observations"]]
                 return {
                     "path_id": request.path_id,
                     "proposal_sha256": request.proposal_sha256,
                     "disposition": "execute", "preconditions_satisfied": True,
-                    "evidence_ids": list(request.supporting_evidence_ids),
+                    "evidence_ids": [*request.supporting_evidence_ids, *receipts],
+                    "source_request_ids": ["http"],
                     "reason": "The bounded fixture evidence satisfies the prerequisites.",
                 }
 
@@ -1830,10 +2173,31 @@ class ValidationCoordinatorTests(unittest.TestCase):
             policy_provider=lambda endpoint, method: self.policy,
         )
 
-        result = ValidationCoordinator(
-            db_path=self.path, agent=FakeAgent(), reproduction=FakePort(),
+        no_receipt = ValidationCoordinator(
+            db_path=self.path, agent=UnderpoweredAgent(), reproduction=FakePort(),
             policy_provider=lambda endpoint, method: self.policy,
             impact_development_port=impact_port, impact_agent_factory=factory,
+        ).run("scan")
+        self.assertEqual(no_receipt.summary["statuses"], {"UNDERPOWERED": 1})
+        self.assertEqual(planners, [])
+
+        def verify_preconditions(candidate, request):
+            action = candidate.impact_development_actions[0]
+            return {
+                "path_id": request.path_id,
+                "contract_sha256": canonical_sha256(impact_action_document(action)),
+                "required_preconditions": list(request.required_preconditions),
+                "source_request_ids": ["http"],
+                "evidence_ids": [],
+                "details": {"kind": "trusted_test_receipt",
+                            "source_url": "https://example.test/source#L255"},
+            }
+
+        result = ValidationCoordinator(
+            db_path=self.path, agent=UnderpoweredAgent(), reproduction=FakePort(),
+            policy_provider=lambda endpoint, method: self.policy,
+            impact_development_port=impact_port, impact_agent_factory=factory,
+            impact_precondition_verifier=verify_preconditions,
         ).run("scan")
 
         self.assertEqual(result.summary["statuses"], {"CONFIRMED": 1})
@@ -1864,12 +2228,30 @@ class ValidationCoordinatorTests(unittest.TestCase):
             hypothesis = conn.execute(
                 """SELECT hypothesis_id,status,plan_json,observation_json
                    FROM validation_impact_hypotheses
-                   WHERE path_id='cross-role-object-access'"""
+                   WHERE path_id='cross-role-object-access' AND stage_run_id=?""",
+                (result.stage_run_id,),
             ).fetchone()
             self.assertEqual(hypothesis[1], "succeeded")
             self.assertEqual(impact_request[4], hypothesis[0])
             self.assertEqual(json.loads(hypothesis[2])["disposition"], "execute")
+            self.assertEqual(json.loads(hypothesis[2])["source_request_ids"], ["http"])
             self.assertTrue(json.loads(hypothesis[3])["signal_observed"])
+            receipts = conn.execute(
+                "SELECT details_json,content_sha256 FROM validation_evidence "
+                "WHERE evidence_kind='impact_precondition_verification'"
+            ).fetchall()
+            self.assertEqual(len(receipts), 1)
+            self.assertEqual(
+                receipts[0][1], canonical_sha256(json.loads(receipts[0][0])),
+            )
+        already_confirmed = ValidationCoordinator(
+            db_path=self.path, agent=FakeAgent(), reproduction=FakePort(),
+            policy_provider=lambda endpoint, method: self.policy,
+            impact_development_port=impact_port, impact_agent_factory=factory,
+            impact_precondition_verifier=verify_preconditions,
+        ).run("scan")
+        self.assertEqual(already_confirmed.summary["statuses"], {"CONFIRMED": 1})
+        self.assertEqual(len(planners), 1)
 
     def test_demonstrated_chain_replays_end_to_end_after_node_gate(self):
         from aidast.validation import canonical_sha256
@@ -2319,7 +2701,12 @@ class ConditionalEligibilityTests(unittest.TestCase):
         with db.connect(self.path) as conn:
             status, decision = conn.execute("SELECT current_status,decision_json FROM validation_cases").fetchone()
             self.assertEqual(status, "CONFIRMED")
-            self.assertEqual(set(json.loads(decision)["evidence_ids"]), set(original_refs))
+            audit_id = conn.execute(
+                "SELECT evidence_id FROM validation_evidence "
+                "WHERE evidence_kind='blind_profile_evidence_audit'"
+            ).fetchone()[0]
+            self.assertEqual(set(json.loads(decision)["evidence_ids"]),
+                             set(original_refs) | {audit_id})
             self.assertEqual(conn.execute("SELECT count(*) FROM validation_eligibility_assessments WHERE phase='post_replay'").fetchone()[0], 1)
             self.assertEqual(conn.execute("SELECT count(*) FROM validation_development_actions").fetchone()[0], 1)
 
