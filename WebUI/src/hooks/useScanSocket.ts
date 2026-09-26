@@ -1,8 +1,9 @@
 import { useEffect, useState } from 'react';
 import { applyEvent, applyOrderedEvent, parseEvent, parseSnapshot, type Snapshot, type ScanEvent } from '../lib/events';
 import { demoSnapshot } from '../data/demo';
+import { resolveTransportMode } from '../lib/transport';
 
-export const transportMode = import.meta.env.VITE_TRANSPORT === 'live' ? 'live' : 'demo';
+export const transportMode = resolveTransportMode(import.meta.env.VITE_TRANSPORT, location.search);
 type Connection = 'idle' | 'loading' | 'demo' | 'connecting' | 'live' | 'reconnecting' | 'offline';
 export function useScanSocket(scanId: string) {
   const [snapshot, setSnapshot] = useState<Snapshot | null>(transportMode === 'demo' ? demoSnapshot : null);

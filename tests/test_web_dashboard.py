@@ -754,6 +754,77 @@ def test_scope_dashboard_requires_explicit_yes_or_no(tmp_path: Path) -> None:
     asyncio.run(exercise())
 
 
+def test_recon_activity_api_pages_every_safe_event_beyond_snapshot_window(tmp_path: Path) -> None:
+    database = _fixture(tmp_path)
+    expected_urls: list[str] = []
+    rows = []
+    for index in range(720):
+        stamp = f"2026-09-20 02:{index // 60:02d}:{index % 60:02d}"
+        kind = index % 4
+        if kind == 0:
+            url = f"https://example.com/p{index}"
+            expected_urls.append(url)
+            details = {"phase": "endpoint_discovery", "state": "found", "method": "GET",
+                       "url": f"{url}?token=secret-{index}", "source": "ffuf", "response_status": 200,
+                       "headers": {"Cookie": "secret"}, "body": "secret"}
+            event_type = "recon.activity"
+        elif kind == 1:
+            details = {"phase": "ffuf", "state": "started", "headers": {"Cookie": "secret"}}
+            event_type = "recon.activity"
+        elif kind == 2:
+            details = {"secret": "must-not-leak"}
+            event_type = "stage.started"
+        else:
+            details = {"phase": "endpoint_discovery", "state": "found", "method": "GET",
+                       "url": "https://user:secret@example.com/creds"}
+            event_type = "recon.activity"
+        rows.append((f"bulk-{index}", SCAN_ID, "stage", None, event_type, json.dumps(details), stamp))
+    with sqlite3.connect(database) as conn:
+        conn.executemany("INSERT INTO audit_events VALUES (?,?,?,?,?,?,?)", rows)
+    app = create_app(result_root=tmp_path, poll_interval=0.01)
+
+    async def exercise() -> None:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            snapshot = (await client.get(f"/api/v1/scans/{SCAN_ID}")).json()
+            snapshot_urls = {log["message_params"].get("url") for log in snapshot["logs"]}
+            assert len(snapshot["logs"]) == 500
+            assert not set(expected_urls) <= snapshot_urls
+
+            pages: list[dict[str, Any]] = []
+            url = f"/api/v1/scans/{SCAN_ID}/recon-activity"
+            while True:
+                response = await client.get(url)
+                assert response.status_code == 200
+                body = response.json()
+                assert 0 < len(body["events"]) <= 200
+                pages.append(body)
+                if body["next_before"] is None:
+                    break
+                assert body["next_before"] == body["events"][-1]["event_id"]
+                url = f"/api/v1/scans/{SCAN_ID}/recon-activity?before={body['next_before']}"
+            assert len(pages) >= 2
+            events = [event for page in pages for event in page["events"]]
+            ids = [event["event_id"] for event in events]
+            assert ids == sorted(set(ids), reverse=True)
+            assert all(event["version"] == 1 and event["type"] == "log.appended"
+                       and event["scan_id"] == SCAN_ID and event["occurred_at"]
+                       and event["payload"]["message_code"] == "recon.activity" for event in events)
+            found = [event["payload"]["message_params"]["url"] for event in events
+                     if event["payload"]["message_params"]["state"] == "found"]
+            assert sorted(found) == sorted(expected_urls)
+            assert any(event["payload"]["message_params"]["phase"] == "ffuf" for event in events)
+            assert "secret" not in json.dumps(pages)
+            assert "must-not-leak" not in json.dumps(pages)
+            assert "example.com/creds" not in json.dumps(pages)
+
+            assert (await client.get(f"/api/v1/scans/{SCAN_ID}/recon-activity?before=0")).status_code == 422
+            assert (await client.get(f"/api/v1/scans/{SCAN_ID}/recon-activity?before=abc")).status_code == 422
+            assert (await client.get("/api/v1/scans/scan_missing/recon-activity")).status_code == 404
+
+    asyncio.run(exercise())
+
+
 def test_scope_activity_schema_upgrades_existing_event_database(tmp_path: Path) -> None:
     database = tmp_path / ".webui" / "scope_jobs.db"
     database.parent.mkdir(parents=True)
