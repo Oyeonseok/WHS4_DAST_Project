@@ -37,7 +37,7 @@ from aidast.recon.origin import resolve_origin
 from aidast.recon.policy import TargetPolicy
 from aidast.scope.models import AssetType
 from aidast.recon.tools.asset_dns_port import run_dnsx, run_naabu, run_nmap, run_subfinder
-from aidast.recon.tools.endpoint_discovery import discover_endpoints
+from aidast.recon.tools.endpoint_discovery import discover_endpoints, _make_default_session_file
 from aidast.recon.tools.http_probe import ProbeResult, probe
 from aidast.recon.tools.mitm_proxy import ingest_mitm_capture, start_mitmproxy, stop_mitmproxy
 
@@ -146,6 +146,7 @@ class ReconExecutor:
         candidate_db_path: Path | None = None,
     ):
         self.target_sessions = target_sessions
+        self.auth_session_files: list[tuple[str, Path, bool]] = []
         self.interactive_login = bool(interactive_login)
         self.automatic_login = bool(automatic_login)
         self.request_headers = dict(request_headers or {})
@@ -801,6 +802,10 @@ class ReconExecutor:
         try:
             if self.require_policy_enforcement and proxy_url is None:
                 raise ReconExecutionError("정책 강제 mitmproxy를 시작할 수 없음")
+            session_path = (
+                session.runtime_path(self.scan_id) if session else
+                Path(_make_default_session_file(url, run_id=self.scan_id))
+            )
             raw = discover_endpoints(
                 url,
                 ffuf_wordlist=self.ffuf_wordlist,
@@ -810,7 +815,7 @@ class ReconExecutor:
                 observation_callback=recorder.record,
                 run_id=self.scan_id,
                 auth_bootstrap=self.auth_bootstrap,
-                session_file=str(session.runtime_path(self.scan_id)) if session else None,
+                session_file=str(session_path),
                 identity_id=session.identity if session else None,
                 preauthenticated=session is not None,
                 interactive_login=self.interactive_login and session is None,
@@ -822,6 +827,12 @@ class ReconExecutor:
                     session.replace_authentication_endpoints if session else None
                 ),
             )
+            authenticated = (
+                session is not None
+                or Path(str(session_path) + ".authenticated").is_file()
+            )
+            if authenticated and session_path.is_file():
+                self.auth_session_files.append((url, session_path, True))
         finally:
             stop_mitmproxy(proxy_process)
             if proxy_url is not None:
@@ -850,6 +861,7 @@ class ReconExecutor:
                 content_type=item.get("content_type"),
                 source_tool=",".join(sorted(item["source_tools"])),
                 is_excluded=item["is_excluded"], exclude_reason=item["exclude_reason"],
+                verification_status=item["verification_status"],
             )
         dbmod.reconcile_observed_endpoints(self.conn, origin_id=origin_id, raw_endpoints=raw)
         self._log_discovered_urls(url, origin_id, merged)

@@ -382,7 +382,7 @@ def _request_data(item: dict) -> tuple[dict[str, str], bytes | None]:
 
 
 def _credential_headers(
-    db_path: Path, *, scan_id: str, task_id: str, item: dict,
+    db_path: Path, *, scan_id: str, task_id: str, url: str, item: dict,
 ) -> tuple[str | None, dict[str, str]]:
     reference = item.get("credential_reference_id")
     if reference is None:
@@ -395,8 +395,11 @@ def _credential_headers(
             (task_id, scan_id),
         ).fetchone()
         row = conn.execute(
-            """SELECT identity_role FROM credential_references
-               WHERE credential_reference_id=? AND scan_id=?""",
+            """SELECT c.identity_role,o.base_url,s.auth_state
+               FROM credential_references c
+               LEFT JOIN sessions s ON s.session_id=c.session_id
+               LEFT JOIN origins o ON o.origin_id=s.origin_id
+               WHERE c.credential_reference_id=? AND c.scan_id=?""",
             (reference, scan_id),
         ).fetchone()
     if task is None or row is None:
@@ -412,6 +415,14 @@ def _credential_headers(
     }
     if reference not in allowed:
         raise RequestGuardError("credential reference is not authorized for this task")
+    if row[1] is not None:
+        source = urlsplit(str(row[1]))
+        destination = urlsplit(url)
+        if (row[2] != "authenticated" or source.scheme != destination.scheme
+                or source.hostname != destination.hostname
+                or (source.port or (443 if source.scheme == "https" else 80))
+                != (destination.port or (443 if destination.scheme == "https" else 80))):
+            raise RequestGuardError("credential reference is bound to another origin")
     required_role = str(payload.get("required_identity_role") or "unknown")
     actual_role = str(row[0])
     if required_role not in {"authenticated", "unknown"} and actual_role not in {
@@ -419,7 +430,9 @@ def _credential_headers(
     }:
         raise RequestGuardError("credential reference has an incompatible identity role")
     try:
-        headers = PipelineCredentialResolver(db_path)(reference)
+        headers = PipelineCredentialResolver(db_path, browser_sessions=True)(
+            reference, destination_url=url,
+        )
     except (ImportError, OSError, sqlite3.Error, ValueError) as exc:
         raise RequestGuardError("credential reference is unavailable") from exc
     return reference, headers
@@ -826,7 +839,7 @@ def guarded_request(
     policy = _select_policy(policy_path, url, method)
     headers, body = _request_data(item)
     credential_reference_id, credential_headers = _credential_headers(
-        db_path, scan_id=scan_id, task_id=task_id, item=item,
+        db_path, scan_id=scan_id, task_id=task_id, url=url, item=item,
     )
     supplied_names = {name.casefold() for name in headers}
     if supplied_names & {name.casefold() for name in credential_headers}:

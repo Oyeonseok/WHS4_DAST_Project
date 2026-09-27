@@ -170,7 +170,7 @@ def ingest_mitm_capture(conn: sqlite3.Connection, jsonl_path: Path, *, origin_id
                 from urllib.parse import urlsplit
                 from aidast.recon.judgment import normalize_path
                 row = conn.execute(
-                    "SELECT endpoint_id FROM endpoints WHERE origin_id=? AND method=? AND normalized_path=?",
+                    "SELECT endpoint_id,verification_status FROM endpoints WHERE origin_id=? AND method=? AND normalized_path=?",
                     (origin_id, record["method"].upper(), normalize_path(urlsplit(record["url"]).path)),
                 ).fetchone()
                 endpoint_id = row[0] if row else None
@@ -193,12 +193,20 @@ def ingest_mitm_capture(conn: sqlite3.Connection, jsonl_path: Path, *, origin_id
                 if endpoint_id is not None:
                     from aidast.recon.annotations import persist_url_parameters, safe_url
                     from aidast.recon.judgment import query_signature
+                    from aidast.recon.verification import successful_response
+                    # A proxy 200 can be a SPA or API error fallback. Only the
+                    # response-aware verifier may promote a spec candidate.
+                    succeeded = (successful_response(record.get("response_status"))
+                                 and record.get("candidate_probe") is not True
+                                 and row[1] != "candidate")
                     dbmod.upsert_endpoint(
                         conn, origin_id=origin_id, method=record["method"].upper(),
                         path=urlsplit(record["url"]).path,
                         normalized_path=normalize_path(urlsplit(record["url"]).path),
                         query_signature=query_signature(record["url"]),
                         source_tool="mitmproxy",
+                        verification_status="verified" if succeeded else "observed",
+                        is_excluded=not succeeded,
                     )
                     persist_url_parameters(conn, endpoint_id, record["url"])
                     conn.execute("""INSERT INTO endpoint_observations

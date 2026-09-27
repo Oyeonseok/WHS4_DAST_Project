@@ -1,5 +1,7 @@
 # 09.24 Juice Shop 인증 Recon 평가
 
+[2026-09-26 인증 Runtime 재시험과 수정](REFACTOR_06_AUTHENTICATED_RUNTIME.md): 재시험에서 인증 소실로 18/71이 됐던 정답 GET·Surface가 관리형 브라우저 생존 판정과 세션 복구 수정 뒤 25/71로 돌아왔다.
+
 [지금까지의 변경사항과 수집 성능 요약](RECON_REFACTOR_SUMMARY.md): 기존 1,000건 실행 대비 실제 GET 요청·최종 Surface의 정답 경로가 각각 **9/71→25/71**로 증가했다.
 
 브라우저 화면 탐색의 다음 실험은 [다섯 번째 리팩토링 기록](REFACTOR_05_BROWSER_NAVIGATION.md)에 있다. 화면 방문은 **6→8개**였지만 실제 GET·Surface 정답은 모두 **25/71**로 유지됐다. [브라우저 GET O/X 표](RECON_BROWSER_GET_ROUTE_MATRIX.md)와 [브라우저 Surface O/X 표](RECON_BROWSER_SURFACE_ROUTE_MATRIX.md)를 별도로 생성했다. 후속 Recon 계획과 ffuf root 선택 모델은 `gpt-6-luna`로 지정했다.

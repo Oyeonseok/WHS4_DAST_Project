@@ -11,6 +11,8 @@ import re
 from collections import defaultdict
 from urllib.parse import parse_qsl, unquote, urlsplit
 
+from aidast.recon.verification import result_verification_status
+
 # Katana-style path fingerprinting for values that are unambiguously dynamic.
 # The original path is retained on the endpoint record; this pattern only
 # controls the deduplication key used by the normalized surface.
@@ -180,6 +182,7 @@ def merge_and_normalize(raw_endpoints: list[dict]) -> list[dict]:
         norm_path = normalize_path(learned.get((item["method"].upper(), item["path"]), item["path"]))
         key = (item["method"], norm_path)
         excluded = is_static_asset(item["path"])
+        verification_status = result_verification_status(item)
         if key not in merged:
             merged[key] = {
                 "method": item["method"],
@@ -188,9 +191,16 @@ def merge_and_normalize(raw_endpoints: list[dict]) -> list[dict]:
                 "content_type": item.get("content_type"),
                 "query_signature": query_signature(item.get("url") or item.get("path")),
                 "source_tools": {item["source"]},
-                "is_excluded": excluded,
-                "exclude_reason": "static_asset" if excluded else None,
+                "is_excluded": excluded or verification_status == "candidate",
+                "exclude_reason": ("static_asset" if excluded else
+                                   "unverified_candidate" if verification_status == "candidate" else None),
+                "verification_status": verification_status,
             }
         else:
             merged[key]["source_tools"].add(item["source"])
+            if verification_status == "verified":
+                merged[key]["verification_status"] = "verified"
+                if merged[key]["exclude_reason"] == "unverified_candidate":
+                    merged[key]["is_excluded"] = False
+                    merged[key]["exclude_reason"] = None
     return list(merged.values())

@@ -2071,6 +2071,8 @@ def discover_endpoints(
         # Recover literal API routes from a few first-party bundles when
         # normal browser and crawler observations leave the API surface sparse.
         adaptive_js_results: list[dict] = []
+        if authenticated_run:
+            driver.ensure_session()
         try:
             adaptive_js_results = discover_adaptive_js_api_candidates(
                 base_url,
@@ -2260,15 +2262,24 @@ def discover_endpoints(
         # Final
         # =================================================
 
+        secondary_candidates = [
+            item for item in secondary_results
+            if item.get("verification_status") == "candidate"
+        ]
+        secondary_verified = [
+            item for item in secondary_results
+            if item.get("verification_status") != "candidate"
+        ]
+
         final_results = (
             _deduplicate_results(
                 primary_results
-                + secondary_results
+                + secondary_verified
             )
         )
         diagnose(
             "deduplication", phase="final_surface",
-            input_count=len(primary_results) + len(secondary_results),
+            input_count=len(primary_results) + len(secondary_verified),
             unique_count=len(final_results), endpoints=endpoint_rows(final_results),
         )
 
@@ -2322,6 +2333,9 @@ def discover_endpoints(
             f"  API Secondary     : "
             f"{len(secondary_results)}"
         )
+
+        print(f"  API 후보          : {len(secondary_candidates)}")
+        print(f"  API 검증 결과     : {len(secondary_verified)}")
 
         print(
             f"  API 신규 Endpoint : "

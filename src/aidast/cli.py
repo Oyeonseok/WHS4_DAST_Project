@@ -1198,6 +1198,15 @@ def _run_recon(
                     ),
                 )
                 _require_complete_recon_annotations(failed_tags)
+            if prepare_attack and not recon_failures:
+                from aidast.pipeline.browser_credentials import register_browser_session_credentials
+
+                registered = register_browser_session_credentials(
+                    executor.conn, scan_id=scan_id, result_root=RESULT_ROOT,
+                    sessions=list(getattr(executor, "auth_session_files", [])),
+                )
+                if registered:
+                    print(f"Attack 인증 세션 참조 {len(registered)}개 등록 완료")
             recon_review = OfflineReconReview(
                 planner=main_agent,
                 conn=executor.conn,

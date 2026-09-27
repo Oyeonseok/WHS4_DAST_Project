@@ -162,6 +162,11 @@ def test_learned_dynamic_routes_retain_observations_without_duplicate_surface(tm
             connection, endpoint_id=raw_get_endpoint, source="mitmproxy", method="GET",
             url="https://example.test/users/alice?search=value", response_status=200,
         )
+        db.upsert_endpoint(
+            connection, origin_id=origin, method="GET", path="/users/alice",
+            normalized_path="/users/alice", source_tool="mitmproxy",
+            verification_status="verified",
+        )
         for item in merge_and_normalize(rows):
             db.upsert_endpoint(connection, origin_id=origin, method=item["method"], path=item["path"],
                                normalized_path=item["normalized_path"], source_tool="crawler")
@@ -174,6 +179,9 @@ def test_learned_dynamic_routes_retain_observations_without_duplicate_surface(tm
         assert connection.execute(
             "SELECT auth_required FROM endpoints WHERE method='GET' AND is_excluded=0"
         ).fetchone()[0] is None
+        assert connection.execute(
+            "SELECT verification_status FROM endpoints WHERE method='GET' AND is_excluded=0"
+        ).fetchone()[0] == "verified"
         assert connection.execute(
             "SELECT COUNT(*) FROM endpoint_observations WHERE endpoint_id=(SELECT endpoint_id FROM endpoints WHERE is_excluded=0 AND method='GET')"
         ).fetchone()[0] == 5
@@ -196,7 +204,7 @@ def test_learned_dynamic_routes_retain_observations_without_duplicate_surface(tm
 def test_recon_schema_version_tracks_metadata_without_downgrading_live_database(tmp_path) -> None:
     database = tmp_path / "Recon.db"
     with db.connect(database) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == db.RECON_SCHEMA_VERSION == 10
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == db.RECON_SCHEMA_VERSION == 11
         connection.execute("PRAGMA user_version=12")
         connection.commit()
     with db.connect(database) as connection:

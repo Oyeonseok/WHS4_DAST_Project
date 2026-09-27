@@ -40,7 +40,7 @@ from playwright.sync_api import (
 
 from aidast.recon.policy import TargetPolicy
 from aidast.recon.judgment import is_probable_redirect_loop_path
-from aidast.auth.endpoints import AuthenticationEndpoint, normalize_origin
+from aidast.auth.endpoints import AuthenticationEndpoint, AuthenticationEndpointError, normalize_origin
 from aidast.core.http_safety import (
     BROWSER_MODE_HEADER, BROWSER_TOKEN_HEADER, scope_uses_loopback_host,
 )
@@ -272,6 +272,12 @@ class PlaywrightDriver:
         self._phase = "runtime"
 
         self._auth_expired = False
+        # Keep the approved pre-Recon credentials in memory. The live browser
+        # can clear storage during SPA navigation, and _load_auth_state writes
+        # that live state to the run-scoped session file.
+        self._auth_checkpoint_state: dict | None = None
+        self._auth_checkpoint_session_storage: dict | None = None
+        self._required_auth_headers: tuple[str, ...] = ()
         # Public and missing pages must never fall through to a manual login
         # wait. This is enabled only after an explicit or auto-detected auth
         # flow has actually started.
@@ -1321,9 +1327,40 @@ class PlaywrightDriver:
             self._attach_manual_browser()
             self._register_authentication_observer()
             print("  [Playwright] 직접 연결 로그인 창을 열었습니다. 브라우저에서 로그인해주세요.")
-            _wait_for_manual_login()
+            operator_confirmed = _wait_for_manual_login()
             if not self.save_session():
                 raise RuntimeError("could not save the target session after manual login")
+            headers = self.get_auth_headers()
+            target_pages = []
+            for page in self.context.pages:
+                try:
+                    if (not page.is_closed()
+                            and normalize_origin(page.url) == normalize_origin(self.base_url)):
+                        target_pages.append(page)
+                except (AuthenticationEndpointError, ValueError):
+                    continue
+            login_form_visible = False
+            for page in target_pages:
+                try:
+                    login_form_visible = (
+                        page.locator("input[type='password']:visible").count() > 0
+                        or self._page_indicates_login_required(page)
+                    )
+                except Exception:
+                    login_form_visible = True
+                if login_form_visible:
+                    break
+            verified = bool(
+                operator_confirmed and target_pages and not login_form_visible
+                and headers and self.session_is_valid()
+                and ("Authorization" in headers
+                     or self.session_config.auth_check_url)
+            )
+            if verified:
+                self.automatic_auth_marker_path.write_text("authenticated\n", encoding="utf-8")
+                self._remember_authenticated_state()
+            else:
+                self.automatic_auth_marker_path.unlink(missing_ok=True)
             if self.session_config.authentication_endpoint_callback is not None:
                 self.session_config.authentication_endpoint_callback(
                     tuple(self.authentication_endpoints)
@@ -1447,6 +1484,7 @@ class PlaywrightDriver:
                     raise RuntimeError("could not refresh the authenticated browser state")
                 self._auth_expired = False
                 self._interactive_authentication_enabled = True
+                self._remember_authenticated_state()
                 print("  [Playwright] 동일 사이트의 로그인 세션을 재사용합니다.")
                 return True
             reason = self._login_capability_reason(page, response)
@@ -1459,7 +1497,6 @@ class PlaywrightDriver:
             print(f"  [Playwright] 로그인 기능 감지 ({reason}); 로그인 창을 엽니다.")
             self._shutdown_runtime()
             self.capture_and_start()
-            self.automatic_auth_marker_path.write_text("authenticated\n", encoding="utf-8")
             return True
         except BaseException:
             self._shutdown_runtime()
@@ -1485,6 +1522,8 @@ class PlaywrightDriver:
                     raise RuntimeError("target session validation failed after login")
                 if not self.save_session():
                     raise RuntimeError("could not save the target session after return")
+                if self.session_config.auth_check_url:
+                    self.automatic_auth_marker_path.write_text("authenticated\n", encoding="utf-8")
                 break
             except RuntimeError as exc:
                 self._shutdown_runtime()
@@ -1511,7 +1550,62 @@ class PlaywrightDriver:
 
         self._auth_expired = False
         self._interactive_authentication_enabled = True
+        self._remember_authenticated_state()
         print("  [Playwright] 프록시·Scope 적용 및 타깃 복귀 완료; Recon을 시작합니다.")
+
+    def _remember_authenticated_state(self) -> None:
+        """Retain one immutable recovery point for a restored target session."""
+        headers = self.get_auth_headers()
+        required = tuple(
+            name for name, value in headers.items()
+            if value and name.lower() != "cookie" and name not in self.request_headers
+        )
+        if not required and headers.get("Cookie"):
+            required = ("Cookie",)
+        if not required:
+            return
+        self._auth_checkpoint_state = json.loads(
+            self.session_path.read_text(encoding="utf-8")
+        )
+        self._auth_checkpoint_session_storage = (
+            json.loads(self.session_storage_path.read_text(encoding="utf-8"))
+            if self.session_storage_path.is_file() else None
+        )
+        self._required_auth_headers = required
+
+    def _restore_authenticated_state(self) -> None:
+        """Restore approved credentials after browser navigation cleared them."""
+        checkpoint = self._auth_checkpoint_state
+        if checkpoint is None:
+            raise RuntimeError("authenticated session recovery point is missing")
+        self.session_path.write_text(
+            json.dumps(checkpoint, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        if self._auth_checkpoint_session_storage is None:
+            self.session_storage_path.unlink(missing_ok=True)
+        else:
+            self.session_storage_path.write_text(
+                json.dumps(self._auth_checkpoint_session_storage, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        self.restore_runtime(force=True)
+        page = self._ensure_page()
+        response = page.goto(
+            self.base_url,
+            wait_until="domcontentloaded",
+            timeout=self.session_config.timeout_ms,
+        )
+        if self.target_policy is not None and not self.target_policy.allows_url(page.url):
+            raise RuntimeError("authenticated session recovery left the approved target")
+        if response is not None and response.status >= 400:
+            raise RuntimeError("authenticated session recovery returned an error")
+        headers = self.get_auth_headers()
+        if any(not headers.get(name) for name in self._required_auth_headers):
+            raise RuntimeError("authenticated session recovery did not restore credentials")
+        if not self.session_is_valid():
+            raise RuntimeError("authenticated session recovery failed validation")
+        print("  [Playwright] 인증 상태 소실 감지; 승인된 세션에서 복구 완료")
 
     @staticmethod
     def _page_indicates_login_required(page: Page) -> bool:
@@ -1871,13 +1965,19 @@ class PlaywrightDriver:
         if self.context is None:
             return False
 
+        if self._browser_kind == "managed":
+            try:
+                return self.browser is not None and self.browser.is_connected()
+            except Exception:
+                return False
+
         if self._chrome_process is None:
             return False
 
         # self.context.storage_state()는 CDP 호출에 타임아웃이 없어서,
         # 브라우저 프로세스는 살아있는데 CDP가 응답 없는 상태(hang)가 되면
         # 이 함수 자체가 영원히 안 끝나는 문제가 실측으로 확인됐다. 여기서는
-        # 순수 프로세스 생존만 확인하고, "진짜" liveness(CDP 응답성)는 이미
+        # CDP 모드에서 순수 프로세스 생존만 확인하고, "진짜" liveness는 이미
         # 타임아웃이 걸려 있는 다음 단계 호출들(session_is_valid(),
         # page.goto(timeout=...))에 맡긴다.
         try:
@@ -2485,7 +2585,7 @@ class PlaywrightDriver:
                     timeout=self.session_config.timeout_ms / 1000,
                     target_policy=self.target_policy, proxy_url=self.proxy_url,
                 )
-                valid = status is not None and status not in self.session_config.invalid_auth_statuses
+                valid = status is not None and 200 <= status < 300
                 self._auth_expired = not valid
                 return valid
 
@@ -2507,12 +2607,7 @@ class PlaywrightDriver:
                 )
             )
 
-            valid = (
-                response.status
-                not in
-                self.session_config
-                .invalid_auth_statuses
-            )
+            valid = 200 <= response.status < 300
 
             self._auth_expired = (
                 not valid
@@ -2538,6 +2633,11 @@ class PlaywrightDriver:
 
         if not (self._interactive_authentication_enabled or self.preauthenticated):
             return
+
+        if self._required_auth_headers:
+            headers = self.get_auth_headers()
+            if any(not headers.get(name) for name in self._required_auth_headers):
+                self._restore_authenticated_state()
 
         if self.session_is_valid():
 

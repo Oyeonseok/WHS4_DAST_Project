@@ -11,6 +11,9 @@ from pathlib import Path
 from typing import Callable, Mapping
 from urllib.parse import unquote, urlsplit
 
+from aidast.paths import RESULT_ROOT
+from aidast.pipeline.browser_credentials import BrowserSessionCredentialBackend
+
 
 _HEADER_NAME = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
 _ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -20,28 +23,34 @@ class PipelineCredentialResolver:
     """Resolve opaque URI references through trusted, scheme-specific backends."""
 
     def __init__(self, db_path: Path, *,
-                 backends: Mapping[str, Callable[[str], object]] | None = None):
+                 backends: Mapping[str, Callable[[str], object]] | None = None,
+                 result_root: Path | None = None,
+                 browser_sessions: bool = False):
         self.db_path = Path(db_path).expanduser().resolve()
         self.backends = {"keyring": KeyringCredentialBackend()}
+        if browser_sessions:
+            self.backends["vault"] = BrowserSessionCredentialBackend(
+                self.db_path, result_root or RESULT_ROOT,
+            )
         if backends:
             for scheme, backend in backends.items():
                 if not isinstance(scheme, str) or not scheme or not callable(backend):
                     raise ValueError("credential backends must map schemes to callables")
                 self.backends[scheme.casefold()] = backend
 
-    def unsupported_reason(self, reference: str) -> str | None:
+    def unsupported_reason(self, reference: str, *, destination_url: str | None = None) -> str | None:
         try:
             uri = self._reference_uri(reference)
-            self._resolve_uri(uri)
+            self._resolve_uri(uri, destination_url=destination_url)
         except (ImportError, OSError, sqlite3.Error, ValueError):
             return "credential_reference_unavailable"
         return None
 
-    def __call__(self, reference: str) -> dict[str, str]:
+    def __call__(self, reference: str, *, destination_url: str | None = None) -> dict[str, str]:
         uri = self._reference_uri(reference)
-        return self._resolve_uri(uri)
+        return self._resolve_uri(uri, destination_url=destination_url)
 
-    def _resolve_uri(self, uri: str) -> dict[str, str]:
+    def _resolve_uri(self, uri: str, *, destination_url: str | None = None) -> dict[str, str]:
         parsed = urlsplit(uri)
         if parsed.scheme == "env":
             raw: object = os.environ.get(self._environment_name(uri))
@@ -54,7 +63,10 @@ class PipelineCredentialResolver:
             if backend is None:
                 raise ValueError("unsupported credential reference backend")
             try:
-                raw = backend(uri)
+                if isinstance(backend, BrowserSessionCredentialBackend):
+                    raw = backend(uri, destination_url=destination_url)
+                else:
+                    raw = backend(uri)
             except (ImportError, OSError, ValueError):
                 raise
             except Exception as exc:

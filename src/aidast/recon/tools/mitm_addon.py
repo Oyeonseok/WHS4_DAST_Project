@@ -140,6 +140,7 @@ class ScopeAndCaptureAddon:
         )
         phase_hint = str(flow.request.headers.pop("X-AIDAST-Phase", "")).lower()
         source_hint = str(flow.request.headers.pop("X-AIDAST-Source", "")).lower()
+        flow.metadata["aidast_candidate_probe"] = phase_hint == "candidate_probe"
         method = flow.request.method.upper()
         # Prioritize browser API/document traffic over crawler noise. Every
         # forwarded request still consumes the finite total budget, including
@@ -328,6 +329,7 @@ class ScopeAndCaptureAddon:
             ),
             "capture_bodies": capture_bodies,
             "browser_support": support_mode,
+            "candidate_probe": bool(flow.metadata.get("aidast_candidate_probe")),
         }
         with self.out_path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")

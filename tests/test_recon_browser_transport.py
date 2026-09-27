@@ -19,6 +19,7 @@ from aidast.recon.tools.playwright_driver import (
     InteractionConfig, ManualSessionConfig, PlaywrightDriver,
     _wait_for_manual_login,
 )
+from aidast.auth.endpoints import AuthenticationEndpoint
 from aidast.recon.tools.page_identity import canonical_visit_key, screen_fingerprint
 from aidast.scope.models import AssetType
 
@@ -389,6 +390,36 @@ class ReconBrowserTransportTests(unittest.TestCase):
         ])
         self.assertIs(self.driver.context.pages[0], page)
 
+    def test_manual_cookie_session_needs_success_proof_before_handoff(self):
+        page = Mock(url=self.policy.asset)
+        page.is_closed.return_value = False
+        page.locator.return_value.count.return_value = 0
+        self.driver.context = Mock(pages=[page])
+        login = AuthenticationEndpoint(
+            method="POST", origin="https://example.com", path="/api/login",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            self.driver.session_config.session_file = str(Path(directory) / "session.json")
+            self.driver.session_path.write_text("{}", encoding="utf-8")
+            for observed in (False, True):
+                def observe():
+                    if observed:
+                        self.driver.authentication_endpoints.append(login)
+
+                with patch.object(self.driver, "_launch_manual_browser"), patch.object(
+                    self.driver, "_attach_manual_browser"
+                ), patch.object(self.driver, "_register_authentication_observer", side_effect=observe), patch(
+                    "aidast.recon.tools.playwright_driver._wait_for_manual_login", return_value=True
+                ), patch.object(self.driver, "save_session", return_value=True), patch.object(
+                    self.driver, "get_auth_headers", return_value={"Cookie": "sessionid=value"}
+                ), patch.object(self.driver, "session_is_valid", return_value=True), patch.object(
+                    self.driver, "_page_indicates_login_required", return_value=False
+                ), patch.object(self.driver, "_remember_authenticated_state"), patch.object(
+                    self.driver, "_register_context_handlers"
+                ), patch.object(self.driver, "_register_page_handlers"):
+                    self.driver.capture_and_start()
+                self.assertFalse(self.driver.automatic_auth_marker_path.is_file())
+
     def test_unauthenticated_start_never_opens_manual_login(self):
         page = Mock(url=self.policy.asset)
         with tempfile.TemporaryDirectory() as directory:
@@ -456,7 +487,7 @@ class ReconBrowserTransportTests(unittest.TestCase):
                 self.driver, "capture_and_start"
             ) as login:
                 self.assertTrue(self.driver.start_automatic())
-            self.assertTrue(self.driver.automatic_auth_marker_path.is_file())
+            self.assertFalse(self.driver.automatic_auth_marker_path.is_file())
         login.assert_called_once_with()
 
     def test_automatic_start_prompts_for_visible_password_input(self):
@@ -526,6 +557,27 @@ class ReconBrowserTransportTests(unittest.TestCase):
         start.assert_called_once_with(restore_saved_session=True)
         login.assert_not_called()
 
+    def test_confirmed_manual_login_creates_recovery_checkpoint(self):
+        page = Mock(url=self.policy.asset)
+        page.is_closed.return_value = False
+        page.locator.return_value.count.return_value = 0
+        self.driver.context = Mock(pages=[page])
+        with tempfile.TemporaryDirectory() as directory:
+            self.driver.session_config.session_file = str(Path(directory) / "session.json")
+            with patch.object(self.driver, "_launch_manual_browser"), patch.object(
+                self.driver, "_attach_manual_browser"
+            ), patch.object(self.driver, "_register_authentication_observer"), patch(
+                "aidast.recon.tools.playwright_driver._wait_for_manual_login", return_value=True
+            ), patch.object(self.driver, "save_session", return_value=True), patch.object(
+                self.driver, "get_auth_headers", return_value={"Authorization": "Bearer test.token.value"}
+            ), patch.object(self.driver, "session_is_valid", return_value=True), patch.object(
+                self.driver, "_page_indicates_login_required", return_value=False
+            ), patch.object(self.driver, "_remember_authenticated_state") as remember, patch.object(
+                self.driver, "_register_context_handlers"
+            ), patch.object(self.driver, "_register_page_handlers"):
+                self.driver.capture_and_start()
+            remember.assert_called_once_with()
+
     def test_none_mode_never_reauthenticates_during_session_check(self):
         self.driver._interactive_authentication_enabled = False
         with patch.object(self.driver, "restore_runtime"), patch.object(
@@ -589,6 +641,80 @@ class ReconBrowserTransportTests(unittest.TestCase):
         ), patch.object(self.driver, "capture_and_start") as capture:
             self.driver.ensure_session()
         capture.assert_called_once_with()
+
+    def test_restored_session_recovers_when_browser_loses_auth_storage(self):
+        """An authenticated scan must not silently continue with anonymous probes."""
+        authenticated = {
+            "cookies": [],
+            "origins": [{
+                "origin": "https://example.com",
+                "localStorage": [{"name": "token", "value": "aaa.bbb.ccc"}],
+            }],
+        }
+        anonymous = {
+            "cookies": [],
+            "origins": [{"origin": "https://example.com", "localStorage": []}],
+        }
+        live = {"state": authenticated}
+        context = Mock(pages=[])
+        context.storage_state.side_effect = lambda **_kwargs: live["state"]
+        page = Mock(url=self.policy.asset)
+        page.goto.return_value = SimpleNamespace(status=200)
+
+        with tempfile.TemporaryDirectory() as directory:
+            self.driver.session_config.session_file = str(Path(directory) / "session.json")
+            self.driver.session_path.write_text(json.dumps(authenticated), encoding="utf-8")
+            self.driver.context = context
+
+            def restore_runtime(*, force=False):
+                if force:
+                    live["state"] = json.loads(self.driver.session_path.read_text())
+
+            with patch.object(self.driver, "_launch_manual_browser"), patch.object(
+                self.driver, "_ensure_page", return_value=page
+            ), patch.object(
+                self.driver, "_page_indicates_login_required", return_value=False
+            ), patch.object(
+                self.driver, "restore_runtime", side_effect=restore_runtime
+            ) as restore, patch.object(
+                self.driver, "capture_and_start"
+            ) as manual_login:
+                self.driver.start_from_session()
+                live["state"] = anonymous
+                self.driver.ensure_session()
+                self.assertEqual(
+                    self.driver.get_auth_headers().get("Authorization"),
+                    "Bearer aaa.bbb.ccc",
+                )
+
+            self.assertIn(call(force=True), restore.call_args_list)
+            manual_login.assert_not_called()
+
+    def test_session_storage_checkpoint_survives_live_storage_loss(self):
+        authenticated = {"cookies": [], "origins": [{
+            "origin": "https://example.com", "localStorage": [],
+        }]}
+        context = Mock(pages=[])
+        context.storage_state.return_value = authenticated
+        page = Mock(url=self.policy.asset)
+        page.goto.return_value = SimpleNamespace(status=200)
+        with tempfile.TemporaryDirectory() as directory:
+            self.driver.session_config.session_file = str(Path(directory) / "session.json")
+            self.driver.session_path.write_text(json.dumps(authenticated), encoding="utf-8")
+            self.driver.session_storage_path.write_text(json.dumps({
+                "https://example.com": {"token": "aaa.bbb.ccc"},
+            }), encoding="utf-8")
+            self.driver.context = context
+            self.driver.preauthenticated = True
+            self.driver._remember_authenticated_state()
+            self.driver.session_storage_path.write_text("{}", encoding="utf-8")
+            with patch.object(self.driver, "restore_runtime") as restore, patch.object(
+                self.driver, "_ensure_page", return_value=page
+            ), patch.object(self.driver, "session_is_valid", return_value=True):
+                self.driver.ensure_session()
+            self.assertEqual(self.driver.get_auth_headers().get("Authorization"),
+                             "Bearer aaa.bbb.ccc")
+            restore.assert_any_call(force=True)
 
     def test_manual_reauthentication_accepts_previously_restored_driver(self):
         self.driver.preauthenticated = True
@@ -699,6 +825,25 @@ class ReconBrowserTransportTests(unittest.TestCase):
                 self.assertEqual(close.call_count, 2)
                 endpoint_callback.assert_called_once_with(tuple())
 
+    def test_restored_cookie_session_needs_explicit_auth_check_for_handoff(self):
+        page = Mock(url=self.policy.asset)
+        page.goto.return_value = SimpleNamespace(status=200)
+        with tempfile.TemporaryDirectory() as directory:
+            self.driver.session_config.session_file = str(Path(directory) / "session.json")
+            self.driver.session_path.write_text("{}", encoding="utf-8")
+            with patch.object(self.driver, "_launch_manual_browser"), patch.object(
+                self.driver, "_restore_target_session"
+            ), patch.object(self.driver, "_ensure_page", return_value=page), patch.object(
+                self.driver, "_page_indicates_login_required", return_value=False
+            ), patch.object(self.driver, "session_is_valid", return_value=True), patch.object(
+                self.driver, "save_session", return_value=True
+            ):
+                self.driver.start_from_session()
+                self.assertFalse(self.driver.automatic_auth_marker_path.is_file())
+                self.driver.session_config.auth_check_url = "/api/me"
+                self.driver.start_from_session()
+                self.assertTrue(self.driver.automatic_auth_marker_path.is_file())
+
     def test_browser_support_allows_only_marked_non_navigation_requests(self):
         self.driver.browser_context_token = "browser-token-with-enough-length"
 
@@ -784,6 +929,19 @@ class ReconBrowserTransportTests(unittest.TestCase):
                 self.driver.restore_runtime(force=True)
         launch.assert_called_once_with()
         restore.assert_called_once_with()
+
+    def test_live_managed_browser_is_not_restarted_between_recon_phases(self):
+        self.driver._browser_kind = "managed"
+        self.driver.browser = Mock()
+        self.driver.context = Mock()
+        self.driver.browser.is_connected.return_value = True
+        with patch.object(self.driver, "_launch_manual_browser") as launch:
+            self.driver.restore_runtime()
+        launch.assert_not_called()
+        self.assertTrue(self.driver.runtime_is_alive())
+
+        self.driver.browser.is_connected.return_value = False
+        self.assertFalse(self.driver.runtime_is_alive())
 
     def test_restore_runtime_retries_one_transient_cdp_launch_failure(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -961,6 +1119,14 @@ class ReconBrowserTransportTests(unittest.TestCase):
             self.assertFalse(self.driver.session_is_valid())
         self.assertIs(request.call_args.kwargs["target_policy"], self.policy)
         self.driver.context.request.get.assert_not_called()
+
+    def test_auth_check_requires_success_status(self):
+        self.config.auth_check_url = "/api/me"
+        self.driver.context = Mock()
+        with patch.object(self.driver, "get_auth_headers", return_value={}), patch(
+            "aidast.recon.tools.playwright_driver._http_request", return_value=(404, {}, b"")
+        ):
+            self.assertFalse(self.driver.session_is_valid())
 
     def test_default_sessions_are_scoped_by_run_identity_and_target(self):
         first = _make_default_session_file(self.policy.asset, run_id="run", identity_id="alice")
