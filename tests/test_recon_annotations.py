@@ -59,6 +59,150 @@ class ObservationTests(unittest.TestCase):
         self.assertEqual(len(endpoint['annotations']), 2)
         self.assertEqual(output['annotation_runs'][0]['status'], 'completed')
 
+    def test_unverified_api_candidate_is_recorded_outside_surface_endpoints(self):
+        recorder = ObservationRecorder(self.conn, origin_id=self.origin, scan_id='scan')
+        recorder.record('api_secondary', [{
+            'method': 'GET', 'path': '/b2b', 'url': 'https://example.com/b2b',
+            'source': 'zap_openapi', 'discovery_kind': 'api_spec_candidate',
+            'verification_status': 'candidate',
+        }])
+
+        surface = json.loads(export_surface(
+            self.conn, scan_id='scan', output_path=Path(self.temp.name) / 'surface.json',
+        ).read_text())
+        origin = surface['origins'][0]
+        self.assertEqual(origin['endpoints'], [])
+        self.assertEqual([item['path'] for item in origin['candidate_endpoints']], ['/b2b'])
+        self.assertEqual(origin['candidate_endpoints'][0]['observations'][0]['source_tool'], 'zap_openapi')
+        self.assertEqual(self.conn.execute(
+            "SELECT is_excluded, exclude_reason FROM endpoints WHERE normalized_path='/b2b'"
+        ).fetchone(), (1, 'unverified_candidate'))
+
+    def test_static_asset_report_is_not_exported_as_api_candidate(self):
+        ObservationRecorder(self.conn, origin_id=self.origin, scan_id='scan').record(
+            'api_secondary', [{
+                'method': 'GET', 'path': '/main.js', 'url': 'https://example.com/main.js',
+                'source': 'zap_openapi', 'verification_status': 'candidate',
+            }],
+        )
+
+        surface = json.loads(export_surface(
+            self.conn, scan_id='scan', output_path=Path(self.temp.name) / 'surface.json',
+        ).read_text())
+        self.assertEqual(surface['origins'][0]['candidate_endpoints'], [])
+
+    def test_verified_observation_promotes_existing_api_candidate(self):
+        recorder = ObservationRecorder(self.conn, origin_id=self.origin, scan_id='scan')
+        candidate = {
+            'method': 'GET', 'path': '/b2b', 'url': 'https://example.com/b2b',
+            'source': 'zap_openapi', 'verification_status': 'candidate',
+        }
+        recorder.record('api_secondary', [candidate])
+        recorder.record('browser', [{
+            'method': 'GET', 'path': '/b2b', 'url': 'https://example.com/b2b',
+            'source': 'playwright_http', 'evidence': {'response_status': 200},
+        }])
+
+        surface = json.loads(export_surface(
+            self.conn, scan_id='scan', output_path=Path(self.temp.name) / 'surface.json',
+        ).read_text())
+        origin = surface['origins'][0]
+        self.assertEqual([item['path'] for item in origin['endpoints']], ['/b2b'])
+        self.assertEqual(origin['candidate_endpoints'], [])
+        self.assertEqual(len(origin['endpoints'][0]['observations']), 2)
+        self.assertEqual(origin['endpoints'][0]['verification_status'], 'verified')
+
+    def test_unproven_observation_does_not_promote_api_candidate(self):
+        recorder = ObservationRecorder(self.conn, origin_id=self.origin, scan_id='scan')
+        recorder.record('api_secondary', [{
+            'method': 'GET', 'path': '/b2b', 'url': 'https://example.com/b2b',
+            'source': 'zap_openapi', 'verification_status': 'candidate',
+        }])
+        recorder.record('crawler', [{
+            'method': 'GET', 'path': '/b2b', 'url': 'https://example.com/b2b',
+            'source': 'katana_standard',
+        }])
+
+        surface = json.loads(export_surface(
+            self.conn, scan_id='scan', output_path=Path(self.temp.name) / 'surface.json',
+        ).read_text())
+        origin = surface['origins'][0]
+        self.assertEqual(origin['endpoints'], [])
+        self.assertEqual(origin['candidate_endpoints'][0]['verification_status'], 'candidate')
+        self.assertEqual(len(origin['candidate_endpoints'][0]['observations']), 2)
+
+    def test_candidate_observation_does_not_demote_verified_endpoint(self):
+        recorder = ObservationRecorder(self.conn, origin_id=self.origin, scan_id='scan')
+        recorder.record('browser', [{
+            'method': 'GET', 'path': '/b2b', 'url': 'https://example.com/b2b',
+            'source': 'playwright_http', 'evidence': {'response_status': 200},
+        }])
+        recorder.record('api_secondary', [{
+            'method': 'GET', 'path': '/b2b', 'url': 'https://example.com/b2b',
+            'source': 'zap_openapi', 'verification_status': 'candidate',
+        }])
+
+        self.assertEqual(self.conn.execute(
+            "SELECT is_excluded, exclude_reason FROM endpoints WHERE normalized_path='/b2b'"
+        ).fetchone(), (0, None))
+
+    def test_failed_http_probe_does_not_promote_api_candidate(self):
+        ObservationRecorder(self.conn, origin_id=self.origin, scan_id='scan').record(
+            'api_secondary', [{
+                'method': 'GET', 'path': '/b2b', 'url': 'https://example.com/b2b',
+                'source': 'zap_openapi', 'verification_status': 'candidate',
+            }],
+        )
+        capture = Path(self.temp.name) / 'capture.jsonl'
+        capture.write_text(json.dumps({
+            'method': 'GET', 'url': 'https://example.com/b2b', 'response_status': 404,
+        }) + '\n')
+        self.assertEqual(ingest_mitm_capture(self.conn, capture, origin_id=self.origin), (1, 0))
+
+        self.assertEqual(self.conn.execute(
+            "SELECT is_excluded, exclude_reason FROM endpoints WHERE normalized_path='/b2b'"
+        ).fetchone(), (1, 'unverified_candidate'))
+
+    def test_successful_proxy_capture_alone_does_not_promote_spec_candidate(self):
+        ObservationRecorder(self.conn, origin_id=self.origin, scan_id='scan').record(
+            'api_secondary', [{
+                'method': 'GET', 'path': '/b2b', 'url': 'https://example.com/b2b',
+                'source': 'zap_openapi', 'verification_status': 'candidate',
+            }],
+        )
+        capture = Path(self.temp.name) / 'capture.jsonl'
+        capture.write_text(json.dumps({
+            'method': 'GET', 'url': 'https://example.com/b2b', 'response_status': 200,
+        }) + '\n')
+        self.assertEqual(ingest_mitm_capture(self.conn, capture, origin_id=self.origin), (1, 0))
+
+        self.assertEqual(self.conn.execute(
+            "SELECT is_excluded, exclude_reason FROM endpoints WHERE normalized_path='/b2b'"
+        ).fetchone(), (1, 'unverified_candidate'))
+
+    def test_rejected_candidate_get_capture_does_not_promote_on_http_200(self):
+        ObservationRecorder(self.conn, origin_id=self.origin, scan_id='scan').record(
+            'api_secondary', [{
+                'method': 'GET', 'path': '/b2b', 'url': 'https://example.com/b2b',
+                'source': 'zap_openapi', 'verification_status': 'candidate',
+                'evidence': {'response_status': 200, 'verification_reason': 'non_positive_json'},
+            }],
+        )
+        capture = Path(self.temp.name) / 'capture.jsonl'
+        capture.write_text(json.dumps({
+            'method': 'GET', 'url': 'https://example.com/b2b',
+            'response_status': 200, 'candidate_probe': True,
+        }) + '\n')
+        self.assertEqual(ingest_mitm_capture(self.conn, capture, origin_id=self.origin), (1, 0))
+
+        surface = json.loads(export_surface(
+            self.conn, scan_id='scan', output_path=Path(self.temp.name) / 'surface.json',
+        ).read_text())
+        self.assertEqual(surface['origins'][0]['endpoints'], [])
+        candidate = surface['origins'][0]['candidate_endpoints'][0]
+        self.assertEqual(candidate['observations'][0]['evidence']['verification_reason'],
+                         'non_positive_json')
+
     def test_invalid_llm_output_keeps_observations_without_partial_tags(self):
         recorder = ObservationRecorder(self.conn, origin_id=self.origin, scan_id='scan', agent=FakeAgent(True))
         recorder.record('login', self.items())

@@ -16,7 +16,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-RECON_SCHEMA_VERSION = 10
+RECON_SCHEMA_VERSION = 11
 
 SCHEMA = """
 -- WAL은 -wal/-shm 보조 파일에 mmap 기반 공유 락이 필요한데, WSL에서
@@ -98,6 +98,8 @@ CREATE TABLE IF NOT EXISTS endpoints (
     source_tools TEXT,
     is_excluded INTEGER DEFAULT 0,
     exclude_reason TEXT,
+    verification_status TEXT NOT NULL DEFAULT 'observed'
+        CHECK(verification_status IN ('candidate','observed','verified')),
     discovered_at TEXT DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (origin_id) REFERENCES origins(origin_id),
     FOREIGN KEY (session_id) REFERENCES sessions(session_id),
@@ -441,7 +443,13 @@ def upsert_endpoint(
     source_tool: str = "",
     is_excluded: bool = False,
     exclude_reason: str | None = None,
+    verification_status: str = "observed",
 ) -> str:
+    if verification_status not in {"candidate", "observed", "verified"}:
+        raise ValueError("invalid endpoint verification status")
+    if verification_status == "candidate":
+        is_excluded = True
+        exclude_reason = exclude_reason or "unverified_candidate"
     row = conn.execute(
         "SELECT endpoint_id, source_tools FROM endpoints WHERE origin_id=? AND method=? AND normalized_path=?",
         (origin_id, method, normalized_path),
@@ -454,13 +462,21 @@ def upsert_endpoint(
             "UPDATE endpoints SET source_tools=?, query_signature=CASE WHEN query_signature='' THEN ? ELSE query_signature END WHERE endpoint_id=?",
             (",".join(sorted(tools)), query_signature, endpoint_id),
         )
+        if verification_status == "verified":
+            conn.execute(
+                """UPDATE endpoints SET verification_status='verified',
+                   is_excluded=CASE WHEN exclude_reason='unverified_candidate' THEN 0 ELSE is_excluded END,
+                   exclude_reason=CASE WHEN exclude_reason='unverified_candidate' THEN NULL ELSE exclude_reason END
+                   WHERE endpoint_id=?""",
+                (endpoint_id,),
+            )
     else:
         endpoint_id = new_id("endpoint")
         conn.execute(
             """INSERT INTO endpoints
                (endpoint_id, origin_id, method, path, normalized_path, query_signature, content_type,
-                auth_required, source_tools, is_excluded, exclude_reason)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                auth_required, source_tools, is_excluded, exclude_reason, verification_status)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 endpoint_id,
                 origin_id,
@@ -473,6 +489,7 @@ def upsert_endpoint(
                 source_tool,
                 int(is_excluded),
                 exclude_reason,
+                verification_status,
             ),
         )
     if query_signature:
@@ -562,7 +579,7 @@ def reconcile_observed_endpoints(
             if old_path == target_path:
                 continue
             old = conn.execute(
-                """SELECT endpoint_id,source_tools,content_type,auth_required,query_signature
+                """SELECT endpoint_id,source_tools,content_type,auth_required,query_signature,verification_status
                    FROM endpoints WHERE origin_id=? AND method=? AND normalized_path=?""",
                 (origin_id, method, old_path),
             ).fetchone()
@@ -590,9 +607,14 @@ def reconcile_observed_endpoints(
                    auth_required=CASE WHEN auth_required=1 OR ?=1 THEN 1
                                       WHEN auth_required=0 OR ?=0 THEN 0
                                       ELSE NULL END,
-                   query_signature=CASE WHEN query_signature='' THEN ? ELSE query_signature END
+                   query_signature=CASE WHEN query_signature='' THEN ? ELSE query_signature END,
+                   verification_status=CASE WHEN ?='verified' THEN 'verified' ELSE verification_status END,
+                   is_excluded=CASE WHEN ?='verified' AND exclude_reason='unverified_candidate'
+                                    THEN 0 ELSE is_excluded END,
+                   exclude_reason=CASE WHEN ?='verified' AND exclude_reason='unverified_candidate'
+                                       THEN NULL ELSE exclude_reason END
                    WHERE endpoint_id=?""",
-                (tools, old[2], old[3], old[3], old[4], target_id),
+                (tools, old[2], old[3], old[3], old[4], old[5], old[5], old[5], target_id),
             )
             for name, location, data_type, role, identifier in conn.execute(
                 """SELECT name,location,data_type,role,is_identifier FROM parameters
@@ -800,7 +822,10 @@ def _migrate_context_schema(conn: sqlite3.Connection) -> None:
     # are detected directly so reopening a v6/v11 database cannot downgrade it.
     for table, columns in (
         ("parameters", {"role": "TEXT"}),
-        ("endpoints", {"query_signature": "TEXT NOT NULL DEFAULT ''"}),
+        ("endpoints", {
+            "query_signature": "TEXT NOT NULL DEFAULT ''",
+            "verification_status": "TEXT NOT NULL DEFAULT 'observed' CHECK(verification_status IN ('candidate','observed','verified'))",
+        }),
         ("asset_discovery_candidates", {
             "probe_state": "TEXT NOT NULL DEFAULT 'unknown' CHECK(probe_state IN ('unknown','active','dead'))"
         }),
@@ -810,6 +835,8 @@ def _migrate_context_schema(conn: sqlite3.Connection) -> None:
             if name not in existing:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_parameters_role ON parameters(role)")
+    conn.execute("""UPDATE endpoints SET verification_status='candidate'
+        WHERE exclude_reason='unverified_candidate' AND verification_status='observed'""")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_endpoints_query_signature ON endpoints(origin_id,method,query_signature)")
     conn.execute("""CREATE TABLE IF NOT EXISTS endpoint_query_signatures (
         endpoint_id TEXT NOT NULL REFERENCES endpoints(endpoint_id),

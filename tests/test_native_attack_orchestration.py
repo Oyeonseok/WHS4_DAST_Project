@@ -17,7 +17,7 @@ from aidast.attack.db_cli import (
 )
 from aidast.attack.models import AttackStageResult
 from aidast.orchestration.attack import AttackCoordinator, AttackCoordinatorError
-from aidast.pipeline.lifecycle import create_task, finish_stage_run, start_stage_run
+from aidast.pipeline.lifecycle import create_task, finish_stage_run, start_stage_run, register_credential_reference
 from aidast.pipeline.live_schema import migrate_live_pipeline_schema
 from aidast.recon import db
 from aidast.validation import (CandidateIntegrityGate, HttpRuntimeContract,
@@ -83,6 +83,35 @@ def completed_pipeline(root: Path) -> Path:
 
 
 class NativeAttackCoordinatorTests(unittest.TestCase):
+    def test_authenticated_credential_reference_is_bound_to_attack_tasks(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            database = completed_pipeline(root)
+            scope, policy = root / "Scope.md", root / "TargetPolicy.json"
+            scope.write_text("# approved", encoding="utf-8")
+            policy.write_text("{}", encoding="utf-8")
+            with sqlite3.connect(database) as conn:
+                origin_id = conn.execute("SELECT origin_id FROM origins").fetchone()[0]
+                conn.execute("INSERT INTO sessions(session_id,origin_id,auth_state) VALUES ('session_auth',?,'authenticated')", (origin_id,))
+                reference = register_credential_reference(
+                    conn, scan_id="scan_native", session_id="session_auth", label="browser",
+                    reference_uri="env://AIDAST_TEST_AUTH_HEADERS", identity_role="authenticated",
+                )
+            main = FakeNativeMain()
+            AttackCoordinator(agent=main, db_path=database, scope_path=scope,
+                              policy_path=policy).run("scan_native")
+            tasks = main.calls[0]["attack_tasks"]
+            assert tasks
+            assert all(task["credential_references"][0]["credential_reference_id"] == reference
+                       for task in tasks)
+            with sqlite3.connect(database) as conn:
+                payloads = [json.loads(row[0]) for row in conn.execute(
+                    "SELECT payload_json FROM attack_tasks WHERE stage_run_id=?",
+                    (main.calls[0]["stage_run_id"],),
+                )]
+            assert all(payload["credential_references"][0]["credential_reference_id"] == reference
+                       for payload in payloads)
+
     def test_completed_recon_spawns_one_agent_and_finishes_attack_stage(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

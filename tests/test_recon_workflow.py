@@ -609,6 +609,48 @@ class ReconExecutorWildcardTests(unittest.TestCase):
 
         self.assertEqual(start.call_args.kwargs["scope_rules"]["max_requests"], 1)
 
+    def test_runtime_browser_session_is_available_for_attack_handoff(self) -> None:
+        policy = TargetPolicy(
+            scope_id="scope_test", policy_id="policy_target",
+            asset_type=AssetType.DOMAIN, asset="example.com",
+            allowed_hosts=["example.com"],
+        )
+        task = ReconTask(
+            task_id="task_endpoint", plan_id="plan_test", scope_id="scope_test",
+            task_type=ReconStep.ENDPOINT_DISCOVERY, sequence=1,
+            target=ReconTaskTarget(asset_type=AssetType.DOMAIN, asset="example.com"),
+            depends_on_task_ids=[], constraints=[],
+        )
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            session_path = Path(temporary_dir) / "browser.json"
+            executor = ReconExecutor(
+                scan_id="scan_auth", scope_type="approved_scope", scope_value="scope_test",
+                db_path=Path(temporary_dir) / "recon.db",
+                target_policies={(AssetType.DOMAIN.value, "example.com"): policy},
+                interactive_login=True,
+            )
+            executor._origin_ids["example.com"] = "origin_test"
+
+            def discover(_url, **kwargs):
+                Path(kwargs["session_file"]).write_text('{"cookies": [], "origins": []}')
+                Path(kwargs["session_file"] + ".authenticated").write_text("authenticated\n")
+                return []
+
+            try:
+                with (
+                    patch("aidast.recon.executor._make_default_session_file", return_value=str(session_path)),
+                    patch("aidast.recon.executor.start_mitmproxy", return_value=(MagicMock(), None)),
+                    patch("aidast.recon.executor.stop_mitmproxy"),
+                    patch("aidast.recon.executor.discover_endpoints", side_effect=discover),
+                    patch("aidast.recon.annotations.ObservationRecorder"),
+                ):
+                    executor._handle_endpoint_discovery(task)
+                self.assertEqual(executor.auth_session_files, [
+                    ("https://example.com", session_path, True),
+                ])
+            finally:
+                executor.conn.close()
+
 
 class ReconMainAgentTests(unittest.TestCase):
     def test_adds_required_origin_chain_before_endpoint_discovery(self) -> None:

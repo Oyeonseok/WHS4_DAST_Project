@@ -26,6 +26,8 @@ import hashlib
 import re
 import subprocess
 import tempfile
+from dataclasses import dataclass
+from html.parser import HTMLParser
 from pathlib import Path
 from urllib.error import URLError
 from urllib.parse import urljoin, urlparse
@@ -33,6 +35,7 @@ from urllib.request import HTTPRedirectHandler, ProxyHandler, build_opener
 
 from aidast.core.request_broker import RequestBroker, RequestPolicyError
 from aidast.recon.policy import TargetPolicy
+from aidast.recon.verification import successful_response
 
 
 # =========================================================
@@ -56,6 +59,29 @@ OPENAPI_COMMON_PATHS = {
 }
 
 
+@dataclass(frozen=True)
+class OpenAPIDefinition:
+    url: str | None = None
+    document: dict | None = None
+
+
+class _SwaggerInitScripts(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.sources: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag != "script":
+            return
+        source = dict(attrs).get("src")
+        if source:
+            try:
+                if urlparse(source).path.rsplit("/", 1)[-1] == "swagger-ui-init.js":
+                    self.sources.append(source)
+            except ValueError:
+                pass
+
+
 GRAPHQL_COMMON_PATHS = {
     "/graphql",
     "/api/graphql",
@@ -65,6 +91,8 @@ GRAPHQL_COMMON_PATHS = {
 ADAPTIVE_API_THRESHOLD = 10
 ADAPTIVE_MAX_SCRIPTS = 5
 ADAPTIVE_MAX_CANDIDATES = 30
+ADAPTIVE_MAX_DETAIL_PROBES = 20
+MAX_CANDIDATE_GET_PROBES = 20
 _JS_API_PATH = re.compile(
     r"(?P<quote>[\"'`])(?P<path>/(?:api|rest)(?:/[^\"'`\\\s?#]{0,160})?)(?P=quote)",
     re.IGNORECASE,
@@ -309,6 +337,74 @@ def _looks_like_openapi(
     )
 
 
+def _swagger_ui_document(
+    page_url: str,
+    page_body: bytes,
+    *,
+    headers: dict[str, str] | None,
+    target_policy: TargetPolicy | None,
+    proxy_url: str | None,
+    broker: RequestBroker | None,
+) -> dict | None:
+    """Read the JSON document embedded by swagger-ui-express, without running JS."""
+    parser = _SwaggerInitScripts()
+    parser.feed(page_body.decode("utf-8", errors="replace"))
+    page_path = urlparse(page_url).path.lower()
+    relative_base = (
+        page_url if page_path.endswith((".html", ".htm"))
+        else page_url.rstrip("/") + "/"
+    )
+    for source in parser.sources[:3]:
+        try:
+            script_url = urljoin(relative_base, source)
+        except ValueError:
+            continue
+        if not _same_origin(script_url, page_url):
+            continue
+        if target_policy is not None and not target_policy.allows_url(script_url, method="GET"):
+            continue
+        status, _, body = _http_request(
+            script_url, headers=headers,
+            timeout=(target_policy.limits.timeout_seconds if target_policy else 5.0),
+            target_policy=target_policy, proxy_url=proxy_url, broker=broker,
+        )
+        if status != 200:
+            continue
+        text = body.decode("utf-8", errors="replace")
+        match = re.search(r"\bvar\s+options\s*=\s*", text)
+        if match is None:
+            continue
+        try:
+            options, _ = json.JSONDecoder().raw_decode(text[match.end():].lstrip())
+        except json.JSONDecodeError:
+            continue
+        document = options.get("swaggerDoc") if isinstance(options, dict) else None
+        if isinstance(document, dict) and _looks_like_openapi(json.dumps(document).encode()):
+            return document
+    return None
+
+
+def _openapi_server_url(
+    document: dict, base_url: str, target_policy: TargetPolicy | None,
+) -> str:
+    servers = document.get("servers")
+    server_url = None
+    if isinstance(servers, list) and servers and isinstance(servers[0], dict):
+        server_url = servers[0].get("url")
+    elif document.get("swagger") and isinstance(document.get("basePath"), str):
+        server_url = document["basePath"]
+    if not isinstance(server_url, str):
+        return base_url
+    candidate = urljoin(base_url.rstrip("/") + "/", server_url)
+    parsed = urlparse(candidate)
+    if (parsed.username or parsed.password or parsed.query or parsed.fragment
+            or not _same_origin(candidate, base_url)):
+        return base_url
+    if target_policy is not None and not target_policy.allows_url(candidate, method="GET"):
+        return base_url
+    return candidate
+
+
 def detect_openapi(
     base_url: str,
     endpoints: list[dict],
@@ -317,9 +413,9 @@ def detect_openapi(
     target_policy: TargetPolicy | None = None,
     proxy_url: str | None = None,
     broker: RequestBroker | None = None,
-) -> list[str]:
+) -> list[OpenAPIDefinition]:
 
-    found: list[str] = []
+    found: list[OpenAPIDefinition] = []
     if broker is None and target_policy is not None:
         broker = _request_broker(target_policy, proxy_url)
 
@@ -365,7 +461,17 @@ def detect_openapi(
                 f"  [OpenAPI 확인] {url}"
             )
 
-            found.append(url)
+            found.append(OpenAPIDefinition(url=url))
+            continue
+
+        if status == 200:
+            document = _swagger_ui_document(
+                url, body, headers=headers, target_policy=target_policy,
+                proxy_url=proxy_url, broker=broker,
+            )
+            if document is not None:
+                print(f"  [OpenAPI 확인] {url} (Swagger UI 내장 명세)")
+                found.append(OpenAPIDefinition(document=document))
 
     return found
 
@@ -661,11 +767,13 @@ def _create_zap_plan(
     base_url: str,
     output_har: Path,
     openapi_urls: list[str] | None = None,
+    openapi_files: list[tuple[Path, str]] | None = None,
     graphql_urls: list[str] | None = None,
     max_messages: int = 300,
 ) -> str:
 
     openapi_urls = openapi_urls or []
+    openapi_files = openapi_files or []
     graphql_urls = graphql_urls or []
 
     lines = [
@@ -690,6 +798,18 @@ def _create_zap_plan(
                 "    parameters:",
                 f"      apiUrl: {_yaml_string(api_url)}",
                 f"      targetUrl: {_yaml_string(base_url)}",
+                '      context: "target"',
+                f"      maxMessages: {max_messages}",
+            ]
+        )
+
+    for api_file, target_url in openapi_files:
+        lines.extend(
+            [
+                "  - type: openapi",
+                "    parameters:",
+                f"      apiFile: {_yaml_string(str(api_file))}",
+                f"      targetUrl: {_yaml_string(target_url)}",
                 '      context: "target"',
                 f"      maxMessages: {max_messages}",
             ]
@@ -907,8 +1027,11 @@ def _parse_zap_har(
             {
                 "method": method,
                 "path": path,
+                "url": url,
                 "content_type": None,
                 "source": source,
+                "discovery_kind": "api_spec_candidate",
+                "verification_status": "candidate",
             }
         )
 
@@ -943,7 +1066,7 @@ def _deduplicate(
 
         key = (
             method,
-            path,
+            result.get("url") or path,
         )
 
         if key not in unique:
@@ -973,6 +1096,178 @@ def _fingerprint(
         (value for key, value in headers.items() if key.lower() == "content-type"), ""
     ).split(";", 1)[0].strip().lower()
     return status, content_type, len(body), hashlib.sha256(body).hexdigest()
+
+
+def _media_type(headers: dict[str, str]) -> str:
+    return next(
+        (value for key, value in headers.items() if key.lower() == "content-type"), ""
+    ).split(";", 1)[0].strip().lower()
+
+
+def _positive_json_response(status: int | None, headers: dict[str, str], body: bytes) -> bool:
+    if not successful_response(status):
+        return False
+    media_type = _media_type(headers)
+    if media_type != "application/json" and not media_type.endswith("+json"):
+        return False
+    try:
+        payload = json.loads(body)
+    except (UnicodeDecodeError, ValueError):
+        return False
+    if isinstance(payload, dict):
+        if payload.get("error") or payload.get("errors"):
+            return False
+        if str(payload.get("status", "")).lower() in {"error", "fail", "failed"}:
+            return False
+        if set(payload) <= {"message", "status", "code"}:
+            return False
+    return isinstance(payload, (dict, list))
+
+
+def _verify_get_candidates(
+    candidates: list[dict], *, base_url: str,
+    target_policy: TargetPolicy | None, headers: dict[str, str] | None,
+    broker: RequestBroker | None, proxy_url: str | None,
+    max_probes: int = MAX_CANDIDATE_GET_PROBES,
+) -> list[dict]:
+    """Probe a bounded set of spec candidates using GET and a sibling missing-route control."""
+    if target_policy is None or not proxy_url or max_probes <= 0:
+        return candidates
+
+    def retained(item: dict, reason: str, status: int | None = None,
+                 response_headers: dict[str, str] | None = None) -> dict:
+        result = dict(item)
+        evidence = dict(item.get("evidence") or {})
+        evidence["verification_reason"] = reason
+        if status is not None:
+            evidence["response_status"] = status
+        if response_headers:
+            evidence["content_type"] = next(
+                (value for key, value in response_headers.items()
+                 if key.lower() == "content-type"), "",
+            )
+        result["evidence"] = evidence
+        return result
+
+    results: list[dict] = []
+    controls: dict[str, tuple[int | None, dict[str, str], bytes]] = {}
+    probe_headers = dict(headers or {})
+    probe_headers["X-AIDAST-Phase"] = "candidate_probe"
+    attempted = 0
+    for item in candidates:
+        url = item.get("url")
+        if item.get("verification_status") != "candidate":
+            results.append(item)
+            continue
+        if str(item.get("method", "GET")).upper() != "GET":
+            results.append(retained(item, "non_get_method"))
+            continue
+        if (not isinstance(url, str) or not _same_origin(url, base_url)
+                or not target_policy.allows_url(url, method="GET")):
+            results.append(retained(item, "out_of_scope"))
+            continue
+        if attempted >= max_probes:
+            results.append(retained(item, "probe_limit"))
+            continue
+        parsed = urlparse(url)
+        parent = parsed.path.rpartition("/")[0]
+        control_url = parsed._replace(
+            path=parent + "/__aidast_missing_control__", query="", fragment="",
+        ).geturl()
+        if not target_policy.allows_url(control_url, method="GET"):
+            results.append(retained(item, "control_out_of_scope"))
+            continue
+        attempted += 1
+        if control_url not in controls:
+            controls[control_url] = _http_request(
+                control_url, headers=probe_headers, target_policy=target_policy,
+                proxy_url=proxy_url, broker=broker,
+            )
+        control_status, control_headers, control_body = controls[control_url]
+        if control_status is None or control_status >= 500:
+            results.append(retained(item, "control_unavailable"))
+            continue
+        status, response_headers, body = _http_request(
+            url, headers=probe_headers, target_policy=target_policy,
+            proxy_url=proxy_url, broker=broker,
+        )
+        if not _positive_json_response(status, response_headers, body):
+            results.append(retained(item, "non_positive_json", status, response_headers))
+            continue
+        if (_fingerprint(status, response_headers, body, request_url=url)
+                == _fingerprint(control_status, control_headers, control_body,
+                                request_url=control_url)):
+            results.append(retained(item, "fallback_match", status, response_headers))
+            continue
+        verified = dict(item)
+        verified["verification_status"] = "verified"
+        verified["discovery_kind"] = "api_get_verified"
+        verified["content_type"] = next(
+            (value for key, value in response_headers.items() if key.lower() == "content-type"), None,
+        )
+        verified["evidence"] = {"response_status": status}
+        results.append(verified)
+    return results
+
+
+def _collection_detail_url(
+    collection_url: str,
+    status: int,
+    response_headers: dict[str, str],
+    body: bytes,
+    target_policy: TargetPolicy | None,
+) -> str | None:
+    """Use one literal item ID from a successful /api collection response."""
+    segments = urlparse(collection_url).path.strip("/").split("/")
+    if (len(segments) != 2 or segments[0].lower() != "api"
+            or not 200 <= status < 300 or _media_type(response_headers) != "application/json"):
+        return None
+    try:
+        payload = json.loads(body)
+    except (UnicodeDecodeError, ValueError):
+        return None
+    items = payload.get("data") if isinstance(payload, dict) else payload
+    if not isinstance(items, list):
+        return None
+    item_id = next((str(item["id"]) for item in items
+                    if isinstance(item, dict)
+                    and isinstance(item.get("id"), (int, str))
+                    and not isinstance(item["id"], bool)
+                    and re.fullmatch(r"[A-Za-z0-9_-]{1,64}", str(item["id"]))), None)
+    if item_id is None:
+        return None
+    detail_url = collection_url.rstrip("/") + "/" + item_id
+    if target_policy is not None and not target_policy.allows_url(detail_url, method="GET"):
+        return None
+    return detail_url
+
+
+def _verified_collection_detail(
+    detail_url: str,
+    collection_url: str,
+    status: int | None,
+    response_headers: dict[str, str],
+    body: bytes,
+) -> dict | None:
+    """Keep a detail response only when it contains the selected item ID."""
+    if status is None or not 200 <= status < 300 or _media_type(response_headers) != "application/json":
+        return None
+    try:
+        payload = json.loads(body)
+    except (UnicodeDecodeError, ValueError):
+        return None
+    item = payload.get("data", payload) if isinstance(payload, dict) else None
+    item_id = item.get("id") if isinstance(item, dict) else None
+    if (not isinstance(item_id, (int, str)) or isinstance(item_id, bool)
+            or str(item_id) != detail_url.rsplit("/", 1)[-1]):
+        return None
+    return {
+        "method": "GET", "path": urlparse(detail_url).path, "url": detail_url,
+        "source": "adaptive_collection_detail", "discovery_kind": "collection_detail",
+        "content_type": next((value for key, value in response_headers.items()
+                              if key.lower() == "content-type"), None),
+        "evidence": {"response_status": status, "collection_url": collection_url},
+    }
 
 
 def discover_adaptive_js_api_candidates(
@@ -1043,6 +1338,7 @@ def discover_adaptive_js_api_candidates(
 
     results: list[dict] = []
     unverified_count = 0
+    detail_probes = 0
     for url in sorted(candidates):
         if not _same_origin(url, base_url):
             continue
@@ -1056,9 +1352,7 @@ def discover_adaptive_js_api_candidates(
             continue
         if status == 403 and body == _POLICY_BLOCK_BODY:
             continue
-        content_type = next(
-            (value for key, value in response_headers.items() if key.lower() == "content-type"), ""
-        ).split(";", 1)[0].strip().lower()
+        content_type = _media_type(response_headers)
         if content_type == "text/html":
             continue
         prefix = "/api" if urlparse(url).path.lower().startswith("/api") else "/rest"
@@ -1089,6 +1383,25 @@ def discover_adaptive_js_api_candidates(
             "content_type": next((v for k, v in response_headers.items() if k.lower() == "content-type"), None),
             "evidence": {"response_status": status, "source_scripts": scripts},
         })
+
+        # Probe one real item per collection within the global request cap.
+        if detail_probes >= ADAPTIVE_MAX_DETAIL_PROBES:
+            continue
+        detail_url = _collection_detail_url(
+            url, status, response_headers, body, target_policy,
+        )
+        if detail_url is None:
+            continue
+        detail_probes += 1
+        detail_status, detail_headers, detail_body = _http_request(
+            detail_url, headers=headers, target_policy=target_policy,
+            proxy_url=proxy_url, broker=broker, timeout=5.0,
+        )
+        detail = _verified_collection_detail(
+            detail_url, url, detail_status, detail_headers, detail_body,
+        )
+        if detail is not None:
+            results.append(detail)
     if diagnostic_callback is not None:
         diagnostic_callback(
             "completed", component="adaptive_js",
@@ -1147,7 +1460,7 @@ def discover_api_secondary(
 
     broker = _request_broker(target_policy, proxy_url) if target_policy is not None else None
     activity("phase_started", "openapi_detection")
-    openapi_urls = detect_openapi(
+    openapi_definitions = detect_openapi(
         base_url,
         endpoints,
         headers=headers,
@@ -1155,7 +1468,7 @@ def discover_api_secondary(
         proxy_url=proxy_url,
         broker=broker,
     )
-    activity("phase_completed", "openapi_detection", count=len(openapi_urls))
+    activity("phase_completed", "openapi_detection", count=len(openapi_definitions))
 
     # =====================================================
     # Detect GraphQL
@@ -1182,7 +1495,7 @@ def discover_api_secondary(
         ]
     ]
 
-    if not openapi_urls:
+    if not openapi_definitions:
         print(
             "  OpenAPI 확인되지 않음"
         )
@@ -1207,7 +1520,7 @@ def discover_api_secondary(
             )
 
     if (
-        not openapi_urls
+        not openapi_definitions
         and not graphql_urls
     ):
 
@@ -1236,7 +1549,7 @@ def discover_api_secondary(
         # source를 구분한다.
         # =================================================
 
-        if openapi_urls:
+        if openapi_definitions:
             activity("phase_started", "zap_openapi")
 
             print()
@@ -1254,11 +1567,24 @@ def discover_api_secondary(
                 / "openapi.yaml"
             )
 
+            openapi_urls = [item.url for item in openapi_definitions if item.url]
+            openapi_files: list[tuple[Path, str]] = []
+            for index, item in enumerate(openapi_definitions):
+                if item.document is None:
+                    continue
+                spec_path = tmp_dir / f"embedded-openapi-{index}.json"
+                spec_path.write_text(json.dumps(item.document), encoding="utf-8")
+                openapi_files.append((
+                    spec_path,
+                    _openapi_server_url(item.document, base_url, target_policy),
+                ))
+
             plan_text = (
                 _create_zap_plan(
                     base_url=base_url,
                     output_har=openapi_har,
                     openapi_urls=openapi_urls,
+                    openapi_files=openapi_files,
                     max_messages=max_messages,
                 )
             )
@@ -1368,6 +1694,17 @@ def discover_api_secondary(
 
     unique = _deduplicate(
         results
+    )
+
+    activity("phase_started", "api_get_verification")
+    unique = _verify_get_candidates(
+        unique, base_url=base_url, target_policy=target_policy,
+        headers=headers, broker=broker, proxy_url=proxy_url,
+    )
+    activity(
+        "phase_completed", "api_get_verification",
+        candidate_count=sum(item.get("verification_status") == "candidate" for item in unique),
+        verified_count=sum(item.get("verification_status") == "verified" for item in unique),
     )
 
     print()

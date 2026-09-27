@@ -144,6 +144,25 @@ class MitmAddonBudgetTests(unittest.TestCase):
         self.assertEqual(static.metadata["aidast_priority"], 6)
         self.assertTrue(static.metadata["aidast_static_resource"])
 
+    def test_candidate_probe_marker_is_captured_but_not_forwarded(self):
+        addon = self._addon()
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            addon.out_path = Path(temporary_dir) / "capture.jsonl"
+            flow = self._flow(
+                "/api/items", headers={"X-AIDAST-Phase": "candidate_probe"},
+            )
+            addon.request(flow)
+            flow.response = SimpleNamespace(
+                status_code=200, headers={"Content-Type": "application/json"},
+                content=b'{}', get_text=lambda strict=False: '{}',
+            )
+            addon.response(flow)
+            import json
+            record = json.loads(addon.out_path.read_text().splitlines()[0])
+
+        self.assertNotIn("X-AIDAST-Phase", flow.request.headers)
+        self.assertTrue(record["candidate_probe"])
+
     def test_different_query_or_post_body_is_not_budget_deduplicated(self):
         addon = self._addon()
         addon.rules["allowed_methods"].append("POST")

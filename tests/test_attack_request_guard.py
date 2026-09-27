@@ -12,8 +12,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 from aidast.attack.db_cli import transition_task
-from aidast.attack.request_cli import RequestGuardError, guarded_request
+from aidast.attack.request_cli import RequestGuardError, guarded_request, _credential_headers
 from aidast.pipeline.lifecycle import create_task, register_credential_reference, start_stage_run
+from aidast.pipeline.browser_credentials import register_browser_session_credentials
 from aidast.pipeline.live_schema import migrate_live_pipeline_schema
 from aidast.recon import db
 
@@ -128,6 +129,54 @@ def fixture(
 
 
 class AttackRequestGuardTests(unittest.TestCase):
+    def test_registered_recon_browser_session_reaches_attack_request(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            database, _policy, _payload, _stage, task = fixture(root)
+            snapshot = root / "browser.json"
+            snapshot.write_text(json.dumps({
+                "cookies": [], "origins": [{"origin": "https://example.test",
+                    "localStorage": [{"name": "token", "value": "header.payload.signature"}]}
+                ],
+            }), encoding="utf-8")
+            with sqlite3.connect(database) as conn:
+                refs = register_browser_session_credentials(
+                    conn, scan_id="scan", result_root=root / "result",
+                    sessions=[("https://example.test/", snapshot, True)],
+                )
+                reference = refs[0]["credential_reference_id"]
+                conn.execute("UPDATE attack_tasks SET payload_json=? WHERE task_id=?", (
+                    json.dumps({"credential_references": refs}), task,
+                ))
+            with patch("aidast.validation.execution.credentials.RESULT_ROOT", root / "result"):
+                selected, headers = _credential_headers(
+                    database, scan_id="scan", task_id=task,
+                    url="https://example.test/api/profile",
+                    item={"credential_reference_id": reference},
+                )
+            self.assertEqual(selected, reference)
+            self.assertEqual(headers, {"Authorization": "Bearer header.payload.signature"})
+
+    def test_session_credential_is_rejected_for_another_origin(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            database, _policy, _payload, _stage, task = fixture(Path(temporary))
+            with sqlite3.connect(database) as conn:
+                origin_id = conn.execute("SELECT origin_id FROM origins").fetchone()[0]
+                conn.execute("INSERT INTO sessions(session_id,origin_id,auth_state) VALUES ('session_auth',?,'authenticated')", (origin_id,))
+                reference = register_credential_reference(
+                    conn, scan_id="scan", session_id="session_auth", label="browser",
+                    reference_uri="env://AIDAST_TEST_AUTH_HEADERS", identity_role="authenticated",
+                )
+                conn.execute("UPDATE attack_tasks SET payload_json=? WHERE task_id=?", (
+                    json.dumps({"credential_references": [{"credential_reference_id": reference}]}), task,
+                ))
+            with self.assertRaisesRegex(RequestGuardError, "origin"):
+                _credential_headers(
+                    database, scan_id="scan", task_id=task,
+                    url="https://another.example.test/api/profile",
+                    item={"credential_reference_id": reference},
+                )
+
     def test_opaque_task_bound_credential_is_resolved_without_persistence(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

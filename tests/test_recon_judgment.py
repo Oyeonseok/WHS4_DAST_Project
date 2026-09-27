@@ -18,6 +18,16 @@ def test_dynamic_paths_and_queries_keep_one_normalized_surface() -> None:
     assert surface[0]["source_tools"] == {"katana", "browser"}
 
 
+def test_normalized_surface_retains_successful_response_verification() -> None:
+    rows = [
+        {"method": "GET", "path": "/api/items/1", "source": "katana"},
+        {"method": "GET", "path": "/api/items/1", "source": "adaptive_js",
+         "evidence": {"response_status": 200}},
+    ]
+
+    assert judgment.merge_and_normalize(rows)[0]["verification_status"] == "verified"
+
+
 def test_repeated_variable_segments_are_learned_without_collapsing_static_paths() -> None:
     rows = [
         {"method": "GET", "path": f"/users/{value}", "source": "katana"}

@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from aidast.recon import db
 from aidast.recon.judgment import normalize_path, is_static_asset, query_signature
+from aidast.recon.verification import result_verification_status
 
 
 TAXONOMY = {
@@ -105,6 +106,8 @@ def sanitize_evidence(value) -> dict:
     for key in ('html_tag', 'html_attribute', 'content_type'):
         if isinstance(value.get(key), str):
             result[key] = safe_text(value[key])[:200]
+    if isinstance(value.get('verification_reason'), str):
+        result['verification_reason'] = safe_text(value['verification_reason'])[:80]
     for key in ('response_status', 'content_length', 'word_count', 'line_count'):
         number = value.get(key)
         if type(number) is int and 0 <= number <= 10**12:
@@ -162,13 +165,19 @@ class ObservationRecorder:
             if not path:
                 continue
             method = item.get('method', 'GET').upper()
+            static_asset = is_static_asset(path)
+            verification_status = result_verification_status(item)
+            unverified_candidate = verification_status == 'candidate'
             endpoint_id = db.upsert_endpoint(
                 self.conn, origin_id=self.origin_id, method=method, path=path,
                 normalized_path=normalize_path(path),
                 query_signature=query_signature(item.get('url', path)),
                 content_type=item.get('content_type'),
-                source_tool=item.get('source', phase), is_excluded=is_static_asset(path),
-                exclude_reason='static_asset' if is_static_asset(path) else None,
+                source_tool=item.get('source', phase),
+                is_excluded=static_asset or unverified_candidate,
+                exclude_reason=('static_asset' if static_asset else
+                                'unverified_candidate' if unverified_candidate else None),
+                verification_status=verification_status,
             )
             persist_url_parameters(self.conn, endpoint_id, item.get('url', path), path)
             context = item.get('context') or {}
@@ -189,6 +198,8 @@ class ObservationRecorder:
             else:
                 self.conn.execute('UPDATE discovery_contexts SET ended_at=? WHERE context_id=?', (db.now(), context_id))
             evidence = sanitize_evidence(item.get('evidence'))
+            if unverified_candidate:
+                evidence['verification_status'] = 'candidate'
             if item.get('traffic_class'):
                 evidence['traffic_class'] = item['traffic_class']
             evidence['phase'] = phase

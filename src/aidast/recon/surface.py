@@ -15,14 +15,21 @@ def export_surface(conn: sqlite3.Connection, *, scan_id: str, output_path: Path)
         (scan_id,),
     ).fetchall()
 
-    result: dict = {"schema_version": "2.1", "scan_id": scan_id, "origins": []}
+    result: dict = {"schema_version": "2.3", "scan_id": scan_id, "origins": []}
     result["annotation_runs"] = _rows(conn, """SELECT annotation_run_id, model,
         prompt_version, taxonomy_version, status, error_message, started_at, finished_at
         FROM annotation_runs WHERE scan_id=? ORDER BY started_at, annotation_run_id""", (scan_id,))
     for origin_id, base_url, spa_detected, framework in origins:
         endpoints = conn.execute(
-            """SELECT endpoint_id, method, normalized_path, query_signature, content_type, source_tools
+            """SELECT endpoint_id, method, normalized_path, query_signature, content_type, source_tools, verification_status
                FROM endpoints WHERE origin_id=? AND is_excluded=0""",
+            (origin_id,),
+        ).fetchall()
+        candidates = conn.execute(
+            """SELECT endpoint_id, method, normalized_path, query_signature, content_type, source_tools, verification_status
+               FROM endpoints WHERE origin_id=? AND is_excluded=1
+                 AND verification_status='candidate'
+                 AND exclude_reason='unverified_candidate'""",
             (origin_id,),
         ).fetchall()
         signals = conn.execute(
@@ -44,8 +51,22 @@ def export_surface(conn: sqlite3.Connection, *, scan_id: str, output_path: Path)
                         "query_signature": query_signature,
                         "content_type": content_type,
                         "source_tools": (source_tools or "").split(","),
+                        "verification_status": verification_status,
                     }
-                    for endpoint_id, method, path, query_signature, content_type, source_tools in endpoints
+                    for endpoint_id, method, path, query_signature, content_type, source_tools, verification_status in endpoints
+                ],
+                "candidate_endpoints": [
+                    {
+                        "endpoint_id": endpoint_id,
+                        "observations": _observations(conn, endpoint_id),
+                        "method": method,
+                        "path": path,
+                        "query_signature": query_signature,
+                        "content_type": content_type,
+                        "source_tools": (source_tools or "").split(","),
+                        "verification_status": verification_status,
+                    }
+                    for endpoint_id, method, path, query_signature, content_type, source_tools, verification_status in candidates
                 ],
                 "surface_signals": {key: value for key, value in signals},
             }

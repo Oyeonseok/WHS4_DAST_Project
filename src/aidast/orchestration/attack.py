@@ -73,6 +73,18 @@ class AttackCoordinator:
                     "SELECT attempt_id FROM attack_attempts WHERE scan_id=?", (scan_id,)
                 )
             }
+            credential_references = [
+                {"credential_reference_id": row[0], "label": row[1],
+                 "identity_role": row[2]}
+                for row in conn.execute(
+                    """SELECT c.credential_reference_id,c.label,c.identity_role
+                       FROM credential_references c JOIN sessions s ON s.session_id=c.session_id
+                       JOIN origins o ON o.origin_id=s.origin_id
+                       JOIN assets a ON a.asset_id=o.asset_id
+                       WHERE c.scan_id=? AND a.scan_id=? AND s.auth_state='authenticated'
+                       ORDER BY c.label""", (scan_id, scan_id),
+                )
+            ]
             stage_run_id = start_stage_run(conn, scan_id=scan_id, stage="attack")
             selected_skills, selection_reasons = select_relevant_attack_skills(
                 self._db_path, scan_id, available_attack_skill_names()
@@ -86,6 +98,7 @@ class AttackCoordinator:
                     payload={
                         "selection_reasons": list(selection_reasons[skill_name]),
                         "resume_from_stage_run_id": prior[0] if prior is not None else None,
+                        "credential_references": credential_references,
                     },
                 )
                 attack_tasks.append({
@@ -93,6 +106,7 @@ class AttackCoordinator:
                     "skill_name": skill_name,
                     "selection_reasons": list(selection_reasons[skill_name]),
                     "template_ids": list(template_ids_for_skill(skill_name)),
+                    "credential_references": credential_references,
                 })
 
         try:

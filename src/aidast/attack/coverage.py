@@ -10,6 +10,7 @@ from contextlib import closing
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Iterable
+from urllib.parse import urlsplit
 
 from aidast.pipeline.live_schema import migrate_live_pipeline_schema
 from aidast.pipeline.lifecycle import create_task
@@ -325,34 +326,47 @@ def ensure_coverage_manifest(database: Path, scan_id: str) -> CoverageManifestRe
 
 def _credential_references(
     conn: sqlite3.Connection, scan_id: str, required_role: str, *,
-    available_only: bool = False,
+    available_only: bool = False, origin_url: str | None = None,
 ) -> list[dict[str, str]]:
     if required_role == "unauthenticated":
         return []
     rows = conn.execute(
-        """SELECT credential_reference_id,label,identity_role
-           FROM credential_references WHERE scan_id=?
-           ORDER BY identity_role,label,credential_reference_id""",
+        """SELECT c.credential_reference_id,c.label,c.identity_role,o.base_url
+           FROM credential_references c
+           LEFT JOIN sessions s ON s.session_id=c.session_id
+           LEFT JOIN origins o ON o.origin_id=s.origin_id
+           WHERE c.scan_id=?
+           ORDER BY c.identity_role,c.label,c.credential_reference_id""",
         (scan_id,),
     ).fetchall()
     compatible = []
     resolver = None
     if available_only:
         database_path = Path(str(conn.execute("PRAGMA database_list").fetchone()[2]))
-        resolver = PipelineCredentialResolver(database_path)
+        resolver = PipelineCredentialResolver(
+            database_path, browser_sessions=origin_url is not None,
+        )
     for row in rows:
         role = str(row["identity_role"])
         if required_role not in {"authenticated", "unknown"} and role not in {
             required_role, "authenticated",
         }:
             continue
+        if origin_url is not None and row["base_url"] is not None:
+            source, destination = urlsplit(str(row["base_url"])), urlsplit(origin_url)
+            source_origin = (source.scheme, source.hostname,
+                             source.port or (443 if source.scheme == "https" else 80))
+            destination_origin = (destination.scheme, destination.hostname,
+                                  destination.port or (443 if destination.scheme == "https" else 80))
+            if source_origin != destination_origin:
+                continue
         item = {
             "credential_reference_id": str(row["credential_reference_id"]),
             "label": str(row["label"]),
             "identity_role": role,
         }
         if resolver is not None and resolver.unsupported_reason(
-            item["credential_reference_id"]
+            item["credential_reference_id"], destination_url=origin_url,
         ) is not None:
             continue
         compatible.append(item)
@@ -406,8 +420,10 @@ def requeue_credential_blocked_coverage(
 ) -> int:
     """Reopen auth-blocked items only when the DB now has enough opaque refs."""
     rows = conn.execute(
-        """SELECT * FROM attack_coverage_items
-           WHERE scan_id=? AND status='blocked_auth'""",
+        """SELECT c.*,o.base_url AS origin_url FROM attack_coverage_items c
+           JOIN endpoints e ON e.endpoint_id=c.endpoint_id
+           JOIN origins o ON o.origin_id=e.origin_id
+           WHERE c.scan_id=? AND c.status='blocked_auth'""",
         (scan_id,),
     ).fetchall()
     reopened = 0
@@ -417,7 +433,7 @@ def requeue_credential_blocked_coverage(
             _credential_role(
                 str(row["vuln_class"]), str(row["required_identity_role"]),
             ),
-            available_only=True,
+            available_only=True, origin_url=str(row["origin_url"]),
         )
         required = 2 if row["vuln_class"] == "idor" else 1
         if len(references) < required:
@@ -574,9 +590,10 @@ def claim_coverage_batch(
     if not 1 <= batch_size <= 50:
         raise ValueError("coverage batch size must be between 1 and 50")
     rows = conn.execute(
-        """SELECT c.*,e.method,e.normalized_path
+        """SELECT c.*,e.method,e.normalized_path,o.base_url AS origin_url
            FROM attack_coverage_items c
            JOIN endpoints e ON e.endpoint_id=c.endpoint_id
+           JOIN origins o ON o.origin_id=e.origin_id
            WHERE c.scan_id=? AND c.status IN ('pending','error_retryable')
              AND c.attempt_count < ?
            ORDER BY CASE c.status WHEN 'error_retryable' THEN 0 ELSE 1 END,
@@ -596,6 +613,7 @@ def claim_coverage_batch(
             _credential_role(
                 str(row["vuln_class"]), str(row["required_identity_role"]),
             ),
+            origin_url=str(row["origin_url"]),
         )
         test_fixtures = _task_fixtures(
             conn, scan_id, parameter_name=str(row["parameter_name"]),
