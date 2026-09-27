@@ -467,9 +467,25 @@ class ReconExecutorWildcardTests(unittest.TestCase):
                 executor._spawned_tasks = [discovered_target]
 
         executor._execute = execute
-        executor.run([wildcard, explicit_target])
+        from aidast.recon import db as dbmod
+
+        with tempfile.TemporaryDirectory() as directory:
+            executor.conn = dbmod.init_db(Path(directory) / "Recon.db")
+            executor.scan_id = "scan_queue"
+            try:
+                dbmod.insert_scan(
+                    executor.conn, scan_id=executor.scan_id,
+                    scope_type="test", scope_value="test",
+                )
+                executor.run([wildcard, explicit_target])
+                planned = executor.conn.execute(
+                    "SELECT task_id FROM pipeline_runs WHERE status='pending' ORDER BY rowid"
+                ).fetchall()
+            finally:
+                executor.conn.close()
 
         self.assertEqual(executed, ["wildcard", "discovered", "explicit"])
+        self.assertEqual([row[0] for row in planned], ["wildcard", "explicit", "discovered"])
 
     def test_failed_target_skips_its_dependents_but_continues_independent_work(self) -> None:
         def task(task_id, depends=()):

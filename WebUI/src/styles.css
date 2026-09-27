@@ -310,6 +310,9 @@ input[type=checkbox],input[type=radio]{min-height:19px}
 .dialog-action-dock{position:sticky;bottom:-24px;z-index:2;margin:4px -24px -24px;padding:16px 24px 24px;border-top:1px solid var(--line);background:color-mix(in srgb,var(--panel) 94%,transparent);backdrop-filter:blur(14px)}
 .dialog-action-dock .button-row{justify-content:flex-end;margin-top:12px}
 .scope-elapsed{display:inline-flex;align-items:center;margin-left:6px;color:var(--amber);font-family:'SFMono-Regular',Consolas,monospace;font-size:12px;font-weight:600;white-space:nowrap}
+.scope-progress{display:grid;grid-template-columns:1fr auto;gap:8px 12px;padding:12px 14px;border:1px solid var(--line);border-radius:7px;background:var(--panel);font-size:14px}
+.scope-progress strong{font-variant-numeric:tabular-nums;color:var(--accent)}
+.scope-progress progress{grid-column:1/-1;width:100%;height:9px;margin:0}
 .scope-event-list h3{display:flex;align-items:center;justify-content:space-between;gap:12px}
 .scope-working-summary{padding-bottom:12px;margin-bottom:12px;border-bottom:1px solid var(--line)}
 .scope-working-summary strong{color:var(--amber);font-family:'SFMono-Regular',Consolas,monospace;font-variant-numeric:tabular-nums}

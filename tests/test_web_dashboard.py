@@ -248,6 +248,24 @@ def test_projection_reads_sources_without_leaking_audit_details(tmp_path: Path) 
     assert projector.snapshot(SCAN_ID)["stage"] == "Attack"
 
 
+def test_same_stage_completion_emits_authoritative_status_event(tmp_path: Path) -> None:
+    database = _fixture(tmp_path)
+    with sqlite3.connect(database) as conn:
+        conn.execute("UPDATE scans SET status='running',finished_at=NULL WHERE scan_id=?", (SCAN_ID,))
+        conn.execute("UPDATE stage_runs SET status='running' WHERE stage_run_id='stage'")
+    projector = DashboardProjector(tmp_path)
+    before = projector.snapshot(SCAN_ID)
+    assert before["status"] == "running"
+    assert before["stage_statuses"]["Recon"] == "running"
+    with sqlite3.connect(database) as conn:
+        conn.execute("UPDATE stage_runs SET status='completed' WHERE stage_run_id='stage'")
+    events = projector.events_after(SCAN_ID, before["last_event_id"])
+    assert not any(item["type"] == "scan.status.changed" for item in events)
+    assert [item["payload"] for item in events if item["type"] == "stage.status.changed"] == [
+        {"stage": "Recon", "stage_statuses": {"Scope": "completed", "Recon": "completed"}},
+    ]
+
+
 def test_projection_exposes_only_allowlisted_recon_activity(tmp_path: Path) -> None:
     database = _fixture(tmp_path)
     with sqlite3.connect(database) as conn:
@@ -416,6 +434,45 @@ def test_report_stage_status_overrides_completed_recon_scan(tmp_path: Path) -> N
     assert projector.list_scans()[0]["status"] == "failed"
 
 
+def test_report_progress_tracks_prepared_and_drafted_cases(tmp_path: Path) -> None:
+    database = _fixture(tmp_path)
+    with sqlite3.connect(database) as conn:
+        conn.execute("UPDATE scans SET status='running',finished_at=NULL WHERE scan_id=?", (SCAN_ID,))
+        conn.execute("UPDATE stage_runs SET stage='report',status='running' WHERE stage_run_id='stage'")
+        conn.execute(
+            "CREATE TABLE validation_cases (case_id TEXT, scan_id TEXT, "
+            "current_status TEXT, processing_phase TEXT, latest_stage_run_id TEXT, "
+            "decision_stage_run_id TEXT)"
+        )
+        conn.executemany("INSERT INTO validation_cases VALUES (?,?,?,?,?,?)", [
+            (case_id, SCAN_ID, "CONFIRMED", "completed", "stage", "stage")
+            for case_id in ("case_web_test", "case_pending")
+        ])
+    projector = DashboardProjector(tmp_path)
+    first = projector.snapshot(SCAN_ID)
+    assert first["progress"] == 50
+    output = tmp_path / "ReportRun" / SCAN_ID / "case_pending"
+    output.mkdir(parents=True)
+    with sqlite3.connect(output / "Report.db") as conn:
+        conn.executescript(
+            "CREATE TABLE report_runs (report_id TEXT, scan_id TEXT, case_id TEXT);"
+            "CREATE TABLE report_drafts (report_id TEXT);"
+            "INSERT INTO report_runs VALUES ('report-pending','scan_web_test','case_pending');"
+        )
+    prepared = projector.snapshot(SCAN_ID)
+    assert prepared["progress"] == 75
+    assert any(
+        event["type"] == "task.progress.updated" and event["payload"]["progress"] == 75
+        for event in projector.events_after(SCAN_ID, first["last_event_id"])
+    )
+    with sqlite3.connect(output / "Report.db") as conn:
+        conn.execute("INSERT INTO report_drafts VALUES ('report-pending')")
+    assert projector.snapshot(SCAN_ID)["progress"] == 99
+    with sqlite3.connect(database) as conn:
+        conn.execute("UPDATE stage_runs SET status='completed' WHERE stage_run_id='stage'")
+    assert projector.snapshot(SCAN_ID)["progress"] == 100
+
+
 def test_recon_activity_tracks_started_task_and_clears_on_completion(tmp_path: Path) -> None:
     database = _fixture(tmp_path)
     with sqlite3.connect(database) as conn:
@@ -445,6 +502,102 @@ def test_recon_activity_tracks_started_task_and_clears_on_completion(tmp_path: P
             ("completed", SCAN_ID, "task-1", "dns_resolution", "success", "2026-09-20T01:02:00Z", "2026-09-20T01:02:00Z"),
         )
     assert projector.snapshot(SCAN_ID)["activity"] == "Processing Recon results"
+
+
+def test_recon_progress_advances_when_planned_tasks_finish(tmp_path: Path) -> None:
+    database = _fixture(tmp_path)
+    with sqlite3.connect(database) as conn:
+        conn.execute("UPDATE scans SET status='running',finished_at=NULL WHERE scan_id=?", (SCAN_ID,))
+        conn.execute("UPDATE stage_runs SET status='running' WHERE stage_run_id='stage'")
+        conn.execute(
+            "CREATE TABLE pipeline_runs (pipeline_run_id TEXT, scan_id TEXT, task_id TEXT, "
+            "stage TEXT, status TEXT)"
+        )
+        conn.executemany("INSERT INTO pipeline_runs VALUES (?,?,?,?,?)", [
+            ("planned-1", SCAN_ID, "task-1", "DNS_RESOLUTION", "pending"),
+            ("planned-2", SCAN_ID, "task-2", "HTTP_PROBE", "pending"),
+        ])
+    projector = DashboardProjector(tmp_path)
+    before = projector.snapshot(SCAN_ID)
+    assert before["progress"] == 0
+    assert before["activity"] == "Preparing Recon"
+    with sqlite3.connect(database) as conn:
+        conn.execute(
+            "INSERT INTO pipeline_runs VALUES (?,?,?,?,?)",
+            ("finished-1", SCAN_ID, "task-1", "DNS_RESOLUTION", "success"),
+        )
+    after = projector.snapshot(SCAN_ID)
+    assert after["progress"] == 50
+    assert any(
+        event["type"] == "task.progress.updated" and event["payload"]["progress"] == 50
+        for event in projector.events_after(SCAN_ID, before["last_event_id"])
+    )
+
+
+def test_validation_progress_advances_with_case_phases_and_decisions(tmp_path: Path) -> None:
+    database = _fixture(tmp_path)
+    with sqlite3.connect(database) as conn:
+        conn.execute("UPDATE scans SET status='running',finished_at=NULL WHERE scan_id=?", (SCAN_ID,))
+        conn.execute("UPDATE stage_runs SET stage='validation',status='running' WHERE stage_run_id='stage'")
+        conn.execute(
+            "CREATE TABLE validation_cases (case_id TEXT, scan_id TEXT, "
+            "latest_stage_run_id TEXT, processing_phase TEXT, decision_stage_run_id TEXT)"
+        )
+        conn.executemany("INSERT INTO validation_cases VALUES (?,?,?,?,?)", [
+            ("case-1", SCAN_ID, "stage", "queued", None),
+            ("case-2", SCAN_ID, "stage", "queued", None),
+        ])
+    projector = DashboardProjector(tmp_path)
+    before = projector.snapshot(SCAN_ID)
+    assert before["progress"] == 0
+    with sqlite3.connect(database) as conn:
+        conn.execute("UPDATE validation_cases SET processing_phase='blind_replay' WHERE case_id='case-1'")
+    underway = projector.snapshot(SCAN_ID)
+    assert 0 < underway["progress"] < 50
+    with sqlite3.connect(database) as conn:
+        conn.execute(
+            "UPDATE validation_cases SET processing_phase='completed',decision_stage_run_id='stage' "
+            "WHERE case_id='case-1'"
+        )
+    halfway = projector.snapshot(SCAN_ID)
+    assert halfway["progress"] == 50
+    assert any(
+        event["type"] == "task.progress.updated" and event["payload"]["progress"] == 50
+        for event in projector.events_after(SCAN_ID, underway["last_event_id"])
+    )
+    with sqlite3.connect(database) as conn:
+        conn.execute(
+            "UPDATE validation_cases SET processing_phase='completed',decision_stage_run_id='stage' "
+            "WHERE case_id='case-2'"
+        )
+    assert projector.snapshot(SCAN_ID)["progress"] == 99
+    with sqlite3.connect(database) as conn:
+        conn.execute("UPDATE stage_runs SET status='completed' WHERE stage_run_id='stage'")
+    assert projector.snapshot(SCAN_ID)["progress"] == 100
+
+
+@pytest.mark.parametrize("stage", ["attack", "chaining"])
+def test_task_stages_show_partial_progress_before_completion(tmp_path: Path, stage: str) -> None:
+    database = _fixture(tmp_path)
+    with sqlite3.connect(database) as conn:
+        conn.execute("UPDATE scans SET status='running',finished_at=NULL WHERE scan_id=?", (SCAN_ID,))
+        conn.execute("UPDATE stage_runs SET stage=?,status='running' WHERE stage_run_id='stage'", (stage,))
+        conn.executemany("INSERT INTO attack_tasks VALUES (?,?,?,?)", [
+            (task_id, "stage", SCAN_ID, "pending") for task_id in ("task-one", "task-two")
+        ])
+    projector = DashboardProjector(tmp_path)
+    assert projector.snapshot(SCAN_ID)["progress"] == 0
+    with sqlite3.connect(database) as conn:
+        conn.execute("UPDATE attack_tasks SET status='completed' WHERE task_id='task-one'")
+    assert projector.snapshot(SCAN_ID)["progress"] == 50
+    with sqlite3.connect(database) as conn:
+        conn.execute("UPDATE attack_tasks SET status='skipped' WHERE task_id='task-two'")
+    assert projector.snapshot(SCAN_ID)["progress"] == 99
+    with sqlite3.connect(database) as conn:
+        conn.execute("UPDATE stage_runs SET status='completed' WHERE stage_run_id='stage'")
+    assert projector.snapshot(SCAN_ID)["progress"] == 100
+
+
 def test_projection_reads_program_grouped_scan(tmp_path: Path) -> None:
     database = _fixture(tmp_path)
     grouped = tmp_path / "Runs" / "yeswehack" / "example-program" / SCAN_ID

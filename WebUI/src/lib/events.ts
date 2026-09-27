@@ -6,7 +6,11 @@ export type Log = { id: number; time: string; stage: Stage; level: Level; messag
 export type Snapshot = { version: 1; scan_id: string; last_event_id: number; status: 'running' | 'paused' | 'completed' | 'failed' | 'cancelled' | 'pending'; stage: Stage; stage_statuses?: Partial<Record<Stage, string>>; progress: number; activity?: string | null; requests: number; budget: number; per_target_budget?: number | null; endpoints: number; service_endpoints?: number; live_endpoints?: number; findings: Finding[]; logs: Log[]; scope_approved?: boolean; scope_id?: string; program_id?: string; program_name?: string };
 export type ReportDraftStatus = 'loading' | 'present' | 'absent' | 'unavailable';
 export function displayStageStatus(snapshot: Snapshot, selected: Stage, reportDraft: ReportDraftStatus): string {
-  if (selected === 'Report') return reportDraft === 'present' ? 'completed' : reportDraft === 'absent' ? 'not_created' : 'unknown';
+  if (selected === 'Report') {
+    if (snapshot.status === 'paused' && snapshot.stage === 'Report') return 'paused';
+    return snapshot.stage_statuses?.Report
+      ?? (reportDraft === 'present' ? 'completed' : reportDraft === 'absent' ? 'not_created' : 'unknown');
+  }
   if (snapshot.status === 'paused' && selected === snapshot.stage) return 'paused';
   const recorded = snapshot.stage_statuses?.[selected];
   if (recorded) return recorded;
@@ -27,7 +31,7 @@ export type ScanEvent = { version: 1; event_id: number; scan_id: string; occurre
   | { type: 'heartbeat'; payload: Record<string, unknown> }
   | { type: 'log.appended'; payload: Omit<Log, 'id' | 'time'> }
   | { type: 'task.progress.updated'; payload: { progress: number; requests: number; activity?: string | null; endpoints?: number; service_endpoints?: number; live_endpoints?: number } }
-  | { type: 'stage.status.changed'; payload: { stage: Stage } }
+  | { type: 'stage.status.changed'; payload: { stage: Stage; stage_statuses?: Partial<Record<Stage, string>> } }
   | { type: 'scan.status.changed'; payload: { status: Snapshot['status'] } }
   | { type: 'finding.updated'; payload: Finding }
 );
@@ -44,6 +48,11 @@ const messageMetadata = (v: Record<string, unknown>): boolean =>
 const stage = (v: unknown): v is Stage => stages.includes(v as Stage);
 const level = (v: unknown): v is Level => ['info', 'success', 'warning', 'error'].includes(v as string);
 const status = (v: unknown) => ['running', 'paused', 'completed', 'failed', 'cancelled', 'pending'].includes(v as string);
+const stageStatuses = (v: unknown): v is Partial<Record<Stage, string>> =>
+  record(v) && Object.keys(v).length <= stages.length
+  && Object.entries(v).every(([key, entry]) => stage(key)
+    && typeof entry === 'string'
+    && ['pending', 'running', 'completed', 'failed', 'blocked', 'skipped', 'paused', 'cancelled'].includes(entry));
 const progress = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v) && v >= 0 && v <= 100;
 const finding = (v: unknown): v is Finding => record(v) && text(v.id) && text(v.title) && text(v.endpoint) && text(v.cwe) && ['HIGH','MEDIUM','LOW','INFO','CRITICAL'].includes(v.severity as string) && ['unreviewed','confirmed','rejected','resolved'].includes(v.status as string);
 export function parseEvent(raw: unknown, scanId: string): ScanEvent | null {
@@ -51,13 +60,13 @@ export function parseEvent(raw: unknown, scanId: string): ScanEvent | null {
     const e = typeof raw === 'string' ? JSON.parse(raw) : raw;
     if (!record(e) || e.version !== 1 || e.scan_id !== scanId || !integer(e.event_id) || !text(e.occurred_at) || !Number.isFinite(Date.parse(e.occurred_at)) || !record(e.payload)) return null;
     const p = e.payload;
-    const valid = e.type === 'heartbeat' || (e.type === 'log.appended' && stage(p.stage) && level(p.level) && text(p.message) && messageMetadata(p)) || (e.type === 'task.progress.updated' && progress(p.progress) && integer(p.requests) && (p.activity === undefined || p.activity === null || text(p.activity)) && ['endpoints','service_endpoints','live_endpoints'].every(key => p[key] === undefined || integer(p[key]))) || (e.type === 'stage.status.changed' && stage(p.stage)) || (e.type === 'scan.status.changed' && status(p.status)) || (e.type === 'finding.updated' && finding(p));
+    const valid = e.type === 'heartbeat' || (e.type === 'log.appended' && stage(p.stage) && level(p.level) && text(p.message) && messageMetadata(p)) || (e.type === 'task.progress.updated' && progress(p.progress) && integer(p.requests) && (p.activity === undefined || p.activity === null || text(p.activity)) && ['endpoints','service_endpoints','live_endpoints'].every(key => p[key] === undefined || integer(p[key]))) || (e.type === 'stage.status.changed' && stage(p.stage) && (p.stage_statuses === undefined || stageStatuses(p.stage_statuses))) || (e.type === 'scan.status.changed' && status(p.status)) || (e.type === 'finding.updated' && finding(p));
     return valid ? e as ScanEvent : null;
   } catch { return null; }
 }
 export function parseSnapshot(value: unknown, scanId: string): Snapshot | null {
   if (!record(value) || value.version !== 1 || value.scan_id !== scanId || !integer(value.last_event_id) || !status(value.status) || !stage(value.stage) || !progress(value.progress) || !integer(value.requests) || !integer(value.budget) || !integer(value.endpoints) || !Array.isArray(value.findings) || !value.findings.every(finding) || !Array.isArray(value.logs)) return null;
-  if (value.stage_statuses !== undefined && (!record(value.stage_statuses) || Object.entries(value.stage_statuses).some(([key, entry]) => !stage(key) || typeof entry !== 'string' || !['pending','running','completed','failed','blocked','skipped'].includes(entry)))) return null;
+  if (value.stage_statuses !== undefined && !stageStatuses(value.stage_statuses)) return null;
   if (['service_endpoints','live_endpoints'].some(key => value[key] !== undefined && !integer(value[key]))) return null;
   if ((value.scope_approved !== undefined && typeof value.scope_approved !== 'boolean') || (value.scope_id !== undefined && !text(value.scope_id)) || (value.program_id !== undefined && !text(value.program_id)) || (value.program_name !== undefined && !text(value.program_name))) return null;
   if (value.activity !== undefined && value.activity !== null && !text(value.activity)) return null;
@@ -115,7 +124,9 @@ export function applyEvent(snapshot: Snapshot, event: ScanEvent): Snapshot {
   switch (event.type) {
     case 'log.appended': return { ...next, logs: [...next.logs, { ...event.payload, id: event.event_id, time: event.occurred_at }].slice(-500) };
     case 'task.progress.updated': return { ...next, ...event.payload };
-    case 'stage.status.changed': return { ...next, stage: event.payload.stage, progress: 0 };
+    case 'stage.status.changed': return { ...next, stage: event.payload.stage,
+      stage_statuses: event.payload.stage_statuses ?? next.stage_statuses,
+      progress: event.payload.stage === snapshot.stage ? snapshot.progress : 0 };
     case 'scan.status.changed': return { ...next, status: event.payload.status };
     case 'finding.updated': return { ...next, findings: [...next.findings.filter(f => f.id !== event.payload.id), event.payload] };
   }

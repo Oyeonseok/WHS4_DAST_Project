@@ -2,12 +2,17 @@ import { useEffect, useReducer, useRef, useState, type ReactNode } from 'react';
 import { DEMO_SCAN, DEMO_VALIDATIONS } from './data/demo';
 import { transportMode, useScanSocket } from './hooks/useScanSocket';
 import {
+  advanceEstimatedProgress,
+  currentStageProgressStatus,
+  estimatedProgressDelay,
   formatActivityElapsed,
   hideAcknowledgedActivity,
+  initialEstimatedProgress,
   initialScopeActivityState,
   isScopeActivityActive,
   mergeActivityLogs,
   reduceScopeActivity,
+  scopeCollectionProgress,
   startScopeElapsedClock,
   startScopeJobPolling,
   shouldPollScopeJob,
@@ -127,17 +132,53 @@ function VerifiedScopeDetails({ draft, approval, language, onScan }: { draft: Sc
 function Empty({ title, children }: { title: string; children: ReactNode }) { return <div className="empty"><Icon name="lock" size={26}/><h3>{title}</h3><p>{children}</p></div>; }
 function Pipeline({ snapshot, language, reportDraft }: { snapshot: Snapshot; language: Language; reportDraft: ReportDraftStatus }) {
   const labels: Record<string, string> = language === 'ko'
-    ? { completed: '완료', skipped: '건너뜀', failed: '실패', blocked: '차단', pending: '대기', running: '진행 중', not_created: '미작성', unknown: '확인 중' }
-    : { completed: 'Completed', skipped: 'Skipped', failed: 'Failed', blocked: 'Blocked', pending: 'Pending', running: 'Running', not_created: 'Not drafted', unknown: 'Checking' };
+    ? { completed: '완료', skipped: '건너뜀', failed: '실패', blocked: '차단', pending: '대기', running: '진행 중', paused: '일시정지', cancelled: '취소됨', not_created: '미작성', unknown: '확인 중' }
+    : { completed: 'Completed', skipped: 'Skipped', failed: 'Failed', blocked: 'Blocked', pending: 'Pending', running: 'Running', paused: 'Paused', cancelled: 'Cancelled', not_created: 'Not drafted', unknown: 'Checking' };
   return <ol className="pipeline" aria-label={translate(language, 'Scan workflow')}>{stages.map((stage, index) => {
     const status = displayStageStatus(snapshot, stage, reportDraft);
     const done = status === 'completed';
     return <li key={stage} className={done ? 'done' : status === 'running' ? 'current' : status === 'skipped' ? 'skipped' : ''}>
       <span className="stage-number">{done ? <Icon name="check" size={13}/> : String(index + 1).padStart(2,'0')}</span>
       <strong>{translate(language, stage)}</strong>
-      <small>{status === 'running' && stage === snapshot.stage ? `${snapshot.progress}% · ${labels[status]}` : labels[status] || status}</small>
+      <small>{status === 'running' && stage === snapshot.stage ? `${translate(language, 'Estimated')} ${snapshot.progress}% · ${labels[status]}` : labels[status] || status}</small>
     </li>;
   })}</ol>;
+}
+function useEstimatedProgress(identity: string, actual: number, status: string): number {
+  const storageKey = `aidast:estimated-progress:${identity}`;
+  const stored = identity ? sessionStorage.getItem(storageKey) : null;
+  const saved = stored !== null && /^(?:0|[1-9]\d?)$/.test(stored) ? Number(stored) : 0;
+  const baseline = initialEstimatedProgress(actual, status, saved);
+  const [state, setState] = useState(() => ({ identity, value: baseline, status }));
+  const shown = state.identity === identity ? state.value : baseline;
+  useEffect(() => {
+    if (state.identity !== identity) {
+      setState({ identity, value: baseline, status });
+      return;
+    }
+    if ((state.status === 'failed' || state.status === 'cancelled') && status === 'running') {
+      sessionStorage.removeItem(storageKey);
+      setState({ identity, value: 0, status });
+      return;
+    }
+    const mode = status === 'running' ? 'running' : status === 'completed' ? 'completed' : 'paused';
+    if (mode === 'paused') {
+      if (state.status !== status || actual > shown) setState({ identity, value: Math.max(shown, actual), status });
+      return;
+    }
+    const delay = estimatedProgressDelay(shown, actual, mode);
+    if (delay === null) {
+      if (state.status !== status) setState({ identity, value: shown, status });
+      return;
+    }
+    const next = advanceEstimatedProgress(shown, mode);
+    const timer = window.setTimeout(() => {
+      if (identity && next < 100) sessionStorage.setItem(storageKey, String(next));
+      setState({ identity, value: next, status });
+    }, delay);
+    return () => window.clearTimeout(timer);
+  }, [identity, actual, status, state.identity, state.status, shown, baseline, storageKey]);
+  return shown;
 }
 function download(name: string, content: string) {
   const url = URL.createObjectURL(new Blob([content], { type: 'text/markdown;charset=utf-8' }));
@@ -275,10 +316,21 @@ export default function App() {
   const [selectedReport, setSelectedReport] = useState<ReportSummary | null>(null);
   const [resultRoot, setResultRoot] = useState(demo ? 'Synthetic demo data (memory)' : '');
   const { snapshot, state, error, refresh } = useScanSocket(scanId);
+  const currentStageStatus = snapshot?.stage_statuses?.[snapshot.stage];
+  const scanProgressStatus = currentStageProgressStatus(snapshot?.status, currentStageStatus);
+  const scanProgress = useEstimatedProgress(snapshot ? `${snapshot.scan_id}:${snapshot.stage}` : scanId, snapshot?.progress ?? 0, scanProgressStatus);
   const retryAction = snapshot ? scanRetryAction(snapshot) : null;
   const cancelling = cancelRequest?.scanId === scanId;
   const cancelPhase = cancelling ? cancelRequest.phase : null;
   const scopeActive = isScopeActivityActive(workflowProgram?.scope_status);
+  const scopeProgress = scopeCollectionProgress(workflowProgram?.scope_status, scopeEvents);
+  const scopeProgressStatus = workflowProgram?.scope_status;
+  const displayedScopeProgress = useEstimatedProgress(
+    workflowProgram?.scope_job_id ?? '',
+    scopeProgress,
+    scopeProgressStatus === 'collecting' ? 'running'
+      : scopeProgressStatus === 'review_required' || scopeProgressStatus === 'approved' || scopeProgressStatus === 'rejected' ? 'completed' : 'paused',
+  );
   const scopeWorkLabel = workflowProgram?.scope_status === 'paused' ? (language === 'ko' ? '일시정지' : 'Paused')
     : workflowProgram?.scope_status === 'cancelling' ? (language === 'ko' ? '취소 중' : 'Cancelling') : (language === 'ko' ? '작업 중' : 'Working');
   const scopeStartedAt = scopeEvents[0]?.occurred_at || workflowProgram?.scope_updated_at;
@@ -308,6 +360,7 @@ export default function App() {
   }, [workflowProgram?.scope_status]);
   const tr = (text: string) => translate(language, text);
   const tk = (ko: string, en: string) => language === 'ko' ? ko : en;
+  const scopeProgressBar = <div className="scope-progress"><span>{tr('Estimated Scope collection progress')}</span><strong>{displayedScopeProgress}%</strong><progress aria-label={tr('Estimated Scope collection progress')} max="100" value={displayedScopeProgress}/></div>;
   const acknowledgeAudit = (id: string) => {
     const next = new Set(acknowledgedAudit);
     if (next.has(id)) next.delete(id);
@@ -607,7 +660,7 @@ export default function App() {
       } catch (e) { if (!abort.signal.aborted) setReportError(e instanceof Error ? e.message : 'Reports could not be loaded.'); }
     })();
     return () => abort.abort();
-  }, [demo, page, scanId, validationRevision, snapshot?.stage, snapshot?.status]);
+  }, [demo, page, scanId, validationRevision, snapshot?.stage, snapshot?.status, snapshot?.stage_statuses?.Report]);
   useEffect(() => {
     if (demo || !scanId || !['Findings', 'Validation', 'Reports'].includes(page)) return;
     const abort = new AbortController();
@@ -809,6 +862,7 @@ export default function App() {
       });
       const body = await response.json() as { status?: string; detail?: string };
       if (!response.ok || body.status !== 'running') throw new Error(body.detail || tk(`재실행 요청 실패 (${response.status})`, `Rerun request failed (${response.status})`));
+      if (snapshot) sessionStorage.removeItem(`aidast:estimated-progress:${scanId}:${snapshot.stage}`);
       setScanOptions(current => current.map(item => item.scan_id === scanId ? { ...item, status: 'running', finished_at: null } : item));
       setModal('scan-progress');
       refresh();
@@ -971,7 +1025,7 @@ export default function App() {
     <button className="secondary-button" onClick={() => void cancelScan()} disabled={cancelling || !!pauseBusy}>{cancelPhase === 'requesting' ? tk("취소 요청 전달 중…", "Sending cancellation request…") : cancelling ? tk("취소 확인 중…", "Confirming cancellation…") : tk("스캔 취소", "Cancel scan")}</button>
   </> : null;
   const scanPanel = <Panel className="scan-summary-panel" title={demo ? tr('Local lab · API assessment') : scanTargetLabel} subtitle={demo ? tr('Synthetic fixture · isolated from program inventory') : `${snapshot?.program_name ? `${snapshot.program_name} · ` : ''}${scanId}`} action={<div className="scan-panel-actions"><Badge tone={snapshot?.status === 'failed' ? 'critical' : snapshot?.status === 'completed' ? 'success' : 'warning'}><span className="dot"/>{cancelling ? tk("취소 처리 중", "Cancelling") : tr(snapshot?.status || state)}</Badge>{scanControls}{!demo && retryAction === 'resume' && <button className="secondary-button" onClick={resumeScan} disabled={resuming}>{resuming ? tk("재실행 요청 중…", "Requesting rerun…") : tk("실패 단계부터 재실행", "Rerun from failed stage")}</button>}{!demo && retryAction === 'rescan' && <button className="secondary-button" onClick={openRepeatScan}>{tk("정찰부터 다시 스캔", "Rescan from recon")}</button>}{!demo && scanId && <button className="secondary-button" onClick={() => setModal('scan-progress')}>{snapshot?.stage === 'Recon' ? tk("도구 작업·발견 URL 보기", "View tools and URLs") : tk("진행 창 열기", "Open progress window")}</button>}</div>}>
-    {snapshot ? <><Pipeline snapshot={snapshot} language={language} reportDraft={reportDraftStatus}/>{cancelling && <p className="scan-stop-status" role="status">{cancelPhase === 'requesting' ? tk("취소 요청을 서버에 전달하고 있습니다.", "Sending the cancellation request to the server.") : tk("취소 요청을 접수했습니다. 실행 프로세스 종료와 저장된 상태 갱신을 확인하고 있습니다.", "Cancellation requested. Checking the process exit and saved status.")}</p>}{snapshot.status === 'paused' && !cancelling && <p className="scan-stop-status" role="status">{tk("스캔 일시정지 중 · 같은 실행을 이어가려면 ‘계속’을 누르세요.", "Scan paused. Select Continue to resume the same run.")}</p>}{snapshot.status === 'cancelled' && <p className="scan-stop-status is-done" role="status">{tk("스캔 취소 완료 · 실행 프로세스가 종료됐고 스캔 상태가 취소됨으로 저장됐습니다.", "Scan cancelled. The process exited and the cancelled status was saved.")}</p>}<div className="scan-stats"><div><span>{tr('Scan ID')}</span><strong className="mono">{snapshot.scan_id}</strong></div><div><span>{tr('Endpoints')}</span><strong>{snapshot.endpoints}</strong></div><div><span>{tk('기록된 HTTP 요청', 'Recorded HTTP requests')}</span><strong>{snapshot.requests.toLocaleString()}</strong>{snapshot.per_target_budget != null && <small>{tk('대상별 상한', 'Per-target limit')} {snapshot.per_target_budget.toLocaleString()}</small>}</div><div className="progress-stat"><span>{tr(snapshot.stage)} {tr('progress')} <b>{snapshot.progress}%</b></span><progress max="100" value={snapshot.progress} aria-label={`${tr(snapshot.stage)} ${tr('progress')}`}/></div></div>{snapshot.service_endpoints !== undefined && <p className="scan-recon-summary"><strong>{tk("서비스 URL 후보", "Candidate service URLs")}</strong> {tk(`${snapshot.service_endpoints}개`, `${snapshot.service_endpoints} candidates`)} <span>{tk(`· 실제 HTTP 응답 관측 ${snapshot.live_endpoints ?? 0}개`, `· ${snapshot.live_endpoints ?? 0} observed HTTP responses`)}</span></p>}{snapshot.stage === 'Recon' && <p className="scan-recon-summary"><strong>{tk("최근 정찰 작업", "Latest recon task")}</strong> {latestReconActivity ? localizeActivityMessage(language, latestReconActivity) : tk('이 실행에는 도구별 정찰 기록이 아직 없습니다.', 'This run has no tool-level recon records yet.')}</p>}{resumeError && <p className="form-error" role="alert">{resumeError}</p>}{pauseError && <p className="form-error" role="alert">{pauseError}</p>}{cancelError && <p className="form-error" role="alert">{cancelError}</p>}</> : <Empty title={tr(state === 'offline' ? 'Backend unavailable' : state === 'idle' ? 'No scan selected' : 'Loading scan snapshot')}>{tr(state === 'idle' ? 'Start a scan from an approved Scope to show its snapshot and activity here.' : 'Connect the REST snapshot endpoint to display scan state. Demo data is never substituted in live mode.')}</Empty>}
+    {snapshot ? <><Pipeline snapshot={{ ...snapshot, progress: scanProgress }} language={language} reportDraft={reportDraftStatus}/>{cancelling && <p className="scan-stop-status" role="status">{cancelPhase === 'requesting' ? tk("취소 요청을 서버에 전달하고 있습니다.", "Sending the cancellation request to the server.") : tk("취소 요청을 접수했습니다. 실행 프로세스 종료와 저장된 상태 갱신을 확인하고 있습니다.", "Cancellation requested. Checking the process exit and saved status.")}</p>}{snapshot.status === 'paused' && !cancelling && <p className="scan-stop-status" role="status">{tk("스캔 일시정지 중 · 같은 실행을 이어가려면 ‘계속’을 누르세요.", "Scan paused. Select Continue to resume the same run.")}</p>}{snapshot.status === 'cancelled' && <p className="scan-stop-status is-done" role="status">{tk("스캔 취소 완료 · 실행 프로세스가 종료됐고 스캔 상태가 취소됨으로 저장됐습니다.", "Scan cancelled. The process exited and the cancelled status was saved.")}</p>}<div className="scan-stats"><div><span>{tr('Scan ID')}</span><strong className="mono">{snapshot.scan_id}</strong></div><div><span>{tr('Endpoints')}</span><strong>{snapshot.endpoints}</strong></div><div><span>{tk('기록된 HTTP 요청', 'Recorded HTTP requests')}</span><strong>{snapshot.requests.toLocaleString()}</strong>{snapshot.per_target_budget != null && <small>{tk('대상별 상한', 'Per-target limit')} {snapshot.per_target_budget.toLocaleString()}</small>}</div><div className="progress-stat"><span>{tr(snapshot.stage)} {tr('Estimated progress')} <b>{scanProgress}%</b></span><progress max="100" value={scanProgress} aria-label={`${tr(snapshot.stage)} ${tr('Estimated progress')}`}/></div></div>{snapshot.service_endpoints !== undefined && <p className="scan-recon-summary"><strong>{tk("서비스 URL 후보", "Candidate service URLs")}</strong> {tk(`${snapshot.service_endpoints}개`, `${snapshot.service_endpoints} candidates`)} <span>{tk(`· 실제 HTTP 응답 관측 ${snapshot.live_endpoints ?? 0}개`, `· ${snapshot.live_endpoints ?? 0} observed HTTP responses`)}</span></p>}{snapshot.stage === 'Recon' && <p className="scan-recon-summary"><strong>{tk("최근 정찰 작업", "Latest recon task")}</strong> {latestReconActivity ? localizeActivityMessage(language, latestReconActivity) : tk('이 실행에는 도구별 정찰 기록이 아직 없습니다.', 'This run has no tool-level recon records yet.')}</p>}{resumeError && <p className="form-error" role="alert">{resumeError}</p>}{pauseError && <p className="form-error" role="alert">{pauseError}</p>}{cancelError && <p className="form-error" role="alert">{cancelError}</p>}</> : <Empty title={tr(state === 'offline' ? 'Backend unavailable' : state === 'idle' ? 'No scan selected' : 'Loading scan snapshot')}>{tr(state === 'idle' ? 'Start a scan from an approved Scope to show its snapshot and activity here.' : 'Connect the REST snapshot endpoint to display scan state. Demo data is never substituted in live mode.')}</Empty>}
   </Panel>;
   const scanProgressContent = <div className="scan-progress-dialog">
     {cancelError && <p className="scan-progress-failed" role="alert"><strong>{tk("스캔 취소 실패 ·", "Scan cancellation failed ·")} </strong>{cancelError}</p>}
@@ -980,11 +1034,11 @@ export default function App() {
       <div><span>{tk("스캔 대상", "Scan target")}</span><strong>{scanTargetLabel || tk("불러오는 중", "Loading")}</strong><small>{snapshot?.program_name} <span className="mono">· {scanId}</span></small></div>
       <Badge tone={snapshot?.status === 'failed' ? 'critical' : snapshot?.status === 'completed' ? 'success' : 'warning'}>{cancelling ? tk("취소 처리 중", "Cancelling") : tr(snapshot?.status || state)}</Badge>
     </div>
-    <div className="scan-progress-stats"><div><span>{tk("현재 단계", "Current stage")}</span><strong>{tr(snapshot?.stage || 'Waiting')}</strong></div><div><span>{tk("단계 진행률", "Stage progress")}</span><strong>{snapshot?.progress ?? 0}%</strong></div><div><span>{tk("경과 시간", "Elapsed time")}</span><strong role="timer">{formatActivityElapsed(scanElapsedSeconds, language)}</strong></div><div><span>{tk("기록된 HTTP 요청", "Recorded HTTP requests")}</span><strong>{snapshot?.requests.toLocaleString() ?? 0}</strong>{snapshot?.per_target_budget != null && <small>{tk("대상별 상한", "Per-target limit")} {snapshot.per_target_budget.toLocaleString()}</small>}</div></div>
+    <div className="scan-progress-stats"><div><span>{tk("현재 단계", "Current stage")}</span><strong>{tr(snapshot?.stage || 'Waiting')}</strong></div><div><span>{tr("Estimated stage progress")}</span><strong>{scanProgress}%</strong></div><div><span>{tk("경과 시간", "Elapsed time")}</span><strong role="timer">{formatActivityElapsed(scanElapsedSeconds, language)}</strong></div><div><span>{tk("기록된 HTTP 요청", "Recorded HTTP requests")}</span><strong>{snapshot?.requests.toLocaleString() ?? 0}</strong>{snapshot?.per_target_budget != null && <small>{tk("대상별 상한", "Per-target limit")} {snapshot.per_target_budget.toLocaleString()}</small>}</div></div>
     {snapshot?.service_endpoints !== undefined && <p className="scan-recon-summary"><strong>{tk("정찰 URL", "Recon URLs")}</strong> {tk(`전체 ${snapshot.endpoints}개 · 서비스 후보 ${snapshot.service_endpoints}개 · HTTP 응답 관측 ${snapshot.live_endpoints ?? 0}개 (404 포함 가능)`, `${snapshot.endpoints} total · ${snapshot.service_endpoints} service candidates · ${snapshot.live_endpoints ?? 0} HTTP responses observed (may include 404)`)}</p>}
-    <progress aria-label={tk("스캔 단계 진행률", "Scan stage progress")} max="100" value={snapshot?.progress ?? 0}/>
+    <progress aria-label={tr("Estimated stage progress")} max="100" value={scanProgress}/>
     {cancelling && <p className="scan-stop-status" role="status">{cancelPhase === 'requesting' ? tk("취소 요청을 서버에 전달하고 있습니다.", "Sending the cancellation request to the server.") : tk("취소 요청 접수됨 · 실행 프로세스 종료와 저장된 상태 갱신을 확인하는 중입니다.", "Cancellation requested. Checking that the process exited and the saved status updated.")}</p>}
-    {snapshot?.status === 'running' && !cancelling && <p className="scan-progress-working" role="status"><span className="dot"/> {tk(`${tr(snapshot.stage)} 단계 작업 중 · ${formatActivityElapsed(scanElapsedSeconds, language)}`, `${tr(snapshot.stage)} stage running · ${formatActivityElapsed(scanElapsedSeconds, language)}`)}{snapshot.progress === 0 ? tk(" · 다음 진행 이벤트를 기다리고 있습니다.", " · waiting for the next progress event.") : ''}</p>}
+    {snapshot?.status === 'running' && !cancelling && <p className="scan-progress-working" role="status"><span className="dot"/> {tk(`${tr(snapshot.stage)} 단계 작업 중 · ${formatActivityElapsed(scanElapsedSeconds, language)}`, `${tr(snapshot.stage)} stage running · ${formatActivityElapsed(scanElapsedSeconds, language)}`)}</p>}
     {snapshot?.status === 'paused' && !cancelling && <p className="scan-stop-status" role="status">{tk("스캔 일시정지 중 · 작업을 멈춘 상태입니다. 같은 실행을 이어가려면 ‘계속’을 누르세요.", "Scan paused. Work is stopped. Select Continue to resume this run.")}</p>}
     {snapshot?.status === 'failed' && <p className="scan-progress-failed" role="alert">{retryAction === 'rescan' ? tk(`${tr(snapshot.stage)} 단계에서 스캔이 실패했습니다. 정찰부터 새 스캔을 시작하세요. 아래 활동 기록에서 마지막 오류를 확인할 수 있습니다.`, `Scan failed during ${tr(snapshot.stage)}. Start a new scan from recon. Check the last error in activity below.`) : tk(`${tr(snapshot.stage)} 단계에서 스캔이 실패했습니다. 완료된 정찰 결과를 재사용하고, 실패한 단계의 작업을 새로 생성해 실행합니다. 아래 활동 기록에서 마지막 오류를 확인하세요.`, `Scan failed during ${tr(snapshot.stage)}. Completed recon results are reused and work for the failed stage is recreated. Check the last error in activity below.`)}</p>}
     {snapshot?.status === 'cancelled' && <p className="scan-stop-status is-done" role="status">{tk("스캔 취소 완료 · 실행 프로세스가 종료됐고 스캔 상태가 취소됨으로 저장됐습니다. 다시 검사하려면 새 스캔을 시작하세요.", "Scan cancelled. The process exited and the cancelled status was saved. Start a new scan to test again.")}</p>}
@@ -1101,14 +1155,17 @@ export default function App() {
       <div className="notice"><Icon name="scope"/><div><strong>{tr('Collect a policy snapshot')}</strong><p>{tr('AI DAST opens its own browser. Log in to the bug bounty platform, then continue here. AI DAST will open the registered program page and collect its scope. The result remains an unapproved draft until you review it.')}</p></div></div>
       {workflowProgram.scope_error && <p className="form-error">{tr('Previous attempt:')} {workflowProgram.scope_error}</p>}
       {workflowProgram.scope_status === 'cancelled' && <p role="status">{tr('Scope collection was cancelled. You can start a new collection.')}</p>}
+      {(workflowProgram.scope_status === 'failed' || workflowProgram.scope_status === 'cancelled') && displayedScopeProgress > 0 && scopeProgressBar}
       <div className="button-row"><button className="secondary-button" onClick={closeDialog}>{tr('Cancel')}</button><button className="primary-button" disabled={scopeActionBusy} onClick={() => void startScopeCollection()}>{tr(scopeActionBusy ? 'Starting…' : workflowProgram.scope_status === 'scope_required' ? 'Collect Scope' : 'Collect again')} <Icon name="arrow" size={14}/></button></div>
     </>}
     {(workflowProgram.scope_status === 'collecting' || workflowProgram.scope_status === 'awaiting_browser' || workflowProgram.scope_status === 'paused' || workflowProgram.scope_status === 'cancelling') && <>
       <div className="notice"><Icon name="terminal"/><div><strong>{tr(workflowProgram.scope_status === 'awaiting_browser' ? 'Browser input required' : workflowProgram.scope_status === 'paused' ? 'Scope collection paused' : workflowProgram.scope_status === 'cancelling' ? 'Scope cancellation in progress' : 'Scope collection is running')} <span className="scope-elapsed" role="timer">· {scopeElapsedLabel}</span></strong><p>{tr(workflowProgram.scope_status === 'awaiting_browser' ? 'Check access in the opened local browser, then continue here. Log in only if the site requires it.' : workflowProgram.scope_status === 'paused' ? 'The Scope worker and its browser are paused. Continue to resume the same collection.' : workflowProgram.scope_status === 'cancelling' ? 'The Scope worker is shutting down. The result will show Cancelled after it exits.' : 'The dashboard is collecting and interpreting the program policy. Keep this dialog open to follow progress.')}</p></div></div>
+      {scopeProgressBar}
       {workflowProgram.scope_status === 'awaiting_browser' && <button className="primary-button workflow-wide-button" disabled={scopeActionBusy} onClick={() => void confirmScopeBrowser()}>{tr(scopeActionBusy ? 'Continuing…' : 'I finished login · Continue')}</button>}
       <div className="button-row"><button className="secondary-button" disabled={scopeActionBusy || workflowProgram.scope_status === 'cancelling'} onClick={() => void controlScope(workflowProgram.scope_status === 'paused' ? 'continue' : 'pause')}>{tr(workflowProgram.scope_status === 'paused' ? 'Continue Scope' : 'Pause Scope')}</button><button className="secondary-button" disabled={scopeActionBusy || workflowProgram.scope_status === 'cancelling'} onClick={() => void controlScope('cancel')}>{tr(workflowProgram.scope_status === 'cancelling' ? 'Cancelling Scope…' : 'Cancel Scope collection')}</button></div>
     </>}
     {scopeEvents.length > 0 && <div className="scope-event-list" aria-live="polite"><h3>{tr('Collection activity')}{scopeActive && <span className="scope-elapsed" role="timer">{scopeWorkLabel} · {scopeElapsedLabel}</span>}</h3>{scopeEvents.map(event => <div key={`${event.job_id}:${event.event_id}`} className={event.level}><time dateTime={event.occurred_at}>{new Date(event.occurred_at).toLocaleTimeString(language === 'ko' ? 'ko-KR' : 'en-GB', { hour12: false })}</time><span>{localizeActivityMessage(language, event)}</span></div>)}</div>}
+    {(workflowProgram.scope_status === 'review_required' || workflowProgram.scope_status === 'approved') && scopeProgressBar}
     {workflowProgram.scope_status === 'approved' && !scopeDraft && !scopeWorkflowError && <p className="form-empty">{tr('Loading approved Scope…')}</p>}
     {(workflowProgram.scope_status === 'review_required' || workflowProgram.scope_status === 'approved') && scopeDraft && <>
       <div className="scope-review-heading"><div><span>{tr(scopeApproval ? 'APPROVED SCOPE' : 'UNAPPROVED DRAFT')}</span><h3>{scopeDraft.program_name}</h3></div><code>{scopeDraft.scope_id}</code></div>
@@ -1267,8 +1324,8 @@ export default function App() {
           </div>}
           <div className="activity-stage">
             {scopeActive && <div className="scope-working-summary"><span>{tk("스코프 수집", "Scope collection")}</span><strong role="timer">{scopeWorkLabel} · {scopeElapsedLabel}</strong></div>}
-            <div><span>{tr('Current stage')}</span><strong>{tr(snapshot?.stage || 'Waiting')} <small>{snapshot?.progress || 0}%</small></strong></div>
-            <progress aria-label={tr('Current stage progress')} max="100" value={snapshot?.progress || 0}/>
+            <div><span>{tr('Estimated stage progress')}</span><strong>{tr(snapshot?.stage || 'Waiting')} <small>{scanProgress}%</small></strong></div>
+            <progress aria-label={tr('Estimated stage progress')} max="100" value={scanProgress}/>
           </div>
           {hasActivity && <div className="activity-filters"><label className="search-field"><Icon name="search" size={14}/><input aria-label={tr('Search activity')} value={logSearch} onChange={e => setLogSearch(e.target.value)} placeholder={tr('Search activity…')}/></label><div><select aria-label={tr('Filter log level')} value={level} onChange={e => setLevel(e.target.value)}>{['All levels','info','success','warning','error'].map(l => <option key={l} value={l}>{tr(l)}</option>)}</select><select aria-label={tr('Filter log stage')} value={stageFilter} onChange={e => setStageFilter(e.target.value)}>{['All stages',...stages].map(s => <option key={s} value={s}>{tr(s)}</option>)}</select></div></div>}
           {hasActivity && <div className="log-toolbar"><span>{visibleLogs.length + (showDashboardError ? 1 : 0)} {tr('events')}{scopeActive && <b> · {scopeWorkLabel} {scopeElapsedLabel}</b>}</span><button onClick={() => setPaused(v => !v)} aria-pressed={paused}>{tr(paused ? '▶ Resume following' : 'Ⅱ Pause scrolling')}</button></div>}

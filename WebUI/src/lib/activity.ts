@@ -60,6 +60,42 @@ export function isScopeActivityActive(status: ScopeActivityStatus | undefined): 
     || status === 'paused' || status === 'cancelling';
 }
 
+export function scopeCollectionProgress(status: ScopeActivityStatus | undefined, events: readonly ScopeActivityEvent[]): number {
+  if (status === 'review_required' || status === 'approved' || status === 'rejected') return 100;
+  const milestones: Record<string, number> = {
+    'scope.page_read_started': 10,
+    'scope.collection_started': 10,
+    'scope.page_read_completed': 25,
+    'scope.analysis_started': 40,
+    'scope.analysis_completed': 55,
+    'scope.collection_completed': 55,
+    'scope.verification_started': 65,
+    'scope.verification_completed': 80,
+    'scope.draft_started': 90,
+    'scope.draft_completed': 95,
+  };
+  return events.reduce((progress, event) => Math.max(progress, milestones[event.message_code ?? ''] ?? 0), 0);
+}
+
+export function initialEstimatedProgress(actual: number, status: string, saved = 0): number {
+  return status === 'running' ? saved : Math.max(actual, saved);
+}
+
+export function currentStageProgressStatus(scanStatus: string | undefined, stageStatus: string | undefined): string {
+  return stageStatus === 'completed' || stageStatus === 'skipped' ? 'completed' : scanStatus ?? 'pending';
+}
+
+export function advanceEstimatedProgress(value: number, mode: 'running' | 'paused' | 'completed'): number {
+  if (mode === 'paused') return value;
+  return Math.min(mode === 'completed' ? 100 : 99, value + 1);
+}
+
+export function estimatedProgressDelay(shown: number, actual: number, mode: 'running' | 'paused' | 'completed'): number | null {
+  if (advanceEstimatedProgress(shown, mode) === shown) return null;
+  if (mode === 'completed' || shown < actual) return 30;
+  return shown >= 95 ? 10_000 : 1_500;
+}
+
 export function scopePollingAfterJobResponse(status: ScopeActivityStatus | undefined): boolean {
   return isScopeActivityActive(status);
 }
