@@ -12,7 +12,11 @@ import { auditLevel, readAuditAcknowledgements, saveAuditAcknowledgements } from
 import { filterFindings, findingVerdict, parseValidationCases, reportCaseForFinding } from '../src/lib/validation.ts';
 import { DEMO_VALIDATIONS } from '../src/data/demo.ts';
 import {
+  advanceEstimatedProgress,
+  currentStageProgressStatus,
+  estimatedProgressDelay,
   formatActivityElapsed,
+  initialEstimatedProgress,
   initialScopeActivityState,
   isScopeActivityActive,
   mergeActivityLogs,
@@ -21,6 +25,7 @@ import {
   startScopeElapsedClock,
   startScopeJobPolling,
   shouldPollScopeJob,
+  scopeCollectionProgress,
 } from '../src/lib/activity.ts';
 
 const event = (id = 8, overrides = {}) => ({ version: 1, event_id: id, scan_id: DEMO_SCAN, occurred_at: '2026-09-20T06:00:00Z', type: 'log.appended', payload: { stage: 'Attack', level: 'info', message: 'Redacted fixture event' }, ...overrides });
@@ -230,6 +235,59 @@ test('active Scope collection elapsed time uses a TUI-style clock', () => {
   assert.equal(formatActivityElapsed(62), '1분 2초');
   assert.equal(formatActivityElapsed(62, 'en'), '1m 2s');
 });
+test('Scope collection progress follows persisted phase events across a pause', () => {
+  const phases = [
+    'scope.page_read_started', 'scope.page_read_completed', 'scope.analysis_started',
+    'scope.analysis_completed', 'scope.verification_started', 'scope.verification_completed',
+    'scope.draft_started', 'scope.draft_completed',
+  ];
+  const events = phases.map((message_code, index) => ({
+    job_id: 'scopejob_fixture', event_id: index + 1,
+    occurred_at: '2026-09-26T00:00:00Z', level: 'info', message: 'fixture', message_code,
+  }));
+  assert.equal(scopeCollectionProgress('collecting', []), 0);
+  assert.equal(scopeCollectionProgress('collecting', events.slice(0, 1)), 10);
+  assert.equal(scopeCollectionProgress('paused', events.slice(0, 3)), 40);
+  assert.equal(scopeCollectionProgress('collecting', events.slice(0, 6)), 80);
+  assert.equal(scopeCollectionProgress('review_required', events), 100);
+});
+test('estimated progress advances one percent per tick and stops at real completion', () => {
+  let shown = 0;
+  for (let expected = 1; expected <= 40; expected += 1) {
+    shown = advanceEstimatedProgress(shown, 'running');
+    assert.equal(shown, expected);
+  }
+  assert.equal(advanceEstimatedProgress(shown, 'paused'), 40);
+  for (let expected = 41; expected <= 99; expected += 1) {
+    shown = advanceEstimatedProgress(shown, 'running');
+    assert.equal(shown, expected);
+  }
+  assert.equal(advanceEstimatedProgress(shown, 'running'), 99);
+  assert.equal(advanceEstimatedProgress(shown, 'completed'), 100);
+  assert.equal(advanceEstimatedProgress(100, 'completed'), 100);
+  assert.equal(estimatedProgressDelay(10, 40, 'running'), 30);
+  assert.equal(estimatedProgressDelay(40, 40, 'running'), 1_500);
+  assert.equal(estimatedProgressDelay(96, 40, 'running'), 10_000);
+  assert.equal(estimatedProgressDelay(40, 100, 'completed'), 30);
+  assert.equal(estimatedProgressDelay(40, 40, 'paused'), null);
+  assert.equal(estimatedProgressDelay(99, 40, 'running'), null);
+});
+test('persisted idle progress survives reload and a completed stage reaches 100 before the scan ends', () => {
+  for (const status of ['paused', 'failed', 'cancelled']) {
+    assert.equal(initialEstimatedProgress(50, status), 50);
+  }
+  assert.equal(initialEstimatedProgress(50, 'running'), 0);
+  assert.equal(currentStageProgressStatus('running', 'completed'), 'completed');
+  assert.equal(currentStageProgressStatus('running', 'skipped'), 'completed');
+  assert.equal(currentStageProgressStatus('paused', 'running'), 'paused');
+  assert.equal(estimatedProgressDelay(99, 100, currentStageProgressStatus('running', 'completed')), 30);
+  assert.equal(advanceEstimatedProgress(99, currentStageProgressStatus('running', 'completed')), 100);
+});
+test('paused scan restores its previous estimate when durable progress remains zero', () => {
+  assert.equal(initialEstimatedProgress(0, 'running', 4), 4);
+  assert.equal(initialEstimatedProgress(0, 'paused', 4), 4);
+  assert.equal(initialEstimatedProgress(50, 'failed', 4), 50);
+});
 test('Scope elapsed clock advances each second across dialog close and cancels on terminal status', () => {
   let now = 0;
   let scheduled;
@@ -417,6 +475,14 @@ test('completed validation does not imply a report draft or completed chaining',
   assert.equal(displayStageStatus(scan, 'Report', 'absent'), 'not_created');
   assert.equal(displayStageStatus(scan, 'Report', 'present'), 'completed');
 });
+test('Report stage shows its running and completed state without reloading drafts', () => {
+  const running = { ...demoSnapshot(), stage: 'Report', status: 'running',
+    stage_statuses: { Validation: 'completed', Report: 'running' } };
+  assert.equal(displayStageStatus(running, 'Report', 'absent'), 'running');
+  const finished = applyEvent(running, event(8, { type: 'stage.status.changed',
+    payload: { stage: 'Report', stage_statuses: { Validation: 'completed', Report: 'completed' } } }));
+  assert.equal(displayStageStatus(finished, 'Report', 'absent'), 'completed');
+});
 test('snapshot validates the synthetic scan independently', () => {
   const data = demoSnapshot();
   assert.deepEqual(parseSnapshot(data, DEMO_SCAN), data);
@@ -479,6 +545,36 @@ test('stage, scan status, and finding changes update the snapshot', () => {
   next = applyEvent(next,event(9,{type:'scan.status.changed',payload:{status:'completed'}})); assert.equal(next.status,'completed');
   next = applyEvent(next,event(10,{type:'finding.updated',payload:{...next.findings[0],status:'confirmed'}}));
   assert.equal(next.findings.length,demoSnapshot().findings.length); assert.equal(next.findings.find(f=>f.id==='F-0042').status,'confirmed');
+});
+test('same-stage completion updates recorded status without resetting progress', () => {
+  const current = { ...demoSnapshot(), stage: 'Recon', status: 'running', progress: 45,
+    stage_statuses: { Scope: 'completed', Recon: 'running' } };
+  const changed = parseEvent(event(8, { type: 'stage.status.changed',
+    payload: { stage: 'Recon', stage_statuses: { Scope: 'completed', Recon: 'completed' } } }), DEMO_SCAN);
+  assert.ok(changed);
+  const next = applyEvent(current, changed);
+  assert.equal(displayStageStatus(next, 'Recon', 'absent'), 'completed');
+  assert.equal(next.progress, 45);
+});
+test('live stage status events preserve completed skipped failed and cancelled states', () => {
+  for (const [stage, terminal] of [
+    ['Recon', 'completed'], ['Attack', 'failed'], ['Chaining', 'skipped'],
+    ['Validation', 'completed'], ['Report', 'cancelled'],
+  ]) {
+    const current = { ...demoSnapshot(), stage, status: 'running',
+      stage_statuses: { [stage]: 'running' } };
+    const changed = parseEvent(event(8, { type: 'stage.status.changed',
+      payload: { stage, stage_statuses: { [stage]: terminal } } }), DEMO_SCAN);
+    assert.ok(changed);
+    const next = applyEvent(current, changed);
+    assert.equal(next.stage_statuses[stage], terminal);
+    if (stage !== 'Report') assert.equal(displayStageStatus(next, stage, 'absent'), terminal);
+  }
+  const cancelled = { ...demoSnapshot(), status: 'cancelled',
+    stage_statuses: { Recon: 'cancelled' } };
+  assert.ok(parseSnapshot(cancelled, DEMO_SCAN));
+  assert.equal(parseEvent(event(8, { type: 'stage.status.changed',
+    payload: { stage: 'Recon', stage_statuses: { Recon: 'not-a-status' } } }), DEMO_SCAN), null);
 });
 test('log retention is bounded while event cursor keeps advancing', () => {
   let next = demoSnapshot();

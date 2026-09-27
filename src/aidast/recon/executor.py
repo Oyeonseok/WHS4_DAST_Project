@@ -260,6 +260,11 @@ class ReconExecutor:
         blocked_ids: set[str] = set()
         failed_count = 0
         pending = list(tasks)
+        for task in pending:
+            dbmod.log_pipeline_run(
+                self.conn, scan_id=self.scan_id, task_id=task.task_id,
+                stage=task.task_type.value, status="pending",
+            )
         while pending:
             progressed = False
             for task in list(pending):
@@ -289,6 +294,11 @@ class ReconExecutor:
                         and self.prioritize_discovered_assets_first
                     )
                     if self._spawned_tasks:
+                        for spawned in self._spawned_tasks:
+                            dbmod.log_pipeline_run(
+                                self.conn, scan_id=self.scan_id, task_id=spawned.task_id,
+                                stage=spawned.task_type.value, status="pending",
+                            )
                         if prioritize_spawned:
                             # Keep any remaining wildcard discovery tasks at
                             # the front, then run their discovered-host chains
