@@ -29,7 +29,7 @@ import {
   type ExecutionProfileId,
   type ScopeExecutionRequirements,
 } from './lib/scan';
-import { scopeCollectionRequest } from './lib/scope';
+import { programRegistrationUrlError, scopeCollectionRequest } from './lib/scope';
 import { activityHeightBounds, clampPanelWidth, panelBounds } from './lib/layout';
 import { filterFindings, findingVerdict, knownSourceCase, parseValidationCases, reportCaseForFinding, type FindingVerdict, type ValidationCase, type ValidationStatus } from './lib/validation';
 import { ResizeHandle } from './components/ResizeHandle';
@@ -745,6 +745,8 @@ export default function App() {
   }, [selectedScope?.scope_id, scanProfile]);
   const registerProgram = async () => {
     if (!scopeProgramUrl.trim()) return;
+    const urlError = programRegistrationUrlError(scopeProgramUrl);
+    if (urlError) { setScopeError(tr(urlError)); return; }
     setScopeSubmitting(true); setScopeError('');
     try {
       const base = import.meta.env.VITE_API_BASE_URL || location.origin;
