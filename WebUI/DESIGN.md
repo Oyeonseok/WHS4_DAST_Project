@@ -128,6 +128,8 @@ Spacing follows a 4px base with practical steps of 4, 8, 12, 16, 20, 24,
 - **States**: default, hover where actionable, focus, empty, error.
 - **Accessibility**: semantic section headings and visible focus.
 - **Layout**: vertical stack; the document owns scrolling.
+- **Scan controls**: when the main content rail narrows, the scan heading
+  puts controls below the title and wraps buttons as whole words.
 
 ### Status badge
 
@@ -167,6 +169,20 @@ Spacing follows a 4px base with practical steps of 4, 8, 12, 16, 20, 24,
   `작업 중 · N초` row and status badge update once per second. Persisted backend
   events remain the authoritative phase history; the timer only fills quiet
   intervals so the operator can see that work is still running.
+
+### Agent work board
+
+- **Structure**: six named roles (main, recon, attack, chaining, validation,
+  report), each showing the latest recorded action or an explicit waiting state.
+- **States**: waiting before its first event, active only for a started event
+  in the current running stage, and last recorded work otherwise.
+- **Source**: durable, allowlisted execution events; never guess an LLM action
+  from elapsed time. Recon tool events may update the Recon role between
+  agent milestones.
+- **Layout**: compact responsive grid within the scan panel and progress
+  dialog; text wraps within each card without a separate scroll region.
+- **Accessibility**: role and state are plain text; the latest step is
+  announced by the scan panel's status line.
 
 ### Log entry
 

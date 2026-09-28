@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import hashlib
 import json
+import os
 import sqlite3
 import tempfile
 import unittest
@@ -14,6 +15,7 @@ from unittest.mock import patch
 from aidast.cli import _parser, _write_recon_handoff, main
 from aidast.paths import RESULT_ROOT
 from aidast.recon import db
+from aidast.web.projection import DashboardProjector
 
 
 class PipelineCliTests(unittest.TestCase):
@@ -62,7 +64,17 @@ class PipelineCliTests(unittest.TestCase):
                 return SimpleNamespace(conn=conn, scan_id=kwargs["scan_id"], run=lambda tasks: None)
 
             stdout = io.StringIO()
+            observed_during_planning = []
+
+            def plan_recon(*, scope_id, scope_markdown, allowed_targets):
+                observed_during_planning.extend(
+                    DashboardProjector(root).stored_events_after(scan_id, 0)
+                )
+                return SimpleNamespace(plan_id="fixture", targets=[])
+
+            scan_id = "scan_" + "a" * 32
             with (
+                patch.dict(os.environ, {"AIDAST_RESULT_ROOT": str(root)}),
                 patch("aidast.cli.resolve_scope_directory", return_value=program_dir),
                 patch("aidast.cli.ScopeCoordinator") as coordinator,
                 patch("aidast.cli.CodexMainAgent") as planner,
@@ -79,7 +91,7 @@ class PipelineCliTests(unittest.TestCase):
                 redirect_stdout(stdout),
             ):
                 coordinator.return_value.load_approved_scope.return_value = (scope, "scope fixture")
-                planner.return_value.create_recon_plan.return_value = SimpleNamespace(plan_id="fixture", targets=[])
+                planner.return_value.create_recon_plan.side_effect = plan_recon
                 planner.return_value.create_target_policies.return_value = {}
                 recon.return_value.create_tasks.return_value = []
                 review.return_value.review.return_value.model_dump_json.return_value = "{}"
@@ -96,10 +108,34 @@ class PipelineCliTests(unittest.TestCase):
                 )
                 result = main([
                     "run", "https://example.test/program", "--all-targets",
+                    "--scan-id", scan_id,
                     "--run-root", str(root / "Runs"),
                     "--attack-output-root", str(root / "AttackRuns"),
                 ])
             self.assertEqual(result, 0)
+            progress = [
+                event for event in DashboardProjector(root).stored_events_after(scan_id, 0)
+                if event["payload"].get("message_code") == "agent.work"
+            ]
+            self.assertIn(("main", "recon_plan", "started"), [
+                (event["payload"]["message_params"]["agent"],
+                 event["payload"]["message_params"]["step"],
+                 event["payload"]["message_params"]["state"])
+                for event in observed_during_planning
+                if event["payload"].get("message_code") == "agent.work"
+            ])
+            self.assertIn(("recon", "execute", "started"), [
+                (event["payload"]["message_params"]["agent"],
+                 event["payload"]["message_params"]["step"],
+                 event["payload"]["message_params"]["state"])
+                for event in progress
+            ])
+            self.assertIn(("attack", "execute", "started"), [
+                (event["payload"]["message_params"]["agent"],
+                 event["payload"]["message_params"]["step"],
+                 event["payload"]["message_params"]["state"])
+                for event in progress
+            ])
             self.assertIn("Legacy Attack plan saved:", stdout.getvalue())
             database, = (root / "AttackRuns").glob("*/*/scan_*/legacy/Attack.db")
             self.assertEqual(database.relative_to(root / "AttackRuns").parts[:2], ("example-test", "program"))
