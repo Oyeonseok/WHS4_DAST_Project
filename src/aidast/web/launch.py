@@ -833,12 +833,23 @@ class ScanLaunchManager:
             for event in events
             if event["type"] == "log.appended"
         ]
+        progress = next(
+            (
+                event["payload"]["message_params"]["progress"]
+                for event in reversed(events)
+                if event["type"] == "log.appended"
+                and event["payload"].get("message_code") == "agent.work"
+                and event["payload"].get("stage") == "Recon"
+                and type(event["payload"].get("message_params", {}).get("progress")) is int
+            ),
+            0,
+        )
         return {
             "version": 1,
             "scan_id": scan_id,
             "status": job.status,
             "stage": "Recon" if job.status != "pending" else "Scope",
-            "progress": 0,
+            "progress": progress if job.status == "running" else 0,
             "activity": "Preparing Recon" if job.status == "running" else None,
             "requests": 0,
             "budget": job.max_requests,

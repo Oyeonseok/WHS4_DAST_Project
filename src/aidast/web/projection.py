@@ -468,7 +468,11 @@ class DashboardProjector:
         if current is not None and current["status"] in {"completed", "skipped"}:
             progress = 100
         elif task_total:
-            progress = min(99, round(task_done / task_total * 100))
+            # Recon still tags observations, reviews results and exports its
+            # surface after the last network task. Reserve room for that work.
+            ceiling = 75 if stage_name == "Recon" else 95
+            share = 75 if stage_name == "Recon" else 100
+            progress = min(ceiling, round(task_done / task_total * share))
         else:
             progress = 0
 
@@ -682,6 +686,7 @@ class DashboardProjector:
         """Append a pre-projection event whose payload is already sanitized."""
         self.validate_scan_id(scan_id)
         with self._lock, closing(sqlite3.connect(self.event_database)) as conn, conn:
+            conn.execute("BEGIN IMMEDIATE")
             self._append(
                 conn,
                 scan_id=scan_id,
@@ -744,6 +749,18 @@ class DashboardProjector:
                 },
             )
 
+        if state["stage"] == "Recon" and state["status"] == "running":
+            work_row = event_conn.execute(
+                """SELECT json_extract(payload_json,'$.message_params.progress')
+                FROM web_events WHERE scan_id=? AND event_type='log.appended'
+                AND json_extract(payload_json,'$.message_code')='agent.work'
+                AND json_extract(payload_json,'$.stage')='Recon'
+                ORDER BY event_id DESC LIMIT 1""",
+                (scan_id,),
+            ).fetchone()
+            if work_row and type(work_row[0]) is int and 0 <= work_row[0] <= 98:
+                state["progress"] = max(state["progress"], work_row[0])
+
         previous_row = event_conn.execute(
             "SELECT state_json FROM web_projection_state WHERE scan_id=?", (scan_id,)
         ).fetchone()
@@ -799,6 +816,7 @@ class DashboardProjector:
                 state, audits = self._read_state(source, scan_id)
             with closing(sqlite3.connect(self.event_database)) as events, events:
                 events.row_factory = sqlite3.Row
+                events.execute("BEGIN IMMEDIATE")
                 self._sync(events, scan_id, state, audits)
                 last_event_id = int(
                     events.execute(

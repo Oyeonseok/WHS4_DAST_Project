@@ -179,6 +179,18 @@ test('structured scan log metadata survives event parsing and stream merging', (
   assert.ok(parsed);
   const next = applyEvent(demoSnapshot(), parsed);
   assert.equal(mergeActivityLogs(next.logs, []).at(-1).message_code, 'pipeline.started');
+  const work = parseEvent(event(9, {
+    payload: {
+      stage: 'Recon', level: 'info', message: 'Agent work',
+      message_code: 'agent.work',
+      message_params: { agent: 'main', step: 'recon_plan', state: 'started', progress: 7 },
+    },
+  }), DEMO_SCAN);
+  assert.ok(work);
+  const recorded = applyEvent(next, work);
+  assert.deepEqual(recorded.logs.at(-1).message_params, {
+    agent: 'main', step: 'recon_plan', state: 'started', progress: 7,
+  });
 });
 test('recon history pages preserve every URL event and reject invalid cursors', async () => {
   const { parseReconActivityPage, mergeReconActivityLogs } = await import('../src/lib/events.ts');
@@ -266,8 +278,8 @@ test('estimated progress advances one percent per tick and stops at real complet
   assert.equal(advanceEstimatedProgress(shown, 'completed'), 100);
   assert.equal(advanceEstimatedProgress(100, 'completed'), 100);
   assert.equal(estimatedProgressDelay(10, 40, 'running'), 30);
-  assert.equal(estimatedProgressDelay(40, 40, 'running'), 1_500);
-  assert.equal(estimatedProgressDelay(96, 40, 'running'), 10_000);
+  assert.equal(estimatedProgressDelay(40, 40, 'running'), null);
+  assert.equal(estimatedProgressDelay(96, 40, 'running'), null);
   assert.equal(estimatedProgressDelay(40, 100, 'completed'), 30);
   assert.equal(estimatedProgressDelay(40, 40, 'paused'), null);
   assert.equal(estimatedProgressDelay(99, 40, 'running'), null);
@@ -276,17 +288,19 @@ test('persisted idle progress survives reload and a completed stage reaches 100 
   for (const status of ['paused', 'failed', 'cancelled']) {
     assert.equal(initialEstimatedProgress(50, status), 50);
   }
-  assert.equal(initialEstimatedProgress(50, 'running'), 0);
+  assert.equal(initialEstimatedProgress(50, 'running'), 50);
   assert.equal(currentStageProgressStatus('running', 'completed'), 'completed');
   assert.equal(currentStageProgressStatus('running', 'skipped'), 'completed');
   assert.equal(currentStageProgressStatus('paused', 'running'), 'paused');
   assert.equal(estimatedProgressDelay(99, 100, currentStageProgressStatus('running', 'completed')), 30);
   assert.equal(advanceEstimatedProgress(99, currentStageProgressStatus('running', 'completed')), 100);
 });
-test('paused scan restores its previous estimate when durable progress remains zero', () => {
-  assert.equal(initialEstimatedProgress(0, 'running', 4), 4);
-  assert.equal(initialEstimatedProgress(0, 'paused', 4), 4);
-  assert.equal(initialEstimatedProgress(50, 'failed', 4), 50);
+test('progress never outruns the most recently observed task milestone', () => {
+  assert.equal(initialEstimatedProgress(0, 'running'), 0);
+  assert.equal(initialEstimatedProgress(0, 'paused'), 0);
+  assert.equal(estimatedProgressDelay(74, 75, 'running'), 30);
+  assert.equal(estimatedProgressDelay(75, 75, 'running'), null);
+  assert.equal(initialEstimatedProgress(50, 'failed'), 50);
 });
 test('Scope elapsed clock advances each second across dialog close and cancels on terminal status', () => {
   let now = 0;

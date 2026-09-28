@@ -19,7 +19,7 @@ import {
   type ScopeActivityEvent,
 } from './lib/activity';
 import { displayStageStatus, mergeReconActivityLogs, parseReconActivityPage, reconDiscoveries, stages, type Finding, type Log, type ReportDraftStatus, type Snapshot } from './lib/events';
-import { localizeActivityMessage, localizeAuditEventType, reconActivityPurpose } from './lib/activityMessages';
+import { agentNames, agentNamesEn, agentOrder, localizeActivityMessage, localizeAuditEventType, reconActivityPurpose } from './lib/activityMessages';
 import { auditLevel, readAuditAcknowledgements, saveAuditAcknowledgements, type AuditEntry } from './lib/audit';
 import { initialLanguage, translate, type Language } from './lib/i18n';
 import {
@@ -143,15 +143,12 @@ function Pipeline({ snapshot, language, reportDraft }: { snapshot: Snapshot; lan
     return <li key={stage} className={done ? 'done' : status === 'running' ? 'current' : status === 'skipped' ? 'skipped' : ''}>
       <span className="stage-number">{done ? <Icon name="check" size={13}/> : String(index + 1).padStart(2,'0')}</span>
       <strong>{translate(language, stage)}</strong>
-      <small>{status === 'running' && stage === snapshot.stage ? `${translate(language, 'Estimated')} ${snapshot.progress}% · ${labels[status]}` : labels[status] || status}</small>
+      <small>{status === 'running' && stage === snapshot.stage ? `${snapshot.progress}% · ${labels[status]}` : labels[status] || status}</small>
     </li>;
   })}</ol>;
 }
 function useEstimatedProgress(identity: string, actual: number, status: string): number {
-  const storageKey = `aidast:estimated-progress:${identity}`;
-  const stored = identity ? sessionStorage.getItem(storageKey) : null;
-  const saved = stored !== null && /^(?:0|[1-9]\d?)$/.test(stored) ? Number(stored) : 0;
-  const baseline = initialEstimatedProgress(actual, status, saved);
+  const baseline = initialEstimatedProgress(actual, status);
   const [state, setState] = useState(() => ({ identity, value: baseline, status }));
   const shown = state.identity === identity ? state.value : baseline;
   useEffect(() => {
@@ -159,14 +156,9 @@ function useEstimatedProgress(identity: string, actual: number, status: string):
       setState({ identity, value: baseline, status });
       return;
     }
-    if ((state.status === 'failed' || state.status === 'cancelled') && status === 'running') {
-      sessionStorage.removeItem(storageKey);
-      setState({ identity, value: 0, status });
-      return;
-    }
     const mode = status === 'running' ? 'running' : status === 'completed' ? 'completed' : 'paused';
-    if (mode === 'paused') {
-      if (state.status !== status || actual > shown) setState({ identity, value: Math.max(shown, actual), status });
+    if (shown > baseline || (mode === 'paused' && shown !== baseline)) {
+      setState({ identity, value: baseline, status });
       return;
     }
     const delay = estimatedProgressDelay(shown, actual, mode);
@@ -176,11 +168,10 @@ function useEstimatedProgress(identity: string, actual: number, status: string):
     }
     const next = advanceEstimatedProgress(shown, mode);
     const timer = window.setTimeout(() => {
-      if (identity && next < 100) sessionStorage.setItem(storageKey, String(next));
       setState({ identity, value: next, status });
     }, delay);
     return () => window.clearTimeout(timer);
-  }, [identity, actual, status, state.identity, state.status, shown, baseline, storageKey]);
+  }, [identity, actual, status, state.identity, state.status, shown, baseline]);
   return shown;
 }
 function download(name: string, content: string) {
@@ -500,12 +491,13 @@ export default function App() {
       try {
         const base = import.meta.env.VITE_API_BASE_URL || location.origin;
         const response = await fetch(new URL(`/api/v1/scans/${encodeURIComponent(scanId)}/recon-activity`, base), { signal: abort.signal, credentials: 'same-origin', cache: 'no-store' });
-        if (!response.ok) throw new Error('Could not load recon history.');
+        if (!response.ok) throw new Error(response.status === 404
+          ? tr('Recon scan not found') : `${tr('Recon history server error')} (HTTP ${response.status})`);
         const page = parseReconActivityPage(await response.json(), scanId);
-        if (!page) throw new Error('Could not load recon history.');
+        if (!page) throw new Error(tr('Recon history format error'));
         if (!abort.signal.aborted) setReconHistory({ scanId, logs: page.logs, nextBefore: page.nextBefore });
-      } catch {
-        if (!abort.signal.aborted) setReconError('Could not load recon history.');
+      } catch (e) {
+        if (!abort.signal.aborted) setReconError(e instanceof Error ? e.message : tr('Recon history connection error'));
       } finally {
         if (!abort.signal.aborted) setReconLoading(false);
       }
@@ -523,14 +515,15 @@ export default function App() {
       const url = new URL(`/api/v1/scans/${encodeURIComponent(scanId)}/recon-activity`, base);
       url.searchParams.set('before', String(before));
       const response = await fetch(url, { signal: abort.signal, credentials: 'same-origin', cache: 'no-store' });
-      if (!response.ok) throw new Error('Could not load recon history.');
+      if (!response.ok) throw new Error(response.status === 404
+        ? tr('Recon scan not found') : `${tr('Recon history server error')} (HTTP ${response.status})`);
       const page = parseReconActivityPage(await response.json(), scanId);
-      if (!page || page.logs.some(log => log.id >= before)) throw new Error('Could not load recon history.');
+      if (!page || page.logs.some(log => log.id >= before)) throw new Error(tr('Recon history format error'));
       if (!abort.signal.aborted) setReconHistory(current => current?.scanId === scanId
         ? { scanId, logs: mergeReconActivityLogs(current.logs, page.logs), nextBefore: page.nextBefore }
         : current);
-    } catch {
-      if (!abort.signal.aborted) setReconError('Could not load recon history.');
+    } catch (e) {
+      if (!abort.signal.aborted) setReconError(e instanceof Error ? e.message : tr('Recon history connection error'));
     } finally {
       if (!abort.signal.aborted) setReconLoading(false);
     }
@@ -1027,12 +1020,33 @@ export default function App() {
   const latestReconPhase = latestReconActivity?.message_params?.phase;
   const latestReconState = latestReconActivity?.message_params?.state;
   const manualLoginNotice = <ManualLoginNotice {...manualLogin} language={language}/>;
+  const workLogs = snapshot?.logs.filter(log => log.message_code === 'agent.work') ?? [];
+  const currentWork = [...(snapshot?.logs ?? [])].reverse().find(log =>
+    log.stage === snapshot?.stage && (log.message_code === 'agent.work' || log.message_code === 'recon.activity'));
+  const agentBoard = <section className="scan-agent-board" aria-label={tk("에이전트별 실제 작업", "Agent work by role")}>
+    <h3>{tk("에이전트별 작업", "Agent work")}</h3>
+    <div className="scan-agent-grid">{agentOrder.map(agent => {
+      const last = [...workLogs].reverse().find(log => log.message_params?.agent === agent);
+      const activity = agent === 'recon' && latestReconActivity && (!last || latestReconActivity.id > last.id)
+        ? latestReconActivity : last;
+      const name = language === 'ko' ? agentNames[agent] : agentNamesEn[agent];
+      const message = activity ? localizeActivityMessage(language, activity) : '';
+      const running = snapshot?.status === 'running' && activity?.message_params?.state === 'started'
+        && (agent === 'main' ? snapshot.stage === 'Recon' : activity?.stage === snapshot.stage);
+      return <article key={agent} className={running ? 'is-active' : ''}>
+        <div><strong>{name}</strong>
+          <small>{running ? tk("진행 중", "In progress") : activity ? tk("최근 작업", "Last work") : tk("대기", "Waiting")}</small></div>
+        <p>{activity ? activity.message_code === 'agent.work' && message.startsWith(`${name} · `)
+          ? message.slice(name.length + 3) : message : tk("앞 단계가 끝나면 시작합니다.", "Starts after the preceding stage.")}</p>
+      </article>;
+    })}</div>
+  </section>;
   const scanControls = !demo && (snapshot?.status === 'running' || snapshot?.status === 'paused') ? <>
     <button className="secondary-button" onClick={() => void changePause(snapshot.status === 'running' ? 'pause' : 'continue')} disabled={!!pauseBusy || cancelling}>{pauseBusy === 'pause' ? tk("일시정지 처리 중…", "Pausing…") : pauseBusy === 'continue' ? tk("계속 처리 중…", "Continuing…") : snapshot.status === 'running' ? tk("일시정지", "Pause") : tk("계속", "Continue")}</button>
     <button className="secondary-button" onClick={() => void cancelScan()} disabled={cancelling || !!pauseBusy}>{cancelPhase === 'requesting' ? tk("취소 요청 전달 중…", "Sending cancellation request…") : cancelling ? tk("취소 확인 중…", "Confirming cancellation…") : tk("스캔 취소", "Cancel scan")}</button>
   </> : null;
   const scanPanel = <Panel className="scan-summary-panel" title={demo ? tr('Local lab · API assessment') : scanTargetLabel} subtitle={demo ? tr('Synthetic fixture · isolated from program inventory') : `${snapshot?.program_name ? `${snapshot.program_name} · ` : ''}${scanId}`} action={<div className="scan-panel-actions"><Badge tone={snapshot?.status === 'failed' ? 'critical' : snapshot?.status === 'completed' ? 'success' : 'warning'}><span className="dot"/>{cancelling ? tk("취소 처리 중", "Cancelling") : tr(snapshot?.status || state)}</Badge>{scanControls}{!demo && retryAction === 'resume' && <button className="secondary-button" onClick={resumeScan} disabled={resuming}>{resuming ? tk("재실행 요청 중…", "Requesting rerun…") : tk("실패 단계부터 재실행", "Rerun from failed stage")}</button>}{!demo && retryAction === 'rescan' && <button className="secondary-button" onClick={openRepeatScan}>{tk("정찰부터 다시 스캔", "Rescan from recon")}</button>}{!demo && scanId && <button className="secondary-button" onClick={() => setModal('scan-progress')}>{snapshot?.stage === 'Recon' ? tk("도구 작업·발견 URL 보기", "View tools and URLs") : tk("진행 창 열기", "Open progress window")}</button>}</div>}>
-    {snapshot ? <>{manualLoginNotice}<Pipeline snapshot={{ ...snapshot, progress: scanProgress }} language={language} reportDraft={reportDraftStatus}/>{cancelling && <p className="scan-stop-status" role="status">{cancelPhase === 'requesting' ? tk("취소 요청을 서버에 전달하고 있습니다.", "Sending the cancellation request to the server.") : tk("취소 요청을 접수했습니다. 실행 프로세스 종료와 저장된 상태 갱신을 확인하고 있습니다.", "Cancellation requested. Checking the process exit and saved status.")}</p>}{snapshot.status === 'paused' && !cancelling && <p className="scan-stop-status" role="status">{tk("스캔 일시정지 중 · 같은 실행을 이어가려면 ‘계속’을 누르세요.", "Scan paused. Select Continue to resume the same run.")}</p>}{snapshot.status === 'cancelled' && <p className="scan-stop-status is-done" role="status">{tk("스캔 취소 완료 · 실행 프로세스가 종료됐고 스캔 상태가 취소됨으로 저장됐습니다.", "Scan cancelled. The process exited and the cancelled status was saved.")}</p>}<div className="scan-stats"><div><span>{tr('Scan ID')}</span><strong className="mono">{snapshot.scan_id}</strong></div><div><span>{tr('Endpoints')}</span><strong>{snapshot.endpoints}</strong></div><div><span>{tk('기록된 HTTP 요청', 'Recorded HTTP requests')}</span><strong>{snapshot.requests.toLocaleString()}</strong>{snapshot.per_target_budget != null && <small>{tk('대상별 상한', 'Per-target limit')} {snapshot.per_target_budget.toLocaleString()}</small>}</div><div className="progress-stat"><span>{tr(snapshot.stage)} {tr('Estimated progress')} <b>{scanProgress}%</b></span><progress max="100" value={scanProgress} aria-label={`${tr(snapshot.stage)} ${tr('Estimated progress')}`}/></div></div>{snapshot.service_endpoints !== undefined && <p className="scan-recon-summary"><strong>{tk("서비스 URL 후보", "Candidate service URLs")}</strong> {tk(`${snapshot.service_endpoints}개`, `${snapshot.service_endpoints} candidates`)} <span>{tk(`· 실제 HTTP 응답 관측 ${snapshot.live_endpoints ?? 0}개`, `· ${snapshot.live_endpoints ?? 0} observed HTTP responses`)}</span></p>}{snapshot.stage === 'Recon' && <p className="scan-recon-summary"><strong>{tk("최근 정찰 작업", "Latest recon task")}</strong> {latestReconActivity ? localizeActivityMessage(language, latestReconActivity) : tk('이 실행에는 도구별 정찰 기록이 아직 없습니다.', 'This run has no tool-level recon records yet.')}</p>}{resumeError && <p className="form-error" role="alert">{resumeError}</p>}{pauseError && <p className="form-error" role="alert">{pauseError}</p>}{cancelError && <p className="form-error" role="alert">{cancelError}</p>}</> : <Empty title={tr(state === 'offline' ? 'Backend unavailable' : state === 'idle' ? 'No scan selected' : 'Loading scan snapshot')}>{tr(state === 'idle' ? 'Start a scan from an approved Scope to show its snapshot and activity here.' : 'Connect the REST snapshot endpoint to display scan state. Demo data is never substituted in live mode.')}</Empty>}
+    {snapshot ? <>{manualLoginNotice}<Pipeline snapshot={{ ...snapshot, progress: scanProgress }} language={language} reportDraft={reportDraftStatus}/>{!demo && <><p className="scan-current-activity" role="status"><strong>{tk("현재 작업", "Current work")}</strong> {currentWork ? localizeActivityMessage(language, currentWork) : tk("스캔 프로세스를 시작하고 승인된 스코프를 확인하고 있습니다.", "Starting the scan process and checking the approved scope.")}</p>{agentBoard}</>}{cancelling && <p className="scan-stop-status" role="status">{cancelPhase === 'requesting' ? tk("취소 요청을 서버에 전달하고 있습니다.", "Sending the cancellation request to the server.") : tk("취소 요청을 접수했습니다. 실행 프로세스 종료와 저장된 상태 갱신을 확인하고 있습니다.", "Cancellation requested. Checking the process exit and saved status.")}</p>}{snapshot.status === 'paused' && !cancelling && <p className="scan-stop-status" role="status">{tk("스캔 일시정지 중 · 같은 실행을 이어가려면 ‘계속’을 누르세요.", "Scan paused. Select Continue to resume the same run.")}</p>}{snapshot.status === 'cancelled' && <p className="scan-stop-status is-done" role="status">{tk("스캔 취소 완료 · 실행 프로세스가 종료됐고 스캔 상태가 취소됨으로 저장됐습니다.", "Scan cancelled. The process exited and the cancelled status was saved.")}</p>}<div className="scan-stats"><div><span>{tr('Scan ID')}</span><strong className="mono">{snapshot.scan_id}</strong></div><div><span>{tr('Endpoints')}</span><strong>{snapshot.endpoints}</strong></div><div><span>{tk('기록된 HTTP 요청', 'Recorded HTTP requests')}</span><strong>{snapshot.requests.toLocaleString()}</strong>{snapshot.per_target_budget != null && <small>{tk('대상별 상한', 'Per-target limit')} {snapshot.per_target_budget.toLocaleString()}</small>}</div><div className="progress-stat"><span>{tr(snapshot.stage)} {tr('Estimated progress')} <b>{scanProgress}%</b></span><progress max="100" value={scanProgress} aria-label={`${tr(snapshot.stage)} ${tr('Estimated progress')}`}/></div></div>{snapshot.service_endpoints !== undefined && <p className="scan-recon-summary"><strong>{tk("서비스 URL 후보", "Candidate service URLs")}</strong> {tk(`${snapshot.service_endpoints}개`, `${snapshot.service_endpoints} candidates`)} <span>{tk(`· 실제 HTTP 응답 관측 ${snapshot.live_endpoints ?? 0}개`, `· ${snapshot.live_endpoints ?? 0} observed HTTP responses`)}</span></p>}{snapshot.stage === 'Recon' && <p className="scan-recon-summary"><strong>{tk("최근 정찰 작업", "Latest recon task")}</strong> {latestReconActivity ? localizeActivityMessage(language, latestReconActivity) : tk('이 실행에는 도구별 정찰 기록이 아직 없습니다.', 'This run has no tool-level recon records yet.')}</p>}{resumeError && <p className="form-error" role="alert">{resumeError}</p>}{pauseError && <p className="form-error" role="alert">{pauseError}</p>}{cancelError && <p className="form-error" role="alert">{cancelError}</p>}</> : <Empty title={tr(state === 'offline' ? 'Backend unavailable' : state === 'idle' ? 'No scan selected' : 'Loading scan snapshot')}>{tr(state === 'idle' ? 'Start a scan from an approved Scope to show its snapshot and activity here.' : 'Connect the REST snapshot endpoint to display scan state. Demo data is never substituted in live mode.')}</Empty>}
   </Panel>;
   const scanProgressContent = <div className="scan-progress-dialog">
     {manualLoginNotice}
@@ -1047,6 +1061,7 @@ export default function App() {
     <progress aria-label={tr("Estimated stage progress")} max="100" value={scanProgress}/>
     {cancelling && <p className="scan-stop-status" role="status">{cancelPhase === 'requesting' ? tk("취소 요청을 서버에 전달하고 있습니다.", "Sending the cancellation request to the server.") : tk("취소 요청 접수됨 · 실행 프로세스 종료와 저장된 상태 갱신을 확인하는 중입니다.", "Cancellation requested. Checking that the process exited and the saved status updated.")}</p>}
     {snapshot?.status === 'running' && !cancelling && <p className="scan-progress-working" role="status"><span className="dot"/> {tk(`${tr(snapshot.stage)} 단계 작업 중 · ${formatActivityElapsed(scanElapsedSeconds, language)}`, `${tr(snapshot.stage)} stage running · ${formatActivityElapsed(scanElapsedSeconds, language)}`)}</p>}
+    {!demo && agentBoard}
     {snapshot?.status === 'paused' && !cancelling && <p className="scan-stop-status" role="status">{tk("스캔 일시정지 중 · 작업을 멈춘 상태입니다. 같은 실행을 이어가려면 ‘계속’을 누르세요.", "Scan paused. Work is stopped. Select Continue to resume this run.")}</p>}
     {snapshot?.status === 'failed' && <p className="scan-progress-failed" role="alert">{retryAction === 'rescan' ? tk(`${tr(snapshot.stage)} 단계에서 스캔이 실패했습니다. 정찰부터 새 스캔을 시작하세요. 아래 활동 기록에서 마지막 오류를 확인할 수 있습니다.`, `Scan failed during ${tr(snapshot.stage)}. Start a new scan from recon. Check the last error in activity below.`) : tk(`${tr(snapshot.stage)} 단계에서 스캔이 실패했습니다. 완료된 정찰 결과를 재사용하고, 실패한 단계의 작업을 새로 생성해 실행합니다. 아래 활동 기록에서 마지막 오류를 확인하세요.`, `Scan failed during ${tr(snapshot.stage)}. Completed recon results are reused and work for the failed stage is recreated. Check the last error in activity below.`)}</p>}
     {snapshot?.status === 'cancelled' && <p className="scan-stop-status is-done" role="status">{tk("스캔 취소 완료 · 실행 프로세스가 종료됐고 스캔 상태가 취소됨으로 저장됐습니다. 다시 검사하려면 새 스캔을 시작하세요.", "Scan cancelled. The process exited and the cancelled status was saved. Start a new scan to test again.")}</p>}
@@ -1063,11 +1078,13 @@ export default function App() {
     {(snapshot?.stage === 'Recon' || reconActivity.length > 0 || reconLoading || !!reconError) && <section className="scan-recon-activity" aria-label={tk("정찰 작업", "Recon tasks")}>
       <h3>{tk("정찰 작업", "Recon tasks")} <small>{tk(`${reconActivity.length}개 기록`, `${reconActivity.length} records`)}</small></h3>
       {latestReconActivity && <div className="scan-recon-current"><p><strong>{latestReconState === 'started' ? tk("진행 중인 도구 작업", "Tool task in progress") : tk("최근 도구 기록", "Latest tool record")}</strong> {localizeActivityMessage(language, latestReconActivity)}</p>{reconActivityPurpose(language, latestReconPhase) && <p>{reconActivityPurpose(language, latestReconPhase)}</p>}</div>}
-      {reconActivity.length > 0 ? <div className="scan-recon-timeline">{reconActivity.map(log => <article key={log.id} className={log.level}><time dateTime={log.time}>{new Date(log.time).toLocaleTimeString('en-GB',{hour12:false})}</time><span>{localizeActivityMessage(language, log)}{log.message_params?.state === 'started' && reconActivityPurpose(language, log.message_params.phase) && <small>{reconActivityPurpose(language, log.message_params.phase)}</small>}</span></article>)}</div> : !reconLoading && <p className="scan-progress-empty">{tk("이 실행에는 도구별 정찰 기록이 없습니다. 새 기록이 도착하면 여기에 표시됩니다.", "This run has no tool-level recon records yet.")}</p>}
+      {reconActivity.length > 0 ? <div className="scan-recon-timeline">{reconActivity.map(log => <article key={log.id} className={log.level}><time dateTime={log.time}>{new Date(log.time).toLocaleTimeString('en-GB',{hour12:false})}</time><span>{localizeActivityMessage(language, log)}{log.message_params?.state === 'started' && reconActivityPurpose(language, log.message_params.phase) && <small>{reconActivityPurpose(language, log.message_params.phase)}</small>}</span></article>)}</div> : !reconLoading && <p className="scan-progress-empty">{snapshot?.status === 'running' && snapshot.stage === 'Recon'
+        ? tr('Recon tools have not started yet. Follow agent work above.')
+        : tr('No tool-level recon records were saved for this scan.')}</p>}
       {(reconLoading || reconError || reconHistory?.scanId === scanId && reconHistory.nextBefore !== null) && <div className="scan-recon-pagination">
         {reconLoading && <span role="status">{tr('Loading recon history…')}</span>}
         {reconError && <span role="alert">{tr(reconError)}</span>}
-        {reconError && reconHistory?.nextBefore === null && <button className="secondary-button" onClick={() => setReconRevision(value => value + 1)}>{tr('Retry loading recon history')}</button>}
+        {reconError && <button className="secondary-button" onClick={() => setReconRevision(value => value + 1)}>{tr('Retry loading recon history')}</button>}
         {reconHistory?.scanId === scanId && reconHistory.nextBefore !== null && <button className="secondary-button" onClick={() => void loadMoreRecon()} disabled={reconLoading}>{tr('Load earlier recon records')}</button>}
       </div>}
     </section>}

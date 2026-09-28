@@ -347,6 +347,8 @@ def create_app(
         try:
             return projector.recon_activity(scan_id, before)
         except ScanNotFoundError:
+            if manager.exists(scan_id):
+                return {"events": [], "next_before": None}
             raise
         except (OSError, sqlite3.Error) as exc:
             raise HTTPException(status_code=503, detail="recon activity projection unavailable") from exc
