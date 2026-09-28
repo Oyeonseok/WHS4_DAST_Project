@@ -142,6 +142,7 @@ const ko: Record<string, string> = {
   'Add the bug bounty program here. Scope extraction, evidence review, and approval stay separate from scan execution.': '버그바운티 프로그램을 등록하세요. 스코프 추출, 증거 검토, 승인은 스캔 실행과 분리됩니다.',
   'Program URL': '프로그램 URL',
   'HTTP URLs cannot be registered. Enter a URL starting with https://.': 'HTTP 주소는 등록할 수 없습니다. https://로 시작하는 URL을 입력하세요.',
+  'program URL must be an absolute HTTPS URL': 'HTTP 주소는 등록할 수 없습니다. https://로 시작하는 URL을 입력하세요.',
   'Program visibility': '프로그램 공개 여부',
   'Public': '공개',
   'Private': '비공개',

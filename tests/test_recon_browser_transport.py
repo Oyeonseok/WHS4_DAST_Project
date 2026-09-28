@@ -48,6 +48,80 @@ class ReconBrowserTransportTests(unittest.TestCase):
             self.assertFalse(_wait_for_manual_login(timeout_seconds=1))
         self.assertIn("자동 진행", output.getvalue())
 
+    def test_dashboard_login_waits_for_browser_token_when_stdin_is_closed(self):
+        probes = 0
+
+        def auth_ready():
+            nonlocal probes
+            probes += 1
+            return probes >= 2
+
+        with patch("sys.stdin", io.StringIO("")):
+            self.assertTrue(_wait_for_manual_login(timeout_seconds=0.5, auth_ready=auth_ready))
+        self.assertGreaterEqual(probes, 2)
+
+    def test_dashboard_login_times_out_without_authentication(self):
+        with patch("sys.stdin", io.StringIO("")):
+            with self.assertRaisesRegex(RuntimeError, "authentication was not detected"):
+                _wait_for_manual_login(timeout_seconds=0.02, auth_ready=lambda: False)
+
+    def test_browser_auth_waits_until_login_form_disappears(self):
+        page = Mock(url=self.policy.asset)
+        page.is_closed.return_value = False
+        page.locator.return_value.count.return_value = 1
+        self.driver.context = Mock(pages=[page])
+        with patch.object(self.driver, "get_auth_headers", return_value={
+            "Authorization": "Bearer header.payload.signature",
+        }), patch.object(self.driver, "_page_indicates_login_required", return_value=False):
+            self.assertFalse(self.driver._browser_auth_ready())
+            page.locator.return_value.count.return_value = 0
+            self.assertTrue(self.driver._browser_auth_ready())
+
+    def test_browser_auth_rejects_other_tab_while_login_tab_is_open(self):
+        home = Mock(url=self.policy.asset)
+        home.is_closed.return_value = False
+        home.locator.return_value.count.return_value = 0
+        login = Mock(url=self.policy.asset)
+        login.is_closed.return_value = False
+        login.locator.return_value.count.return_value = 1
+        self.driver.context = Mock(pages=[home, login])
+        with patch.object(self.driver, "get_auth_headers", return_value={
+            "Authorization": "Bearer header.payload.signature",
+        }), patch.object(self.driver, "_page_indicates_login_required", return_value=False):
+            self.assertFalse(self.driver._browser_auth_ready())
+
+    def test_dashboard_login_does_not_continue_if_final_verification_fails(self):
+        page = Mock(url=self.policy.asset)
+        page.is_closed.return_value = False
+        page.locator.return_value.count.return_value = 1
+        self.driver.context = Mock(pages=[page])
+        with tempfile.TemporaryDirectory() as directory:
+            self.driver.session_config.session_file = str(Path(directory) / "session.json")
+            with patch("sys.stdin", io.StringIO("")), patch.object(
+                self.driver, "_launch_manual_browser"
+            ), patch.object(self.driver, "_attach_manual_browser"), patch.object(
+                self.driver, "_register_authentication_observer"
+            ), patch("aidast.recon.tools.playwright_driver._wait_for_manual_login", return_value=True), patch.object(
+                self.driver, "save_session", return_value=True
+            ), patch.object(self.driver, "get_auth_headers", return_value={
+                "Authorization": "Bearer header.payload.signature",
+            }), patch.object(self.driver, "session_is_valid", return_value=True), patch.object(
+                self.driver, "_page_indicates_login_required", return_value=False
+            ), patch.object(self.driver, "_shutdown_runtime"):
+                with self.assertRaisesRegex(RuntimeError, "browser login could not be verified"):
+                    self.driver.capture_and_start()
+
+    @unittest.skipIf(os.name != "posix", "POSIX file permission check")
+    def test_saved_browser_session_files_are_private(self):
+        context = Mock(pages=[])
+        context.storage_state.return_value = {"cookies": [], "origins": []}
+        self.driver.context = context
+        with tempfile.TemporaryDirectory() as directory:
+            self.driver.session_config.session_file = str(Path(directory) / "session.json")
+            self.assertTrue(self.driver.save_session())
+            self.assertEqual(self.driver.session_path.stat().st_mode & 0o077, 0)
+            self.assertEqual(self.driver.session_storage_path.stat().st_mode & 0o077, 0)
+
     def test_policy_requires_proxy_before_browser_launch(self):
         with self.assertRaisesRegex(ValueError, "requires a proxy"):
             PlaywrightDriver(self.policy.asset, self.config, target_policy=self.policy)
@@ -375,10 +449,10 @@ class ReconBrowserTransportTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             self.driver.session_config.session_file = str(Path(directory) / "session.json")
             self.driver.session_path.write_text("{}")
-            with patch.object(self.driver, "_launch_manual_browser", side_effect=lambda **kwargs: events.append(("launch", kwargs.get("manual_login", False)))), patch.object(
+            with patch("sys.stdin", Mock(isatty=lambda: True)), patch.object(self.driver, "_launch_manual_browser", side_effect=lambda **kwargs: events.append(("launch", kwargs.get("manual_login", False)))), patch.object(
             self.driver, "_attach_manual_browser", side_effect=lambda: events.append(("attach",))
             ), patch.object(self.driver, "_register_authentication_observer", side_effect=lambda: events.append(("auth-observer",))
-            ), patch("aidast.recon.tools.playwright_driver._wait_for_manual_login", side_effect=lambda: events.append(("input",))), patch.object(
+            ), patch("aidast.recon.tools.playwright_driver._wait_for_manual_login", side_effect=lambda **_: events.append(("input",))), patch.object(
             self.driver, "save_session", side_effect=lambda: events.append(("save", self.driver._phase)) or True
             ), patch.object(self.driver, "_register_context_handlers", side_effect=lambda: events.append(("policy",))), patch.object(
             self.driver, "_register_page_handlers", side_effect=lambda current: events.append(("page", current is page))
@@ -406,7 +480,7 @@ class ReconBrowserTransportTests(unittest.TestCase):
                     if observed:
                         self.driver.authentication_endpoints.append(login)
 
-                with patch.object(self.driver, "_launch_manual_browser"), patch.object(
+                with patch("sys.stdin", Mock(isatty=lambda: True)), patch.object(self.driver, "_launch_manual_browser"), patch.object(
                     self.driver, "_attach_manual_browser"
                 ), patch.object(self.driver, "_register_authentication_observer", side_effect=observe), patch(
                     "aidast.recon.tools.playwright_driver._wait_for_manual_login", return_value=True
@@ -719,7 +793,7 @@ class ReconBrowserTransportTests(unittest.TestCase):
     def test_manual_reauthentication_accepts_previously_restored_driver(self):
         self.driver.preauthenticated = True
         self.driver.context = Mock(pages=[])
-        with patch.object(self.driver, "_launch_manual_browser"), patch.object(
+        with patch("sys.stdin", Mock(isatty=lambda: True)), patch.object(self.driver, "_launch_manual_browser"), patch.object(
             self.driver, "_attach_manual_browser"
         ), patch.object(self.driver, "_register_authentication_observer"), patch(
             "aidast.recon.tools.playwright_driver._wait_for_manual_login"
