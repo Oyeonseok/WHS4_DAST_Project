@@ -48,8 +48,22 @@ from aidast.recon.tools.api_secondary_discovery import _http_request
 from aidast.recon.tools.page_identity import canonical_visit_key, screen_fingerprint
 
 
-def _wait_for_manual_login(timeout_seconds: int = 300) -> bool:
-    """Wait for Enter, but allow unattended runs to continue after a timeout."""
+def _wait_for_manual_login(
+    timeout_seconds: float = 300, *, auth_ready: Callable[[], bool] | None = None,
+) -> bool:
+    """Wait for terminal confirmation or detected browser authentication."""
+    try:
+        interactive = sys.stdin.isatty()
+    except (OSError, ValueError, AttributeError):
+        interactive = False
+    if not interactive and auth_ready is not None:
+        print("  [Playwright] 브라우저 로그인 인증 정보를 기다립니다.", flush=True)
+        deadline = time.monotonic() + timeout_seconds
+        while time.monotonic() < deadline:
+            if auth_ready():
+                return True
+            time.sleep(min(0.25, max(0.0, deadline - time.monotonic())))
+        raise RuntimeError("browser authentication was not detected before the login timeout")
     print(f"  로그인 완료 후 Enter (미입력 시 {timeout_seconds // 60}분 후 자동 진행) > ", end="", flush=True)
     if os.name == "nt":
         import msvcrt
@@ -71,10 +85,18 @@ def _wait_for_manual_login(timeout_seconds: int = 300) -> bool:
         print("\n  [Playwright] 대화형 입력을 사용할 수 없어 현재 세션으로 자동 진행합니다.")
         return False
     if ready:
-        sys.stdin.readline()
-        return True
+        return bool(sys.stdin.readline())
     print("\n  [Playwright] 입력 시간 초과: 현재 세션으로 자동 진행합니다.")
     return False
+
+
+def _write_private_session(path: Path, value: object) -> None:
+    """Write browser credentials without exposing newly created files."""
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+    with os.fdopen(os.open(path, flags, 0o600), "w", encoding="utf-8") as handle:
+        if os.name == "posix":
+            os.fchmod(handle.fileno(), 0o600)
+        json.dump(value, handle, ensure_ascii=False, indent=2)
 
 # =========================================================
 # Configuration
@@ -108,6 +130,9 @@ class ManualSessionConfig:
     authentication_endpoint_callback: Callable[
         [tuple[AuthenticationEndpoint, ...]], None
     ] | None = None
+
+    # Dashboard confirmation is operator attestation, not an API auth check.
+    operator_confirmation: Callable[[Callable[[], str | None]], bool] | None = None
 
     # Storage 값을 HTTP Header로 변환
     #
@@ -282,6 +307,7 @@ class PlaywrightDriver:
         # wait. This is enabled only after an explicit or auto-detected auth
         # flow has actually started.
         self._interactive_authentication_enabled = bool(preauthenticated)
+        self._operator_confirmed_login = False
 
         # 외부 Chromium Process
         self._chrome_process: (
@@ -1316,9 +1342,72 @@ class PlaywrightDriver:
         if self.context is not None:
             self.context.on("request", self._observe_authentication_request)
 
+    def _browser_auth_ready(self) -> bool:
+        """Confirm the target has left its login form and exposed auth state."""
+        if self.context is None:
+            return False
+        headers = self.get_auth_headers()
+        authorization = headers.get("Authorization")
+        has_auth = bool(
+            authorization and authorization != self.request_headers.get("Authorization")
+        )
+        if not has_auth and self.session_config.auth_check_url:
+            has_auth = self.session_is_valid()
+        if not has_auth:
+            return False
+        target_page_seen = False
+        for page in self.context.pages:
+            try:
+                if (page.is_closed()
+                        or normalize_origin(page.url) != normalize_origin(self.base_url)):
+                    continue
+                target_page_seen = True
+                if (page.locator("input[type='password']:visible").count() > 0
+                        or self._page_indicates_login_required(page)):
+                    return False
+            except Exception:
+                return False
+        return target_page_seen
+
+    def _manual_login_problem(self) -> str | None:
+        """Check browser readiness without claiming server-side authentication."""
+        if self.context is None:
+            return "browser_unavailable"
+        target_page_seen = False
+        try:
+            # Sync Playwright properties are cached. A protocol round-trip
+            # dispatches navigation/new-tab events before inspecting origins.
+            self.context.cookies()
+            for page in self.context.pages:
+                if page.is_closed() or normalize_origin(page.url) != normalize_origin(self.base_url):
+                    continue
+                if self.target_policy is not None and not self.target_policy.allows_url(page.url):
+                    continue
+                target_page_seen = True
+                if page.locator("input[type='password']:visible").count() > 0:
+                    return "login_form_visible"
+                if self._login_path(page.url):
+                    return "login_form_visible"
+                if self._login_capability_reason(page, None) in {
+                    "visible login form", "visible login control",
+                }:
+                    return "login_form_visible"
+                text = page.locator("body").inner_text(timeout=3000).lower()
+                if any(marker in text for marker in (
+                    "use the invitation code to get access", "invite code is required",
+                    "invitation code is required",
+                )):
+                    return "invite_required"
+                if self._page_indicates_login_required(page):
+                    return "access_required"
+        except Exception:
+            return "browser_unavailable"
+        return None if target_page_seen else "target_page_missing"
+
     def capture_and_start(self) -> None:
         """Log in once and keep the same Chromium context for Recon."""
         self._phase = "login"
+        self._operator_confirmed_login = False
         self.authentication_endpoints.clear()
         try:
             # Keep login direct. Attach CDP only for passive endpoint metadata;
@@ -1327,7 +1416,11 @@ class PlaywrightDriver:
             self._attach_manual_browser()
             self._register_authentication_observer()
             print("  [Playwright] 직접 연결 로그인 창을 열었습니다. 브라우저에서 로그인해주세요.")
-            operator_confirmed = _wait_for_manual_login()
+            dashboard_confirmation = self.session_config.operator_confirmation
+            if dashboard_confirmation is not None:
+                operator_confirmed = dashboard_confirmation(self._manual_login_problem)
+            else:
+                operator_confirmed = _wait_for_manual_login(auth_ready=self._browser_auth_ready)
             if not self.save_session():
                 raise RuntimeError("could not save the target session after manual login")
             headers = self.get_auth_headers()
@@ -1350,17 +1443,29 @@ class PlaywrightDriver:
                     login_form_visible = True
                 if login_form_visible:
                     break
-            verified = bool(
-                operator_confirmed and target_pages and not login_form_visible
-                and headers and self.session_is_valid()
-                and ("Authorization" in headers
-                     or self.session_config.auth_check_url)
-            )
+            if dashboard_confirmation is not None:
+                # Explicit human confirmation permits cookie-only sessions and
+                # does not require a particular API's success or a Bearer token.
+                verified = bool(operator_confirmed and self._manual_login_problem() is None)
+            else:
+                verified = bool(
+                    operator_confirmed and target_pages and not login_form_visible
+                    and headers and self.session_is_valid()
+                    and ("Authorization" in headers
+                         or self.session_config.auth_check_url)
+                )
             if verified:
+                self._operator_confirmed_login = dashboard_confirmation is not None
                 self.automatic_auth_marker_path.write_text("authenticated\n", encoding="utf-8")
                 self._remember_authenticated_state()
             else:
                 self.automatic_auth_marker_path.unlink(missing_ok=True)
+                try:
+                    noninteractive = not sys.stdin.isatty()
+                except (OSError, ValueError, AttributeError):
+                    noninteractive = True
+                if noninteractive:
+                    raise RuntimeError("browser login could not be verified")
             if self.session_config.authentication_endpoint_callback is not None:
                 self.session_config.authentication_endpoint_callback(
                     tuple(self.authentication_endpoints)
@@ -1374,6 +1479,7 @@ class PlaywrightDriver:
             for page in self.context.pages:
                 self._register_page_handlers(page)
         except BaseException:
+            self._operator_confirmed_login = False
             self._shutdown_runtime()
             self._phase = "runtime"
             raise
@@ -1578,17 +1684,11 @@ class PlaywrightDriver:
         checkpoint = self._auth_checkpoint_state
         if checkpoint is None:
             raise RuntimeError("authenticated session recovery point is missing")
-        self.session_path.write_text(
-            json.dumps(checkpoint, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        _write_private_session(self.session_path, checkpoint)
         if self._auth_checkpoint_session_storage is None:
             self.session_storage_path.unlink(missing_ok=True)
         else:
-            self.session_storage_path.write_text(
-                json.dumps(self._auth_checkpoint_session_storage, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
+            _write_private_session(self.session_storage_path, self._auth_checkpoint_session_storage)
         self.restore_runtime(force=True)
         page = self._ensure_page()
         response = page.goto(
@@ -1603,7 +1703,7 @@ class PlaywrightDriver:
         headers = self.get_auth_headers()
         if any(not headers.get(name) for name in self._required_auth_headers):
             raise RuntimeError("authenticated session recovery did not restore credentials")
-        if not self.session_is_valid():
+        if not self._operator_confirmed_login and not self.session_is_valid():
             raise RuntimeError("authenticated session recovery failed validation")
         print("  [Playwright] 인증 상태 소실 감지; 승인된 세션에서 복구 완료")
 
@@ -1775,14 +1875,7 @@ class PlaywrightDriver:
             exist_ok=True,
         )
 
-        self.session_path.write_text(
-            json.dumps(
-                state,
-                ensure_ascii=False,
-                indent=2,
-            ),
-            encoding="utf-8",
-        )
+        _write_private_session(self.session_path, state)
 
         # ---------------------------------------------
         # sessionStorage
@@ -1860,14 +1953,7 @@ class PlaywrightDriver:
 
                 continue
 
-        self.session_storage_path.write_text(
-            json.dumps(
-                session_storage,
-                ensure_ascii=False,
-                indent=2,
-            ),
-            encoding="utf-8",
-        )
+        _write_private_session(self.session_storage_path, session_storage)
 
         print()
         print(
@@ -2093,14 +2179,7 @@ class PlaywrightDriver:
                     exist_ok=True,
                 )
 
-                self.session_path.write_text(
-                    json.dumps(
-                        state,
-                        ensure_ascii=False,
-                        indent=2,
-                    ),
-                    encoding="utf-8",
-                )
+                _write_private_session(self.session_path, state)
 
                 return state
 
@@ -2638,6 +2717,10 @@ class PlaywrightDriver:
             headers = self.get_auth_headers()
             if any(not headers.get(name) for name in self._required_auth_headers):
                 self._restore_authenticated_state()
+
+        if self._operator_confirmed_login:
+            # Individual API status codes cannot revoke operator attestation.
+            return
 
         if self.session_is_valid():
 

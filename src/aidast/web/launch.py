@@ -390,6 +390,7 @@ class ScanLaunchManager:
         self._log(scan_id, "launch.accepted", "Scope", "Scan request accepted after approval verification.", message_code="pipeline.accepted")
         env = os.environ.copy()
         env["AIDAST_RESULT_ROOT"] = str(self.result_root)
+        env["AIDAST_DASHBOARD_MANUAL_LOGIN"] = "1"
         source_root = self.project_root / "src"
         if source_root.is_dir():
             prior = env.get("PYTHONPATH", "")
@@ -442,6 +443,7 @@ class ScanLaunchManager:
         ]
         env = os.environ.copy()
         env["AIDAST_RESULT_ROOT"] = str(self.result_root)
+        env["AIDAST_DASHBOARD_MANUAL_LOGIN"] = "1"
         source_root = self.project_root / "src"
         if source_root.is_dir():
             prior = env.get("PYTHONPATH", "")

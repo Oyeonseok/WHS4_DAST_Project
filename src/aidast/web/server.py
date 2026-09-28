@@ -13,7 +13,9 @@ from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field
 
+from aidast.auth.manual_login import ManualLoginStore
 from aidast.orchestration.scope import CoordinatorError, ScopeCoordinator
 from aidast.paths import RESULT_ROOT
 
@@ -32,6 +34,10 @@ DEFAULT_ORIGINS = (
     "http://127.0.0.1:4173",
     "http://localhost:4173",
 )
+
+
+class ManualLoginConfirmation(BaseModel):
+    request_id: str = Field(pattern=r'^[a-f0-9]{32}$')
 
 
 def create_app(
@@ -57,6 +63,7 @@ def create_app(
     registry = ProgramRegistry(resolved_root)
     workflow = scope_workflow or ScopeWorkflowManager(resolved_root, registry)
     reports = ReportCatalog(resolved_root)
+    manual_logins = ManualLoginStore(resolved_root)
     app.state.launch_manager = manager
     app.state.program_registry = registry
     app.state.scope_workflow = workflow
@@ -287,6 +294,24 @@ def create_app(
             return manager.snapshot(scan_id)
         except (OSError, sqlite3.Error) as exc:
             raise HTTPException(status_code=503, detail="scan projection unavailable") from exc
+
+    @app.get("/api/v1/scans/{scan_id}/manual-login")
+    async def manual_login_status(scan_id: str) -> dict[str, Any]:
+        await snapshot(scan_id)
+        return {"manual_login": manual_logins.read(scan_id)}
+
+    @app.post("/api/v1/scans/{scan_id}/manual-login/confirm")
+    async def confirm_manual_login(
+        scan_id: str, payload: ManualLoginConfirmation, request: Request,
+    ) -> dict[str, Any]:
+        require_same_origin(request)
+        current = await snapshot(scan_id)
+        if current["status"] != "running":
+            raise HTTPException(status_code=409, detail="scan is not running")
+        try:
+            return {"manual_login": manual_logins.confirm(scan_id, payload.request_id)}
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     @app.get("/api/v1/scans/{scan_id}/attack-tasks")
     async def attack_tasks(scan_id: str) -> dict[str, Any]:

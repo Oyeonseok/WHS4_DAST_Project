@@ -190,6 +190,11 @@ class ReconExecutor:
         )
 
     def _diagnostic(self, event: str, **details: object) -> None:
+        if event == "operator_login_confirmed":
+            audit_event(self.conn, scan_id=self.scan_id,
+                        event_type="recon.operator_login_confirmed",
+                        details={"auth_state": "operator_confirmed",
+                                 "target_origin": details.get("target_origin")})
         activity = activity_from_diagnostic(event, details)
         if activity is not None:
             try:

@@ -30,9 +30,12 @@ import {
   type ScopeExecutionRequirements,
 } from './lib/scan';
 import { programRegistrationUrlError, scopeCollectionRequest } from './lib/scope';
+import { apiErrorMessage } from './lib/transport';
 import { activityHeightBounds, clampPanelWidth, panelBounds } from './lib/layout';
 import { filterFindings, findingVerdict, knownSourceCase, parseValidationCases, reportCaseForFinding, type FindingVerdict, type ValidationCase, type ValidationStatus } from './lib/validation';
 import { ResizeHandle } from './components/ResizeHandle';
+import { ManualLoginNotice } from './components/ManualLoginNotice';
+import { useManualLogin } from './hooks/useManualLogin';
 
 const pages = ['Overview', 'Scopes / Programs', 'Scans', 'Findings', 'Validation', 'Reports', 'Audit log', 'Settings'] as const;
 type Page = typeof pages[number];
@@ -316,6 +319,7 @@ export default function App() {
   const [selectedReport, setSelectedReport] = useState<ReportSummary | null>(null);
   const [resultRoot, setResultRoot] = useState(demo ? 'Synthetic demo data (memory)' : '');
   const { snapshot, state, error, refresh } = useScanSocket(scanId);
+  const manualLogin = useManualLogin(scanId, snapshot?.status || '', !demo && !!scanId);
   const currentStageStatus = snapshot?.stage_statuses?.[snapshot.stage];
   const scanProgressStatus = currentStageProgressStatus(snapshot?.status, currentStageStatus);
   const scanProgress = useEstimatedProgress(snapshot ? `${snapshot.scan_id}:${snapshot.stage}` : scanId, snapshot?.progress ?? 0, scanProgressStatus);
@@ -573,13 +577,13 @@ export default function App() {
       load: async signal => {
         const base = import.meta.env.VITE_API_BASE_URL || location.origin;
         const response = await fetch(new URL(`/api/v1/programs/${encodeURIComponent(programId)}/scope-job?after=0`, base), { signal, credentials: 'same-origin', cache: 'no-store' });
-        const body = await response.json() as { job?: Partial<RegisteredProgram>; events?: ScopeActivityEvent[]; detail?: string };
-        if (!response.ok || !body.job) throw new Error(body.detail || `Scope status returned ${response.status}`);
+        const body = await response.json() as { job?: Partial<RegisteredProgram>; events?: ScopeActivityEvent[]; detail?: unknown };
+        if (!response.ok || !body.job) throw new Error(tr(apiErrorMessage(body.detail, `Scope status returned ${response.status}`)));
         let draft: ScopeDraft | undefined;
         if (body.job.scope_status === 'review_required' && modal === 'scope-workflow') {
           const draftResponse = await fetch(new URL(`/api/v1/programs/${encodeURIComponent(programId)}/scope-draft`, base), { signal, credentials: 'same-origin', cache: 'no-store' });
-          const draftBody = await draftResponse.json() as { draft?: ScopeDraft; detail?: string };
-          if (!draftResponse.ok || !draftBody.draft) throw new Error(draftBody.detail || `Scope draft returned ${draftResponse.status}`);
+          const draftBody = await draftResponse.json() as { draft?: ScopeDraft; detail?: unknown };
+          if (!draftResponse.ok || !draftBody.draft) throw new Error(tr(apiErrorMessage(draftBody.detail, `Scope draft returned ${draftResponse.status}`)));
           draft = draftBody.draft;
         }
         return {
@@ -603,8 +607,8 @@ export default function App() {
       try {
         const base = import.meta.env.VITE_API_BASE_URL || location.origin;
         const response = await fetch(new URL(`/api/v1/programs/${encodeURIComponent(workflowProgram.id)}/approved-scope`, base), { signal: abort.signal, credentials: 'same-origin', cache: 'no-store' });
-        const body = await response.json() as { scope?: ScopeDraft; approval?: ScopeApproval; detail?: string };
-        if (!response.ok || !body.scope || !body.approval) throw new Error(body.detail || `Approved Scope returned ${response.status}`);
+        const body = await response.json() as { scope?: ScopeDraft; approval?: ScopeApproval; detail?: unknown };
+        if (!response.ok || !body.scope || !body.approval) throw new Error(tr(apiErrorMessage(body.detail, `Approved Scope returned ${response.status}`)));
         setScopeDraft(body.scope);
         setScopeApproval(body.approval);
         setScopeWorkflowError('');
@@ -716,12 +720,12 @@ export default function App() {
       try {
         const base = import.meta.env.VITE_API_BASE_URL || location.origin;
         const response = await fetch(new URL(`/api/v1/scopes/${encodeURIComponent(catalogScopeId)}`, base), { signal: abort.signal, credentials: 'same-origin', cache: 'no-store' });
-        const body = await response.json() as { scope?: ScopeDraft; approval?: ScopeApproval; detail?: string };
+        const body = await response.json() as { scope?: ScopeDraft; approval?: ScopeApproval; detail?: unknown };
         if (response.status === 404 && body.detail === 'Not Found') {
           setCatalogScopeSummaryOnly(true);
           return;
         }
-        if (!response.ok || !body.scope || !body.approval) throw new Error(body.detail || `Scope detail returned ${response.status}`);
+        if (!response.ok || !body.scope || !body.approval) throw new Error(tr(apiErrorMessage(body.detail, `Scope detail returned ${response.status}`)));
         setCatalogScopeDraft(body.scope);
         setCatalogScopeApproval(body.approval);
       } catch (error) { if (!abort.signal.aborted) setCatalogScopeError(error instanceof Error ? error.message : 'Scope details could not be loaded.'); }
@@ -754,8 +758,8 @@ export default function App() {
         method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ program_url: scopeProgramUrl.trim(), visibility: scopeVisibility }),
       });
-      const body = await response.json() as { program?: RegisteredProgram; detail?: string };
-      if (!response.ok || !body.program) throw new Error(body.detail || `Program registration returned ${response.status}`);
+      const body = await response.json() as { program?: RegisteredProgram; detail?: unknown };
+      if (!response.ok || !body.program) throw new Error(tr(apiErrorMessage(body.detail, `Program registration returned ${response.status}`)));
       setRegisteredPrograms(current => [body.program!, ...current.filter(item => item.id !== body.program!.id)]);
       setScopeProgramUrl(''); setModal(null); go('Scopes / Programs');
     } catch (e) { setScopeError(e instanceof Error ? e.message : 'The program could not be registered.'); }
@@ -773,8 +777,8 @@ export default function App() {
         method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(scopeCollectionRequest),
       });
-      const body = await response.json() as { job?: Partial<RegisteredProgram>; detail?: string };
-      if (!response.ok || !body.job) throw new Error(body.detail || `Scope collection returned ${response.status}`);
+      const body = await response.json() as { job?: Partial<RegisteredProgram>; detail?: unknown };
+      if (!response.ok || !body.job) throw new Error(tr(apiErrorMessage(body.detail, `Scope collection returned ${response.status}`)));
       setWorkflowProgram(current => current ? { ...current, ...body.job } : current);
       dispatchScopeActivity({ type: 'collection-started' });
       await refreshRegisteredPrograms();
@@ -787,8 +791,8 @@ export default function App() {
     try {
       const base = import.meta.env.VITE_API_BASE_URL || location.origin;
       const response = await fetch(new URL(`/api/v1/programs/${encodeURIComponent(workflowProgram.id)}/scope-browser-ready`, base), { method: 'POST', credentials: 'same-origin' });
-      const body = await response.json() as { job?: Partial<RegisteredProgram>; detail?: string };
-      if (!response.ok || !body.job) throw new Error(body.detail || `Browser confirmation returned ${response.status}`);
+      const body = await response.json() as { job?: Partial<RegisteredProgram>; detail?: unknown };
+      if (!response.ok || !body.job) throw new Error(tr(apiErrorMessage(body.detail, `Browser confirmation returned ${response.status}`)));
       setWorkflowProgram(current => current ? { ...current, ...body.job } : current);
       dispatchScopeActivity({ type: 'external-mutation' });
     } catch (e) { setScopeWorkflowError(e instanceof Error ? e.message : 'Browser confirmation failed.'); }
@@ -800,8 +804,8 @@ export default function App() {
     try {
       const base = import.meta.env.VITE_API_BASE_URL || location.origin;
       const response = await fetch(new URL(`/api/v1/programs/${encodeURIComponent(workflowProgram.id)}/scope-${action}`, base), { method: 'POST', credentials: 'same-origin' });
-      const body = await response.json() as { job?: Partial<RegisteredProgram>; detail?: string };
-      if (!response.ok || !body.job) throw new Error(body.detail || `Scope ${action} returned ${response.status}`);
+      const body = await response.json() as { job?: Partial<RegisteredProgram>; detail?: unknown };
+      if (!response.ok || !body.job) throw new Error(tr(apiErrorMessage(body.detail, `Scope ${action} returned ${response.status}`)));
       setWorkflowProgram(current => current ? { ...current, ...body.job } : current);
       dispatchScopeActivity({ type: 'external-mutation' });
       await refreshRegisteredPrograms();
@@ -817,8 +821,8 @@ export default function App() {
         method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ decision, approved_by: decision === 'yes' ? scopeReviewer.trim() : null, confirmation: decision === 'yes' && scopeConfirmed }),
       });
-      const body = await response.json() as { job?: Partial<RegisteredProgram>; detail?: string };
-      if (!response.ok || !body.job) throw new Error(body.detail || `Scope decision returned ${response.status}`);
+      const body = await response.json() as { job?: Partial<RegisteredProgram>; detail?: unknown };
+      if (!response.ok || !body.job) throw new Error(tr(apiErrorMessage(body.detail, `Scope decision returned ${response.status}`)));
       setWorkflowProgram(current => current ? { ...current, ...body.job } : current);
       dispatchScopeActivity({ type: 'external-mutation' });
       setScopeDraft(null); setScopeConfirmed(false);
@@ -1022,14 +1026,16 @@ export default function App() {
   const observedUrls = discoveredUrls.filter(item => item.responseStatus !== null && item.responseStatus >= 200 && item.responseStatus < 400).length;
   const latestReconPhase = latestReconActivity?.message_params?.phase;
   const latestReconState = latestReconActivity?.message_params?.state;
+  const manualLoginNotice = <ManualLoginNotice {...manualLogin} language={language}/>;
   const scanControls = !demo && (snapshot?.status === 'running' || snapshot?.status === 'paused') ? <>
     <button className="secondary-button" onClick={() => void changePause(snapshot.status === 'running' ? 'pause' : 'continue')} disabled={!!pauseBusy || cancelling}>{pauseBusy === 'pause' ? tk("일시정지 처리 중…", "Pausing…") : pauseBusy === 'continue' ? tk("계속 처리 중…", "Continuing…") : snapshot.status === 'running' ? tk("일시정지", "Pause") : tk("계속", "Continue")}</button>
     <button className="secondary-button" onClick={() => void cancelScan()} disabled={cancelling || !!pauseBusy}>{cancelPhase === 'requesting' ? tk("취소 요청 전달 중…", "Sending cancellation request…") : cancelling ? tk("취소 확인 중…", "Confirming cancellation…") : tk("스캔 취소", "Cancel scan")}</button>
   </> : null;
   const scanPanel = <Panel className="scan-summary-panel" title={demo ? tr('Local lab · API assessment') : scanTargetLabel} subtitle={demo ? tr('Synthetic fixture · isolated from program inventory') : `${snapshot?.program_name ? `${snapshot.program_name} · ` : ''}${scanId}`} action={<div className="scan-panel-actions"><Badge tone={snapshot?.status === 'failed' ? 'critical' : snapshot?.status === 'completed' ? 'success' : 'warning'}><span className="dot"/>{cancelling ? tk("취소 처리 중", "Cancelling") : tr(snapshot?.status || state)}</Badge>{scanControls}{!demo && retryAction === 'resume' && <button className="secondary-button" onClick={resumeScan} disabled={resuming}>{resuming ? tk("재실행 요청 중…", "Requesting rerun…") : tk("실패 단계부터 재실행", "Rerun from failed stage")}</button>}{!demo && retryAction === 'rescan' && <button className="secondary-button" onClick={openRepeatScan}>{tk("정찰부터 다시 스캔", "Rescan from recon")}</button>}{!demo && scanId && <button className="secondary-button" onClick={() => setModal('scan-progress')}>{snapshot?.stage === 'Recon' ? tk("도구 작업·발견 URL 보기", "View tools and URLs") : tk("진행 창 열기", "Open progress window")}</button>}</div>}>
-    {snapshot ? <><Pipeline snapshot={{ ...snapshot, progress: scanProgress }} language={language} reportDraft={reportDraftStatus}/>{cancelling && <p className="scan-stop-status" role="status">{cancelPhase === 'requesting' ? tk("취소 요청을 서버에 전달하고 있습니다.", "Sending the cancellation request to the server.") : tk("취소 요청을 접수했습니다. 실행 프로세스 종료와 저장된 상태 갱신을 확인하고 있습니다.", "Cancellation requested. Checking the process exit and saved status.")}</p>}{snapshot.status === 'paused' && !cancelling && <p className="scan-stop-status" role="status">{tk("스캔 일시정지 중 · 같은 실행을 이어가려면 ‘계속’을 누르세요.", "Scan paused. Select Continue to resume the same run.")}</p>}{snapshot.status === 'cancelled' && <p className="scan-stop-status is-done" role="status">{tk("스캔 취소 완료 · 실행 프로세스가 종료됐고 스캔 상태가 취소됨으로 저장됐습니다.", "Scan cancelled. The process exited and the cancelled status was saved.")}</p>}<div className="scan-stats"><div><span>{tr('Scan ID')}</span><strong className="mono">{snapshot.scan_id}</strong></div><div><span>{tr('Endpoints')}</span><strong>{snapshot.endpoints}</strong></div><div><span>{tk('기록된 HTTP 요청', 'Recorded HTTP requests')}</span><strong>{snapshot.requests.toLocaleString()}</strong>{snapshot.per_target_budget != null && <small>{tk('대상별 상한', 'Per-target limit')} {snapshot.per_target_budget.toLocaleString()}</small>}</div><div className="progress-stat"><span>{tr(snapshot.stage)} {tr('Estimated progress')} <b>{scanProgress}%</b></span><progress max="100" value={scanProgress} aria-label={`${tr(snapshot.stage)} ${tr('Estimated progress')}`}/></div></div>{snapshot.service_endpoints !== undefined && <p className="scan-recon-summary"><strong>{tk("서비스 URL 후보", "Candidate service URLs")}</strong> {tk(`${snapshot.service_endpoints}개`, `${snapshot.service_endpoints} candidates`)} <span>{tk(`· 실제 HTTP 응답 관측 ${snapshot.live_endpoints ?? 0}개`, `· ${snapshot.live_endpoints ?? 0} observed HTTP responses`)}</span></p>}{snapshot.stage === 'Recon' && <p className="scan-recon-summary"><strong>{tk("최근 정찰 작업", "Latest recon task")}</strong> {latestReconActivity ? localizeActivityMessage(language, latestReconActivity) : tk('이 실행에는 도구별 정찰 기록이 아직 없습니다.', 'This run has no tool-level recon records yet.')}</p>}{resumeError && <p className="form-error" role="alert">{resumeError}</p>}{pauseError && <p className="form-error" role="alert">{pauseError}</p>}{cancelError && <p className="form-error" role="alert">{cancelError}</p>}</> : <Empty title={tr(state === 'offline' ? 'Backend unavailable' : state === 'idle' ? 'No scan selected' : 'Loading scan snapshot')}>{tr(state === 'idle' ? 'Start a scan from an approved Scope to show its snapshot and activity here.' : 'Connect the REST snapshot endpoint to display scan state. Demo data is never substituted in live mode.')}</Empty>}
+    {snapshot ? <>{manualLoginNotice}<Pipeline snapshot={{ ...snapshot, progress: scanProgress }} language={language} reportDraft={reportDraftStatus}/>{cancelling && <p className="scan-stop-status" role="status">{cancelPhase === 'requesting' ? tk("취소 요청을 서버에 전달하고 있습니다.", "Sending the cancellation request to the server.") : tk("취소 요청을 접수했습니다. 실행 프로세스 종료와 저장된 상태 갱신을 확인하고 있습니다.", "Cancellation requested. Checking the process exit and saved status.")}</p>}{snapshot.status === 'paused' && !cancelling && <p className="scan-stop-status" role="status">{tk("스캔 일시정지 중 · 같은 실행을 이어가려면 ‘계속’을 누르세요.", "Scan paused. Select Continue to resume the same run.")}</p>}{snapshot.status === 'cancelled' && <p className="scan-stop-status is-done" role="status">{tk("스캔 취소 완료 · 실행 프로세스가 종료됐고 스캔 상태가 취소됨으로 저장됐습니다.", "Scan cancelled. The process exited and the cancelled status was saved.")}</p>}<div className="scan-stats"><div><span>{tr('Scan ID')}</span><strong className="mono">{snapshot.scan_id}</strong></div><div><span>{tr('Endpoints')}</span><strong>{snapshot.endpoints}</strong></div><div><span>{tk('기록된 HTTP 요청', 'Recorded HTTP requests')}</span><strong>{snapshot.requests.toLocaleString()}</strong>{snapshot.per_target_budget != null && <small>{tk('대상별 상한', 'Per-target limit')} {snapshot.per_target_budget.toLocaleString()}</small>}</div><div className="progress-stat"><span>{tr(snapshot.stage)} {tr('Estimated progress')} <b>{scanProgress}%</b></span><progress max="100" value={scanProgress} aria-label={`${tr(snapshot.stage)} ${tr('Estimated progress')}`}/></div></div>{snapshot.service_endpoints !== undefined && <p className="scan-recon-summary"><strong>{tk("서비스 URL 후보", "Candidate service URLs")}</strong> {tk(`${snapshot.service_endpoints}개`, `${snapshot.service_endpoints} candidates`)} <span>{tk(`· 실제 HTTP 응답 관측 ${snapshot.live_endpoints ?? 0}개`, `· ${snapshot.live_endpoints ?? 0} observed HTTP responses`)}</span></p>}{snapshot.stage === 'Recon' && <p className="scan-recon-summary"><strong>{tk("최근 정찰 작업", "Latest recon task")}</strong> {latestReconActivity ? localizeActivityMessage(language, latestReconActivity) : tk('이 실행에는 도구별 정찰 기록이 아직 없습니다.', 'This run has no tool-level recon records yet.')}</p>}{resumeError && <p className="form-error" role="alert">{resumeError}</p>}{pauseError && <p className="form-error" role="alert">{pauseError}</p>}{cancelError && <p className="form-error" role="alert">{cancelError}</p>}</> : <Empty title={tr(state === 'offline' ? 'Backend unavailable' : state === 'idle' ? 'No scan selected' : 'Loading scan snapshot')}>{tr(state === 'idle' ? 'Start a scan from an approved Scope to show its snapshot and activity here.' : 'Connect the REST snapshot endpoint to display scan state. Demo data is never substituted in live mode.')}</Empty>}
   </Panel>;
   const scanProgressContent = <div className="scan-progress-dialog">
+    {manualLoginNotice}
     {cancelError && <p className="scan-progress-failed" role="alert"><strong>{tk("스캔 취소 실패 ·", "Scan cancellation failed ·")} </strong>{cancelError}</p>}
     {pauseError && <p className="scan-progress-failed" role="alert"><strong>{tk("일시정지 상태 변경 실패 ·", "Pause state change failed ·")} </strong>{pauseError}</p>}
     <div className="scan-progress-overview">
@@ -1137,6 +1143,7 @@ export default function App() {
         <div className="scan-rate-summary" aria-live="polite"><span>{tr('This scan per-target request-rate cap')}</span><strong>{maxRps > 0 ? `${maxRps} ${tr('requests per second unit')}` : tr('Enter a valid request rate')}</strong>{requestInterval !== null && <small>{language === 'ko' ? `평균 ${requestInterval}초에 1회 요청` : `Average one request every ${requestInterval} seconds`}</small>}<p>{tr('Concurrency limits parallel work; it does not multiply the request-rate setting.')} {tr('The generated TargetPolicy may lower this setting further.')}</p></div>
         <div className="form-grid"><label className="form-field"><span>{tr('Timeout seconds')} <small>≤ {selectedLimits?.timeout_seconds}</small></span><input type="number" min="1" max={selectedLimits?.timeout_seconds} value={timeoutSeconds} onChange={event => setTimeoutSeconds(Number(event.target.value))}/></label><label className="form-field"><span>{tr('Maximum depth')} <small>≤ {selectedLimits?.max_depth}</small></span><input type="number" min="0" max={selectedLimits?.max_depth} value={maxDepth} onChange={event => setMaxDepth(Number(event.target.value))}/></label></div>
         <div className="form-grid"><label className="form-field"><span>{tr('Tag batch size')} <small>1–200</small></span><input type="number" min="1" max="200" step="1" value={tagBatchSize} onChange={event => setTagBatchSize(Number(event.target.value))} aria-describedby="tag-batch-size-hint"/><small id="tag-batch-size-hint">{tr('Observations per model call · 25 recommended (300-second model timeout)')}</small></label><label className="form-field"><span>{tr('Login behavior')}</span><select value={loginMode} onChange={event => setLoginMode(event.target.value as 'none' | 'runtime-browser')}><option value="none">{tr('No login prompt')}</option><option value="runtime-browser">{tr('Open runtime browser')}</option></select></label></div>
+        {loginMode === 'runtime-browser' && <p className="requirements-note">{tk('스캔 중 열린 브라우저에서 5분 안에 로그인을 완료하세요. 인증 토큰과 로그인 화면 종료가 확인되면 자동으로 진행합니다. 토큰을 사용하지 않는 사이트는 자동 확인에 실패할 수 있습니다.', 'Complete login in the opened browser within five minutes. The scan continues when an authentication token is detected and the login form closes. Sites without a token may not be confirmed automatically.')}</p>}
         {requiredHeader && <label className="form-field"><span className="mono">{requiredHeader.name} <small>{tr('required for every request')}</small></span><input value={platformHandle} onChange={event => setPlatformHandle(event.target.value)} autoComplete="off" maxLength={64} placeholder={tr('Enter the platform username sent in this header')}/></label>}
       </>}
       {launchError && <p className="form-error" role="alert">{launchError}</p>}
@@ -1331,6 +1338,7 @@ export default function App() {
           </div>
           {hasActivity && <div className="activity-filters"><label className="search-field"><Icon name="search" size={14}/><input aria-label={tr('Search activity')} value={logSearch} onChange={e => setLogSearch(e.target.value)} placeholder={tr('Search activity…')}/></label><div><select aria-label={tr('Filter log level')} value={level} onChange={e => setLevel(e.target.value)}>{['All levels','info','success','warning','error'].map(l => <option key={l} value={l}>{tr(l)}</option>)}</select><select aria-label={tr('Filter log stage')} value={stageFilter} onChange={e => setStageFilter(e.target.value)}>{['All stages',...stages].map(s => <option key={s} value={s}>{tr(s)}</option>)}</select></div></div>}
           {hasActivity && <div className="log-toolbar"><span>{visibleLogs.length + (showDashboardError ? 1 : 0)} {tr('events')}{scopeActive && <b> · {scopeWorkLabel} {scopeElapsedLabel}</b>}</span><button onClick={() => setPaused(v => !v)} aria-pressed={paused}>{tr(paused ? '▶ Resume following' : 'Ⅱ Pause scrolling')}</button></div>}
+          {manualLoginNotice}
           <div className="log-stream" ref={stream} tabIndex={0} aria-label={tr('Activity events')}>
             {hasActivity && <div className="stream-start">{demo ? tr('SYNTHETIC SESSION STARTED') : tk("통합 활동 스트림 시작", "Combined activity stream started")}</div>}
             {visibleLogs.map(log => <article key={log.key} className={`log-entry ${log.level}`}><div><time dateTime={log.time}>{new Date(log.time).toLocaleTimeString(language === 'ko' ? 'ko-KR' : 'en-GB',{hour12:false})}</time><span>{log.source === 'scope' ? tk("스코프 수집", "Scope collection") : `${tk('스캔', 'Scan')} · ${tr(log.stage)}`}</span><i title={tr(log.level)}/><span className="sr-only">{tr(log.level)}</span></div><p>{localizeActivityMessage(language, log)}</p></article>)}

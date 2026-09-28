@@ -19,6 +19,7 @@ const auditLabels: Record<string, string> = {
   'request.authorized': '요청 승인',
   'finding.created': '취약점 후보 생성',
   'recon.activity': '정찰 도구 활동',
+  'recon.operator_login_confirmed': '사용자가 로그인 완료를 확인함',
 };
 
 const reconPhaseLabels: Record<string, string> = {
@@ -148,6 +149,7 @@ const auditLabelsEn: Record<string, string> = {
   'scope.verified': 'Scope verified', 'pipeline.materialized': 'Pipeline created',
   'request.authorized': 'Request authorized', 'finding.created': 'Finding candidate created',
   'recon.activity': 'Recon tool activity',
+  'recon.operator_login_confirmed': 'Operator confirmed login completion',
 };
 const reconPhaseLabelsEn: Record<string, string> = {
   subfinder: 'Subfinder subdomain discovery', dnsx: 'dnsx DNS resolution',

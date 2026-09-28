@@ -43,6 +43,7 @@ from __future__ import annotations
 import json
 import html
 import math
+import os
 import re
 import shutil
 import subprocess
@@ -1723,6 +1724,17 @@ def discover_endpoints(
                 authentication_endpoint_callback=authentication_endpoint_callback,
             )
         )
+
+        if run_id and os.environ.get("AIDAST_DASHBOARD_MANUAL_LOGIN") == "1":
+            from aidast.auth.manual_login import ManualLoginGate, ManualLoginStore
+            from aidast.auth.endpoints import normalize_origin
+            gate = ManualLoginGate(ManualLoginStore(RESULT_ROOT), run_id, normalize_origin(base_url))
+            def confirm_login(browser_problem):
+                confirmed = gate.wait(browser_problem)
+                diagnose("operator_login_confirmed", auth_state="operator_confirmed",
+                         target_origin=normalize_origin(base_url))
+                return confirmed
+            session_config.operator_confirmation = confirm_login
 
         effective_interaction_config = interaction_config or InteractionConfig()
         effective_interaction_config = replace(
