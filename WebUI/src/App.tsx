@@ -35,6 +35,7 @@ import { activityHeightBounds, clampPanelWidth, panelBounds } from './lib/layout
 import { filterFindings, findingVerdict, knownSourceCase, parseValidationCases, reportCaseForFinding, type FindingVerdict, type ValidationCase, type ValidationStatus } from './lib/validation';
 import { ResizeHandle } from './components/ResizeHandle';
 import { ManualLoginNotice } from './components/ManualLoginNotice';
+import { ReportSubmission } from './components/ReportSubmission';
 import { useManualLogin } from './hooks/useManualLogin';
 
 const pages = ['Overview', 'Scopes / Programs', 'Scans', 'Findings', 'Validation', 'Reports', 'Audit log', 'Settings'] as const;
@@ -315,7 +316,6 @@ export default function App() {
   const [validationRevision, setValidationRevision] = useState(0);
   const [reportError, setReportError] = useState('');
   const [reportScanId, setReportScanId] = useState<string | null>(null);
-  const [reportPreview, setReportPreview] = useState(sampleReport);
   const [selectedReport, setSelectedReport] = useState<ReportSummary | null>(null);
   const [resultRoot, setResultRoot] = useState(demo ? 'Synthetic demo data (memory)' : '');
   const { snapshot, state, error, refresh } = useScanSocket(scanId);
@@ -978,20 +978,10 @@ export default function App() {
     setLaunchError('');
     setModal('new');
   };
-  const openReport = async (item: ReportSummary) => {
+  const openReport = (item: ReportSummary) => {
     setReportError('');
-    if (demo) {
-      setSelectedReport(item);
-      setReportPreview(sampleReport);
-      setModal('report');
-      return;
-    }
-    try {
-      const base = import.meta.env.VITE_API_BASE_URL || location.origin;
-      const response = await fetch(new URL(`/api/v1/reports/${encodeURIComponent(item.report_id)}`, base), { credentials: 'same-origin', cache: 'no-store' });
-      if (!response.ok) throw new Error(`Report preview returned ${response.status}`);
-      setSelectedReport(item); setReportPreview(await response.text()); setModal('report');
-    } catch (e) { setReportError(e instanceof Error ? e.message : 'The report preview could not be loaded.'); }
+    setSelectedReport(item);
+    setModal('report');
   };
   const findingTable = (rows: Finding[]) => <div className="table-wrap finding-table"><table>
     <thead><tr><th>{tr('Severity')}</th><th>{tr('Finding')}</th><th>{tr('Validation verdict')}</th><th><span className="sr-only">{tr('Details')}</span></th></tr></thead>
@@ -1283,7 +1273,7 @@ export default function App() {
                   <h3>{demo ? tr('Server version disclosure') : item.title}</h3>
                   <p>{demo ? tr('A synthetic report showing finding, evidence, impact, and remediation sections.') : `${item.platform} · ${tr('Case')} ${item.case_id}`}</p>
                   <small className="mono">{demo ? 'F-0040 · LOW · Markdown' : item.report_id}</small>
-                  <div className="button-row"><button className="secondary-button" onClick={() => void openReport(item)}>{tr('Preview draft')}</button></div>
+                  <div className="button-row"><button className="secondary-button" onClick={() => void openReport(item)}>{demo ? tr('Preview draft') : tk('보고서 검사 및 내보내기', 'Report checks and export')}</button></div>
                 </div>
               </div>)}</div>
               : <Empty title={tr('No report draft for this scan')}>{tr('Only reports linked to currently confirmed Validation cases are shown.')}</Empty>}
@@ -1353,8 +1343,8 @@ export default function App() {
       </div>
     </div>
     <dialog ref={dialog} onCancel={closeDialog} onClose={closeDialog} aria-labelledby="dialog-title">
-      <div className="dialog-heading"><h2 id="dialog-title">{modal === 'new' ? tr('Start a new scan') : modal === 'scan-progress' ? tk("스캔 진행 상황", "Scan progress") : modal === 'scope' ? tr('Add bug bounty program') : modal === 'scope-workflow' ? tr(workflowProgram?.scope_status === 'approved' ? 'View approved Scope' : 'Collect and review Scope') : modal === 'verified-scope' ? tk("검증된 Scope 내용", "Verified Scope details") : modal === 'report' ? tr(demo ? 'Demo report preview' : 'Local report preview') : selectedFinding?.id}</h2><button className="icon-button" aria-label={tr('Close dialog')} onClick={closeDialog}>×</button></div>
-      {modal === 'new' ? newScanContent : modal === 'scan-progress' ? scanProgressContent : modal === 'scope' ? scopeIntakeContent : modal === 'scope-workflow' ? scopeWorkflowContent : modal === 'verified-scope' ? (catalogScopeSummaryOnly ? catalogScopeSummaryContent : catalogScopeError ? <p className="form-error" role="alert">{catalogScopeError}</p> : catalogScopeDraft && catalogScopeApproval ? <VerifiedScopeDetails draft={catalogScopeDraft} approval={catalogScopeApproval} language={language} onScan={() => scanFromScope(catalogScopeDraft.scope_id)}/> : <p className="form-empty">{tk("검증된 Scope 내용을 불러오는 중입니다…", "Loading verified Scope details…")}</p>) : modal === 'report' ? <><pre className="report-preview">{demo ? language === 'ko' ? sampleReport : sampleReportEn : reportPreview}</pre><div className="button-row"><button className="primary-button" onClick={() => download(`${selectedReport?.report_id || 'DEMO-Report'}.md`, demo ? language === 'ko' ? sampleReport : sampleReportEn : reportPreview)}>{tr('Download .md')} <Icon name="arrow" size={14}/></button></div></> : selectedFinding && <><Badge tone={selectedFinding.severity.toLowerCase()}>{tr(selectedFinding.severity)}</Badge><h3 className="finding-detail-title">{findingTitle(selectedFinding)}</h3><dl className="detail-grid"><div><dt>{tr('Endpoint')}</dt><dd className="mono">{selectedFinding.endpoint}</dd></div><div><dt>{tr('Classification')}</dt><dd>{selectedFinding.cwe}</dd></div><div><dt>{tr('Review status')}</dt><dd>{tr(selectedFinding.status)}</dd></div><div><dt>{tr('Source')}</dt><dd>{tr(demo ? 'Synthetic fixture' : 'Pipeline finding')}</dd></div></dl><div className="notice"><Icon name="shield"/><p>{tr(demo ? 'This is synthetic evidence for UI demonstration. No listed program was tested.' : 'Evidence details require a redacted evidence endpoint. The summary alone is not proof of a vulnerability.')}</p></div><button className="secondary-button" onClick={() => { setModal(null); go('Validation'); }}>{tr('Open validation queue')} <Icon name="arrow" size={14}/></button></>}
+      <div className="dialog-heading"><h2 id="dialog-title">{modal === 'new' ? tr('Start a new scan') : modal === 'scan-progress' ? tk("스캔 진행 상황", "Scan progress") : modal === 'scope' ? tr('Add bug bounty program') : modal === 'scope-workflow' ? tr(workflowProgram?.scope_status === 'approved' ? 'View approved Scope' : 'Collect and review Scope') : modal === 'verified-scope' ? tk("검증된 Scope 내용", "Verified Scope details") : modal === 'report' ? demo ? tr('Demo report preview') : tk('보고서 검사 및 내보내기', 'Report checks and export') : selectedFinding?.id}</h2><button className="icon-button" aria-label={tr('Close dialog')} onClick={closeDialog}>×</button></div>
+      {modal === 'new' ? newScanContent : modal === 'scan-progress' ? scanProgressContent : modal === 'scope' ? scopeIntakeContent : modal === 'scope-workflow' ? scopeWorkflowContent : modal === 'verified-scope' ? (catalogScopeSummaryOnly ? catalogScopeSummaryContent : catalogScopeError ? <p className="form-error" role="alert">{catalogScopeError}</p> : catalogScopeDraft && catalogScopeApproval ? <VerifiedScopeDetails draft={catalogScopeDraft} approval={catalogScopeApproval} language={language} onScan={() => scanFromScope(catalogScopeDraft.scope_id)}/> : <p className="form-empty">{tk("검증된 Scope 내용을 불러오는 중입니다…", "Loading verified Scope details…")}</p>) : modal === 'report' ? demo ? <><pre className="report-preview">{language === 'ko' ? sampleReport : sampleReportEn}</pre><div className="button-row"><button className="primary-button" onClick={() => download(`${selectedReport?.report_id || 'DEMO-Report'}-draft.md`, language === 'ko' ? sampleReport : sampleReportEn)}>{tk('데모 초안 .md 내려받기', 'Download demo draft .md')} <Icon name="arrow" size={14}/></button></div></> : selectedReport && <ReportSubmission key={selectedReport.report_id} reportId={selectedReport.report_id} language={language}/> : selectedFinding && <><Badge tone={selectedFinding.severity.toLowerCase()}>{tr(selectedFinding.severity)}</Badge><h3 className="finding-detail-title">{findingTitle(selectedFinding)}</h3><dl className="detail-grid"><div><dt>{tr('Endpoint')}</dt><dd className="mono">{selectedFinding.endpoint}</dd></div><div><dt>{tr('Classification')}</dt><dd>{selectedFinding.cwe}</dd></div><div><dt>{tr('Review status')}</dt><dd>{tr(selectedFinding.status)}</dd></div><div><dt>{tr('Source')}</dt><dd>{tr(demo ? 'Synthetic fixture' : 'Pipeline finding')}</dd></div></dl><div className="notice"><Icon name="shield"/><p>{tr(demo ? 'This is synthetic evidence for UI demonstration. No listed program was tested.' : 'Evidence details require a redacted evidence endpoint. The summary alone is not proof of a vulnerability.')}</p></div><button className="secondary-button" onClick={() => { setModal(null); go('Validation'); }}>{tr('Open validation queue')} <Icon name="arrow" size={14}/></button></>}
       {modal === 'finding' && selectedFinding && <section className="finding-verdict">
         <h3>{tr('Validation verdict')}</h3>
         <Badge tone={selectedValidation?.processing_phase === 'completed' && selectedValidation.current_status === 'CONFIRMED' ? 'success' : selectedValidation?.processing_phase === 'completed' && selectedValidation.current_status === 'DISPROVEN' ? 'critical' : selectedKnownSource ? 'warning' : ''}>

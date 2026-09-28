@@ -45,6 +45,37 @@ class ReportCatalog:
                     return item
         raise ReportNotFoundError("report draft not found")
 
+    def database(self, report_id: str) -> Path:
+        """Resolve an internal report path and constrain its source to this root."""
+        from aidast.reporting.runtime import ReportError
+
+        if not _REPORT_ID.fullmatch(report_id):
+            raise ReportNotFoundError("invalid report identifier")
+        root = self.result_root / "ReportRun"
+        if root.is_dir():
+            for database in root.rglob("Report.db"):
+                item = self._read(database)
+                if item is None or item['report_id'] != report_id:
+                    continue
+                resolved = database.resolve(strict=True)
+                if any(path.is_symlink() for path in (database, *database.parents)):
+                    raise ReportError("report source cannot be verified")
+                try:
+                    with closing(sqlite3.connect(resolved.as_uri() + '?mode=ro', uri=True)) as conn:
+                        rows = conn.execute('SELECT source_path FROM report_runs').fetchall()
+                    if len(rows) != 1 or not isinstance(rows[0][0], str):
+                        raise ValueError
+                    source = resolved.parent / rows[0][0]
+                    if any(path.is_symlink() for path in (source, *source.parents)):
+                        raise ValueError
+                    source.resolve(strict=True).relative_to(self.result_root)
+                    if not source.is_file():
+                        raise ValueError
+                except (OSError, sqlite3.Error, TypeError, ValueError):
+                    raise ReportError("report source cannot be verified") from None
+                return resolved
+        raise ReportNotFoundError("report draft not found")
+
     def _read(self, database: Path) -> dict[str, Any] | None:
         try:
             resolved = database.resolve(strict=True)
@@ -56,7 +87,7 @@ class ReportCatalog:
             ) as conn:
                 conn.row_factory = sqlite3.Row
                 run = conn.execute(
-                    "SELECT report_id,scan_id,case_id,context_json,created_at FROM report_runs"
+                    "SELECT report_id,scan_id,case_id,context_json,created_at,source_path FROM report_runs"
                 ).fetchall()
                 if len(run) != 1:
                     return None
@@ -73,6 +104,11 @@ class ReportCatalog:
                 return None
             context = json.loads(run[0]["context_json"])
             platform = str(context.get("platform") or "unknown")[:64]
+            from aidast.reporting.submission import sanitize_preview
+
+            source_path = str(run[0]['source_path'])
+            markdown = sanitize_preview(markdown, paths=(str(resolved), str(resolved.parent), source_path,
+                                                       str((resolved.parent / source_path).resolve())))
             title = next(
                 (line.lstrip("# ").strip() for line in markdown.splitlines() if line.startswith("#")),
                 "Local report draft",

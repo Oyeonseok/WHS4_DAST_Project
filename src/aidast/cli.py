@@ -613,6 +613,13 @@ def _parser() -> argparse.ArgumentParser:
         "status", help="verify and inspect a Report.db"
     )
     report_status_parser.add_argument("database", type=Path)
+    for action in ("check", "export"):
+        command = report_commands.add_parser(action, help="check and prepare a masked platform submission package")
+        command.add_argument("database", type=Path, help="source-bound case Report.db")
+        command.add_argument("--requirements", type=Path, help="program requirements JSON")
+        if action == "export":
+            command.add_argument("--output", type=Path, required=True, help="new ZIP package path (existing files are preserved)")
+            command.add_argument("--revision", help="expected inspection revision SHA-256")
 
     # dashboard 명령어
     dashboard = commands.add_parser(
@@ -1942,6 +1949,34 @@ def _run_validation(
 # === Report 작성과 조회 ===
 # 확인된 사례의 보고서를 작성하거나 보고서 상태를 조회
 def _run_report(args: argparse.Namespace, *, writer: object | None = None) -> int:
+    if args.report_command in {"check", "export"}:
+        from aidast.reporting.runtime import ReportError as SubmissionError, _path
+        from aidast.reporting.submission import MAX_REQUIREMENTS_BYTES, ProgramRequirements, export_report, inspect_report, save_requirements
+
+        if args.requirements is not None:
+            try:
+                rules_path = _path(args.requirements, existing=True)
+                if rules_path.stat().st_size > MAX_REQUIREMENTS_BYTES:
+                    raise ValueError
+                rules = ProgramRequirements.model_validate_json(rules_path.read_bytes())
+            except (OSError, ValueError):
+                raise SubmissionError("program requirements could not be read or validated") from None
+            save_requirements(args.database, rules)
+        result = inspect_report(args.database)
+        if args.report_command == "check":
+            print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+            return 0 if result['ready'] else 1
+        output = _path(args.output)
+        package = export_report(args.database, expected_revision=args.revision or result['revision_sha256'])
+        try:
+            # Exclusive creation also protects report/source/requirements files.
+            with output.open('xb') as stream:
+                stream.write(package)
+        except OSError:
+            raise SubmissionError("export destination must be a new writable file") from None
+        print(json.dumps({'ready': True, 'revision_sha256': result['revision_sha256'],
+                          'output': str(output)}, ensure_ascii=False))
+        return 0
     if args.report_command == "status":
         with sqlite3.connect(args.database) as connection:
             version = connection.execute("PRAGMA user_version").fetchone()[0]

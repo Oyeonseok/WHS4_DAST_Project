@@ -1,0 +1,41 @@
+dialog:has(.report-submission){width:min(860px,calc(100% - 32px))}
+.report-submission{font-size:13px;min-width:0}
+.report-submission-status{padding:16px;background:var(--soft);border:1px solid var(--line);border-radius:6px}
+.report-submission-status strong{color:var(--accent)}
+.report-submission-status p{margin-top:8px}
+.report-submission-status small{display:block;margin-top:8px;color:var(--muted);overflow-wrap:anywhere}
+.report-submission-actions{flex-wrap:wrap;margin:16px 0}
+.report-submission-section{border-top:1px solid var(--line);padding:22px 0 4px}
+.report-submission-section h3{font-size:15px;margin-bottom:12px}
+.report-rules-form{border:0;padding:0;margin:16px 0;display:grid;gap:15px;min-width:0}
+.report-rules-form label{display:grid;gap:7px;min-width:0}
+.report-rules-form input:not([type=checkbox]),.report-rules-form textarea{width:100%;background:var(--bg);color:var(--text);border:1px solid var(--line);border-radius:5px;padding:10px;font:inherit}
+.report-rules-form textarea{resize:vertical;min-height:65px;font-family:Consolas,monospace}
+.report-rules-form textarea:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
+.report-rules-form small{color:var(--muted);line-height:1.6;overflow-wrap:anywhere}
+.report-rules-form .report-rule-check{display:flex;align-items:flex-start;gap:10px;line-height:1.6}
+.report-rule-check input{flex-shrink:0;margin:0}
+.report-rules-form button{justify-self:start}
+.report-submission-fields{margin:0}
+.report-submission-fields>div{padding:12px 0;border-bottom:1px solid var(--line);scroll-margin-top:18px}
+.report-submission-fields dt{font-weight:600;color:var(--muted);margin-bottom:6px}
+.report-submission-fields dd{margin:0;white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.7}
+.report-checks{list-style:none;padding:0;margin:12px 0}
+.report-checks li{padding:11px 12px;border-left:3px solid var(--line);margin:8px 0;display:flex;flex-wrap:wrap;gap:6px 10px;background:var(--bg);line-height:1.6}
+.report-checks li span{flex:1;min-width:180px}
+.report-checks a{color:var(--accent);overflow-wrap:anywhere}
+.report-checks .report-check-blocker{border-color:#dd8c8c}
+.report-check-blocker strong{color:#dd8c8c}
+.report-checks .report-check-warning{border-color:var(--amber)}
+.report-check-warning strong{color:var(--amber)}
+.report-check-pass{color:var(--accent)}
+.report-redactions{display:flex;flex-wrap:wrap;gap:8px;list-style:none;padding:0;margin:12px 0}
+.report-redactions li{background:var(--bg);padding:6px 10px;border:1px solid var(--line);border-radius:4px}
+.report-redactions strong{margin-left:6px}
+.report-evidence{margin:12px 0;padding:12px;border:1px solid var(--line);border-radius:5px}
+.report-evidence summary{cursor:pointer;overflow-wrap:anywhere;line-height:1.6}
+.report-evidence pre{white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.6}
+.report-evidence dl{font-size:11px;color:var(--muted);margin-bottom:0}
+.report-evidence dd{margin:4px 0 10px;overflow-wrap:anywhere;font-family:Consolas,monospace}
+.report-submission .report-preview{padding:14px;background:var(--bg);border:1px solid var(--line);border-radius:5px;font-size:12px}
+@media(max-width:660px){.report-submission-actions button{width:100%}.report-checks li{display:block}.report-checks span,.report-checks a{display:block;margin-top:5px}}
