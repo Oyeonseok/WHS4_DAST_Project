@@ -1,6 +1,6 @@
 # Validation lab 작업 재개 기록 (2026-09-24)
 
-사용자가 중단한 Validation 준비를 재개해 실행 입력과 채점 도구를 완성했고, 2026-09-24에 실제 `aidast validate run`으로 7건을 실행했다. 상세 결과는 [첫 실행 보고서](../test-results/09.24/validation/VALIDATION_LAB_FIRST_RUN.md)에 있다.
+사용자가 중단한 Validation 준비를 재개해 실행 입력과 채점 도구를 완성했고, 2026-09-24에 실제 `aidast validate run`으로 7건을 실행했다. 상세 결과는 [첫 실행 보고서](../test-results/09.24/_archive/validation/VALIDATION_LAB_FIRST_RUN.md)에 있다.
 
 ## 현재 산출물
 

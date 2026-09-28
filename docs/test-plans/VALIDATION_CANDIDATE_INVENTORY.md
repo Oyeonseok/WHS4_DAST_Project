@@ -1,6 +1,6 @@
 # Validation 후보 데이터 인벤토리
 
-약한 영향도 증거에서 실제 Impact Development 실행을 시험하는 환경과 정답은 [Impact Development 실습](../test-results/09.24/validation/VALIDATION_IMPACT_DEVELOPMENT_LAB.md)에 정리했다.
+약한 영향도 증거에서 실제 Impact Development 실행을 시험하는 환경과 정답은 [Impact Development 실습](../test-results/09.24/_archive/validation/VALIDATION_IMPACT_DEVELOPMENT_LAB.md)에 정리했다.
 
 ## 목적과 산출물
 
@@ -82,7 +82,7 @@ Juice Shop 원본 스냅샷은 `resources/lab/juice-shop-v20.2.0-challenges.yml`
 
 ## 실제 첫 실행 결과
 
-2026-09-24에 7건을 실제 실행했다. 양성 1건이 인용된 증거와 함께 `CONFIRMED`되어 `PASS`, 비취약 반례 6건은 `BLOCKED` 또는 `INCONCLUSIVE`여서 `UNRESOLVED`였다. 보류된 merchant 3건은 `NEEDS_PREREQUISITES`다. 세부 요청·대조군·판정 원인과 수정 내역은 [Validation 실습 첫 실행 결과](../test-results/09.24/validation/VALIDATION_LAB_FIRST_RUN.md)에 기록했다. 이후 출처가 고정된 부정 증거를 별도 실습 어댑터로 공급한 재실행에서는 [7건 모두 `PASS`](../test-results/09.24/validation/VALIDATION_LAB_FOLLOWUP.md)했다.
+2026-09-24에 7건을 실제 실행했다. 양성 1건이 인용된 증거와 함께 `CONFIRMED`되어 `PASS`, 비취약 반례 6건은 `BLOCKED` 또는 `INCONCLUSIVE`여서 `UNRESOLVED`였다. 보류된 merchant 3건은 `NEEDS_PREREQUISITES`다. 세부 요청·대조군·판정 원인과 수정 내역은 [Validation 실습 첫 실행 결과](../test-results/09.24/_archive/validation/VALIDATION_LAB_FIRST_RUN.md)에 기록했다. 이후 출처가 고정된 부정 증거를 별도 실습 어댑터로 공급한 재실행에서는 [7건 모두 `PASS`](../test-results/09.24/_archive/validation/VALIDATION_LAB_FOLLOWUP.md)했다.
 
 확인 예시:
 
