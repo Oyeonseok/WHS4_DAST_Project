@@ -318,7 +318,8 @@ class NativeAttackMainAgentTests(unittest.TestCase):
             scope = root / "Scope.md"
             policy = root / "TargetPolicy.json"
             scope.write_text("# approved", encoding="utf-8")
-            policy.write_text("{}", encoding="utf-8")
+            from test_policy_guidance import bound
+            policy.write_text(json.dumps({"policies": [bound(root).model_dump(mode="json")]}), encoding="utf-8")
 
             def fake_run(command, **kwargs):
                 work = Path(command[command.index("--cd") + 1])
@@ -339,6 +340,11 @@ class NativeAttackMainAgentTests(unittest.TestCase):
                     work / ".codex/agents/aidast-attack.toml"
                 ).read_text(encoding="utf-8")
                 self.assertIn('model = "gpt-6-sol"', agent_config)
+                self.assertIn("$aidast-policy", agent_config)
+                self.assertIn("$aidast-policy", kwargs["input"])
+                self.assertTrue((work / ".agents/skills/aidast-policy/SKILL.md").is_file())
+                self.assertIn("Sensitive data", (work / "TargetPolicy.json").read_text())
+                self.assertEqual((work / "scope.md").read_bytes(), scope.read_bytes())
                 overrides = tomllib.loads("\n".join(
                     command[index + 1]
                     for index, value in enumerate(command[:-1]) if value == "--config"

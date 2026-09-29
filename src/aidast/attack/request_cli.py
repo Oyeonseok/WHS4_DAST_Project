@@ -8,6 +8,10 @@ and records the outcome in the shared pipeline database.
 
 from __future__ import annotations
 
+from fnmatch import fnmatchcase
+from aidast.core.capture_receipt import prepare_http_request, urllib_request_data
+from aidast.core.http_safety import require_request_admission
+
 import argparse
 import base64
 import hashlib
@@ -24,7 +28,9 @@ from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 from uuid import uuid4
 
-from aidast.core.http_safety import merge_hackerone_identity
+from aidast.core.http_safety import merge_hackerone_identity, sanitize_headers
+from aidast.pipeline.request_profiles import recon_user_agent
+from aidast.core.request_governor import RequestGovernor, GovernorError
 from aidast.validation.execution.credentials import PipelineCredentialResolver
 
 
@@ -96,6 +102,9 @@ def _policy_allows(policy: dict, url: str, method: str) -> bool:
     return (
         parsed.scheme in policy.get("allowed_schemes", [])
         and host_allowed
+        and not any(fnmatchcase(host, str(pattern).lower().rstrip('.'))
+                    for pattern in policy.get('excluded_hosts', []))
+        and (policy.get('execution_allowed_methods') is None or method in policy['execution_allowed_methods'])
         and port in policy.get("allowed_ports", [])
         and method in policy.get(
             "attack_allowed_methods", policy.get("allowed_methods", [])
@@ -825,6 +834,7 @@ def _set_status(db_path: Path, request_id: str, *, status: str, **values: object
             raise RequestGuardError("request reservation disappeared")
 
 
+
 def guarded_request(
     db_path: Path, *, scan_id: str, stage_run_id: str, task_id: str,
     policy_path: Path, payload_path: Path,
@@ -846,8 +856,22 @@ def guarded_request(
         raise RequestGuardError("request headers cannot override resolved credentials")
     headers = credential_headers | headers
     headers = merge_hackerone_identity(
-        headers, policy.get("hackerone_username")
+        headers, policy.get("hackerone_username"),
+        required_identity_headers=policy.get("required_identity_headers"),
     )
+    if not any(name.casefold() == "user-agent" for name in headers):
+        user_agent = recon_user_agent(db_path, scan_id=scan_id, url=url)
+        if user_agent is not None:
+            headers["User-Agent"] = user_agent
+    try:
+        descriptor = prepare_http_request(url, method=method, headers=headers, body=body)
+    except ValueError as exc:
+        raise RequestGuardError('invalid physical request context') from exc
+    headers, body = descriptor['headers'], urllib_request_data(descriptor)
+    def admit():
+        require_request_admission(policy, url=url, method=method, headers=headers,
+            body=descriptor['body'], error_class=RequestGuardError)
+    admit()
     consumed_bindings, consumed_binding_contracts = _binding_hashes(
         db_path, scan_id=scan_id, stage_run_id=stage_run_id, task_id=task_id,
         bindings=item.get("bindings"), url=url, headers=headers, body=body,
@@ -902,6 +926,7 @@ def guarded_request(
          base64.b64encode(body or b"").decode("ascii")],
         ensure_ascii=False, separators=(",", ":"),
     ).encode("utf-8")).hexdigest()
+    admit()
     request_id, scheduled = _reserve(
         db_path, scan_id=scan_id, stage_run_id=stage_run_id, task_id=task_id,
         policy=policy, method=method, url=url, fingerprint=fingerprint,
@@ -928,11 +953,19 @@ def guarded_request(
         )
         raise RequestGuardError("Attack stage or task stopped before dispatch")
     _set_status(db_path, request_id, status="running", dispatched_at=time.time())
+    try:
+        permit = RequestGovernor(policy.get("request_governor")).reserve(url, timeout_seconds=timeout)
+    except GovernorError as exc:
+        _set_status(db_path, request_id, status="failed", error_message=str(exc), finished_at=time.time())
+        raise RequestGuardError(str(exc)) from exc
     opener = build_opener(ProxyHandler({}), _NoRedirect())
+    opener.addheaders = []
     request = Request(url, data=body, headers=headers, method=method)
     try:
+        permit.wait()
+        admit()
         try:
-            response = opener.open(request, timeout=timeout)
+            response = opener.open(request, timeout=permit.timeout_seconds)
         except HTTPError as exc:
             response = exc
         try:
@@ -940,7 +973,7 @@ def guarded_request(
             truncated = len(response_body) > MAX_RESPONSE_BODY_BYTES
             response_body = response_body[:MAX_RESPONSE_BODY_BYTES]
             status_code = int(response.code if isinstance(response, HTTPError) else response.status)
-            response_headers = _sanitized_headers(response.headers)
+            response_headers = sanitize_headers(_sanitized_headers(response.headers), identity_headers=policy.get("required_identity_headers"))
             final_url = str(response.geturl())
         finally:
             response.close()
@@ -950,6 +983,8 @@ def guarded_request(
             error_message=type(exc).__name__, finished_at=time.time(),
         )
         raise RequestGuardError("HTTP request outcome is unknown") from exc
+    finally:
+        permit.complete()
     try:
         result_metadata, captures, assertions = _response_metadata(
             item, status_code=status_code, response_headers=response.headers,

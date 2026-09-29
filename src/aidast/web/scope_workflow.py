@@ -21,7 +21,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from aidast.agents.main import CodexMainAgent
 from aidast.orchestration.scope import CoordinatorError, ScopeCoordinator
 from aidast.scope.models import ScopeDocument
-from aidast.scope.paths import identify_program
+from aidast.scope.paths import identify_program, scope_archive_directories, scope_revision_directory
 from aidast.scope.reader import PlaywrightProgramPageReader, RuntimeBrowserProgramPageReader
 
 from .programs import ProgramRegistry
@@ -33,6 +33,8 @@ _ACTIVE = {"collecting", "awaiting_browser", "paused", "cancelling"}
 _SCOPE_PHASE_MESSAGES = {
     "page_read_started": "프로그램 정책 화면 읽기를 시작합니다.",
     "page_read_completed": "프로그램 정책 화면 읽기를 완료했습니다. 텍스트 {characters}자를 수집했습니다.",
+    "policy_preparation_started": "관찰한 링크 {candidates}개에서 관련 정책 문서를 선택하고 준비합니다.",
+    "policy_preparation_completed": "참조 정책 {references}건의 수집 결과를 저장했습니다. 통합 근거를 분석합니다.",
     "analysis_started": "Scope Agent가 In-Scope, Out-of-Scope와 정책 제약을 읽고 분석합니다.",
     "analysis_completed": "In-Scope {in_scope}개와 Out-of-Scope {out_of_scope}개를 읽고 분류했습니다.",
     "collection_started": "Scope Agent가 프로그램 화면 수집과 정책 분석을 시작합니다.",
@@ -53,6 +55,7 @@ class ScopeCollectionRequest(BaseModel):
 
     login_mode: Literal["headless", "runtime-browser"] = "headless"
     identity: str | None = Field(default=None, max_length=64)
+    refresh: bool = False
 
     @model_validator(mode="after")
     def require_runtime_identity(self) -> "ScopeCollectionRequest":
@@ -124,7 +127,8 @@ class ScopeWorkflowManager:
                   error TEXT,
                   created_at TEXT NOT NULL,
                   updated_at TEXT NOT NULL,
-                  paused_from TEXT
+                  paused_from TEXT,
+                  output_path TEXT
                 );
                 CREATE TABLE IF NOT EXISTS scope_job_events (
                   job_id TEXT NOT NULL,
@@ -146,6 +150,8 @@ class ScopeWorkflowManager:
             job_columns = {row[1] for row in conn.execute("PRAGMA table_info(scope_jobs)")}
             if "paused_from" not in job_columns:
                 conn.execute("ALTER TABLE scope_jobs ADD COLUMN paused_from TEXT")
+            if "output_path" not in job_columns:
+                conn.execute("ALTER TABLE scope_jobs ADD COLUMN output_path TEXT")
             interrupted = conn.execute(
                 "SELECT job_id,status FROM scope_jobs WHERE status IN ('collecting','awaiting_browser','paused','cancelling')"
             ).fetchall()
@@ -186,14 +192,8 @@ class ScopeWorkflowManager:
 
     def start(self, program_id: str, request: ScopeCollectionRequest) -> dict[str, Any]:
         program = self.registry.get(program_id)
-        output_dir = identify_program(str(program["program_url"])).under(
-            self.result_root / "Scope"
-        ).resolve(strict=False)
-        if output_dir.exists():
-            ScopeCoordinator(output_dir).verify_approval()
-            return self._record_terminal(program, "approved", "A verified approved Scope already exists.")
-
         with self._lock, closing(sqlite3.connect(self.database)) as conn, conn:
+            conn.execute("BEGIN IMMEDIATE")
             conn.row_factory = sqlite3.Row
             previous = conn.execute(
                 "SELECT * FROM scope_jobs WHERE program_key=?", (program["program_key"],)
@@ -202,19 +202,29 @@ class ScopeWorkflowManager:
                 raise ValueError("Scope collection is already running")
             if previous is not None and previous["status"] == "review_required":
                 raise ValueError("a Scope draft is already waiting for review")
+            canonical = scope_revision_directory(str(program["program_url"]), self.result_root / "Scope")
+            if canonical.exists():
+                ScopeCoordinator(canonical).verify_approval()
+            approved = self._latest_approved_directory(program)
+            if approved is not None and not request.refresh:
+                if previous is not None and previous["status"] == "approved":
+                    return self._public_job(previous)
+                return self._record_terminal(conn, program, "approved", "A verified approved Scope already exists.", output_path=approved)
             if previous is not None and previous["draft_path"]:
                 self._discard_path(Path(previous["draft_path"]))
             job_id = f"scopejob_{uuid4().hex}"
+            output_dir = scope_revision_directory(str(program["program_url"]), self.result_root / "Scope",
+                                                  job_id if canonical.exists() and request.refresh else None)
             now = _now()
             conn.execute(
                 """INSERT INTO scope_jobs
-                (job_id,program_key,status,login_mode,draft_path,error,created_at,updated_at)
-                VALUES (?,?, 'collecting', ?,NULL,NULL,?,?)
+                (job_id,program_key,status,login_mode,draft_path,error,created_at,updated_at,output_path)
+                VALUES (?,?, 'collecting', ?,NULL,NULL,?,?,?)
                 ON CONFLICT(program_key) DO UPDATE SET
                 job_id=excluded.job_id,status='collecting',login_mode=excluded.login_mode,
-                draft_path=NULL,error=NULL,paused_from=NULL,
+                draft_path=NULL,error=NULL,paused_from=NULL,output_path=excluded.output_path,
                 created_at=excluded.created_at,updated_at=excluded.updated_at""",
-                (job_id, program["program_key"], request.login_mode, now, now),
+                (job_id, program["program_key"], request.login_mode, now, now, str(output_dir)),
             )
             self._append_event(conn, job_id, "info", "스코프 수집을 시작했습니다.", message_code="scope.started")
         if self._process_controller is not None:
@@ -388,9 +398,10 @@ class ScopeWorkflowManager:
         return self._public_job(job)
 
     def draft(self, program_id: str) -> dict[str, Any]:
-        job, _program = self._job_and_program(program_id)
+        job, program = self._job_and_program(program_id)
         if job["status"] != "review_required" or not job["draft_path"]:
             raise ValueError("no Scope draft is waiting for review")
+        self._job_output_directory(job, program)
         draft = self._validated_draft_path(Path(job["draft_path"]))
         document = ScopeDocument.model_validate_json(
             (draft / "Scope.json").read_text(encoding="utf-8")
@@ -399,9 +410,9 @@ class ScopeWorkflowManager:
 
     def approved_scope(self, program_id: str) -> dict[str, Any]:
         program = self.registry.get(program_id)
-        directory = identify_program(str(program["program_url"])).under(
-            self.result_root / "Scope"
-        ).resolve(strict=False)
+        directory = self._latest_approved_directory(program)
+        if directory is None:
+            raise CoordinatorError("no verified approved Scope is available")
         coordinator = ScopeCoordinator(directory)
         document, _markdown = coordinator.load_approved_scope()
         approval = coordinator.verify_approval()
@@ -428,6 +439,12 @@ class ScopeWorkflowManager:
             "prohibited_activities": analysis.prohibited_activities,
             "submission_requirements": analysis.submission_requirements,
             "operational_constraints": analysis.operational_constraints,
+            "required_request_headers": ([item.model_dump(mode="json") for item in analysis.required_request_headers]
+                                         if analysis.required_request_headers is not None else None),
+            "execution_rules": analysis.execution_rules.model_dump(mode="json") if analysis.execution_rules is not None else None,
+            "policy_references": [record.model_dump(mode="json", include={
+                "requested_url", "final_url", "status", "applicability", "relationship", "error", "source_quote"})
+                for record in document.source.policy_references],
             "safe_harbor": analysis.safe_harbor,
             "ambiguities": analysis.ambiguities,
             "source_evidence": [item.model_dump(mode="json") for item in analysis.source_evidence],
@@ -443,9 +460,7 @@ class ScopeWorkflowManager:
             self._update(str(job["job_id"]), status="rejected", draft_path=None, level="warning", message="운영자가 스코프 초안을 거절했습니다. 승인 산출물은 생성하지 않았습니다.", message_code="scope.rejected")
             return self.get_job(program_id)
 
-        output_dir = identify_program(str(program["program_url"])).under(
-            self.result_root / "Scope"
-        ).resolve(strict=False)
+        output_dir = self._job_output_directory(job, program)
         ScopeCoordinator(output_dir).approve_draft(
             draft, approved_by=(request.approved_by or "").strip()
         )
@@ -463,6 +478,42 @@ class ScopeWorkflowManager:
         return [{**dict(row), "message_params": json.loads(row["message_params"] or "{}")}
                 for row in rows]
 
+    def _job_output_directory(self, job: sqlite3.Row, program: dict[str, Any]) -> Path:
+        root = self.result_root / "Scope"
+        canonical = scope_revision_directory(str(program["program_url"]), root)
+        if job["output_path"] is None:  # Only pre-migration jobs may fall back.
+            return canonical
+        path = Path(job["output_path"])
+        revision = scope_revision_directory(str(program["program_url"]), root, str(job["job_id"]))
+        if not path.is_absolute() or path not in {canonical, revision}:
+            raise ValueError("Scope job destination path does not match its program and job")
+        return path
+
+    def _latest_approved_directory(self, program: dict[str, Any]) -> Path | None:
+        root = self.result_root / "Scope"
+        canonical = scope_revision_directory(str(program["program_url"]), root)
+        verified = []
+        for directory in scope_archive_directories(root):
+            if directory != canonical and directory.parent.parent != canonical:
+                continue
+            try:
+                document, _ = ScopeCoordinator(directory).load_approved_scope()
+                approval = ScopeCoordinator(directory).verify_approval()
+                if identify_program(str(document.source.requested_url)) != identify_program(str(program["program_url"])):
+                    continue
+                verified.append((approval.approved_at, document.created_at, directory.name, directory))
+            except (CoordinatorError, OSError, ValueError):
+                continue
+        return max(verified)[-1] if verified else None
+
+    def run_worker(self, program_id: str, job_id: str, request: ScopeCollectionRequest) -> int:
+        job, program = self._job_and_program(program_id)
+        if job["job_id"] != job_id or job["status"] != "collecting":
+            return 2
+        output_dir = self._job_output_directory(job, program)
+        self._collect(job_id, program, request, output_dir)
+        return 0 if self.get_job(program_id)["scope_status"] == "review_required" else 1
+
     def _collect(
         self,
         job_id: str,
@@ -472,6 +523,11 @@ class ScopeWorkflowManager:
     ) -> None:
         url = str(program["program_url"])
         try:
+            job, _ = self._job_and_program(f"registered-{str(program['program_key'])[:12]}")
+            if job["job_id"] != job_id or job["status"] != "collecting":
+                raise ValueError("Scope collection no longer owns this job")
+            if self._job_output_directory(job, program) != output_dir:
+                raise ValueError("Scope collection destination path changed")
             agent = self._agent_factory()
             primary_reader = None
             fallback_reader = PlaywrightProgramPageReader(timeout_seconds=45)
@@ -569,21 +625,20 @@ class ScopeWorkflowManager:
             raise KeyError("Scope job not found")
         return job, program
 
-    def _record_terminal(self, program: dict[str, Any], status: str, message: str) -> dict[str, Any]:
+    def _record_terminal(self, conn: sqlite3.Connection, program: dict[str, Any], status: str, message: str, *, output_path: Path) -> dict[str, Any]:
         job_id = f"scopejob_{uuid4().hex}"
         now = _now()
-        with self._lock, closing(sqlite3.connect(self.database)) as conn, conn:
-            conn.execute(
-                """INSERT INTO scope_jobs
-                (job_id,program_key,status,login_mode,draft_path,error,created_at,updated_at,paused_from)
-                VALUES (?,?,?,'headless',NULL,NULL,?,?,NULL)
-                ON CONFLICT(program_key) DO UPDATE SET job_id=excluded.job_id,status=excluded.status,
-                login_mode=excluded.login_mode,draft_path=NULL,error=NULL,paused_from=NULL,
-                created_at=excluded.created_at,updated_at=excluded.updated_at""",
-                (job_id, program["program_key"], status, now, now),
-            )
-            self._append_event(conn, job_id, "success", message, message_code="scope.already_approved")
-        return self._public_job(self._job_and_program(f"registered-{str(program['program_key'])[:12]}")[0])
+        conn.execute(
+            """INSERT INTO scope_jobs
+            (job_id,program_key,status,login_mode,draft_path,error,created_at,updated_at,paused_from,output_path)
+            VALUES (?,?,?,'headless',NULL,NULL,?,?,NULL,?)
+            ON CONFLICT(program_key) DO UPDATE SET job_id=excluded.job_id,status=excluded.status,
+            login_mode=excluded.login_mode,draft_path=NULL,error=NULL,paused_from=NULL,output_path=excluded.output_path,
+            created_at=excluded.created_at,updated_at=excluded.updated_at""",
+            (job_id, program["program_key"], status, now, now, str(output_path)),
+        )
+        self._append_event(conn, job_id, "success", message, message_code="scope.already_approved")
+        return self._public_job(conn.execute("SELECT * FROM scope_jobs WHERE job_id=?", (job_id,)).fetchone())
 
     def _update(
         self,
@@ -652,7 +707,7 @@ class ScopeWorkflowManager:
     def _validated_draft_path(self, path: Path) -> Path:
         resolved = path.resolve(strict=True)
         resolved.relative_to(self.draft_root)
-        if resolved.is_symlink():
+        if path.absolute() != resolved:
             raise CoordinatorError("Scope draft must not be a symbolic link")
         return resolved
 

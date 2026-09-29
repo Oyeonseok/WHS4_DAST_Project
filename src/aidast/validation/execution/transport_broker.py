@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import copy
 import sqlite3
 import time
 from contextlib import closing
@@ -13,6 +14,8 @@ from urllib.parse import urlsplit
 from uuid import uuid4
 
 from aidast.recon.policy import TargetPolicy
+from aidast.core.http_safety import require_request_admission, has_request_exclusions
+from aidast.core.request_governor import RequestGovernor, GovernorError
 
 from ..contracts.models import BlindCase, canonical_json, canonical_sha256
 from ..persistence.evidence_policy import sanitize_metadata
@@ -37,6 +40,11 @@ class TransportOperationSpec:
     concurrency_units: Literal[0, 1] = 1
     request_units: int = 1
     metadata: Mapping[str, object] = field(default_factory=dict)
+    headers: Mapping[str, str] = field(default_factory=dict)
+    body: bytes | None = None
+    body_available: bool = False
+    identity_available: bool = False
+    context: Mapping[str, object] | None = None
 
 
 @dataclass(frozen=True)
@@ -68,6 +76,9 @@ class ValidationTransportBroker:
         self.attempt_id, self.blind_case, self.policy = attempt_id, blind_case, policy
         self.sleeper, self.clock = sleeper, clock
         self.operation_ids: list[str] = []
+        self.governor = RequestGovernor(getattr(policy, "request_governor", None), clock=clock, sleeper=sleeper)
+        self._permits = {}
+        self._admissions = {}
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path, isolation_level=None)
@@ -123,6 +134,21 @@ class ValidationTransportBroker:
             raise ValidationTransportError("invalid transport destination") from None
         if not allowed:
             raise ValidationTransportError("transport operation is outside current TargetPolicy")
+        actual = urlsplit(spec.destination)
+        expected = urlsplit(spec.policy_url)
+        actual_scheme = {'ws':'http','wss':'https'}.get(actual.scheme,actual.scheme)
+        def destination_key(p, scheme):
+            return (scheme,p.hostname,p.port or (443 if scheme=='https' else 80),p.path or '/',p.query)
+        if (actual.fragment or expected.fragment
+                or destination_key(actual,actual_scheme) != destination_key(expected,expected.scheme)
+                or (spec.runtime_kind == 'grpc' and (actual.query or expected.query))):
+            raise ValidationTransportError('physical destination differs from policy URL')
+        if spec.runtime_kind == 'websocket' and has_request_exclusions(self.policy):
+            raise ValidationTransportError('exclusion hold: complete WebSocket exchange and implicit controls unsupported')
+        require_request_admission(self.policy, url=spec.policy_url, method=spec.method.upper(),
+            headers=dict(spec.headers), body=spec.body, body_available=spec.body_available,
+            identity_available=spec.identity_available, context=spec.context, now=self.clock(),
+            error_class=ValidationTransportError)
         metadata = self._metadata(spec.metadata)
         # Accounting is broker-owned, never adapter-supplied result metadata.
         metadata.pop("request_units", None)
@@ -149,6 +175,7 @@ class ValidationTransportBroker:
                        group_id: str | None) -> tuple[TransportReservation, ...]:
         if not isinstance(specs, tuple) or not specs:
             raise ValidationTransportError("execution group requires operation specifications")
+        specs = copy.deepcopy(specs)
         prepared = tuple(self._prepare(spec) for spec in specs)
         limits = self.policy.limits
         policy_sha = canonical_sha256(self.policy.model_dump(mode="json"))
@@ -189,10 +216,19 @@ class ValidationTransportBroker:
                     )
                     reservations.append(TransportReservation(operation_id, scheduled, limits.timeout_seconds))
                     previous = scheduled
+                for spec, reservation in zip(specs, reservations):
+                    self._permits[reservation.operation_id] = self.governor.reserve(
+                        spec.policy_url, units=spec.request_units,
+                        timeout_seconds=limits.timeout_seconds, concurrency_units=spec.concurrency_units,
+                    )
                 conn.execute("COMMIT")
             except BaseException:
                 conn.execute("ROLLBACK")
+                for reservation in reservations:
+                    self._release(reservation.operation_id)
                 raise
+        for spec, reservation in zip(specs, reservations):
+            self._admissions[reservation.operation_id] = specs
         self.operation_ids.extend(item.operation_id for item in reservations)
         return tuple(reservations)
 
@@ -207,6 +243,24 @@ class ValidationTransportBroker:
         if row is None:
             raise ValidationTransportError("operation reservation is unavailable for dispatch")
         return row
+
+    def admission_for(self, reservation: TransportReservation) -> Callable[[], None]:
+        """Keep a frozen group's gate available through physical connection waits.
+
+        Owned senders call this again immediately before request bytes, after
+        their DNS/TCP/TLS acquisition, as well as checking their final member.
+        """
+        group = self._admissions.get(reservation.operation_id)
+
+        def admit() -> None:
+            if group is None:
+                if has_request_exclusions(self.policy):
+                    raise ValidationTransportError('exclusion hold: immutable operation context unavailable')
+                return
+            for member in group:
+                self._prepare(member)
+
+        return admit
 
     def dispatch_reserved(self, reservation: TransportReservation,
                           sender: Callable[[float], TransportDispatchResult[T]]) -> tuple[str, T]:
@@ -231,10 +285,18 @@ class ValidationTransportBroker:
                 conn.execute("ROLLBACK")
                 raise
         try:
-            result = sender(self.policy.limits.timeout_seconds)
+            permit = self._permits.get(reservation.operation_id)
+            if permit is None and self.governor.binding is not None:
+                raise ValidationTransportError("shared governor reservation unavailable")
+            if permit is not None:
+                permit.wait()
+            self.admission_for(reservation)()
+            result = sender(permit.timeout_seconds if permit is not None else self.policy.limits.timeout_seconds)
         except BaseException as exc:
             self._finish(reservation.operation_id, "outcome_unknown", error_message=type(exc).__name__)
             raise
+        finally:
+            self._release(reservation.operation_id)
         try:
             if (not isinstance(result, TransportDispatchResult)
                     or type(result.response_bytes) is not int or result.response_bytes < 0
@@ -302,7 +364,14 @@ class ValidationTransportBroker:
                 raise
         if cursor.rowcount != len(abandoned):
             raise ValidationTransportError("reserved operation cleanup changed concurrently")
+        for operation_id in abandoned:
+            self._release(operation_id)
         return abandoned
+
+    def _release(self, operation_id):
+        permit = self._permits.pop(operation_id, None)
+        if permit is not None:
+            permit.complete()
 
     def _finish(self, operation_id: str, status: str, *, response_bytes: int | None = None,
                 result_json: str = "{}", error_message: str | None = None) -> None:

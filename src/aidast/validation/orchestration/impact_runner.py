@@ -8,6 +8,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from aidast.agents.main import CodexMainAgent
+from aidast.agents.policy_guidance import policy_skill_text, stage_policy_skill
 
 from ..execution.impact_development import ImpactDevelopmentPlan, ImpactDevelopmentRequest
 from ..core.profiles import SkillProfileResolver
@@ -28,6 +29,7 @@ class CodexImpactDevelopmentRunner:
     def plan(self, request: ImpactDevelopmentRequest, *, evidence: tuple[dict, ...]) -> ImpactDevelopmentPlan:
         work_dir = self._work_root / ("hypothesis-" + uuid4().hex)
         work_dir.mkdir()
+        stage_policy_skill(work_dir)
         context = json.dumps({
             "impact_development_request": request.model_dump(mode="json"),
             "evidence": evidence,
@@ -48,7 +50,13 @@ class CodexImpactDevelopmentRunner:
                 ],
             },
         }, ensure_ascii=False, sort_keys=True)
-        prompt = f"""Follow the selected Validation Skill only for precondition judgment.
+        prompt = f"""$aidast-policy
+
+{policy_skill_text()}
+
+Apply application_policy_guidance before selecting execute; it is precaution
+data, not proof, and has no citation IDs. Skip an action whose permission is unclear.
+Follow the selected Validation Skill only for precondition judgment.
                     Return only ImpactDevelopmentPlan. Choose execute only when every declared prerequisite
                     is supported by the supplied evidence. Never invent or modify an endpoint, method,
                     identity, credential, payload, assertion, signal, score, or final Validation status.

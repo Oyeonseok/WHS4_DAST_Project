@@ -24,7 +24,7 @@ from aidast.reporting.runtime import ReportError
 from aidast.reporting.submission import MAX_REQUIREMENTS_BYTES, ProgramRequirements, export_report, inspect_report, save_requirements
 
 from .projection import DashboardProjector, ProjectionError, ScanNotFoundError
-from .launch import ProgramResolveRequest, ScanLaunchManager, ScanLaunchRequest
+from .launch import ProgramResolveRequest, ScanLaunchManager, ScanLaunchRequest, ExclusionPreparationRequest
 from .programs import ProgramRegistrationRequest, ProgramRegistry
 from .reports import ReportCatalog, ReportNotFoundError
 from .scope_workflow import (
@@ -250,6 +250,27 @@ def create_app(
     ) -> dict[str, Any]:
         require_same_origin(request)
         return {"job": scope_action(lambda: workflow.decide(program_id, payload))}
+
+    @app.post("/api/v1/scopes/{scope_id}/execution-requirements")
+    @app.post("/api/v1/scopes/{scope_id}/header-requirements")
+    async def resolve_header_requirements(scope_id: str, request: Request) -> dict[str, Any]:
+        require_same_origin(request)
+        try:
+            approved = await asyncio.to_thread(manager.catalog.resolve_header_requirements, scope_id)
+            return {"scope": approved.public()}
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/v1/scopes/{scope_id}/exclusion-preparation")
+    async def prepare_scope_resources(scope_id: str, payload: ExclusionPreparationRequest, request: Request) -> dict[str, Any]:
+        require_same_origin(request)
+        if payload.scope_id != scope_id:
+            raise HTTPException(status_code=400, detail="Scope selection mismatch")
+        try:
+            preparation = await asyncio.to_thread(manager.prepare_resources, payload)
+            return {"preparation": preparation}
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.post("/api/v1/scopes/resolve")
     async def resolve_scope(payload: ProgramResolveRequest, request: Request) -> dict[str, Any]:

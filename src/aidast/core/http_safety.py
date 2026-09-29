@@ -20,6 +20,40 @@ BROWSER_SUPPORT_MODES = {"same-origin", "passive"}
 AUTH_CAPABILITY_HEADER = "X-AIDAST-Auth-Capability"
 AUTH_CAPABILITY_VERSION = 1
 
+# Policy requirements may name any safe HTTP token. This deny list protects
+# credentials, request routing/framing, and internal transport capabilities.
+PROTECTED_IDENTITY_HEADERS = frozenset({
+    "host", "cookie", "set-cookie", "authorization", "proxy-authorization",
+    "connection", "keep-alive", "proxy-connection", "transfer-encoding",
+    "content-length", "te", "trailer", "upgrade", "expect", "proxy-authenticate",
+    "www-authenticate", "forwarded", "x-forwarded-host", "x-forwarded-for",
+    "x-forwarded-proto", "via",
+    "api-key", "x-api-key", "apikey", "x-apikey", "authentication",
+    "x-auth", "x-auth-token", "access-token", "x-access-token",
+    "x-csrf-token", "x-xsrf-token",
+})
+
+
+def validate_identity_header_name(name: str) -> str:
+    if (not isinstance(name, str) or len(name) > 128
+            or re.fullmatch(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+", name) is None):
+        raise ValueError("identity header name must be a valid HTTP token")
+    normalized = name.casefold().replace("_", "-")
+    if normalized in PROTECTED_IDENTITY_HEADERS or normalized.startswith("x-aidast-"):
+        raise ValueError("protected credential, routing or internal identity header")
+    return name
+
+
+def validate_identity_header_value(value: str) -> str:
+    if (not isinstance(value, str) or not value.strip() or len(value) > 1024
+            or any(ord(char) < 32 or ord(char) == 127 for char in value)):
+        raise ValueError("identity header value must be nonblank, bounded and free of controls")
+    try:
+        value.encode("latin-1")
+    except UnicodeEncodeError as exc:
+        raise ValueError("identity header value must be HTTP Latin-1 encodable") from exc
+    return value
+
 
 def scope_uses_loopback_host(hosts: object) -> bool:
     """Keep browser rendering traffic local when a scope contains loopback."""
@@ -157,7 +191,7 @@ def is_sensitive_header(name: str) -> bool:
     return (
         normalized in {
             "authorization", "proxy-authorization", "cookie", "set-cookie",
-            "x-intigriti-username", "x-hackerone",
+            "x-intigriti-username", "x-hackerone", "x-bug-bounty",
         }
         or any(
             part in normalized
@@ -179,27 +213,48 @@ def validate_hackerone_username(value: str) -> str:
     return validate_platform_username(value, "HackerOne")
 
 
+def validate_identity_headers(headers: Mapping[str, str]) -> dict[str, str]:
+    """Validate a generic trusted identification map without interpreting policy."""
+    if not isinstance(headers, Mapping) or len(headers) > 32:
+        raise ValueError("required identity headers must be a bounded object")
+    normalized: dict[str, str] = {}
+    seen: set[str] = set()
+    for name, value in headers.items():
+        name = validate_identity_header_name(name)
+        if name.casefold() in seen:
+            raise ValueError("duplicate researcher identity header names")
+        seen.add(name.casefold())
+        normalized[name] = validate_identity_header_value(value)
+    return normalized
+
+
 def merge_hackerone_identity(
     headers: Mapping[str, str] | None,
     username: str | None,
+    *,
+    required_identity_headers: Mapping[str, str] | None = None,
 ) -> dict[str, str]:
+    required = validate_identity_headers({} if required_identity_headers is None else required_identity_headers)
+    controlled = {"x-hackerone", *(name.casefold() for name in required)}
     merged = {
         str(name): str(value)
         for name, value in (headers or {}).items()
-        if str(name).casefold() != "x-hackerone"
+        if str(name).casefold() not in controlled
     }
-    if username is not None:
+    # Preserve legacy policies, but use the exact Scope names for new policies.
+    if username is not None and not required:
         merged["X-HackerOne"] = validate_hackerone_username(username)
+    merged.update(required)
     return merged
 
 
-def sanitize_headers(headers: Mapping[str, str] | None) -> dict[str, str]:
+def sanitize_headers(headers: Mapping[str, str] | None, *, identity_headers: Mapping[str, str] | None = None) -> dict[str, str]:
     """Retain useful header names without persisting credential values."""
     result: dict[str, str] = {}
     for name, value in (headers or {}).items():
         header_name = str(name)
         header_value = str(value)
-        if is_sensitive_header(header_name):
+        if is_sensitive_header(header_name) or header_name.casefold() in {name.casefold() for name in (identity_headers or {})}:
             header_value = "[REDACTED]"
         elif header_name.lower().replace("_", "-") == "user-agent":
             header_value = re.sub(
@@ -252,6 +307,10 @@ def validate_scope_rules(rules: object) -> dict:
     maximum = rules.get("max_requests")
     if type(maximum) is not int or maximum < 1:
         raise ValueError("scope rules require a positive max_requests")
+    if "required_identity_headers" in rules:
+        validate_identity_headers(rules["required_identity_headers"])
+    if rules.get("hackerone_username") is not None:
+        validate_hackerone_username(rules["hackerone_username"])
     return rules
 
 
@@ -266,3 +325,48 @@ def _valid_host_pattern(host: str) -> bool:
         and "*" not in value
         and re.fullmatch(r"[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?", value)
     )
+
+
+def exclusion_snapshot(policy):
+    """Extract a guard without letting malformed present values become legacy."""
+    value = policy.get('request_exclusions') if isinstance(policy, Mapping) else getattr(policy, 'request_exclusions', None)
+    return value.model_dump(mode='json') if hasattr(value, 'model_dump') else value
+
+
+def has_request_exclusions(policy):
+    """Whether unmanaged capabilities must hold, including malformed guards."""
+    value = exclusion_snapshot(policy)
+    if value is None:
+        return False
+    from pathlib import Path
+    import runpy
+    try:
+        guard = runpy.run_path(str(Path(__file__).with_name('exclusion_guard.py')))
+        value = guard['validate_exclusion_policy'](value)
+        return any(guard['exclusion_applicability'](r, value['target_asset']) != 'disjoint'
+                   for r in value['rules'])
+    except (ValueError, TypeError, KeyError):
+        return True
+
+
+def require_request_admission(policy, *, url, method, headers=None, body=None,
+                              body_available=True, identity_available=True,
+                              context=None, now=None, error_class=ValueError):
+    """Full physical admission; false exclusions still require baseline checks."""
+    if hasattr(policy, 'check_request_exclusions'):
+        result = policy.check_request_exclusions(url, method=method, headers=headers,
+            body=body, body_available=body_available, identity_available=identity_available,
+            context=context, now=now)
+    else:
+        from pathlib import Path
+        import runpy
+        guard = runpy.run_path(str(Path(__file__).with_name('exclusion_guard.py')))
+        value = exclusion_snapshot(policy)
+        if value is not None and (not isinstance(value, dict) or value.get('target_asset') != policy.get('asset')):
+            raise error_class('exclusion hold: policy target mismatch')
+        result = guard['evaluate_exclusions'](value, url=url, method=method, headers=headers,
+            body=body, body_available=body_available, identity_available=identity_available,
+            context=context, now=now)
+    if result['decision'] != 'continue':
+        raise error_class('exclusion ' + result['decision'] + ': ' + ', '.join(result['rule_keys']) + ' (' + result['reason'] + ')')
+    return result

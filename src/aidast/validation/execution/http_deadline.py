@@ -135,7 +135,9 @@ class DeadlineHttpTransport:
         self._ordinary_http = transport is None
 
     def send(self, request: Request, *, deadline: float,
-             timeout: float) -> tuple[BrokerResponse, float, int]:
+             timeout: float, admission=None) -> tuple[BrokerResponse, float, int]:
+        if admission is not None:
+            admission()
         method = request.get_method()
         remaining = deadline - self.clock()
         if remaining <= 0:
@@ -234,6 +236,8 @@ class DeadlineHttpTransport:
                         else:
                             connection.connect()
                     ensure_remaining()  # immediately after socket acquisition
+                    if admission is not None:
+                        admission()
                     dispatch_ns = self.monotonic_ns()  # immediately before send
                     connection.request(method, target, body=request.data, headers=dict(request.header_items()))
                     if connection.sock is not None:
@@ -246,6 +250,8 @@ class DeadlineHttpTransport:
                     timer = threading.Timer(max(0.0, deadline - self.clock()), abort)
                     timer.daemon = True
                     timer.start()
+                    if admission is not None:
+                        admission()
                     dispatch_ns = self.monotonic_ns()  # immediately before seam invocation
                     response = self.transport(request, timeout=min(timeout, ensure_remaining()))
                     ensure_remaining()

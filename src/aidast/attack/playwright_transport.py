@@ -21,8 +21,8 @@ class PlaywrightResponse:
         self.url = url
         self._body = body
 
-    def read(self) -> bytes:
-        return self._body
+    def read(self, maximum: int = -1) -> bytes:
+        return self._body if maximum < 0 else self._body[:maximum]
 
     def close(self) -> None:
         return None
@@ -30,6 +30,8 @@ class PlaywrightResponse:
 
 class PlaywrightSessionTransport:
     """Callable transport using exactly one explicit storage-state file."""
+
+    identity_available = False  # APIRequestContext adds session cookies/defaults.
 
     def __init__(
         self,

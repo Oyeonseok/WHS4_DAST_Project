@@ -43,6 +43,7 @@ from aidast.scope.models import (
     ScopeAnalysis,
     ScopeAsset,
     SourceEvidence,
+    RequiredRequestHeader, HeaderInput, ScopeExecutionRules,
 )
 
 
@@ -55,6 +56,10 @@ def _execution_requirements(
 ):
     return build_scope_execution_requirements(
         ScopeAnalysis(
+            required_request_headers=[],
+            execution_rules={"exclusions": [], "request_limits": [dict(
+                maximum=10, period_seconds=1, scope="program", source_quote=rate_quote
+            )] if rate_quote else []},
             program_name="Fixture",
             program_description="Fixture",
             in_scope_assets=[],
@@ -728,6 +733,11 @@ def test_scope_dashboard_requires_explicit_yes_or_no(tmp_path: Path) -> None:
         text=text,
     )
     analysis = ScopeAnalysis(
+        execution_rules=ScopeExecutionRules(exclusions=[], request_limits=[dict(maximum=10, period_seconds=1, scope="program", source_quote="Automated tooling\nmax. 10 requests /sec")]),
+        required_request_headers=[RequiredRequestHeader(
+            name="X-Intigriti-Username", value_template="{intigriti_username}",
+            inputs=[HeaderInput(key="intigriti_username", label="Username", kind="username")],
+            source_quote="Request header\nX-Intigriti-Username:{Username}")],
         program_name="Example Program",
         program_description="Authorized public bug bounty program.",
         in_scope_assets=[
@@ -1022,6 +1032,26 @@ def test_scan_launcher_builds_fixed_argv_and_streams_pre_database_logs(tmp_path:
         captured.update(argv=argv, kwargs=kwargs)
         return Process()
 
+    from aidast.scope.identity_headers import ScopeHeaderResolver
+    from aidast.orchestration.scope import ScopeCoordinator
+    from test_scope_workflow import sample_analysis, sample_page
+    header_quote = "Include X-HackerOne:{Username} in every request."
+    scope_analysis = sample_analysis().model_copy(update={
+        "in_scope_assets": [ScopeAsset(asset_type=AssetType.DOMAIN, asset="prismlife.com", description="", eligibility="", maximum_severity="HIGH")],
+        "source_evidence": [SourceEvidence(section="Scope", quote="prismlife.com"), SourceEvidence(section="Headers", quote=header_quote)],
+        "required_request_headers": [RequiredRequestHeader(name="X-HackerOne", value_template="{hackerone_username}",
+            inputs=[HeaderInput(key="hackerone_username", label="Username", kind="username")], source_quote=header_quote)],
+    })
+    source_page = sample_page()
+    source_text = "prismlife.com is in scope. " + header_quote + " Automated tooling max. 10 requests /sec"
+    source_page = source_page.model_copy(update={"text": source_text, "content_sha256": hashlib.sha256(source_text.encode()).hexdigest()})
+    class ScopeAgent:
+        def collect_scope(self, _url):
+            return source_page, scope_analysis
+    launch_scope_dir = tmp_path / "Scope" / "hackerone" / "prism_vdp"
+    ScopeCoordinator(launch_scope_dir).collect("https://hackerone.com/prism_vdp", main_agent=ScopeAgent(),
+                                            approved_by="operator", review=lambda _: True)
+
     approved = ApprovedScope(
         scope_id="scope_verified",
         program_id="h1-prism-vdp",
@@ -1031,10 +1061,12 @@ def test_scan_launcher_builds_fixed_argv_and_streams_pre_database_logs(tmp_path:
         targets=({"asset_type": "DOMAIN", "asset": "prismlife.com", "description": "", "maximum_severity": "HIGH"},),
         identity_header="hackerone",
         approved_by="operator",
-        execution_requirements=_execution_requirements("hackerone"),
+        execution_requirements=build_scope_execution_requirements(scope_analysis),
+        directory=launch_scope_dir,
     )
 
     class Catalog:
+        header_resolver = ScopeHeaderResolver(tmp_path / ".header-requirements")
         def list(self) -> list[ApprovedScope]:
             return [approved]
 
@@ -1090,14 +1122,24 @@ def test_scan_launcher_builds_fixed_argv_and_streams_pre_database_logs(tmp_path:
 
     from dataclasses import replace
 
-    approved = replace(
-        approved,
-        execution_requirements=_execution_requirements(
-            "hackerone", rate_quote="Automated tooling max. 10 requests /sec"
-        ),
-    )
+    # A stale catalog projection cannot loosen the freshly verified document.
+    approved = replace(approved, execution_requirements=_execution_requirements(
+        "hackerone", rate_quote="Automated tooling max. 10 requests /sec"))
+    with pytest.raises(ValueError, match="request rate exceeds"):
+        manager.launch(request.model_copy(update={"max_rps": 10}))
+    from aidast.scope.execution_rules import ScopeExecutionResolver, EXECUTION_INTERPRETATION_VERSION
+    document, _ = ScopeCoordinator(launch_scope_dir).load_approved_scope()
+    resolver = ScopeExecutionResolver(tmp_path / '.execution-requirements')
+    rate_quote = "Automated tooling max. 10 requests /sec"
+    resolver.cache_dir.mkdir()
+    resolver.cache_path(document).write_text(json.dumps(dict(
+        interpretation_version=EXECUTION_INTERPRETATION_VERSION, approved_digest=resolver.digest(document),
+        requirements=dict(required_request_headers=[item.model_dump() for item in scope_analysis.required_request_headers],
+            execution_rules=dict(policy_review_version=2, exclusions=[], request_limits=[dict(maximum=10,period_seconds=1,scope="program",source_quote=rate_quote)])))))
+    manager.catalog.header_resolver = resolver
     manager.launch(request.model_copy(update={"max_rps": 10}))
-    assert captured["argv"][captured["argv"].index("--max-rps") + 1] == "10"
+    argv = captured["argv"]
+    assert float(argv[argv.index("--max-rps") + 1]) == 10.0
     with pytest.raises(ValueError, match="request rate exceeds"):
         manager.launch(request.model_copy(update={"max_rps": 11}))
     waiting.set()
@@ -1452,3 +1494,21 @@ def test_validations_api_reports_case_verdicts_and_safe_evidence(tmp_path: Path)
             assert (await client.get("/api/v1/scans/unknown-scan/validations")).status_code == 404
 
     asyncio.run(exercise())
+
+
+def test_resume_uses_saved_policy_without_new_launch_inputs(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+    projector = DashboardProjector(tmp_path)
+    process = Mock()
+    factory = Mock(return_value=process)
+    manager = ScanLaunchManager(tmp_path, projector, process_factory=factory, project_root=tmp_path)
+    plan = SimpleNamespace(scope_id='approved', targets=('https://example.test/',), stage='recon')
+    monkeypatch.setattr('aidast.web.launch.inspect_resume', lambda root, scan_id: plan)
+    manager.catalog = SimpleNamespace(get=lambda scope_id: SimpleNamespace(scope_id=scope_id))
+    monkeypatch.setattr('aidast.web.launch.threading.Thread.start', lambda self: None)
+    result = manager.resume('scan_resume_fixture')
+    assert result['status'] == 'running'
+    argv = factory.call_args.args[0]
+    assert argv[1:5] == ['-m', 'aidast', 'resume', 'scan_resume_fixture']
+    assert '--policy-input' not in argv and '--confirm-policy' not in argv

@@ -16,8 +16,8 @@ class _Response:
         self.url = response.url
         self._body = body
 
-    def read(self) -> bytes:
-        return self._body
+    def read(self, maximum: int = -1) -> bytes:
+        return self._body if maximum < 0 else self._body[:maximum]
 
     def close(self) -> None:
         return None
@@ -81,6 +81,7 @@ class PersistentSessionPool:
             )
             return _Response(response, response.body()[: self.max_body_bytes])
 
+        send.identity_available = False  # Live cookie jar is not a frozen wire identity.
         return send
 
     def close(self) -> None:

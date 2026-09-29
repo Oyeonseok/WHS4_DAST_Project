@@ -10,9 +10,11 @@ from pathlib import Path
 from typing import Any
 
 from aidast.attack.runtime import _require_standalone_database
-from aidast.attack.store import _redact, _verify_handoff
+from aidast.attack.store import _redact, _verify_handoff, _SECRET_VALUE, _URL
+from aidast.pipeline.models import verify_artifact
+from aidast.recon.policy import TargetPolicy
 
-from .evidence_policy import redact_text, sanitize_metadata
+from .evidence_policy import _HEADER, redact_text, sanitize_metadata
 from ..contracts.models import ValidationError, canonical_json as canonical, canonical_sha256 as digest
 
 
@@ -43,6 +45,60 @@ def _safe_metadata(value: Any) -> Any:
         return sanitize_metadata(value)
     except ValidationError:
         return {"omitted": "metadata exceeds the safe review format or budget"}
+
+
+def _bound_policy_warnings(manifest, manifest_path: Path, policy_digest: str) -> tuple[TargetPolicy, ...]:
+    """Load notes only from the exact artifact bound by the immutable Attack run."""
+    by_role = {item.role.casefold(): item for item in manifest.artifacts}
+    artifact = next((by_role[role] for role in ('target-policy', 'target_policy', 'policy')
+                     if role in by_role), None)
+    if artifact is None:
+        if policy_digest:
+            raise ValidationError("bound TargetPolicy artifact is missing")
+        return ()
+    if artifact.sha256 != policy_digest:
+        raise ValidationError("TargetPolicy digest does not match the Attack run")
+    if artifact.size_bytes > 8_000_000:
+        raise ValidationError("bound TargetPolicy exceeds the 8 MB review budget")
+    path = verify_artifact(artifact, root=manifest_path.parent)
+    # Recheck the bytes actually parsed after manifest verification.
+    raw = path.read_bytes()
+    if len(raw) != artifact.size_bytes or hashlib.sha256(raw).hexdigest() != policy_digest:
+        raise ValidationError("TargetPolicy changed while reading the source snapshot")
+    document = json.loads(raw)
+    # Old evidence-only handoffs can carry opaque policy metadata with no notes.
+    if not isinstance(document, dict) or 'policies' not in document:
+        return ()
+    items = document['policies']
+    if not isinstance(items, list):
+        raise ValidationError("bound TargetPolicy policies must be an array")
+    try:
+        return tuple(TargetPolicy.model_validate(item) for item in items
+                     if isinstance(item, dict) and item.get('policy_notes'))
+    except ValueError:
+        raise ValidationError("invalid bound TargetPolicy warnings") from None
+
+
+def _safe_policy_note(note: str) -> str:
+    """Reuse review redaction without truncating a precaution after a long quote."""
+    # Each URL still passes the existing credential/query/fragment sanitizer.
+    # The complete context budget below bounds policy prose instead of the
+    # evidence-description cap, which could silently discard a stop condition.
+    return _SECRET_VALUE.sub('[REDACTED]', _URL.sub(
+        lambda match: safe_text(match.group()),
+        _HEADER.sub('[SENSITIVE HEADER OMITTED]', note),
+    ))
+
+
+def _applicable_policy_warnings(policies: tuple[TargetPolicy, ...], request_rows) -> list[dict]:
+    """Use captured destinations for applicability; export no credentials or claims."""
+    return [
+        {'asset': safe_text(policy.asset),
+         'policy_notes': [_safe_policy_note(note) for note in policy.policy_notes]}
+        for policy in policies
+        if any(policy.allows_validation_url(str(row['url']), method=str(row['method']))
+               for row in request_rows)
+    ]
 
 
 def read_source(database: Path, *, run_id: str | None = None,
@@ -82,6 +138,7 @@ def read_source(database: Path, *, run_id: str | None = None,
                     or recon_sha != run["source_database_sha256"]
                     or (path.parent / run["source_database_path"]).resolve(strict=True) != recon_path):
                 raise ValidationError("Attack run source provenance does not match its Recon handoff")
+            policy_warnings = _bound_policy_warnings(manifest, manifest_path, run["policy_digest"])
             parameters: tuple = (run_id, run["scan_id"])
             query = "SELECT * FROM findings WHERE run_id=? AND scan_id=?"
             if finding_id is not None:
@@ -166,6 +223,13 @@ def read_source(database: Path, *, run_id: str | None = None,
                     "limitations": ["untrusted_evidence_data", "no_reproduction_performed", "raw_bodies_and_headers_omitted",
                                      "hashes_alone_do_not_establish_scope_policy_or_impact"],
                 }
+                warnings = _applicable_policy_warnings(policy_warnings, request_rows)
+                if warnings:
+                    context['policy_guidance'] = {
+                        'context_kind': 'application_policy_guidance',
+                        'source_policy_sha256': run['policy_digest'],
+                        'policies': warnings,
+                    }
                 if len(canonical(context).encode()) > 1_048_576:
                     raise ValidationError("finding context exceeds the 1 MiB review budget")
                 context["context_sha256"] = digest(context)

@@ -9,6 +9,8 @@ from importlib.resources import files
 from pathlib import Path
 from typing import Protocol
 
+from aidast.agents.policy_guidance import policy_skill_text
+
 from .models import QUESTIONS, ValidationAssessment, ValidationError
 from ..persistence.source import canonical, digest, read_source, safe_text
 from .store import initialize_store, persist_decision
@@ -19,7 +21,7 @@ class ValidationReviewer(Protocol):
 
 
 def load_skill() -> str:
-    return files("aidast.skills.validation.legacy").joinpath("SKILL.md").read_text(
+    return policy_skill_text() + "\n\n" + files("aidast.skills.validation.legacy").joinpath("SKILL.md").read_text(
         encoding="utf-8"
     )
 

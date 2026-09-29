@@ -71,3 +71,55 @@ def _slug(value: str, label: str) -> str:
     if not normalized or normalized in {".", ".."}:
         raise ScopePathError(f"program URL has an invalid {label}")
     return normalized
+
+
+_SCOPE_REVISION_ID = re.compile(r'^scopejob_[0-9a-f]{32}$')
+
+
+def validate_scope_artifact_directory(directory: Path, root: Path) -> Path:
+    """Accept only canonical archives or app-owned revisions without symlinks."""
+    root = root.absolute()
+    directory = directory.absolute()
+    try:
+        parts = directory.relative_to(root).parts
+    except ValueError as exc:
+        raise ScopePathError('Scope destination path is outside the Scope root') from exc
+    if not (len(parts) == 2 or (len(parts) == 4 and parts[2] == 'revisions'
+                               and _SCOPE_REVISION_ID.fullmatch(parts[3]))):
+        raise ScopePathError('Scope destination path has an invalid archive layout')
+    if any(part in {'.', '..'} for part in parts):
+        raise ScopePathError('Scope destination path cannot contain relative segments')
+    current = root
+    for part in ('', *parts):
+        if part:
+            current = current / part
+        if current.is_symlink():
+            raise ScopePathError('Scope destination path must not contain a symbolic link')
+    if directory.resolve(strict=False) != directory:
+        raise ScopePathError('Scope destination path must not contain a symbolic link or alias')
+    return directory
+
+
+def scope_revision_directory(program_url: str, root: Path, revision: str | None = None) -> Path:
+    directory = identify_program(program_url).under(root)
+    if revision is not None:
+        if not _SCOPE_REVISION_ID.fullmatch(revision):
+            raise ScopePathError('Scope revision must be an application-owned job ID')
+        directory = directory / 'revisions' / revision
+    return validate_scope_artifact_directory(directory, root)
+
+
+def scope_archive_directories(root: Path):
+    """Bounded-depth discovery; only the original two-level identity is used."""
+    if not root.is_dir():
+        return
+    for pattern in ('*/*/Scope.json', '*/*/revisions/scopejob_*/Scope.json'):
+        for scope_json in root.glob(pattern):
+            try:
+                directory = validate_scope_artifact_directory(scope_json.parent, root)
+                if any((directory / name).is_symlink() for name in
+                       ('Scope.json', 'Scope.md', 'Manifest.json', 'Approval.json')):
+                    continue
+                yield directory
+            except (OSError, ValueError):
+                continue

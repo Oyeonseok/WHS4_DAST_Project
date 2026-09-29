@@ -10,7 +10,7 @@ from unittest.mock import Mock, patch
 from aidast.agents.main import CodexLegacyReportWriter, CodexValidationReviewer
 from aidast.cli import main
 from aidast.reporting import ReportDraft
-from aidast.validation import ValidationAssessment
+from aidast.validation import ValidationAssessment, load_skill
 
 
 class ValidationReportCliTests(unittest.TestCase):
@@ -143,9 +143,7 @@ class ValidationReportCliTests(unittest.TestCase):
             ],
         })
         agent._run_structured.side_effect = [assessment, report]
-        skill = Path("src/aidast/skills/validation/legacy/SKILL.md").read_text(
-            encoding="utf-8"
-        )
+        skill = load_skill()
         CodexValidationReviewer(agent).review(
             {"context_sha256": "a" * 64, "finding_id": "finding"}, skill
         )

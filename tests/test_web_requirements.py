@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from aidast.recon.profiles import EXECUTION_PROFILES
-from aidast.scope.models import ScopeAnalysis, SourceEvidence
+from aidast.scope.models import ScopeAnalysis, SourceEvidence, RequiredRequestHeader, HeaderInput, ScopeExecutionRules
 from aidast.web.requirements import build_scope_execution_requirements
 
 
@@ -14,6 +14,8 @@ def _analysis(*, rate_quote: str | None) -> ScopeAnalysis:
             SourceEvidence(section="Rules of engagement", quote=rate_quote)
         )
     return ScopeAnalysis(
+        required_request_headers=[],
+        execution_rules={"exclusions": []},
         program_name="Example",
         program_description="Example bounty program",
         in_scope_assets=[],
@@ -30,7 +32,15 @@ def _analysis(*, rate_quote: str | None) -> ScopeAnalysis:
 
 def test_scope_requirements_use_grounded_rate_and_identity_header() -> None:
     requirements = build_scope_execution_requirements(
-        _analysis(rate_quote="Automated tooling\nmax. 10 requests /sec"),
+        _analysis(rate_quote="Automated tooling\nmax. 10 requests /sec").model_copy(update={
+            "execution_rules": ScopeExecutionRules(request_limits=[dict(maximum=10, period_seconds=1, scope="program", source_quote="Automated tooling\nmax. 10 requests /sec")]),
+            "required_request_headers": [RequiredRequestHeader(
+                name="X-Intigriti-Username", value_template="{intigriti_username}",
+                inputs=[HeaderInput(key="intigriti_username", label="Username", kind="username")],
+                source_quote="Use X-Intigriti-Username on requests.")],
+            "source_evidence": [SourceEvidence(section="Rules", quote="Automated tooling\nmax. 10 requests /sec"),
+                                SourceEvidence(section="Headers", quote="Use X-Intigriti-Username on requests.")],
+        }),
         identity_header="intigriti",
     )
 
@@ -61,11 +71,12 @@ def test_scope_requirements_fail_closed_when_rate_is_not_grounded() -> None:
 
     assert requirements.scope_max_requests_per_second is None
     assert requirements.required_header is None
-    assert requirements.profiles[0].limits is EXECUTION_PROFILES["safe-recon"]
+    assert requirements.profiles[0].limits == EXECUTION_PROFILES["safe-recon"]
 
 
 def test_scope_rate_shorthand_uses_the_policy_number_in_the_scan_profile() -> None:
     analysis = _analysis(rate_quote=None).model_copy(update={
+        "execution_rules": ScopeExecutionRules(request_limits=[dict(maximum=6, period_seconds=1, scope="program", source_quote="자동 점검은 6req/s제한")]),
         "source_evidence": [
             SourceEvidence(section="Scope", quote="자동 점검은 6req/s제한"),
         ],

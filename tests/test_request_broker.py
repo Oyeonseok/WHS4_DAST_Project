@@ -113,7 +113,10 @@ class RequestBrokerTests(unittest.TestCase):
             "https://example.com/app", headers={"Authorization": "secret", "Cookie": "session=secret",
                                                "X-Api-Key": "secret", "Host": "example.com", "Accept": "text/plain"})
         forwarded = dict(transport.call_args.args[0].header_items())
-        self.assertEqual(forwarded, {"Accept": "text/plain"})
+        self.assertEqual(forwarded['Accept'], 'text/plain')
+        self.assertEqual(forwarded['Host'], 'sub.example.com')
+        self.assertEqual(forwarded['Accept-encoding'], 'identity')
+        self.assertFalse({'authorization','cookie','x-api-key'} & {name.lower() for name in forwarded})
 
     def test_redirect_method_change_is_policy_checked(self):
         transport = MagicMock(return_value=response(303, {"Location": "/app/next"}))

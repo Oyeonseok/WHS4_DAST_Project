@@ -8,6 +8,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from aidast.agents.main import CodexMainAgent
+from aidast.agents.policy_guidance import policy_guidance_context, policy_skill_text, stage_policy_skill
 
 from ..contracts.models import BlindAssessment, ClaimComparison, canonical_sha256
 from ..core.profiles import SkillProfileResolver
@@ -19,12 +20,18 @@ class CodexBlindValidationRunner:
     def __init__(self, agent: CodexMainAgent | None = None):
         self._agent = agent or CodexMainAgent()
         self.agent_id = "validation_agent_" + uuid4().hex
+        self._policy_guidance = ""
+        self._pending_policy_guidance: str | None = None
         self._active_case_id: str | None = None
         self._base_skill: str | None = None
         self._session_id: str | None = None
         self._temporary = tempfile.TemporaryDirectory(prefix="aidast-validation-")
         self._work_root = Path(self._temporary.name)
         self._work_dir: Path | None = None
+
+    def set_policy_context(self, policy) -> None:
+        # Bind to the next model pass after any new-case isolation reset.
+        self._pending_policy_guidance = policy_guidance_context(policy)
 
     def assess(self, blind_case: dict, observations: tuple[dict, ...],
                correction: str | None = None) -> BlindAssessment:
@@ -122,6 +129,10 @@ Return only ClaimComparison and never return a final Validation status.
         )
 
     def _run(self, **kwargs):
+        if self._pending_policy_guidance is not None:
+            self._policy_guidance = self._pending_policy_guidance
+            self._pending_policy_guidance = None
+        kwargs["prompt"] = "$aidast-policy\n\n" + policy_skill_text() + "\n\n" + self._policy_guidance + "\n\n" + kwargs["prompt"]
         session_method = getattr(type(self._agent), "_run_structured_session", None)
         if callable(session_method):
             if self._work_dir is None:
@@ -135,12 +146,16 @@ Return only ClaimComparison and never return a final Validation status.
     def _begin_case(self, case_id: str) -> None:
         """Drop disclosure context before the next case enters its blind pass."""
         self._active_case_id = case_id
+        self._policy_guidance = ""
         self._base_skill = None
         self._session_id = None
         self._work_dir = self._work_root / ("case-" + uuid4().hex)
         self._work_dir.mkdir()
+        stage_policy_skill(self._work_dir)
 
     def close(self) -> None:
+        self._policy_guidance = ""
+        self._pending_policy_guidance = None
         self._active_case_id = None
         self._base_skill = None
         self._session_id = None

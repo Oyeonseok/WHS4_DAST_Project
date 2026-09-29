@@ -197,9 +197,18 @@ class ValidationProfileTests(unittest.TestCase):
             "validation_skill_sha256": resolved.validation_skill_sha256,
             "validation_profile_sha256": resolved.profile_sha256,
         }
+        from aidast.recon.policy import TargetPolicy
+        runner.set_policy_context(TargetPolicy(scope_id="scope", policy_id="policy",
+            asset_type="URL", asset="https://test/", allowed_hosts=["test"],
+            policy_notes=["Sensitive data: use owned data only"]))
+        original_blind = json.dumps(blind, sort_keys=True)
         self.assertIs(runner.assess(blind, ()), assessment)
+        self.assertEqual(json.dumps(blind, sort_keys=True), original_blind)
+        self.assertTrue((runner._work_dir / ".agents/skills/aidast-policy/SKILL.md").is_file())
         first_prompt = agent._run_structured.call_args_list[0].kwargs["prompt"]
         self.assertNotIn("claimed_impact", first_prompt)
+        self.assertIn("Sensitive data", first_prompt)
+        self.assertIn("$aidast-policy", first_prompt)
         self.assertIn(resolved.validation_base_skill_text, first_prompt)
         self.assertIn(resolved.validation_skill_text, first_prompt)
         self.assertIs(runner.compare(

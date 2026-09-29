@@ -23,6 +23,8 @@ from aidast.scope.models import (
     CaptureReason,
     CaptureStatus,
     ProgramPage,
+    ObservedPolicyLink,
+    PrimaryPolicyView,
     ScopeNavigationDecision,
 )
 
@@ -172,6 +174,31 @@ class PlaywrightProgramPageReader:
         finally:
             context.close()
 
+    @staticmethod
+    def _observe_policy_links(page: Page) -> list[ObservedPolicyLink]:
+        """Observe hrefs before leaving this view; AI decides policy relevance."""
+        observed = page.locator("a[href]").evaluate_all("""nodes => nodes.slice(0, 128).map(node => ({
+            href: node.href,
+            label: (node.innerText || node.getAttribute('aria-label') || node.getAttribute('title') || '').trim().slice(0, 512)
+        }))""")
+        links: list[ObservedPolicyLink] = []
+        seen = set()
+        for item in observed[:128]:
+            href = urljoin(page.url, item["href"])
+            label = item["label"]
+            key = (page.url, href, label)
+            if key in seen or not href or len(href) > 4096:
+                continue
+            links.append(ObservedPolicyLink(candidate_id=len(links), url=href,
+                label=label, source_url=page.url))
+            seen.add(key)
+        return links
+
+    def _capture_primary_view(self, page: Page, text: str) -> PrimaryPolicyView:
+        # Use the same whitespace normalization as the unchanged aggregate capture.
+        text = "\n".join(line.rstrip() for line in text.splitlines() if line.strip()).strip()
+        return PrimaryPolicyView(url=page.url, text=text, observed_links=self._observe_policy_links(page))
+
     # 열린 페이지의 본문과 Scope 화면을 수집해 결과 모델로 만듬
     def _capture_loaded_page(
         self,
@@ -181,6 +208,7 @@ class PlaywrightProgramPageReader:
         discover_scope_view: bool = True,
     ) -> ProgramPage:
         landing_text = self._wait_for_stable_text(page)
+        primary_views = [self._capture_primary_view(page, landing_text)]
         final_url = page.url
         title = page.title().strip()
         _validate_public_https_url(final_url)
@@ -189,6 +217,8 @@ class PlaywrightProgramPageReader:
             if discover_scope_view
             else None
         )
+        if scope_view is not None:
+            primary_views.append(self._capture_primary_view(page, scope_view[1]))
         text = (
             f"=== PROGRAM PAGE: {final_url} ===\n{landing_text}\n\n"
             f"=== SCOPE VIEW: {scope_view[0]} ===\n{scope_view[1]}"
@@ -222,6 +252,7 @@ class PlaywrightProgramPageReader:
                 normalized_text.encode("utf-8")
             ).hexdigest(),
             text=normalized_text,
+            primary_views=primary_views,
         )
 
     # 프로그램 페이지에서 별도의 Scope 화면을 찾아 읽음
@@ -494,6 +525,7 @@ class RuntimeBrowserProgramPageReader(PlaywrightProgramPageReader):
         self, page: Page, program_url: str, *, initial_text: str | None = None
     ) -> ProgramPage:
         views: list[tuple[str, str]] = []
+        primary_views: list[PrimaryPolicyView] = []
         seen: set[tuple[str, str]] = set()
         attempted: dict[tuple[str, str], set[int]] = {}
         captured = False
@@ -510,6 +542,7 @@ class RuntimeBrowserProgramPageReader(PlaywrightProgramPageReader):
             if current not in seen:
                 views.append(current)
                 seen.add(current)
+            primary_views.append(self._capture_primary_view(page, body))
             choices, locators = self._navigation_candidates(page, program_url)
             available = [choice for choice in choices if choice["id"] not in attempted.get(current, set())]
             self._output(
@@ -573,6 +606,7 @@ class RuntimeBrowserProgramPageReader(PlaywrightProgramPageReader):
             capture_reason=reason,
             content_sha256=hashlib.sha256(text.encode("utf-8")).hexdigest(),
             text=text,
+            primary_views=primary_views,
         )
 
     def _prepare_session_directory(self, url: str) -> Path:

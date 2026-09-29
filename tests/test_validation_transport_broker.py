@@ -158,8 +158,8 @@ class ValidationTransportBrokerTests(unittest.TestCase):
         self.assertEqual(self.rows(), [])
 
     def test_metadata_and_destination_are_redacted_before_fingerprinting(self):
-        first = self.broker().reserve(self.spec(destination="https://test/items/0?token=private", metadata={"token": "private"}))
-        second = self.broker().reserve(self.spec(destination="https://test/items/0?token=other", metadata={"token": "other"}))
+        first = self.broker().reserve(self.spec(destination="https://test/items/0?token=private", policy_url="https://test/items/0?token=private", metadata={"token": "private"}))
+        second = self.broker().reserve(self.spec(destination="https://test/items/0?token=other", policy_url="https://test/items/0?token=other", metadata={"token": "other"}))
         rows = [tuple(row) for row in self.conn.execute(
             "SELECT destination,request_fingerprint,result_json FROM validation_transport_operations ORDER BY scheduled_at"
         )]

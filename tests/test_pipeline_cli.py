@@ -6,6 +6,7 @@ import json
 import sqlite3
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from contextlib import closing, redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
@@ -49,8 +50,11 @@ class PipelineCliTests(unittest.TestCase):
                 "scope_json_sha256": hashlib.sha256((program_dir / "Scope.json").read_bytes()).hexdigest(),
                 "scope_markdown_sha256": hashlib.sha256((program_dir / "Scope.md").read_bytes()).hexdigest(),
             }), encoding="utf-8")
-            scope = SimpleNamespace(
-                scope_id="pipeline-fixture", analysis=SimpleNamespace(in_scope_assets=[], source_evidence=[]),
+            from aidast.scope.models import ScopeDocument
+            from test_recon_workflow import program_page, scope_analysis
+            scope = ScopeDocument(
+                scope_id="pipeline-fixture", created_at=datetime.now(timezone.utc),
+                source=program_page(), analysis=scope_analysis(),
             )
 
             def fixture_executor(**kwargs):
@@ -79,8 +83,14 @@ class PipelineCliTests(unittest.TestCase):
                 redirect_stdout(stdout),
             ):
                 coordinator.return_value.load_approved_scope.return_value = (scope, "scope fixture")
-                planner.return_value.create_recon_plan.return_value = SimpleNamespace(plan_id="fixture", targets=[])
-                planner.return_value.create_target_policies.return_value = {}
+                planner.return_value.create_recon_plan.return_value = __import__('aidast.recon.models', fromlist=['ReconPlan']).ReconPlan(
+                    plan_id='fixture', scope_id='pipeline-fixture', objective='Offline fixture', mode='safe',
+                    targets=[dict(asset_type='WILDCARD', asset='*.example.com', steps=['ASSET_DISCOVERY'], constraints=[])],
+                    global_constraints=[], completion_criteria=['Offline fixture complete'])
+                planner.return_value.create_target_policies.return_value = {
+                    ('WILDCARD', '*.example.com'): __import__('aidast.recon.policy', fromlist=['TargetPolicy']).TargetPolicy(
+                        scope_id='pipeline-fixture', policy_id='fixture', asset_type='WILDCARD',
+                        asset='*.example.com', allowed_hosts=['example.com'], include_subdomains=True)}
                 recon.return_value.create_tasks.return_value = []
                 review.return_value.review.return_value.model_dump_json.return_value = "{}"
                 attack_coordinator.return_value.run.return_value = SimpleNamespace(
@@ -96,6 +106,7 @@ class PipelineCliTests(unittest.TestCase):
                 )
                 result = main([
                     "run", "https://example.test/program", "--all-targets",
+                    "--output-dir", str(root / "Scope"),
                     "--run-root", str(root / "Runs"),
                     "--attack-output-root", str(root / "AttackRuns"),
                 ])

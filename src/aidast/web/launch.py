@@ -16,7 +16,7 @@ import subprocess
 import sys
 import threading
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -30,7 +30,12 @@ from aidast.recon.profiles import EXECUTION_PROFILES, ProfileId, profile_request
 from aidast.pipeline.resume import inspect_resume
 from aidast.pipeline.lifecycle import finish_stage_run
 from aidast.scope.models import AssetType
-from aidast.scope.paths import ScopePathError, resolve_scope_directory
+from aidast.scope.exclusion_preparation import prepare_exclusions, normalize_start_urls
+from aidast.scope.exclusion_binding import ExclusionBindingResolver
+from aidast.scope.execution_rules import execution_interpretation_complete, requires_policy_advisory_review
+from aidast.scope.identity_headers import ScopeHeaderResolver, resolve_scope_identity_headers
+from aidast.scope.execution_rules import ScopeExecutionResolver, validate_policy_prerequisites, validate_shared_policy_values
+from aidast.scope.paths import ScopePathError, resolve_scope_directory, identify_program, scope_archive_directories
 
 from .projection import DashboardProjector, ScanNotFoundError
 from .process_identity import process_args, process_cwd, process_stat
@@ -74,6 +79,9 @@ class ScanLaunchRequest(BaseModel):
     tag_batch_size: int = Field(default=25, ge=1, le=200)
     login_mode: str = "none"
     start_url: str | None = Field(default=None, max_length=2048)
+    policy_values: dict[str, str] = Field(default_factory=dict, max_length=64)
+    policy_confirmations: list[str] = Field(default_factory=list, max_length=64)
+    identity_values: dict[str, str] = Field(default_factory=dict, max_length=512)
     hackerone_username: str | None = None
     intigriti_username: str | None = None
     authorization_confirmed: bool = False
@@ -102,6 +110,15 @@ class ScanLaunchRequest(BaseModel):
             raise ValueError("invalid platform handle")
         return candidate
 
+    @field_validator("identity_values", "policy_values")
+    @classmethod
+    def bounded_identity_values(cls, values):
+        if len(values) > 512 or any(not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}", key)
+                                  or len(value) > 256 or any(ord(c) < 32 or ord(c) == 127 for c in value)
+                                  for key, value in values.items()):
+            raise ValueError("invalid header input values")
+        return values
+
     @field_validator("start_url")
     @classmethod
     def clean_start_url(cls, value: str | None) -> str | None:
@@ -118,8 +135,6 @@ class ScanLaunchRequest(BaseModel):
             raise ValueError("authorization confirmation is required")
         if len(set(self.targets)) != len(self.targets):
             raise ValueError("duplicate targets are not allowed")
-        if self.hackerone_username and self.intigriti_username:
-            raise ValueError("platform handles cannot be combined")
         if self.max_requests > EXECUTION_PROFILES[self.profile].max_requests:
             raise ValueError("request budget exceeds the selected profile")
         profile = EXECUTION_PROFILES[self.profile]
@@ -138,6 +153,10 @@ class ScanLaunchRequest(BaseModel):
         if self.start_url and len(self.targets) != 1:
             raise ValueError("a specific start URL requires exactly one target")
         return self
+
+
+class ExclusionPreparationRequest(ScanLaunchRequest):
+    refresh: bool = False
 
 
 class ProgramResolveRequest(BaseModel):
@@ -183,20 +202,23 @@ class ApprovedScope:
 
 
 class ApprovedScopeCatalog:
-    def __init__(self, result_root: Path) -> None:
+    def __init__(self, result_root: Path, *, header_resolver: ScopeHeaderResolver | None = None, execution_resolver: ScopeExecutionResolver | None = None) -> None:
         self.result_root = result_root.expanduser().resolve()
+        self.header_resolver = execution_resolver or header_resolver or ScopeExecutionResolver(self.result_root / ".execution-requirements")
 
     def list(self) -> list[ApprovedScope]:
         root = self.result_root / "Scope"
         scopes: list[ApprovedScope] = []
         if not root.is_dir():
             return scopes
-        for scope_json in root.glob("*/*/Scope.json"):
-            directory = scope_json.parent
+        for directory in scope_archive_directories(root):
             try:
                 document, markdown = ScopeCoordinator(directory).load_approved_scope()
                 approval = ScopeCoordinator(directory).verify_approval()
                 platform, slug = directory.relative_to(root).parts[:2]
+                identity = identify_program(str(document.source.requested_url))
+                if (identity.platform, identity.program) != (platform, slug):
+                    continue
                 targets = tuple(
                     {
                         "asset_type": asset.asset_type.value,
@@ -209,12 +231,22 @@ class ApprovedScopeCatalog:
                 )
                 if not targets:
                     continue
+                cached_analysis = self.header_resolver.cached(document)
+                requirements = build_scope_execution_requirements(
+                    cached_analysis or document.analysis, identity_header=None,
+                )
+                if cached_analysis is None and requires_policy_advisory_review(document):
+                    # Keep legacy controls visible while read-only listing waits
+                    # for explicit preparation of the separate reviewed cache.
+                    requirements = requirements.model_copy(update={
+                        "execution_requirements_status": "pending",
+                        "header_requirements_status": "pending",
+                    })
                 identity: IdentityHeader | None = (
-                    "hackerone"
-                    if "X-HackerOne" in markdown
-                    else "intigriti"
-                    if "X-Intigriti-Username" in markdown
-                    else None
+                    "hackerone" if requirements.required_header
+                    and requirements.required_header.input_field == "hackerone_username"
+                    else "intigriti" if requirements.required_header
+                    and requirements.required_header.input_field == "intigriti_username" else None
                 )
                 platform_prefix = {
                     "hackerone": "h1",
@@ -231,10 +263,7 @@ class ApprovedScopeCatalog:
                         targets=targets,
                         identity_header=identity,
                         approved_by=approval.approved_by[:160],
-                        execution_requirements=build_scope_execution_requirements(
-                            document.analysis,
-                            identity_header=identity,
-                        ),
+                        execution_requirements=requirements,
                         directory=directory.resolve(),
                     )
                 )
@@ -247,6 +276,16 @@ class ApprovedScopeCatalog:
             if scope.scope_id == scope_id:
                 return scope
         raise ValueError("approved scope not found or integrity verification failed")
+
+    def resolve_header_requirements(self, scope_id: str) -> ApprovedScope:
+        scope = self.get(scope_id)
+        if scope.directory is None:
+            raise ValueError("approved scope not found")
+        document, _ = ScopeCoordinator(scope.directory).load_approved_scope()
+        self.header_resolver.resolve(document)
+        return self.get(scope_id)
+
+    resolve_execution_requirements = resolve_header_requirements
 
     def resolve(self, program_url: str) -> ApprovedScope:
         try:
@@ -287,10 +326,13 @@ class ScanLaunchManager:
         *,
         process_factory: ProcessFactory = subprocess.Popen,
         project_root: Path | None = None,
+        header_resolver: ScopeHeaderResolver | None = None,
+        execution_resolver: ScopeExecutionResolver | None = None,
     ) -> None:
         self.result_root = result_root.expanduser().resolve()
         self.projector = projector
-        self.catalog = ApprovedScopeCatalog(self.result_root)
+        self.catalog = ApprovedScopeCatalog(self.result_root, header_resolver=header_resolver, execution_resolver=execution_resolver)
+        self.exclusion_resolver = ExclusionBindingResolver(self.result_root / ".exclusion-bindings")
         self.process_factory = process_factory
         candidate = (project_root or Path.cwd()).expanduser().resolve()
         self.project_root = candidate
@@ -304,7 +346,7 @@ class ScanLaunchManager:
         with self._lock:
             return scan_id in self._jobs
 
-    def launch(self, request: ScanLaunchRequest) -> dict[str, Any]:
+    def _prepare_launch(self, request: ScanLaunchRequest, *, refresh: bool = False):
         scope = self.catalog.get(request.scope_id)
         allowed = {item["asset"] for item in scope.targets}
         if any(target not in allowed for target in request.targets):
@@ -321,20 +363,50 @@ class ScanLaunchManager:
                 )
             except ValueError as exc:
                 raise ValueError(f"start URL is outside the selected approved target: {exc}") from exc
-        scope_max_rps = (
-            scope.execution_requirements.scope_max_requests_per_second
-        )
+        if scope.directory is None:
+            raise ValueError("approved scope not found")
+        document, _ = ScopeCoordinator(scope.directory).load_approved_scope()
+        analysis = self.catalog.header_resolver.resolve(document)
+        if not execution_interpretation_complete(analysis):
+            raise ValueError("Scope execution requirements need AI interpretation before launch")
+        # Every cap and prerequisite comes from the same complete v3 analysis.
+        scope = replace(scope, execution_requirements=build_scope_execution_requirements(analysis))
+        scope_max_rps = scope.execution_requirements.scope_max_requests_per_second
         allowed_rps = profile_request_rate(request.profile, scope_max_rps)
-        if (
-            request.max_rps is not None
-            and request.max_rps > allowed_rps
-        ):
+        if request.max_rps is not None and request.max_rps > allowed_rps:
             raise ValueError("request rate exceeds the approved Scope or profile fallback")
-        if scope.identity_header == "hackerone" and not request.hackerone_username:
-            raise ValueError("this Scope requires a HackerOne username")
-        if scope.identity_header == "intigriti" and not request.intigriti_username:
-            raise ValueError("this Scope requires an Intigriti username")
+        headers = resolve_scope_identity_headers(analysis, identity_values=request.identity_values,
+                                       hackerone_username=request.hackerone_username,
+                                       intigriti_username=request.intigriti_username)
 
+        shared_values = dict(request.identity_values)
+        if request.hackerone_username is not None:
+            shared_values['hackerone_username'] = request.hackerone_username
+        if request.intigriti_username is not None:
+            shared_values['intigriti_username'] = request.intigriti_username
+        validate_shared_policy_values(analysis, shared_values, request.policy_values)
+        validate_policy_prerequisites(analysis.execution_rules, request.targets,
+                                      request.policy_values, request.policy_confirmations)
+        effective = next(item.limits for item in scope.execution_requirements.profiles if item.id == request.profile)
+        overrides = {'max_requests': request.max_requests, 'concurrency': request.max_concurrency,
+                     'timeout_seconds': request.timeout_seconds, 'max_depth': request.max_depth}
+        for field, value in overrides.items():
+            if value is not None and value > getattr(effective, field):
+                raise ValueError(f'{field} exceeds the approved policy cap')
+        targets = [target for target in document.analysis.in_scope_assets if target.asset in request.targets]
+        starts = normalize_start_urls({(targets[0].asset_type.value,targets[0].asset):request.start_url} if request.start_url else {})
+        preparation = prepare_exclusions(document=document, analysis=analysis, targets=targets,
+            result_root=self.result_root, start_urls=starts, headers=headers,
+            login_mode=request.login_mode, resolver=self.exclusion_resolver, refresh=refresh)
+        return scope, preparation
+
+    def prepare_resources(self, request: ExclusionPreparationRequest) -> dict[str, Any]:
+        _scope, preparation = self._prepare_launch(request, refresh=request.refresh)
+        return preparation.public()
+
+    def launch(self, request: ScanLaunchRequest) -> dict[str, Any]:
+        scope, preparation = self._prepare_launch(request)
+        preparation.require_ready()
         scan_id = f"scan_{uuid4().hex}"
         argv: list[str] = [
             sys.executable,
@@ -367,6 +439,8 @@ class ScanLaunchManager:
                 str(self.result_root / "AttackRuns"),
             )
         )
+        if scope.directory is not None and scope.directory.parent.name == "revisions":
+            argv.extend(("--scope-revision", scope.directory.name))
         if request.max_rps is not None:
             argv.extend(("--max-rps", str(request.max_rps)))
         if request.max_depth is not None:
@@ -380,6 +454,12 @@ class ScanLaunchManager:
         if request.intigriti_username:
             argv.extend(("--intigriti-username", request.intigriti_username))
 
+        for key, value in request.identity_values.items():
+            argv.extend(("--header-input", f"{key}={value}"))
+        for key, value in request.policy_values.items():
+            argv.extend(('--policy-input', f'{key}={value}'))
+        for key in request.policy_confirmations:
+            argv.extend(('--confirm-policy', key))
         started = _now()
         job = LaunchJob(
             scan_id, scope, "pending", started, request.max_requests,

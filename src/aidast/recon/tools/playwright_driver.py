@@ -17,6 +17,9 @@ Playwright는 메인 크롤러가 아니다.
 
 from __future__ import annotations
 
+from aidast.core.http_safety import has_request_exclusions, require_request_admission
+from aidast.core.request_governor import RequestGovernor
+
 import json
 import os
 import sys
@@ -41,6 +44,7 @@ from playwright.sync_api import (
 from aidast.recon.policy import TargetPolicy
 from aidast.recon.judgment import is_probable_redirect_loop_path
 from aidast.auth.endpoints import AuthenticationEndpoint, AuthenticationEndpointError, normalize_origin
+from aidast.core.http_safety import merge_hackerone_identity
 from aidast.core.http_safety import (
     BROWSER_MODE_HEADER, BROWSER_TOKEN_HEADER, scope_uses_loopback_host,
 )
@@ -667,6 +671,8 @@ class PlaywrightDriver:
         manual_login: bool = False,
     ) -> None:
 
+        if manual_login and has_request_exclusions(self.target_policy):
+            raise ValueError('exclusion hold: unmanaged manual browser login is unsupported')
         self._ensure_playwright()
 
         assert self.playwright is not None
@@ -789,7 +795,7 @@ class PlaywrightDriver:
 
         self.browser = self.playwright.chromium.launch(**launch_options)
         self._browser_kind = "managed"
-        self.context = self.browser.new_context(ignore_https_errors=True)
+        self.context = self.browser.new_context(ignore_https_errors=True, **({"service_workers":"block"} if has_request_exclusions(self.target_policy) else {}))
         self.context.add_init_script(
             "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
         )
@@ -799,6 +805,8 @@ class PlaywrightDriver:
 
     def _attach_manual_browser(self) -> None:
         """Attach only after manual login, or to the policy-enforced runtime."""
+        if has_request_exclusions(self.target_policy):
+            raise ValueError('exclusion hold: unmanaged CDP attachment is unsupported')
         port = self._cdp_port
         if port is None or self.playwright is None:
             raise RuntimeError("manual browser is not running")
@@ -841,7 +849,7 @@ class PlaywrightDriver:
             "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
         )
 
-        if self._phase != "login":
+        if self._phase != "login" or has_request_exclusions(self.target_policy):
             self._register_context_handlers()
 
         pages = self.context.pages
@@ -883,10 +891,58 @@ class PlaywrightDriver:
             strictly_allowed = False
             support_mode = None
         try:
+            if has_request_exclusions(self.target_policy):
+                if not strictly_allowed and not (support_mode and self.browser_context_token):
+                    route.abort('blockedbyclient')
+                    return
+                headers = dict(request.all_headers())
+                if strictly_allowed or support_mode == 'same-origin':
+                    headers.update(self.request_headers)
+                    headers = merge_hackerone_identity(headers, self.target_policy.hackerone_username,
+                        required_identity_headers=self.target_policy.required_identity_headers)
+                else:
+                    controlled = {k.casefold() for k in self.target_policy.required_identity_headers}
+                    headers = {k:v for k,v in headers.items() if k.casefold() not in controlled}
+                body = request.post_data_buffer
+                body = bytes(body) if body is not None else b''
+                def admit():
+                    require_request_admission(self.target_policy, url=request.url, method=request.method,
+                        headers=headers, body=body, identity_available=False)
+                admit()
+                count = getattr(self, '_exclusion_request_count', 0)
+                if count >= self.target_policy.limits.max_requests:
+                    raise ValueError('browser request budget exhausted')
+                # A configured proxy owns its shared permit; direct routes own theirs.
+                governor = RequestGovernor(None if self.proxy_url else self.target_policy.request_governor)
+                permit = governor.reserve(request.url, timeout_seconds=self.target_policy.limits.timeout_seconds)
+                fetched = None
+                try:
+                    permit.wait()
+                    admit()
+                    self._exclusion_request_count = count + 1
+                    sent_headers = dict(headers)
+                    if support_mode:
+                        sent_headers[BROWSER_TOKEN_HEADER] = self.browser_context_token
+                        sent_headers[BROWSER_MODE_HEADER] = support_mode
+                    fetched = route.fetch(headers=sent_headers, method=request.method,
+                        post_data=body, max_redirects=0, max_retries=0,
+                        timeout=permit.timeout_seconds * 1000)
+                    if fetched.status in {301,302,303,307,308} and any(k.lower()=='location' for k in fetched.headers):
+                        route.abort('blockedbyclient')
+                    else:
+                        route.fulfill(response=fetched)
+                finally:
+                    if fetched is not None:
+                        fetched.dispose()
+                    permit.complete()
+                return
             if strictly_allowed:
-                if self.request_headers:
+                if self.request_headers or self.target_policy.required_identity_headers or self.target_policy.hackerone_username:
                     headers = dict(request.all_headers())
                     headers.update(self.request_headers)
+                    if self.target_policy.required_identity_headers or self.target_policy.hackerone_username:
+                        headers = merge_hackerone_identity(headers, self.target_policy.hackerone_username,
+                            required_identity_headers=self.target_policy.required_identity_headers)
                     route.continue_(headers=headers)
                 else:
                     route.continue_()
@@ -898,19 +954,29 @@ class PlaywrightDriver:
                 headers = dict(request.all_headers())
                 if support_mode == "same-origin":
                     headers.update(self.request_headers)
+                    if self.target_policy.required_identity_headers or self.target_policy.hackerone_username:
+                        headers = merge_hackerone_identity(headers, self.target_policy.hackerone_username,
+                            required_identity_headers=self.target_policy.required_identity_headers)
+                else:
+                    controlled = {name.casefold() for name in self.target_policy.required_identity_headers}
+                    headers = {name: value for name, value in headers.items() if name.casefold() not in controlled}
                 headers[BROWSER_TOKEN_HEADER] = self.browser_context_token
                 headers[BROWSER_MODE_HEADER] = support_mode
                 route.continue_(headers=headers)
             else:
                 route.abort("blockedbyclient")
         except Exception:
-            # TargetClosedError (and equivalent CDP teardown races) are safe
-            # to ignore because the page/context is already gone.
+            try:
+                route.abort('blockedbyclient')
+            except Exception:
+                pass
             return
 
     def _browser_support_mode(self, request) -> str | None:
         """Classify rendering traffic caused by a page inside the strict boundary."""
         if self.target_policy is None or request.is_navigation_request():
+            return None
+        if not self.target_policy.allows_execution_method(request.method):
             return None
         try:
             if not self.target_policy.allows_url(request.frame.url):
@@ -923,7 +989,8 @@ class PlaywrightDriver:
                     request.url, method=request.method
                 )
                 if (
-                    request.method.upper() == "POST"
+                    self.target_policy.execution_allowed_methods is None
+                    and request.method.upper() == "POST"
                     and getattr(request, "resource_type", None) in {"xhr", "fetch"}
                 ):
                     # Browser support deliberately ignores the endpoint path
@@ -966,6 +1033,8 @@ class PlaywrightDriver:
         구간은 생기지 않는다). 반드시 resume_policy_routing()으로 복원할
         것(finally로 감쌀 것).
         """
+        if has_request_exclusions(self.target_policy):
+            raise ValueError('exclusion hold: browser policy routing cannot be paused')
         if self.context is None or self.target_policy is None:
             return
         try:
@@ -979,7 +1048,9 @@ class PlaywrightDriver:
             return
         try:
             self.context.route("**/*", self._guard_request)
-        except Exception:
+        except Exception as exc:
+            if has_request_exclusions(self.target_policy):
+                raise ValueError('exclusion hold: required browser routing could not be restored') from exc
             pass
 
     def _register_context_handlers(
@@ -990,6 +1061,10 @@ class PlaywrightDriver:
             return
 
         if self.target_policy is not None:
+            if has_request_exclusions(self.target_policy):
+                if not callable(getattr(self.context, 'route_web_socket', None)):
+                    raise ValueError('exclusion hold: browser WebSocket interception unavailable')
+                self.context.route_web_socket('**/*', lambda route: None)
             self.context.route("**/*", self._guard_request)
             # WebSocket messages are outside the HTTP policy contract.  Do
             # not call WebSocketRoute.close() from its synchronous callback:
@@ -3048,6 +3123,12 @@ class PlaywrightDriver:
                 # Click
                 # -------------------------------------
 
+                # This adapter cannot attest the selected control's complete
+                # resource/effects. dom_action marks every request predicate
+                # unknown; page.url is only the enclosing document identity.
+                require_request_admission(self.target_policy, url=page.url, method='GET',
+                    headers={}, body_available=False, identity_available=False,
+                    context={'transport':'browser', 'operation':'dom_action', 'target':description[:300]})
                 self._context_serial += 1
                 self._action_context = {
                     'context_key': f'action:{self._context_serial}',

@@ -527,6 +527,10 @@ class ReconExecutor:
 
     @_stage("asset_discovery")
     def _handle_asset_discovery(self, task: ReconTask) -> None:
+        from aidast.core.http_safety import has_request_exclusions
+        if has_request_exclusions(self._policy_for(task)):
+            self._diagnostic('phase_held', phase='unmanaged_discovery', reason='request_exclusions')
+            raise ReconExecutionError('exclusion hold: unmanaged discovery has no complete protocol context')
         asset_id = self._ensure_asset(task)
         policy = self._policy_for(task)
         asset_type = task.target.asset_type.value
@@ -654,6 +658,10 @@ class ReconExecutor:
 
     @_stage("dns_resolution")
     def _handle_dns_resolution(self, task: ReconTask) -> None:
+        from aidast.core.http_safety import has_request_exclusions
+        if has_request_exclusions(self._policy_for(task)):
+            self._diagnostic('phase_held', phase='unmanaged_discovery', reason='request_exclusions')
+            raise ReconExecutionError('exclusion hold: unmanaged discovery has no complete protocol context')
         asset_id = self._ensure_asset(task)
         host = _extract_host(task.target.asset)
         self._diagnostic("phase_started", phase="dnsx")
@@ -666,6 +674,10 @@ class ReconExecutor:
 
     @_stage("host_port_discovery")
     def _handle_host_port_discovery(self, task: ReconTask) -> None:
+        from aidast.core.http_safety import has_request_exclusions
+        if has_request_exclusions(self._policy_for(task)):
+            self._diagnostic('phase_held', phase='unmanaged_discovery', reason='request_exclusions')
+            raise ReconExecutionError('exclusion hold: unmanaged discovery has no complete protocol context')
         asset_id = self._ensure_asset(task)
         host = _extract_host(task.target.asset)
         policy = self._policy_for(task)
