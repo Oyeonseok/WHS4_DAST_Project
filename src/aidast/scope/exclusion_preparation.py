@@ -20,6 +20,9 @@ from aidast.core.exclusion_guard import evaluate_exclusions, exclusion_applicabi
 from aidast.scope.exclusion_binding import ExclusionBindingResolver
 from aidast.scope.exclusions import ResourceCandidate, ResourceEvidence
 from aidast.scope.execution_rules import execution_interpretation_complete
+from aidast.scope.exclusion_guidance import (
+    split_exclusion_enforcement, agent_exclusion_advisories, render_agent_exclusion_note,
+)
 from aidast.recon.policy import validate_start_url_for_target
 from aidast.scope.models import AssetType
 
@@ -271,10 +274,12 @@ class ExclusionPreparation:
     rejected_captures: int = 0
     startup_operations: dict[str,list[StartupOperation]] = field(default_factory=dict)
     login_mode: str | None = None
+    agent_guidance: dict[str, list[dict]] = field(default_factory=dict)
 
     def public(self):
         return {'resources':self.diagnostics, 'captured_candidates':self.captured_candidates,
                 'rejected_captures':self.rejected_captures,
+                'agent_guidance': [item for items in self.agent_guidance.values() for item in items],
                 'held':sum(d['decision']=='hold' for d in self.diagnostics),
                 'denied':sum(d['decision']=='deny' for d in self.diagnostics)}
 
@@ -320,8 +325,16 @@ class ExclusionPreparation:
         self.require_ready()
 
     def attach(self, policies):
-        return {key:policy.model_copy(update={'request_exclusions':self.policies[policy.asset]})
-                for key,policy in policies.items()}
+        result = {}
+        for key, policy in policies.items():
+            notes = list(policy.policy_notes)
+            for item in self.agent_guidance.get(policy.asset, []):
+                note = render_agent_exclusion_note(item)
+                if note not in notes:
+                    notes.append(note)
+            result[key] = policy.model_copy(update={
+                'request_exclusions': self.policies[policy.asset], 'policy_notes': notes})
+        return result
 
 
 def prepare_exclusions(*, document, analysis, targets, result_root, start_urls=None, headers=None,
@@ -336,7 +349,7 @@ def prepare_exclusions(*, document, analysis, targets, result_root, start_urls=N
         raise ValueError('Scope exclusion interpretation is pending; prepare execution requirements offline')
     root=Path(result_root)
     resolver=resolver or ExclusionBindingResolver(root/'.exclusion-bindings')
-    rules=analysis.execution_rules.exclusions
+    rules, _ = split_exclusion_enforcement(analysis.execution_rules)
     policies={}; count=rejected=0
     paths=database_paths if database_paths is not None else capture_databases(root)
     starts=normalize_start_urls(start_urls)
@@ -362,5 +375,7 @@ def prepare_exclusions(*, document, analysis, targets, result_root, start_urls=N
     operations=(selected_startup_operations(targets,start_urls=starts)
                 if startup_operations is None else startup_operations)
     prepared=ExclusionPreparation(policies,[],count,rejected,login_mode=login_mode)
+    prepared.agent_guidance = {target.asset: agent_exclusion_advisories(analysis.execution_rules, target.asset)
+                               for target in targets}
     prepared.reconcile_startup(operations,headers=headers,seed_identity_complete=seed_identity_complete)
     return prepared

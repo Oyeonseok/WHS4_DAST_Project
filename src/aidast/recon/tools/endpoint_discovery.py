@@ -1182,28 +1182,36 @@ def discover_with_ffuf(
     with Path(wordlist).open("rb") as wordlist_file:
         wordlist_lines = sum(1 for _ in wordlist_file)
 
+    baseline_seed = [item for item in seed_endpoints if not re.search(
+        r'\.(?:js|mjs|css|png|jpg|jpeg|gif|svg|ico|woff2?|ttf|map)$',
+        str(item.get('path') or '').split('?', 1)[0], re.I)]
+    baseline_roots = _build_ffuf_roots(baseline_seed, max_depth=1, max_roots=3)
+    policy_guided = bool(target_policy is not None and target_policy.policy_notes)
+    selector_endpoints = ([dict(path=root, method='GET', source='baseline_prefix_candidate')
+                           for root in baseline_roots] + seed_endpoints
+                          if policy_guided else seed_endpoints)
     selector = root_selector or select_ffuf_roots_from_endpoints
     try:
-        roots = selector(seed_endpoints)
+        if policy_guided and root_selector is None:
+            roots = selector(selector_endpoints, target_policy=target_policy)
+        else:
+            roots = selector(selector_endpoints)
     except FfufRootSelectionError as exc:
         print(
             "  [경고] ffuf Root 선택 Agent 실패, "
-            f"기존 Prefix 방식으로 대체: {type(exc).__name__}"
+            + (f"정책 검토 불가로 ffuf 건너뜀: {type(exc).__name__}" if policy_guided
+               else f"기존 Prefix 방식으로 대체: {type(exc).__name__}")
         )
         roots = []
 
     if not roots:
         print(
             "  [경고] 선택된 ffuf Root가 없어 "
-            "기존 Prefix 방식으로 대체"
+            + ("ffuf 건너뜀" if policy_guided else "기존 Prefix 방식으로 대체")
         )
         roots = []
 
-    baseline_seed = [item for item in seed_endpoints if not re.search(
-        r'\.(?:js|mjs|css|png|jpg|jpeg|gif|svg|ico|woff2?|ttf|map)$',
-        str(item.get('path') or '').split('?', 1)[0], re.I)]
-    baseline_roots = _build_ffuf_roots(baseline_seed, max_depth=1, max_roots=3)
-    roots = list(dict.fromkeys(baseline_roots + roots))[:50]
+    roots = list(dict.fromkeys(roots if policy_guided else baseline_roots + roots))[:50]
     if target_policy is not None:
         roots = [
             root for root in roots

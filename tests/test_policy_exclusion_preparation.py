@@ -44,6 +44,19 @@ def document(semantic=True):
     return ScopeDocument(scope_id='scope_preparation', created_at=datetime.now(timezone.utc), source=page,
         analysis=type(analysis).model_validate(data))
 
+def guarded_semantic_rule():
+    """A mixed rule remains request-enforced after advisory review."""
+    semantic = rule()
+    direct = rule(False).condition.model_copy(update={
+        'predicate': rule(False).condition.predicate.model_copy(update={'key': 'private_path'})})
+    return semantic.model_copy(update={'condition': type(semantic.condition).model_validate(dict(
+        operator='any', children=[semantic.condition.model_dump(), direct.model_dump()]))})
+
+def guarded_semantic_document():
+    doc = document()
+    rules = doc.analysis.execution_rules.model_copy(update={'exclusions': [guarded_semantic_rule()]})
+    return doc.model_copy(update={'analysis': doc.analysis.model_copy(update={'execution_rules': rules})})
+
 def capture(tmp_path, doc, *, url=URL, receipt=True, scope_id=None, source_type='approved_scope', response=b'Public documentation for all visitors.', headers=None, body=b''):
     from aidast.recon import db
     path = tmp_path / 'Runs' / 'scan_local' / 'Recon.db'
@@ -202,7 +215,7 @@ def approved(tmp_path,doc):
 @pytest.mark.parametrize('semantic,login,start',[(True,'runtime-browser',None),(False,'system-browser',None),(False,'none',URL+'private')])
 def test_cli_exclusion_gate_precedes_login_plan_and_executor(tmp_path,monkeypatch,semantic,login,start):
     import aidast.cli as cli
-    doc=approved(tmp_path,document(semantic))
+    doc=approved(tmp_path,guarded_semantic_document() if semantic else document(False))
     class Agent(FakeReconMainAgent):
         def create_recon_plan(self,**kwargs): pytest.fail('held seed must stop before plan/executor')
     monkeypatch.setattr(cli,'CodexMainAgent',lambda **_:Agent())
@@ -217,7 +230,7 @@ def test_web_preparation_is_explicit_same_origin_and_catalog_get_is_cache_only(t
     from aidast.web.launch import ScanLaunchManager,ScanLaunchRequest
     from aidast.web.projection import DashboardProjector
     from aidast.web.server import create_app
-    doc=approved(tmp_path,document());capture(tmp_path,doc)
+    doc=approved(tmp_path,guarded_semantic_document());capture(tmp_path,doc)
     calls=[]
     def classify(ctx):calls.append(ctx);return interpret(ctx)
     manager=ScanLaunchManager(tmp_path,DashboardProjector(tmp_path),process_factory=lambda *a,**k:pytest.fail('offline preparation launched process'))
@@ -245,7 +258,7 @@ def test_web_preparation_is_explicit_same_origin_and_catalog_get_is_cache_only(t
 def test_web_launch_holds_unknown_seed_before_process(tmp_path):
     from aidast.web.launch import ScanLaunchManager,ScanLaunchRequest
     from aidast.web.projection import DashboardProjector
-    doc=approved(tmp_path,document())
+    doc=approved(tmp_path,guarded_semantic_document())
     manager=ScanLaunchManager(tmp_path,DashboardProjector(tmp_path),process_factory=lambda *a,**k:pytest.fail('held seed launched process'))
     with pytest.raises(ValueError,match='restricted'):
         manager.launch(ScanLaunchRequest(scope_id=doc.scope_id,targets=[URL],authorization_confirmed=True))
@@ -301,7 +314,7 @@ def test_cli_policy_only_prepares_semantic_snapshot_without_login_or_executor(tm
     import aidast.cli as cli
     from aidast.recon.policy import TargetPolicy
     from aidast.recon.models import ReconPlan,ReconPlanTarget,ReconStep
-    doc=approved(tmp_path,document());path=capture(tmp_path,doc)
+    doc=approved(tmp_path,guarded_semantic_document());path=capture(tmp_path,doc)
     extra=[]
     if capture_location!='standard':
         destination=tmp_path/'explicit.db' if capture_location=='custom_recon' else tmp_path/'AttackRuns'/'scan_local'/'Pipeline.db'
@@ -333,7 +346,7 @@ def test_cli_current_sidecar_overrides_complete_embedded_rules_before_login(tmp_
     from aidast.scope.execution_rules import ScopeExecutionResolver,EXECUTION_INTERPRETATION_VERSION
     source=document();doc=approved(tmp_path,source.model_copy(update={'analysis':source.analysis.model_copy(update={'execution_rules':ScopeExecutionRules(exclusions=[])})}))
     resolver=ScopeExecutionResolver(tmp_path/'.execution-requirements');resolver.cache_dir.mkdir()
-    reviewed = resolver._validate(doc, dict(required_request_headers=[], execution_rules=dict(exclusions=[rule().model_dump()])), fresh=True)
+    reviewed = resolver._validate(doc, dict(required_request_headers=[], execution_rules=dict(exclusions=[guarded_semantic_rule().model_dump()])), fresh=True)
     resolver.cache_path(doc).write_text(json.dumps(dict(interpretation_version=EXECUTION_INTERPRETATION_VERSION,approved_digest=resolver.digest(doc),requirements=dict(required_request_headers=[],execution_rules=reviewed.execution_rules.model_dump()))))
     monkeypatch.setattr(cli,'CodexMainAgent',lambda **_:FakeReconMainAgent())
     monkeypatch.setattr(cli,'collect_target_sessions',lambda *a,**k:pytest.fail('sidecar was ignored before login'))
@@ -527,7 +540,7 @@ def test_mixed_pending_startup_never_suppresses_known_preplan_blocks(tmp_path,mo
     elif selection=='denied_url':
         doc=retarget_document('URL',URL+'private')
     else:
-        doc=document(selection=='held_url')
+        doc=guarded_semantic_document() if selection=='held_url' else document(False)
     target=ScopeAsset(asset_type=AssetType.DOMAIN,asset='other.example.test',description='Pending startup',eligibility='eligible',maximum_severity='High')
     text=doc.source.text+'\n'+target.asset
     analysis=doc.analysis.model_copy(update={

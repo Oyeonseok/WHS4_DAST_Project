@@ -36,5 +36,6 @@ export function ScopeExecutionRules({ rules, open = false, selectedAssets }: { r
 export function ScopeExclusionStatus({ count, preparation }: { count: number; preparation?: ExclusionPreparation | null }) {
   return h('div',{className:'requirements-note','aria-live':'polite'},
     h('span',null,`${count} exclusions · ${preparation ? `${preparation.held} held, ${preparation.denied} denied` : 'Checked before launch'}`),
+    h(ScopePolicyAdvisories,{advisories:preparation?.agent_guidance}),
     preparation && preparation.resources.filter(item=>item.decision!=='continue').map((item,index)=>h('div',{key:index},`${item.decision} [${item.rule_keys.join(', ')}]: ${item.reason}`)));
 }

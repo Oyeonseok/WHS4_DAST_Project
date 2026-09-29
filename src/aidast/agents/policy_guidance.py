@@ -33,7 +33,9 @@ def policy_guidance_context(policy: TargetPolicy) -> str:
 
 def effective_advisory_context(rules: ScopeExecutionRules | None) -> str:
     """Separate runtime interpretation; never present this as an approved Scope."""
-    if rules is None or not rules.advisories:
+    from aidast.scope.exclusion_guidance import agent_exclusion_advisories
+    guided = agent_exclusion_advisories(rules)
+    if rules is None or not (rules.advisories or guided):
         return ''
     # Quotes remain complete in approved evidence and the bound TargetPolicy.
     # Avoid copying up to 176 long captured quotes into Recon's Scope input again.
@@ -41,11 +43,19 @@ def effective_advisory_context(rules: ScopeExecutionRules | None) -> str:
                 'reason': item.reason, 'guidance': item.guidance,
                 'source_quote_sha256': hashlib.sha256(item.source_quote.encode()).hexdigest()}
                for item in rules.advisories]
+    contextual = ''
+    if guided:
+        contextual = ('\n# Agent-guided exclusion context\n\n'
+            'These captured conditions use Agent judgement before each operation. '
+            'They are mandatory precautions, not a requirement for prior response captures '
+            'before all otherwise authorized work. Skip a questionable individual operation '
+            'and record the reason. Direct and mixed request guards remain enforced.\n\n'
+            + json.dumps(guided, ensure_ascii=False, indent=2) + '\n')
     return ('# Effective execution advisory context\n\n'
             'Application-resolved captured policy interpretation, separate from the approved Scope.\n'
             'The advisory classification below is the current interpretation of uncertainty; '
             'it does not override explicit restrictions or grant authority.\n\n'
-            + json.dumps(entries, ensure_ascii=False, indent=2) + '\n')
+            + json.dumps(entries, ensure_ascii=False, indent=2) + '\n' + contextual)
 
 
 def recon_scope_context(*, approved_document, approved_markdown: str,
@@ -58,6 +68,7 @@ def recon_scope_context(*, approved_document, approved_markdown: str,
     The planner still enforces its input limit on the resulting representation.
     Downstream policy generation keeps the original Markdown for literal grounding.
     """
+    from aidast.scope.exclusion_guidance import agent_exclusion_advisories
     if len(scope_markdown) <= max_chars:
         return scope_markdown
     captured = approved_document.source.evidence_text
@@ -90,6 +101,7 @@ def recon_scope_context(*, approved_document, approved_markdown: str,
         'approved_document_sha256': hashlib.sha256(approved_document.model_dump_json().encode('utf-8')).hexdigest(),
         'approved_document': project(approved_document.model_dump(mode='json')),
         'effective_execution': project({
+            'agent_guided_exclusion_keys': [item['key'] for item in agent_exclusion_advisories(effective_analysis.execution_rules)],
             'required_request_headers': [item.model_dump(mode='json') for item in effective_analysis.required_request_headers or []],
             'execution_rules': effective_analysis.execution_rules.model_dump(mode='json') if effective_analysis.execution_rules else None,
         }),
@@ -108,5 +120,8 @@ def recon_scope_context(*, approved_document, approved_markdown: str,
         'and provenance. effective_execution contains the current application-reviewed '
         'interpretation, including all precautions; legacy uncertainty classifications may '
         'differ from the original artifact but cannot override explicit restrictions.\n\n'
+        'agent_guided_exclusion_keys identifies purely contextual exclusions that the Agent '
+        'must apply before each operation; they do not require prior response captures '
+        'before the whole scan. Skip an operation whose permission cannot be established.\n\n'
         '<execution_scope_json>\n' + encoded + '\n</execution_scope_json>\n'
     )
