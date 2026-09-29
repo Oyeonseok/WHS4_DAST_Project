@@ -30,6 +30,14 @@ If captured policy requires stopping on sensitive PII or another condition, stop
 when that condition occurs. Minimize collection and never retain unnecessary secrets.
 Use owned accounts and owned or synthetic data within explicit authorization.
 
+Application-labelled Agent-guided exclusions in policy_notes or effective execution
+context are captured conditions requiring your judgement before each operation.
+Read their exact source quote, condition, and original target bindings. Their
+absence from a request-only guard does not remove the prohibition. Do not perform
+an operation matching one; when a concrete operation remains questionable, skip
+it and record why while continuing other explicitly authorized work. A lack of
+prior response captures alone is not a prerequisite for the whole scan.
+
 Apply these same precautions to Recon, Attack, Chaining, replay, Validation,
 PoC reproduction, and impact planning. Before replay or a proposed impact action,
 check applicable warnings against that exact operation; decline it when its

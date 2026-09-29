@@ -135,7 +135,7 @@ export type ExclusionExpression = {
   readonly children?: readonly ExclusionExpression[];
 };
 export type ScopeExclusion = { readonly key: string; readonly label: string; readonly source_quote: string; readonly target_assets: readonly string[]; readonly condition: ExclusionExpression };
-export type ExclusionPreparation = { readonly held: number; readonly denied: number; readonly captured_candidates: number; readonly rejected_captures: number; readonly resources: readonly { readonly target_asset: string; readonly url: string | null; readonly decision: 'continue' | 'deny' | 'hold'; readonly rule_keys: readonly string[]; readonly reason: string }[] };
+export type ExclusionPreparation = { readonly held: number; readonly denied: number; readonly captured_candidates: number; readonly rejected_captures: number; readonly agent_guidance?: readonly PolicyAdvisory[]; readonly resources: readonly { readonly target_asset: string; readonly url: string | null; readonly decision: 'continue' | 'deny' | 'hold'; readonly rule_keys: readonly string[]; readonly reason: string }[] };
 export type ScopeExecutionRules = {
   readonly exclusions?: readonly ScopeExclusion[] | null;
   readonly request_limits: readonly RequestLimit[];

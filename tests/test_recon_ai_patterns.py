@@ -240,3 +240,20 @@ def test_provider_failure_leaves_existing_results_available(policy,monkeypatch):
         ai_pattern_planner=FailedPlanner(),diagnostic_callback=lambda event,**data: events.append((event,data)))
     assert any(r['path']=='/catalog' for r in rows)
     assert any(event=='phase_error' and data.get('component')=='ai_patterns' for event,data in events)
+
+
+def test_bound_policy_precautions_reach_pattern_agent_separately_from_evidence(policy):
+    note = 'Agent-guided exclusion: Do not inspect employee personal data.'
+    bound = policy.model_copy(update={'policy_notes': [note]})
+    bundle = evidence(bound)
+    seen = []
+    class Agent:
+        def _run_structured(self, **kwargs):
+            seen.append(kwargs['prompt'])
+            return api().PatternPlan(bindings=[], literal_gets=[], summary='Skip questionable operations')
+    api().CodexPatternPlanner(Agent()).propose(bundle.context)
+    assert note in seen[0]
+    assert 'before selecting GET candidates' in seen[0]
+    assert 'Policy context is not captured evidence' in seen[0]
+    assert seen[0].count('<policy_context_json>') == 1
+    assert all(note not in snippet['text'] for snippet in bundle.context['snippets'])

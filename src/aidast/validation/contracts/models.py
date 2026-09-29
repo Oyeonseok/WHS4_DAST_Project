@@ -137,7 +137,7 @@ class ValidationStageResult(StrictContract):
     db_path: str
     stage_run_id: Identifier
     case_ids: tuple[Identifier, ...]
-    validation_agent_ids: tuple[Identifier, ...] = Field(max_length=2)
+    validation_agent_ids: tuple[Identifier, ...] = Field(max_length=3)
     summary: dict[str, Any]
 
 

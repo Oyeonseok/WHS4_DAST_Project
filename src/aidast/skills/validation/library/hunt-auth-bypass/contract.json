@@ -48,6 +48,22 @@
   ],
   "impact_expansion_paths": [
     {
+      "path_id": "authenticated-session-confirmation",
+      "gap_axis": "sensitivity",
+      "hypothesis_kind": "protected_session_access",
+      "required_preconditions": [
+        "A fresh credential returned by the target login replay",
+        "A declared same-origin read-only protected resource and account field assertion"
+      ],
+      "expected_signal": {"kind": "authenticated_protected_resource_observed"},
+      "recommended_actions": [
+        "Supply session_verification in the HTTP runtime contract and replay target and unauthenticated control"
+      ],
+      "execution_owner": "validation",
+      "feasibility": "medium",
+      "potential_impact": {"sensitivity": 1}
+    },
+    {
       "path_id": "bounded-impact-confirmation",
       "gap_axis": "boundary",
       "hypothesis_kind": "bounded_authorization_boundary",

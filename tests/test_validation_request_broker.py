@@ -1,5 +1,6 @@
 """Validation request safety and per-hop ledger tests."""
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -84,6 +85,71 @@ class ValidationRequestBrokerTests(unittest.TestCase):
             validation_skill_sha256="b" * 64, validation_profile_sha256="c" * 64,
         )
 
+    def test_login_session_verification_uses_fresh_token_and_redacts_ledger(self):
+        from aidast.validation.execution.http_adapter import HttpReproductionPort
+        from aidast.validation.contracts.runtime_contract import HttpRuntimeContract
+
+        for protected_status, token_present, kind, expected_status in (
+                (200, True, "target", 200), (401, True, "target", 200),
+                (200, False, "target", 200), (200, False, "negative_control", 201)):
+            with self.subTest(status=protected_status, token=token_present, kind=kind):
+                calls = []
+
+                def transport(request, timeout):
+                    calls.append(request)
+                    response = Response()
+                    response.status = protected_status if len(calls) == 2 else 200
+                    body = (b'{"user":{"id":7}}' if len(calls) == 2 else
+                            b'{"authentication":{"token":"private-fresh-token"}}' if token_present else
+                            b'{}' if kind == "negative_control" else b'{"authentication":{}}')
+                    response.read = lambda maximum: body
+                    return response
+
+                attempt = {"request": {}, "assertions": [{
+                    "assertion_id": "login", "kind": "body_contains", "expected": '"authentication"',
+                }]}
+                runtime = HttpRuntimeContract.model_validate({
+                    "schema_version": 1, "target": attempt, "positive_control": attempt,
+                    "negative_control": attempt,
+                    "session_verification": {
+                        "endpoint_template": "/items/session", "token_path": ["authentication", "token"],
+                        "request": {}, "assertions": [
+                            {"assertion_id": "protected-status", "kind": "status_equals", "expected": expected_status},
+                            {"assertion_id": "account", "kind": "json_equals", "path": ["user", "id"], "expected": 7},
+                        ],
+                    },
+                })
+                blind = self.blind.model_copy(update={
+                    "endpoint": "https://test/items/login", "credential_references": (),
+                    "runtime_contract": runtime.model_dump(mode="json"),
+                })
+                result = HttpReproductionPort(transport=transport).execute(
+                    blind, attempt_kind=kind, batch_no=1, ordinal=1,
+                    attempt_id=self.attempt, db_path=self.path, scan_id="scan",
+                    stage_run_id=self.stage, case_id="case", policy=self.policy,
+                )
+                proof = result.details["protected_access"]
+                from aidast.validation.persistence.evidence_policy import sanitize_metadata
+                self.assertIsInstance(sanitize_metadata(result.details)["protected_access"], dict)
+                repo = ValidationRepository(self.conn)
+                evidence_id = repo.add_evidence(
+                    case_id="case", stage_run_id=self.stage, attempt_id=self.attempt,
+                    evidence_kind="observation", details=result.details,
+                    content_sha256=result.content_sha256, content_length=result.content_length,
+                )
+                stored = json.loads(self.conn.execute(
+                    "SELECT details_json FROM validation_evidence WHERE evidence_id=?", (evidence_id,),
+                ).fetchone()[0])
+                self.assertEqual(stored["protected_access"]["verified"], proof["verified"])
+                self.assertEqual(proof["verified"], (token_present or kind == "negative_control") and protected_status == expected_status)
+                self.assertEqual(len(calls), 2 if token_present or kind == "negative_control" else 1)
+                if token_present:
+                    self.assertEqual(calls[1].get_header("Authorization"), "Bearer private-fresh-token")
+                self.assertTrue(result.signal_observed)
+                self.assertNotIn("private-fresh-token", result.model_dump_json())
+                rows = self.conn.execute("SELECT result_json FROM validation_http_requests").fetchall()
+                self.assertNotIn("private-fresh-token", str(rows))
+
     def broker(self):
         return ValidationRequestBroker(
             db_path=self.path, scan_id="scan", stage_run_id="stage", case_id="case",
@@ -92,6 +158,34 @@ class ValidationRequestBrokerTests(unittest.TestCase):
             credential_resolver=lambda reference: {"Authorization": "Bearer private"},
             sleeper=lambda delay: None, clock=lambda: 100.0,
         )
+
+    def test_anonymous_control_omits_case_credentials_on_same_endpoint(self):
+        calls, resolutions = [], []
+        proof = [{"assertion_id": "effect", "kind": "body_contains", "expected": "ok"}]
+        runtime = HttpRuntimeContract.model_validate({
+            "schema_version": 1,
+            "target": {"request": {"path_parameters": {"id": 1}}, "assertions": proof},
+            "positive_control": {"request": {"path_parameters": {"id": 1}}, "assertions": proof},
+            "negative_control": {"identity_mode": "anonymous", "request": {"path_parameters": {"id": 1}}, "assertions": proof},
+        })
+        blind = self.blind.model_copy(update={"runtime_contract": runtime.model_dump(mode="json")})
+        def resolve(reference):
+            resolutions.append(reference)
+            return {"Authorization": "Bearer private", "Cookie": "login=private"}
+        def transport(request, timeout):
+            calls.append(request)
+            return Response()
+        port = HttpReproductionPort(transport=transport, credential_resolver=resolve)
+        for kind in ("target", "negative_control"):
+            port.execute(blind, attempt_kind=kind, batch_no=1, ordinal=1,
+                         attempt_id=self.attempt, db_path=self.path, scan_id="scan",
+                         stage_run_id=self.stage, case_id="case", policy=self.policy)
+        self.assertEqual(resolutions, ["credential"])
+        self.assertEqual(calls[0].full_url, calls[1].full_url)
+        self.assertEqual(calls[0].get_header("Authorization"), "Bearer private")
+        self.assertEqual(calls[0].get_header("Cookie"), "login=private")
+        self.assertIsNone(calls[1].get_header("Authorization"))
+        self.assertIsNone(calls[1].get_header("Cookie"))
 
     def test_request_is_policy_checked_and_persists_redacted_ledger(self):
         result = self.broker().request("https://test/items/7?token=private", method="GET")

@@ -103,7 +103,8 @@ class ValidationCoordinator:
                  impact_precondition_verifier: Callable[
                      [ValidatedCandidate, ImpactDevelopmentRequest],
                      VerifiedImpactPreconditions | dict[str, Any] | None,
-                 ] | None = None):
+                 ] | None = None,
+                 replay_preparer=None):
         self.db_path = Path(db_path).expanduser().resolve()
         self.agent = agent
         self.eligibility_agent = eligibility_agent
@@ -111,6 +112,7 @@ class ValidationCoordinator:
         self._used_agent_ids: list[str] = []
         self._owns_agent = False
         self.reproduction = reproduction
+        self.replay_preparer = replay_preparer
         self.policy_provider = policy_provider
         self.prerequisite_resolver = prerequisite_resolver
         self.impact_development_port = impact_development_port
@@ -515,6 +517,32 @@ class ValidationCoordinator:
                           "eligibility_assessment_id": eligibility_id}, evidence_ids=(),
             )
             return True
+        if (candidate.staged._blind_case.runtime_contract is None
+                and self.reproduction is not None):
+            from aidast.pipeline.live_schema import VALIDATION_REPLAY_PLAN_SCHEMA
+            conn.execute(VALIDATION_REPLAY_PLAN_SCHEMA)
+            adapter_preflight = getattr(self.reproduction, "unsupported_reason", None)
+            if (callable(adapter_preflight)
+                    and adapter_preflight(candidate.staged._blind_case) == "http_runtime_contract_missing"
+                    and (self.replay_preparer is not None or conn.execute(
+                        "SELECT 1 FROM validation_replay_plans WHERE case_id=? AND stage_run_id=?",
+                        (candidate.case_id, stage_run_id),
+                    ).fetchone() is not None)):
+                from .replay_preparation import prepare_missing_http_replay
+                preparer_id = getattr(self.replay_preparer, "agent_id", None)
+                if preparer_id and preparer_id not in self._used_agent_ids:
+                    self._used_agent_ids.append(preparer_id)
+                candidate, preparation_error = prepare_missing_http_replay(
+                    conn, candidate, stage_run_id, self.replay_preparer, policy,
+                )
+                if preparation_error:
+                    repo.finalize(
+                        case["case_id"], stage_run_id=stage_run_id, expected_version=version,
+                        status="INCONCLUSIVE", decision={"reason": preparation_error,
+                        "phase": "replay_preparation"}, evidence_ids=(),
+                    )
+                    return True
+                blind_view = candidate.staged.blind_view()
         resuming = case.get("blind_case_sha256") is not None
         if resuming:
             expected = {

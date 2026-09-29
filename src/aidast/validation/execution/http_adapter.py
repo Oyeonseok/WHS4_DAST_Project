@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import time
 from pathlib import Path
 from typing import Callable, Mapping
+from urllib.parse import urljoin
 
 from aidast.recon.policy import TargetPolicy
 
@@ -14,7 +16,7 @@ from ..contracts.models import ReproductionObservation
 from .request_broker import (ValidationCredentialError, ValidationPolicyRejection,
                              ValidationRequestBroker)
 from ..contracts.runtime_contract import (HttpRuntimeContract, evaluate_http_response,
-                               render_http_request)
+                               render_http_request, _json_path)
 
 
 class HttpReproductionPort:
@@ -75,6 +77,8 @@ class HttpReproductionPort:
             case_id=case_id, attempt_id=attempt_id, blind_case=blind_case,
             policy=policy, transport=self.transport,
             credential_resolver=self.credential_resolver,
+            credential_references=(() if runtime is not None
+                                   and runtime.for_attempt(attempt_kind).identity_mode == "anonymous" else None),
         )
         try:
             started = self.clock()
@@ -115,6 +119,17 @@ class HttpReproductionPort:
             "response_bytes": len(response.body), "evaluation": evaluation,
             "request_ids": broker.request_ids,
         }
+        if runtime is not None and runtime.session_verification is not None and attempt_kind != "positive_control":
+            proof = self._verify_session(
+                blind_case, runtime, response, attempt_kind=attempt_kind,
+                attempt_id=attempt_id, db_path=db_path, scan_id=scan_id,
+                stage_run_id=stage_run_id, case_id=case_id, policy=policy,
+            )
+            details["protected_access"] = proof
+            details["request_ids"].extend(proof.get("request_ids", []))
+            # A public verification resource cannot prove an authentication boundary.
+            if attempt_kind == "negative_control" and proof.get("protected_fields_observed") is True:
+                observed = True
         return ReproductionObservation(
             outcome="blocked" if blocker else "observed" if observed else "not_observed",
             signal_type=blind_case.signal_types[0], signal_observed=observed,
@@ -122,3 +137,46 @@ class HttpReproductionPort:
             content_sha256=hashlib.sha256(response.body).hexdigest(),
             content_length=len(response.body), explicit_non_exploit=bool(explicit),
         )
+
+    def _verify_session(self, blind_case, runtime, response, *, attempt_kind,
+                        attempt_id, db_path, scan_id, stage_run_id, case_id, policy):
+        verification = runtime.session_verification
+        token = None
+        if attempt_kind == "target":
+            try:
+                token = _json_path(json.loads(response.body), verification.token_path)
+            except (ValueError, UnicodeDecodeError):
+                pass
+            if (not isinstance(token, str) or not token or len(token) > 16_384
+                    or any(ord(c) <= 32 for c in token)):
+                return {"verified": False, "reason": "fresh_session_token_missing", "request_ids": []}
+        url, headers, data = render_http_request(
+            urljoin(blind_case.endpoint, verification.endpoint_template), verification.request,
+        )
+        # The fresh credential is resolved in memory and never stored in the contract.
+        broker = ValidationRequestBroker(
+            db_path=db_path, scan_id=scan_id, stage_run_id=stage_run_id, case_id=case_id,
+            attempt_id=attempt_id, blind_case=blind_case, policy=policy,
+            transport=self.transport, credential_references=("fresh-replay-session",) if token else (),
+            credential_resolver=lambda reference: {"Authorization": "Bearer " + token},
+            request_boundary=("GET", url), max_redirects=0,
+        )
+        try:
+            started = self.clock()
+            protected = broker.request(url, method="GET", headers=headers, data=data)
+            evaluation = evaluate_http_response(
+                protected, verification.assertions,
+                duration_ms=max(0.0, (self.clock() - started) * 1000),
+            )
+            json_ids = {a.assertion_id for a in verification.assertions
+                        if a.kind in {"json_equals", "json_path_nonempty_string"}}
+            fields_observed = all(a["passed"] for a in evaluation["assertions"]
+                                  if a["assertion_id"] in json_ids)
+            verified = 200 <= protected.status_code < 300 and evaluation["signal_observed"]
+            return {"verified": bool(verified), "response_status": protected.status_code,
+                    "protected_fields_observed": fields_observed,
+                    "evaluation": evaluation, "request_ids": broker.request_ids,
+                    "response_body_sha256": hashlib.sha256(protected.body).hexdigest(),
+                    "reason": "protected_session_verified" if verified else "protected_session_not_verified"}
+        except (ValidationPolicyRejection, ValidationCredentialError):
+            return {"verified": False, "reason": "session_verification_blocked", "request_ids": broker.request_ids}

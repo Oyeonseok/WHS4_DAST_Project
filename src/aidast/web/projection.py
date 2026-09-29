@@ -1016,9 +1016,23 @@ class DashboardProjector:
                     if row["current_status"] is not None:
                         decision = _json_object(row["decision_json"])
                         summary: dict[str, Any] = {}
-                        reason = decision.get("reason")
+                        assessment = decision.get("blind_assessment")
+                        assessment = assessment if isinstance(assessment, dict) else {}
+                        reason = decision.get("reason") or assessment.get("conclusion")
                         if isinstance(reason, str):
-                            summary["reason"] = str(redact_text(reason))[:200]
+                            summary["reason"] = str(redact_text(reason))[:1000]
+                        if type(assessment.get("reproduced")) is bool:
+                            summary["reproduced"] = assessment["reproduced"]
+                        axes = {}
+                        for axis_name in ("boundary", "sensitivity", "actor_requirements"):
+                            axis = assessment.get("impact_" + axis_name)
+                            if (isinstance(axis, dict) and type(axis.get("score")) is int
+                                    and 0 <= axis["score"] <= 3):
+                                axes[axis_name] = {"score": axis["score"]}
+                                if isinstance(axis.get("reason"), str):
+                                    axes[axis_name]["reason"] = str(redact_text(axis["reason"]))[:500]
+                        if axes:
+                            summary["impact_axes"] = axes
                         for key in ("match_kind", "failed_check"):
                             if isinstance(decision.get(key), str):
                                 summary[key] = str(redact_text(decision[key]))[:64]

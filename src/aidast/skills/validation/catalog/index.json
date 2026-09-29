@@ -27,8 +27,8 @@
       "skill_id": "hunt-auth-bypass",
       "skill_path": "library/hunt-auth-bypass/SKILL.md",
       "contract_path": "library/hunt-auth-bypass/contract.json",
-      "skill_sha256": "e19d9633579c9286e518299fae14616cd158cfabd7e985eaea52a71078079f5f",
-      "contract_sha256": "2f1a3b84956f072a175f3969ead4be160c68de0b19ce11d6fe3b693a7319caf6"
+      "skill_sha256": "92ea5e31d6b388cb2d026b924139a033933ccf678affb192afc4f16fcf838324",
+      "contract_sha256": "b1f5bffb9b13464a569691ca3248444914b6fa05974721848ec107faf6b98608"
     },
     {
       "skill_id": "hunt-brute-force",

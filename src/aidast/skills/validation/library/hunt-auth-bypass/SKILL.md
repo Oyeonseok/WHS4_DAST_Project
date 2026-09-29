@@ -21,6 +21,16 @@ Require the declared positive control to prove the signal channel is operational
 
 Cite only evidence from the current Validation case for every impact score.
 
+Controlled login responses and their positive/negative controls can establish
+reproduction. An optional `session_verification` supplies further account or
+protected-resource evidence through the `protected_access` observation. Its
+absence is not an additional sensitivity-zero rule or a requirement to execute
+controls. Score the actual fresh observations under the existing impact rules.
+
 ## Impact expansion
 
-This profile declares no automatic impact-expansion path. Do not invent one; leave the result UNDERPOWERED when the observed impact is insufficient.
+The contract declares bounded boundary confirmation and authenticated session
+confirmation. The HTTP runtime performs only a declared session read, using
+the newly returned token in memory. If its contract is absent, do not invent
+an endpoint or execute an action; leave the result UNDERPOWERED and explain
+which account or protected-resource evidence is missing.

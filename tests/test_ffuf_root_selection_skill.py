@@ -20,6 +20,7 @@ from aidast.recon.tools.ffuf_root_selector import (
 )
 from aidast.recon.policy import TargetPolicy
 from aidast.scope.models import AssetType
+import pytest
 
 
 class FfufRootSelectionSkillTests(unittest.TestCase):
@@ -157,3 +158,44 @@ class FfufRootSelectionSkillTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def guided_policy():
+    return TargetPolicy(scope_id='scope', policy_id='guided', asset_type='URL',
+        asset='https://example.com/', allowed_hosts=['example.com'],
+        policy_notes=['Agent-guided exclusion: Do not fuzz sensitive account resources.'])
+
+
+def test_ffuf_root_agent_receives_precautions_before_baseline_selection(tmp_path):
+    wordlist = tmp_path / 'words.txt'; wordlist.write_text('probe\n')
+    result = FfufRootSelection(base_url='', roots=[], count=0, selection_reason='Skip questionable roots')
+    with (mock.patch('aidast.recon.tools.endpoint_discovery.shutil.which', return_value='/fake/ffuf'),
+          mock.patch.object(CodexMainAgent, '_run_structured', return_value=result) as agent,
+          mock.patch('aidast.recon.tools.endpoint_discovery.subprocess.run') as run):
+        discover_with_ffuf('https://example.com/', wordlist=str(wordlist),
+            seed_endpoints=[dict(path='/sensitive/forms', method='GET', source='observed')],
+            auth_headers=None, target_policy=guided_policy(), proxy_url='http://127.0.0.1:8080')
+        prompt = agent.call_args.kwargs['prompt']
+        assert guided_policy().policy_notes[0] in prompt
+        assert 'before selecting fuzzing roots' in prompt
+        assert 'baseline_prefix_candidate' in prompt
+        run.assert_not_called()
+
+
+@pytest.mark.parametrize('selected', [[], ['/safe'], 'failure'])
+def test_guided_ffuf_never_reintroduces_agent_declined_baseline_roots(tmp_path, selected):
+    wordlist = tmp_path / 'words.txt'; wordlist.write_text('probe\n')
+    options = ({'side_effect': RuntimeError('Unavailable selection')}
+               if selected == 'failure' else {'return_value': FfufRootSelection(
+                   base_url='', roots=selected, count=len(selected), selection_reason='Reviewed roots')})
+    with (mock.patch('aidast.recon.tools.endpoint_discovery.shutil.which', return_value='/fake/ffuf'),
+          mock.patch.object(CodexMainAgent, '_run_structured', **options),
+          mock.patch('aidast.recon.tools.endpoint_discovery.subprocess.run',
+              return_value=SimpleNamespace(returncode=0, stdout='', stderr='')) as run):
+        discover_with_ffuf('https://example.com/', wordlist=str(wordlist),
+            seed_endpoints=[dict(path='/sensitive/forms'), dict(path='/safe/items')],
+            auth_headers=None, target_policy=guided_policy(), proxy_url='http://127.0.0.1:8080')
+        commands = [call.args[0] for call in run.call_args_list]
+        assert len(commands) == int(selected == ['/safe'])
+        if commands:
+            assert 'https://example.com/safe/FUZZ' in commands[0]

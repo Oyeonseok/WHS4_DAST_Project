@@ -46,7 +46,7 @@ import type { PolicyReferenceSummary } from './lib/scope';
 import { ScopePolicyReferences } from './components/ScopePolicyReferences';
 import { apiErrorMessage } from './lib/transport';
 import { activityHeightBounds, clampPanelWidth, panelBounds } from './lib/layout';
-import { filterFindings, findingVerdict, knownSourceCase, parseValidationCases, reportCaseForFinding, type FindingVerdict, type ValidationCase, type ValidationStatus } from './lib/validation';
+import { filterFindings, findingVerdict, findingValidationStatus, knownSourceCase, parseValidationCases, reportCaseForFinding, type FindingVerdict, type ValidationCase, type ValidationStatus } from './lib/validation';
 import { ResizeHandle } from './components/ResizeHandle';
 import { ManualLoginNotice } from './components/ManualLoginNotice';
 import { ScopeExecutionRules as ScopeExecutionRulesView, ScopeExclusionStatus, ScopePolicyAdvisories } from './components/ScopeExecutionRules';
@@ -223,6 +223,25 @@ const demoReport: ReportSummary = {
   report_id: 'DEMO-Report', scan_id: DEMO_SCAN, case_id: 'case-demo-40',
   platform: 'local', title: '서버 버전 노출', created_at: '2026-09-20T05:26:24Z',
 };
+
+function ValidationImpact({ decision, language }: { decision: ValidationCase['decision']; language: 'ko' | 'en' }) {
+  const tk = (ko: string, en: string) => language === 'ko' ? ko : en;
+  if (!decision) return null;
+  const labels = { boundary: tk('권한 경계', 'Boundary'), sensitivity: tk('보호 정보·행위', 'Sensitivity'), actor_requirements: tk('공격 조건', 'Actor requirements') };
+  return <div className="validation-impact">
+    {decision.reason === 'http_runtime_contract_missing' && <p>{tk('재현 명세가 없어 검증 요청을 실행하지 못한 기록입니다. 현재 버전은 재검증 시 명세 보완을 시도합니다.', 'This record stopped without requests because replay metadata was missing. The current version attempts to prepare it during revalidation.')}</p>}
+    {decision.reason === 'replay_preparation_insufficient_context' && <p>{tk('재현 요청 보완을 시도했지만 수집된 정보가 부족했습니다.', 'Replay preparation was attempted, but captured context was insufficient.')}</p>}
+    {decision.reason === 'replay_preparation_invalid' && <p>{tk('재현 요청 보완을 시도했지만 실행 가능한 명세를 구성하지 못했습니다.', 'Replay preparation was attempted, but a runnable contract could not be constructed.')}</p>}
+    {decision.reason === 'replay_preparation_failed' && <p>{tk('재현 요청 보완 단계에서 오류가 발생했습니다. 검증 요청은 실행되지 않았습니다.', 'Replay preparation failed. Verification requests were not executed.')}</p>}
+    {decision.reason === 'replay_preparation_runtime_unsupported' && <p>{tk('이 검증 유형은 HTTP 외의 재현 방식이 필요하여 명세를 자동 보완하지 못했습니다.', 'This validation type needs a non-HTTP runtime, so replay metadata could not be prepared automatically.')}</p>}
+    {typeof decision.reproduced === 'boolean' && <p><strong>{tk('재현 여부', 'Reproduction')}</strong> · {decision.reproduced ? tk('재현됨', 'Reproduced') : tk('재현되지 않음', 'Not reproduced')}</p>}
+    {decision.severity && <p><strong>{tk('검증 영향 평가', 'Validation impact estimate')}</strong> · {translate(language, decision.severity)}{decision.impact_score !== undefined ? ` · ${decision.impact_score}/9` : ''}</p>}
+    {decision.impact_axes && <dl>{(Object.keys(labels) as (keyof typeof labels)[]).map(key => {
+      const axis = decision.impact_axes?.[key];
+      return axis ? <div key={key}><dt>{labels[key]} · {axis.score}/3</dt>{axis.reason && <dd>{axis.reason}</dd>}</div> : null;
+    })}</dl>}
+  </div>;
+}
 
 export default function App() {
   const getPage = () => pages[Math.max(0, slugs.indexOf(location.hash.slice(1)))];
@@ -1071,13 +1090,17 @@ export default function App() {
     setModal('report');
   };
   const findingTable = (rows: Finding[]) => <div className="table-wrap finding-table"><table>
-    <thead><tr><th>{tr('Severity')}</th><th>{tr('Finding')}</th><th>{tr('Validation verdict')}</th><th><span className="sr-only">{tr('Details')}</span></th></tr></thead>
+    <thead><tr><th>{tk('Attack 추정 심각도', 'Attack severity estimate')}</th><th>{tr('Finding')}</th><th>{tr('Validation verdict')}</th><th><span className="sr-only">{tr('Details')}</span></th></tr></thead>
     <tbody>{rows.map(f => {
       const verdict = findingVerdict(f, currentValidations);
+      const status = findingValidationStatus(f, currentValidations);
+      const validation = currentValidations.find(item => item.target_kind === 'finding' && item.target_id === f.id);
       return <tr key={f.id}>
         <td><Badge tone={f.severity.toLowerCase()}>{tr(f.severity)}</Badge></td>
         <td><button className="text-button finding-title" onClick={() => inspect(f)}>{findingTitle(f)}</button><small className="mono">{f.id} <span>·</span> {f.endpoint}</small></td>
-        <td><Badge tone={verdict === 'tp' ? 'success' : verdict === 'fp' ? 'critical' : verdict === 'duplicate' ? 'warning' : ''}>{validationReady ? tr(verdictLabels[verdict]) : tr('Checking validation verdict')}</Badge></td>
+        <td><Badge tone={verdict === 'tp' ? 'success' : verdict === 'fp' ? 'critical' : verdict === 'duplicate' ? 'warning' : ''}>{validationReady ? tr(status ? validationStatusLabels[status] : verdictLabels[verdict]) : tr('Checking validation verdict')}</Badge>
+          {validationReady && validation?.processing_phase === 'completed' && validation.decision?.reason === 'http_runtime_contract_missing' && <small>{tk('재현 명세 누락 · 검증 실행 전 중단', 'Replay contract missing · stopped before verification')}</small>}
+        </td>
         <td><button className="icon-button" aria-label={`${tr('Details')} ${f.id}`} onClick={() => inspect(f)}><Icon name="arrow" size={16}/></button></td>
       </tr>;
     })}</tbody>
@@ -1384,7 +1407,8 @@ export default function App() {
                   <Badge tone={item.processing_phase === 'completed' && item.current_status === 'CONFIRMED' ? 'success' : item.processing_phase === 'completed' && item.current_status === 'DISPROVEN' ? 'critical' : known ? 'warning' : ''}>{tr(statusLabel)}</Badge>
                 </div>
                 <dl className="validation-facts"><div><dt>{tr('Target attempts')}</dt><dd>{attempts('target')}</dd></div><div><dt>{tr('Control attempts')}</dt><dd>{attempts('positive_control') + attempts('negative_control')}</dd></div><div><dt>{tr('Evidence references')}</dt><dd>{item.evidence?.evidence_count ?? 0}</dd></div></dl>
-                {item.processing_phase === 'completed' && item.decision?.reason && <p><strong>{tr('Decision reason')}</strong> {item.decision.reason}</p>}
+                {item.processing_phase === 'completed' && item.decision?.reason && item.decision.reason !== 'http_runtime_contract_missing' && <p><strong>{tr('Decision reason')}</strong> {item.decision.reason}</p>}
+                {item.processing_phase === 'completed' && <ValidationImpact decision={item.decision} language={language}/>}
                 {known && <p><strong>{tr('Matched confirmed case')}</strong> <code>{item.decision?.known_source_case_id}</code></p>}
                 {item.processing_phase === 'completed' && linked && <button className="secondary-button" onClick={() => void openReport(linked)}>{tr('Open related report')} <Icon name="arrow" size={14}/></button>}
               </article>;
@@ -1478,9 +1502,10 @@ export default function App() {
       {modal === 'finding' && selectedFinding && <section className="finding-verdict">
         <h3>{tr('Validation verdict')}</h3>
         <Badge tone={selectedValidation?.processing_phase === 'completed' && selectedValidation.current_status === 'CONFIRMED' ? 'success' : selectedValidation?.processing_phase === 'completed' && selectedValidation.current_status === 'DISPROVEN' ? 'critical' : selectedKnownSource ? 'warning' : ''}>
-          {validationReady ? tr(verdictLabels[findingVerdict(selectedFinding, currentValidations)]) : tr('Checking validation verdict')}
+          {validationReady ? tr(findingValidationStatus(selectedFinding, currentValidations) ? validationStatusLabels[findingValidationStatus(selectedFinding, currentValidations)!] : verdictLabels[findingVerdict(selectedFinding, currentValidations)]) : tr('Checking validation verdict')}
         </Badge>
-        {selectedValidation?.processing_phase === 'completed' && selectedValidation.decision?.reason && <p><strong>{tr('Decision reason')}</strong> {selectedValidation.decision.reason}</p>}
+        {selectedValidation?.processing_phase === 'completed' && selectedValidation.decision?.reason && selectedValidation.decision.reason !== 'http_runtime_contract_missing' && <p><strong>{tr('Decision reason')}</strong> {selectedValidation.decision.reason}</p>}
+        {selectedValidation?.processing_phase === 'completed' && <ValidationImpact decision={selectedValidation.decision} language={language}/>}
         {selectedKnownSource && <p>
           <strong>{tr('Matched confirmed case')}</strong> <code>{selectedKnownSource.case_id}</code>
           {selectedKnownSource.target_kind === 'finding' && <span> · {findings.find(item => item.id === selectedKnownSource.target_id)?.title || selectedKnownSource.target_id}</span>}

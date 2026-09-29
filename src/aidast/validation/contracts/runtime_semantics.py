@@ -141,8 +141,8 @@ def validate_runtime_semantics(
 
     if isinstance(runtime, HttpRuntimeContract):
         _different(
-            runtime.target.request.model_dump(mode="json"),
-            runtime.negative_control.request.model_dump(mode="json"),
+            {"request": runtime.target.request.model_dump(mode="json"), "identity_mode": runtime.target.identity_mode},
+            {"request": runtime.negative_control.request.model_dump(mode="json"), "identity_mode": runtime.negative_control.identity_mode},
             "HTTP target and inert negative control requests must differ",
         )
         assertion_kinds = {item.kind for item in runtime.target.assertions}

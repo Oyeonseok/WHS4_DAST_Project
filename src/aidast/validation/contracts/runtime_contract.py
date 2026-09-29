@@ -7,9 +7,9 @@ import math
 import re
 from collections.abc import Mapping
 from typing import Annotated, Any, Literal
-from urllib.parse import quote, urlencode, urlsplit, urlunsplit
+from urllib.parse import quote, unquote, urlencode, urlsplit, urlunsplit
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import Field, field_validator, model_serializer, model_validator
 
 from aidast.core.http_safety import is_sensitive_header
 from aidast.core.request_broker import BrokerResponse
@@ -118,6 +118,14 @@ class ResponseAssertion(StrictContract):
 class HttpAttemptContract(StrictContract):
     request: HttpRequestTemplate
     assertions: tuple[ResponseAssertion, ...] = Field(min_length=1, max_length=16)
+    identity_mode: Literal["case", "anonymous"] = "case"
+
+    @model_serializer(mode="wrap")
+    def stable_identity_document(self, handler):
+        document = handler(self)
+        if self.identity_mode == "case":
+            document.pop("identity_mode", None)
+        return document
 
     @field_validator("assertions", mode="before")
     @classmethod
@@ -133,11 +141,56 @@ class HttpAttemptContract(StrictContract):
         return self
 
 
+class HttpSessionVerification(StrictContract):
+    """One declared read using the credential returned by the current replay."""
+
+    endpoint_template: str = Field(min_length=1, max_length=4096)
+    token_path: tuple[str | int, ...] = Field(min_length=1, max_length=16)
+    request: HttpRequestTemplate
+    assertions: tuple[ResponseAssertion, ...] = Field(min_length=1, max_length=16)
+
+    @field_validator("token_path", "assertions", mode="before")
+    @classmethod
+    def json_arrays(cls, value: Any) -> Any:
+        return tuple(value) if isinstance(value, list) else value
+
+    @model_validator(mode="after")
+    def bounded_verification(self) -> "HttpSessionVerification":
+        parsed = urlsplit(self.endpoint_template)
+        decoded = unquote(parsed.path)
+        if (not decoded.startswith("/") or decoded.startswith("//")
+                or parsed.scheme or parsed.netloc or parsed.query or parsed.fragment
+                or ".." in decoded.split("/") or any(c in decoded for c in "\\%{}")
+                or any(ord(c) <= 32 for c in decoded)):
+            raise ValueError("session verification requires a literal same-origin path")
+        if self.request.json_body is not None or self.request.text_body is not None:
+            raise ValueError("session verification must be a body-free GET")
+        if self.request.path_parameters:
+            raise ValueError("session verification path must be literal")
+        if any((isinstance(p, str) and (not p or len(p) > 256))
+               or (type(p) is int and p < 0) for p in self.token_path):
+            raise ValueError("session token path is invalid")
+        if not any(a.kind in {"json_equals", "json_path_nonempty_string"}
+                   for a in self.assertions):
+            raise ValueError("session verification requires a protected JSON field assertion")
+        if len({a.assertion_id for a in self.assertions}) != len(self.assertions):
+            raise ValueError("session verification assertion IDs must be unique")
+        return self
+
+
 class HttpRuntimeContract(StrictContract):
     schema_version: Literal[1]
     target: HttpAttemptContract
     positive_control: HttpAttemptContract
     negative_control: HttpAttemptContract
+    session_verification: HttpSessionVerification | None = None
+
+    @model_serializer(mode="wrap")
+    def stable_legacy_document(self, handler):
+        document = handler(self)
+        if self.session_verification is None:
+            document.pop("session_verification", None)
+        return document
 
     def for_attempt(self, attempt_kind: str) -> HttpAttemptContract:
         if attempt_kind not in {"target", "positive_control", "negative_control"}:

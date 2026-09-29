@@ -39,3 +39,12 @@ test('reference review displays semantic relationship and legacy uncertainty', (
   const html=renderToStaticMarkup(createElement(ScopePolicyReferences,{references:[{...reference,relationship:'supporting'},reference],language:'en'}));
   assert.ok(html.includes('Supporting')); assert.ok(html.includes('Uncertain'));
 });
+
+test('prepared Agent conditions remain visible when request guards are ready', () => {
+  const preparation={held:0,denied:0,captured_candidates:0,rejected_captures:0,resources:[],agent_guidance:[advisory]};
+  const html=renderToStaticMarkup(createElement(components.ScopeExclusionStatus,{count:1,preparation}));
+  assert.ok(html.includes('0 held, 0 denied'));
+  assert.ok(html.includes(advisory.label));
+  assert.ok(html.includes(advisory.source_quote));
+  assert.ok(html.includes(advisory.guidance));
+});

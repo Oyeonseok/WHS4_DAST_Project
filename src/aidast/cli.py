@@ -1032,9 +1032,11 @@ def _run_recon(
         except ValueError as exc:
             raise ReconCoordinatorError(str(exc)) from exc
     from aidast.agents.policy_guidance import effective_advisory_context
+    from aidast.scope.exclusion_guidance import agent_exclusion_advisories
     effective_policy_context = (
         effective_advisory_context(scope_document.analysis.execution_rules)
-        if scope_document.analysis.execution_rules != approved_scope_document.analysis.execution_rules
+        if (scope_document.analysis.execution_rules != approved_scope_document.analysis.execution_rules
+            or agent_exclusion_advisories(scope_document.analysis.execution_rules))
         else ""
     )
     if effective_policy_context:

@@ -1502,7 +1502,12 @@ def test_program_registry_persists_and_masks_private_programs(tmp_path: Path) ->
 
 def test_validations_api_reports_case_verdicts_and_safe_evidence(tmp_path: Path) -> None:
     database = _fixture(tmp_path)
-    decision = {"reason": "Bearer abcdef1234567890 leaked", "evidence_ids": ["e1"], "body": "secret-body"}
+    decision = {"blind_assessment": {
+        "reproduced": True, "conclusion": "Bearer abcdef1234567890 leaked",
+        "impact_boundary": {"score": 2, "reason": "Login response observed"},
+        "impact_sensitivity": {"score": 0, "reason": "Protected account access not established"},
+        "impact_actor_requirements": {"score": 2, "reason": "No existing credential required"},
+    }, "evidence_ids": ["e1"], "body": "secret-body"}
     with sqlite3.connect(database) as conn:
         conn.executescript(
             """
@@ -1554,6 +1559,11 @@ def test_validations_api_reports_case_verdicts_and_safe_evidence(tmp_path: Path)
             assert by_id["c-confirmed"]["current_status"] == "CONFIRMED"
             assert by_id["c-confirmed"]["target_id"] == "f1"
             assert by_id["c-confirmed"]["decision"]["severity"] == "HIGH"
+            assert "[REDACTED]" in by_id["c-confirmed"]["decision"]["reason"]
+            assert by_id["c-confirmed"]["decision"]["reproduced"] is True
+            assert by_id["c-confirmed"]["decision"]["impact_axes"]["sensitivity"] == {
+                "score": 0, "reason": "Protected account access not established",
+            }
             assert by_id["c-confirmed"]["evidence"] == {
                 "attempts": {"target": {"observed": 1}, "negative_control": {"not_observed": 1}},
                 "evidence_count": 1,

@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Callable, Mapping
 
 from .coordinator import ValidationCoordinator, ValidationCoordinatorError
+from .replay_preparation import CodexReplayPreparer
 from ..execution.browser_adapter import BrowserExecutor, BrowserReproductionPort
 from ..execution.chain_adapter import ChainReproductionPort
 from ..execution.credentials import PipelineCredentialResolver
@@ -48,6 +49,7 @@ def build_native_validation_coordinator(
     websocket_connector: Callable | None = None,
     grpc_channel_factory: Callable | None = None,
     artifact_resolver: Callable[[str], bytes] | None = None,
+    replay_preparer=None,
 ) -> ValidationCoordinator:
     """Build native runtimes; the Codex runner remains lazy per stage."""
     try:
@@ -110,6 +112,7 @@ def build_native_validation_coordinator(
     return ValidationCoordinator(
         db_path=db_path,
         agent=None,
+        replay_preparer=replay_preparer if replay_preparer is not None else CodexReplayPreparer(),
         reproduction=reproduction,
         policy_provider=policy_provider,
         impact_development_port=(

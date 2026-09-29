@@ -225,6 +225,11 @@ def bind_execution_policies(policies, rules: ScopeExecutionRules | None, *, resu
             note = render_execution_advisories(rules.model_copy(update={'advisories': [item]}))
             if note not in data['policy_notes']:
                 data['policy_notes'].append(note)
+        from aidast.scope.exclusion_guidance import agent_exclusion_advisories, render_agent_exclusion_note
+        for item in agent_exclusion_advisories(rules, policy.asset):
+            note = render_agent_exclusion_note(item)
+            if note not in data['policy_notes']:
+                data['policy_notes'].append(note)
         data['policy_prerequisite_evidence'] = prerequisite_evidence
         narrowed[key] = TargetPolicy.model_validate(data)
     if not narrowed:
