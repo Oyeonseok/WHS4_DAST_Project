@@ -174,6 +174,16 @@ def ingest_mitm_capture(conn: sqlite3.Connection, jsonl_path: Path, *, origin_id
                     (origin_id, record["method"].upper(), normalize_path(urlsplit(record["url"]).path)),
                 ).fetchone()
                 endpoint_id = row[0] if row else None
+            stored_response = response_body.encode('utf-8') if isinstance(response_body, str) else None
+            receipt = record.get('request_receipt')
+            if receipt is not None:
+                from aidast.core.capture_receipt import validate_capture_receipt
+                try:
+                    if any(record.get(k) for k in ('candidate_probe','deferred_candidate','duplicate','static_resource')):
+                        raise ValueError('non-resource capture')
+                    receipt = validate_capture_receipt(receipt, url=record['url'], method=record['method'], response_body=stored_response)
+                except (ValueError, TypeError):
+                    receipt = None
             transaction_id = dbmod.insert_http_transaction(
                 conn,
                 endpoint_id=endpoint_id,
@@ -184,7 +194,8 @@ def ingest_mitm_capture(conn: sqlite3.Connection, jsonl_path: Path, *, origin_id
                 request_body=request_body.encode("utf-8") if request_body else None,
                 response_status=record.get("response_status"),
                 response_headers=sanitize_headers(record.get("response_headers")),
-                response_body=response_body.encode("utf-8") if response_body else None,
+                response_body=stored_response,
+                request_receipt=receipt,
                 content_type=record.get("content_type"),
             )
             if origin_id is not None:

@@ -7,6 +7,7 @@ import os
 import sqlite3
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from contextlib import closing, redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
@@ -15,6 +16,8 @@ from unittest.mock import patch
 from aidast.cli import _parser, _write_recon_handoff, main
 from aidast.paths import RESULT_ROOT
 from aidast.recon import db
+from aidast.recon.models import ReconPlan
+from aidast.recon.policy import TargetPolicy
 from aidast.web.projection import DashboardProjector
 
 
@@ -51,8 +54,11 @@ class PipelineCliTests(unittest.TestCase):
                 "scope_json_sha256": hashlib.sha256((program_dir / "Scope.json").read_bytes()).hexdigest(),
                 "scope_markdown_sha256": hashlib.sha256((program_dir / "Scope.md").read_bytes()).hexdigest(),
             }), encoding="utf-8")
-            scope = SimpleNamespace(
-                scope_id="pipeline-fixture", analysis=SimpleNamespace(in_scope_assets=[], source_evidence=[]),
+            from aidast.scope.models import ScopeDocument
+            from test_recon_workflow import program_page, scope_analysis
+            scope = ScopeDocument(
+                scope_id="pipeline-fixture", created_at=datetime.now(timezone.utc),
+                source=program_page(), analysis=scope_analysis(),
             )
 
             def fixture_executor(**kwargs):
@@ -70,7 +76,10 @@ class PipelineCliTests(unittest.TestCase):
                 observed_during_planning.extend(
                     DashboardProjector(root).stored_events_after(scan_id, 0)
                 )
-                return SimpleNamespace(plan_id="fixture", targets=[])
+                return ReconPlan(
+                    plan_id='fixture', scope_id='pipeline-fixture', objective='Offline fixture', mode='safe',
+                    targets=[dict(asset_type='WILDCARD', asset='*.example.com', steps=['ASSET_DISCOVERY'], constraints=[])],
+                    global_constraints=[], completion_criteria=['Offline fixture complete'])
 
             scan_id = "scan_" + "a" * 32
             with (
@@ -92,7 +101,10 @@ class PipelineCliTests(unittest.TestCase):
             ):
                 coordinator.return_value.load_approved_scope.return_value = (scope, "scope fixture")
                 planner.return_value.create_recon_plan.side_effect = plan_recon
-                planner.return_value.create_target_policies.return_value = {}
+                planner.return_value.create_target_policies.return_value = {
+                    ('WILDCARD', '*.example.com'): TargetPolicy(
+                        scope_id='pipeline-fixture', policy_id='fixture', asset_type='WILDCARD',
+                        asset='*.example.com', allowed_hosts=['example.com'], include_subdomains=True)}
                 recon.return_value.create_tasks.return_value = []
                 review.return_value.review.return_value.model_dump_json.return_value = "{}"
                 attack_coordinator.return_value.run.return_value = SimpleNamespace(
@@ -108,15 +120,23 @@ class PipelineCliTests(unittest.TestCase):
                 )
                 result = main([
                     "run", "https://example.test/program", "--all-targets",
+                    "--output-dir", str(root / "Scope"),
                     "--scan-id", scan_id,
                     "--run-root", str(root / "Runs"),
                     "--attack-output-root", str(root / "AttackRuns"),
                 ])
             self.assertEqual(result, 0)
+            self.assertNotIn("Automatic reports unavailable", stdout.getvalue())
             progress = [
                 event for event in DashboardProjector(root).stored_events_after(scan_id, 0)
                 if event["payload"].get("message_code") == "agent.work"
             ]
+            self.assertIn(("report", "draft", "finished"), [
+                (event["payload"]["message_params"]["agent"],
+                 event["payload"]["message_params"]["step"],
+                 event["payload"]["message_params"]["state"])
+                for event in progress
+            ])
             self.assertIn(("main", "recon_plan", "started"), [
                 (event["payload"]["message_params"]["agent"],
                  event["payload"]["message_params"]["step"],
@@ -136,6 +156,11 @@ class PipelineCliTests(unittest.TestCase):
                  event["payload"]["message_params"]["state"])
                 for event in progress
             ])
+            recon_progress = [event["payload"]["message_params"]["progress"]
+                              for event in progress
+                              if event["payload"].get("stage") == "Recon"
+                              and "progress" in event["payload"]["message_params"]]
+            self.assertEqual(recon_progress, sorted(recon_progress))
             self.assertIn("Legacy Attack plan saved:", stdout.getvalue())
             database, = (root / "AttackRuns").glob("*/*/scan_*/legacy/Attack.db")
             self.assertEqual(database.relative_to(root / "AttackRuns").parts[:2], ("example-test", "program"))

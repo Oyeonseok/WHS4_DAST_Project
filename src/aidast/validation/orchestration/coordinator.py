@@ -12,6 +12,7 @@ from pydantic import ValidationError as PydanticValidationError
 
 from aidast.pipeline.lifecycle import finish_stage_run, resume_validation_stage_run, start_stage_run
 from aidast.recon.policy import TargetPolicy
+from aidast.agents.policy_guidance import policy_guidance_context
 
 from ..core.decision import DecisionEngine, DecisionInput
 from ..core.profile_evidence import evaluate_profile_evidence, fit_profile_audit
@@ -60,7 +61,8 @@ class PolicyProvider(Protocol):
 
 def _impact_planning_context(candidate: ValidatedCandidate,
                              observations: tuple[dict[str, Any], ...], *,
-                             verified_preconditions: tuple[dict[str, Any], ...] = ()
+                             verified_preconditions: tuple[dict[str, Any], ...] = (),
+                             policy: TargetPolicy | None = None,
                              ) -> tuple[dict[str, Any], ...]:
     """Give the planner only gated request provenance and non-secret marker receipts."""
     provenance = ({
@@ -71,7 +73,9 @@ def _impact_planning_context(candidate: ValidatedCandidate,
         "context_kind": "verified_impact_precondition_observations",
         "observations": list(verified_preconditions),
     },) if verified_preconditions else ()
-    return (*observations, *provenance, *verified, {
+    guidance = ({"context_kind": "application_policy_guidance",
+                 "guidance": policy_guidance_context(policy)},) if policy is not None else ()
+    return (*observations, *provenance, *verified, *guidance, {
         "context_kind": "immutable_impact_execution_capabilities",
         "capabilities": [{
             "contract_id": action.contract_id,
@@ -312,12 +316,14 @@ class ValidationCoordinator:
         scope: ScopePolicySource, evidence_ids: tuple[str, ...],
         evidence_summaries: tuple[dict[str, Any], ...],
         conditional_context: ConditionalEligibilityContext | None = None,
+        policy: TargetPolicy | None = None,
     ) -> tuple[EligibilityAssessment, str]:
         view = candidate.staged.eligibility_view()
         claim = view.pop("attack_claim")
         request = EligibilityRequest(
             case_id=candidate.case_id, scope_sha256=scope.scope_sha256, phase=phase,
             scope_markdown=scope.scope_markdown,
+            policy_guidance=policy_guidance_context(policy) if policy and policy.policy_notes else "",
             target_kind=candidate.staged.blind_view()["target_kind"],
             vuln_class=candidate.vuln_class, endpoint=view["endpoint"], method=view["method"],
             title=claim["title"], claimed_impact=claim["claimed_impact"],
@@ -497,6 +503,7 @@ class ValidationCoordinator:
         preflight, eligibility_id = self._eligibility_assessment(
             conn=conn, repo=repo, candidate=candidate, stage_run_id=stage_run_id,
             phase="preflight", scope=self._load_scope(conn, case.get("scope_sha256")),
+            policy=policy,
             evidence_ids=(), evidence_summaries=(),
         )
         if preflight.eligibility in {"INELIGIBLE", "UNKNOWN"}:
@@ -672,7 +679,7 @@ class ValidationCoordinator:
                 ).fetchone())
             else:
                 try:
-                    assessment = self._assessment(blind_view, tuple(observations))
+                    assessment = self._assessment(blind_view, tuple(observations), policy=policy)
                 except ValidationCoordinatorError:
                     repo.finalize(
                         case["case_id"], stage_run_id=stage_run_id, expected_version=version,
@@ -706,7 +713,7 @@ class ValidationCoordinator:
                     if stop_incomplete_replay(observations, evidence_ids):
                         return True
                     try:
-                        assessment = self._assessment(blind_view, tuple(observations))
+                        assessment = self._assessment(blind_view, tuple(observations), policy=policy)
                     except ValidationCoordinatorError:
                         repo.finalize(
                             case["case_id"], stage_run_id=stage_run_id, expected_version=version,
@@ -785,7 +792,7 @@ class ValidationCoordinator:
                     and candidate.impact_development_actions):
                 assessment = self._develop_impact(
                     repo, candidate, stage_run_id, assessment,
-                    observations=tuple(observations), evidence_ids=evidence_ids,
+                    observations=tuple(observations), evidence_ids=evidence_ids, policy=policy,
                 )
                 repo.set_processing_phase(
                     case["case_id"], stage_run_id=stage_run_id, phase="blind_replay",
@@ -823,7 +830,7 @@ class ValidationCoordinator:
         if stored_comparison is None:
             try:
                 comparison = self._comparison(
-                    claim, assessment.model_dump(mode="json"), blind_view=blind_view,
+                    claim, assessment.model_dump(mode="json"), blind_view=blind_view, policy=policy,
                 )
             except ValidationCoordinatorError:
                 repo.finalize(
@@ -894,6 +901,7 @@ class ValidationCoordinator:
             post, post_id = self._eligibility_assessment(
                 conn=conn, repo=repo, candidate=candidate, stage_run_id=stage_run_id,
                 phase="post_replay", scope=self._load_scope(conn, case.get("scope_sha256")),
+                policy=policy,
                 evidence_ids=post_evidence_ids, evidence_summaries=summaries,
                 conditional_context=ConditionalEligibilityContext(
                     assessment_id=eligibility_id,
@@ -1568,13 +1576,15 @@ class ValidationCoordinator:
             unfinished="development result cites an unfinished request ledger row",
         )
 
-    def _assessment(self, blind: dict[str, Any], observations: tuple[dict[str, Any], ...]) -> BlindAssessment:
-        return self._agent_call("assess", blind, observations, model=BlindAssessment)
+    def _assessment(self, blind: dict[str, Any], observations: tuple[dict[str, Any], ...],
+                    *, policy: TargetPolicy | None = None) -> BlindAssessment:
+        return self._agent_call("assess", blind, observations, model=BlindAssessment, policy=policy)
 
     def _develop_impact(
         self, repo: ValidationRepository, candidate: ValidatedCandidate,
         stage_run_id: str, assessment: BlindAssessment, *,
         observations: tuple[dict[str, Any], ...], evidence_ids: list[str],
+        policy: TargetPolicy | None = None,
     ) -> BlindAssessment:
         from ..core.decision import evaluate_impact
         from ..execution.impact_development import (
@@ -1761,7 +1771,7 @@ class ValidationCoordinator:
                     )
                     planning_context = _impact_planning_context(
                         candidate, observations,
-                        verified_preconditions=verified_preconditions,
+                        verified_preconditions=verified_preconditions, policy=policy,
                     )
                     if runner is None:
                         factory = self.impact_agent_factory or (
@@ -1911,7 +1921,7 @@ class ValidationCoordinator:
 
     def _comparison(
         self, claim: dict[str, Any], assessment: dict[str, Any], *,
-        blind_view: dict[str, Any],
+        blind_view: dict[str, Any], policy,
     ) -> ClaimComparison:
         if self.agent is None:
             from .codex_runner import CodexBlindValidationRunner
@@ -1920,13 +1930,17 @@ class ValidationCoordinator:
         prepare = getattr(self.agent, "prepare_comparison", None)
         if callable(prepare):
             prepare(blind_view)
-        return self._agent_call("compare", claim, assessment, model=ClaimComparison)
+        return self._agent_call("compare", claim, assessment, model=ClaimComparison, policy=policy)
 
-    def _agent_call(self, method: str, first: Any, second: Any, *, model):
+    def _agent_call(self, method: str, first: Any, second: Any, *, model, policy=None):
         if self.agent is None:
             from .codex_runner import CodexBlindValidationRunner
             self.agent = CodexBlindValidationRunner()
             self._owns_agent = True
+        if method in {"assess", "compare"} and policy is not None:
+            setter = getattr(type(self.agent), "set_policy_context", None)
+            if callable(setter):
+                self.agent.set_policy_context(policy)
         if self.agent.agent_id not in self._used_agent_ids:
             self._used_agent_ids.append(self.agent.agent_id)
         correction = None

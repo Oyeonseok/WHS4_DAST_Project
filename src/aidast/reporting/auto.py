@@ -12,11 +12,11 @@ from urllib.parse import urlsplit
 from aidast.agents.main import CodexReportWriter
 from aidast.pipeline.lifecycle import finish_stage_run, start_stage_run
 
-from .runtime import ReportAgent, ReportError, ReportWriter
+from .runtime import PLATFORMS, ReportAgent, ReportError, ReportWriter
 
 
-def report_platform_for_program_url(program_url: str) -> str | None:
-    """Select a template only when the program host identifies its platform."""
+def report_platform_for_program_url(program_url: str) -> str:
+    """Select a known platform template, otherwise use the general report."""
     host = (urlsplit(program_url).hostname or "").casefold().removeprefix("www.")
     for platform, domain in (
         ("hackerone", "hackerone.com"),
@@ -25,7 +25,7 @@ def report_platform_for_program_url(program_url: str) -> str | None:
     ):
         if host == domain or host.endswith("." + domain):
             return platform
-    return None
+    return "generic"
 
 
 def _case_directory(case_id: str) -> str:
@@ -39,11 +39,11 @@ def generate_scan_reports(
     output_root: Path,
     *,
     scan_id: str,
-    platform: str,
+    platform: str = "generic",
     writer: ReportWriter | None = None,
 ) -> list[dict]:
     """Generate one local draft per current confirmed case for this scan."""
-    if platform not in {"hackerone", "bugcrowd", "intigriti"}:
+    if platform not in PLATFORMS:
         raise ReportError("automatic reports require a supported program platform")
     with closing(sqlite3.connect(pipeline_db)) as conn:
         cases = [row[0] for row in conn.execute(

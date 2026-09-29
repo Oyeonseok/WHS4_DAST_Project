@@ -6,7 +6,7 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
-Platform = Literal["hackerone", "bugcrowd", "intigriti"]
+Platform = Literal["hackerone", "bugcrowd", "intigriti", "generic"]
 Text = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=8192)]
 Identifier = Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9_.:-]{1,256}$")]
 

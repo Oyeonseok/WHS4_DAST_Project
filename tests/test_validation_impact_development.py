@@ -214,9 +214,14 @@ class ImpactHypothesisExecutorTests(unittest.TestCase):
         )
         self.addCleanup(runner.close)
 
-        self.assertIs(runner.plan(request, evidence=({"evidence_id": "evidence"},)), plan)
+        guidance = {"context_kind": "application_policy_guidance",
+                    "guidance": "Sensitive data: use owned data only"}
+        self.assertIs(runner.plan(request, evidence=({"evidence_id": "evidence"}, guidance)), plan)
         prompt = agent._run_structured.call_args.kwargs["prompt"]
         self.assertIn("hunt-idor validation", prompt)
+        self.assertIn("Sensitive data", prompt)
+        self.assertIn("$aidast-policy", prompt)
+        self.assertTrue(list(runner._work_root.glob("hypothesis-*/.agents/skills/aidast-policy/SKILL.md")))
         self.assertIn(request.proposal_sha256, prompt)
         self.assertNotIn("hunt-sqli validation", prompt)
         self.assertTrue(runner.agent_id.startswith("impact_development_agent_"))

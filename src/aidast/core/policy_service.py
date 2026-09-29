@@ -282,6 +282,15 @@ class PolicyService:
         broker._validate(intent.url, intent.method)
         if timeout is not None and (timeout <= 0 or not math.isfinite(timeout)):
             raise RequestPolicyError("timeout must be positive and finite")
+        from aidast.core.capture_receipt import prepare_http_request
+        from aidast.core.http_safety import merge_hackerone_identity, require_request_admission
+        prepared = prepare_http_request(intent.url, method=intent.method,
+            headers=merge_hackerone_identity({}, self.policy.hackerone_username,
+                required_identity_headers=self.policy.required_identity_headers))
+        require_request_admission(self.policy, url=intent.url, method=intent.method,
+            headers=prepared['headers'], body=prepared['body'],
+            identity_available=getattr(self.transport, 'identity_available', True) is True,
+            now=now, error_class=RequestPolicyError)
         self._validate_external_generation()
         reservation = self.ledger.reserve(self.authorization, intent, now=now)
         try:

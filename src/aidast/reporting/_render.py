@@ -38,7 +38,7 @@ def render_markdown(draft: ReportDraft, *, source: str) -> str:
     section("VRT Category", draft.vrt_category)
     section("Technical Severity" if draft.platform == "bugcrowd" else "Severity", draft.severity)
     section("CVSS Vector", draft.cvss_vector)
-    section("Summary" if draft.platform == "hackerone" else "Description", draft.summary)
+    section("Summary" if draft.platform in {"hackerone", "generic"} else "Description", draft.summary)
     if draft.prerequisites:
         section("Prerequisites", "\n\n".join(_cited(item) for item in draft.prerequisites))
     section("Steps to Reproduce", "\n\n".join(

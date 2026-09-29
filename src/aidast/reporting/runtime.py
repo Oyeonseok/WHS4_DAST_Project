@@ -11,7 +11,7 @@ from typing import Protocol
 
 from .models import ReportDraft
 
-PLATFORMS = ("hackerone", "bugcrowd", "intigriti")
+PLATFORMS = ("hackerone", "bugcrowd", "intigriti", "generic")
 SCHEMA_VERSION = "2.0"
 
 
@@ -119,7 +119,9 @@ class ReportAgent:
         if self.writer is None or result["status"] == "drafted":
             return result
         _, context, _, _ = _load(Path(result["report_db"]))
-        writer_context = json.loads(_json(context))
+        from .submission import sanitize_writer_context
+
+        writer_context = sanitize_writer_context(context)
         writer_context["output_schema"] = ReportDraft.model_json_schema()
         return record_case_report(
             Path(result["report_db"]), self.writer.write(writer_context),

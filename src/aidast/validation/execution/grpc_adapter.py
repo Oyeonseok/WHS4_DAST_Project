@@ -10,6 +10,7 @@ from typing import Callable
 from urllib.parse import urlsplit, urlunsplit
 
 from aidast.recon.policy import TargetPolicy
+from aidast.core.http_safety import merge_hackerone_identity
 
 from ..contracts.binary import BinaryArtifactResolver, BinaryArtifactUnavailable
 from ..contracts.grpc_contract import (
@@ -142,6 +143,8 @@ class GrpcReproductionPort:
                 metadata = bounded_metadata(metadata | resolved, credentials=True)
             except Exception:
                 raise GrpcSessionError("gRPC credential metadata invalid") from None
+        metadata = bounded_metadata(merge_hackerone_identity(metadata, policy.hackerone_username,
+            required_identity_headers=policy.required_identity_headers), credentials=True)
         remaining()
 
         def paced_sleep(delay):
@@ -158,6 +161,10 @@ class GrpcReproductionPort:
             runtime_kind="grpc", operation_kind="unary", destination=url,
             policy_url=url, method="POST",
             request_bytes=len(loaded.request_bytes), max_response_bytes=attempt.max_response_bytes,
+            headers=dict(metadata) | {'Content-Type':'application/grpc'},
+            body=bytes(loaded.request_bytes), body_available=False, identity_available=False,
+            context={'transport':'grpc','operation':'unary','method_path':loaded.method_path,
+                'descriptor_sha256':attempt.descriptor.sha256},
             concurrency_units=1, metadata={"request_sha256": hashlib.sha256(loaded.request_bytes).hexdigest(),
                 "descriptor_sha256": attempt.descriptor.sha256, "descriptor_length": attempt.descriptor.length},
         )
@@ -166,12 +173,14 @@ class GrpcReproductionPort:
         except ValidationTransportError as error:
             if str(error) == "transport operation is outside current TargetPolicy" or str(error).startswith((
                 "TargetPolicy request budget exhausted", "TargetPolicy concurrency limit reached",
-                "TargetPolicy validation byte budget exhausted",
+                "TargetPolicy validation byte budget exhausted", "exclusion ",
             )):
                 return self._blocked(blind_case, "current_policy_rejected", policy_allowed=False)
             raise
 
         def dispatch(timeout):
+            nonlocal deadline
+            deadline = min(deadline, self.clock() + timeout)
             channel, raw_response, captured_response, capture_failed = None, None, None, False
 
             def deserialize(value):

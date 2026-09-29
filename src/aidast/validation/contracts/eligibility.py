@@ -98,6 +98,7 @@ class EligibilityRequest(StrictContract):
     scope_sha256: Digest
     phase: EligibilityPhase
     scope_markdown: Annotated[str, Field(min_length=1, max_length=500_000)]
+    policy_guidance: Annotated[str, Field(max_length=8_000_000, exclude_if=lambda value: not value)] = ""
     target_kind: Literal["finding", "chain"]
     vuln_class: Annotated[str, Field(min_length=1, max_length=256)]
     endpoint: Annotated[str, Field(min_length=1, max_length=4096)]

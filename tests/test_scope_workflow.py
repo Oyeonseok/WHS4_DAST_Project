@@ -62,6 +62,8 @@ def sample_page() -> ProgramPage:
 
 def sample_analysis() -> ScopeAnalysis:
     return ScopeAnalysis(
+        required_request_headers=[],
+        execution_rules={"exclusions": []},
         program_name="Example <Program>",
         program_description="Public bug bounty program.",
         in_scope_assets=[

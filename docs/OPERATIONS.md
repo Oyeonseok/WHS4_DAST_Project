@@ -61,7 +61,8 @@ WebSocket replay stream을 제공하고 선택한 정적 WebUI도 같은 origin�
 - durable WebSocket cursor는 파생 데이터인 `result/.webui/events.db`에 저장합니다.
 - `Scope.json`과 `Approval.json`의 SHA-256이 일치해야 승인 상태가 표시됩니다.
 - 인증이 구현되기 전까지 `127.0.0.1`, `::1`, `localhost` 이외의 bind는 거부합니다.
-- UI에는 실행/변경 endpoint가 없으며 스캔 제어는 계속 CLI를 사용합니다.
+- 승인된 Scope로 새 스캔을 실행하고 중단·재개할 수 있습니다. 실행 전 정책 해석과
+  필수 입력·확인 항목을 검증하며, 기존 승인 산출물은 수정하지 않습니다.
 
 ## Scope 수집과 정책
 
@@ -91,6 +92,38 @@ aidast scope status "<PROGRAM_URL>"
 
 승인 후 `Scope.md` 또는 `Scope.json`이 변경되면 무결성 검사가 실패합니다.
 기존 프로그램 산출물은 자동으로 덮어쓰지 않습니다.
+
+### 기존 승인 Scope 재수집과 새 스캔
+
+대시보드의 프로그램 대기열에서 승인된 프로그램의 **View result**를 열고
+**Collect again**을 누르면 현재 정책을 새로 수집합니다. 이 동작은
+`POST /api/v1/programs/<id>/scope-collection`에 `refresh: true`를 보냅니다.
+일반 수집 요청은 기본 `refresh: false`이며 기존 승인 Scope를 재사용합니다.
+수집 중이거나 검토 대기 중인 작업이 있으면 두 요청 모두 새 작업을 만들지 않습니다.
+
+새 초안에서 자산, 필수 요청 헤더, 실행 규칙과 참조 문서의 URL·수집 상태·
+적용 분야·실패 이유를 원문 근거와 대조합니다. 기존의 검토자 이름과 전체 승인
+확인으로 **Yes · Approve Scope** 또는 **No · Reject draft**를 선택합니다.
+새 수집이 대기·실패·취소·거절되어도 이전에 승인된 Scope는 계속 사용할 수 있습니다.
+
+기존 파일을 삭제하거나 수정할 필요가 없습니다. 최초 승인은 원래 프로그램 경로에
+유지되고, 다시 승인한 버전은 다음 경로에 따로 게시됩니다.
+
+```text
+result/Scope/<platform>/<program>/revisions/<scopejob_id>/
+├── Scope.md
+├── Scope.json
+├── Manifest.json
+└── Approval.json
+```
+
+검증된 Scope 목록에는 원본과 새 승인 버전이 같은 프로그램으로 표시됩니다.
+승인 결과의 **New scan with this Scope**를 누르면 방금 승인한 정확한 Scope ID가
+선택됩니다. 목록에서 이전 버전도 선택할 수 있습니다. 대시보드가 실행하는
+`aidast run`은 선택한 버전의 작업 ID를 `--scope-revision <scopejob_id>`로 전달하며,
+CLI는 해당 프로그램의 이미 승인된 경로만 읽습니다. 잘못된 ID나 미승인 버전은
+실패하며 원본으로 돌아가거나 새 정책을 수집하지 않습니다. 완성된 실행 규칙은
+저장된 승인 근거에서 읽고 새 의미 해석 없이 적용합니다.
 
 ### 인증이 필요한 프로그램 페이지
 
@@ -122,6 +155,62 @@ result/Scope/<platform>/<program>/
 ├── Manifest.json
 └── Approval.json
 ```
+
+### 정책에서 자동 적용하는 실행 옵션
+
+AI가 승인할 정책 원문에서 실행 제한과 사용자 의무를 구조화하고 정확한 근거
+문장을 함께 남깁니다. 실행 코드는 지원하는 옵션의 타입·범위와 원문 근거를
+검증하며, 정책 문구를 정규식으로 해석하지 않습니다.
+
+| 정책 요구 | 자동 처리 | 사용자가 제공할 내용 |
+| --- | --- | --- |
+| 필수 식별 헤더 | 임의의 이름과 값 템플릿을 정책에 바인딩 | 선언된 사용자 이름 등 입력값 |
+| 초당·분당·일당 요청 제한 | 횟수·기간·프로그램/대상 범위로 저장하고 전송 전 검사 | 더 낮은 실행 상한을 선택할 수 있음 |
+| 총 요청 횟수 | 대상·단계가 공유하는 스캔 예산과 정책 총량을 검사 | 실행 예산; 정책 상한을 늘릴 수 없음 |
+| 동시성·개별 타임아웃·깊이 | 기존 실행값과 정책 제한 중 더 작은 값을 적용 | 필요한 경우 더 낮은 상한 |
+| 공유 요청 허가 시간 (`max_scan_seconds`) | 대기 시간을 포함한 기한 이후 새 전송을 차단하고 HTTP·명시적 전송의 남은 타임아웃을 줄임 | 별도 필수 입력 없음 |
+| 허용 메서드·테스트 대상 | 기존 승인 범위와 교집합을 사용 | 승인된 대상 선택 |
+| Playwright·Headless·ffuf·재귀·form 제출·MITM body 저장 | 정책에서 금지된 기능을 끔; 기존 권한을 확대하지 않음 | 별도 필수 입력 없음 |
+| 테스트 계정 이메일·연구자 식별값 | 해당 대상의 필수 입력과 이메일 도메인을 검증 | 실제로 사용할 식별값 |
+| 운영 환경 테스트 전 연락 등 수동 의무 | 해당 대상을 선택했을 때 확인 항목을 요구 | 실제 수행 후 확인 |
+| 지원하지 않는 필수 실행 제어·해소되지 않은 모순 | 사유와 근거를 표시하고 해당 대상으로의 실행을 막음 | 정책 검토와 요구 해소 |
+
+사전 연락, 외부 계정 생성과 사람의 판단이 필요한 의무는 코드가 대신 수행했다고
+간주하지 않습니다. 입력·확인은 선택한 정확한 Scope 자산에 맞춰 검증합니다.
+지원하지 않는 요구도 정확한 자산에 연결할 수 있습니다. 운영 환경에만 해당하는
+차단 조건은 스테이징을 선택했을 때 적용하지 않으며, 대상이 없는 차단 조건은
+전체 실행에 적용합니다.
+
+기존 승인 Scope는 원본 JSON·Markdown·승인 파일을 유지하고, 저장된 원문을 AI가
+해석한 결과를 별도 캐시에 보관합니다. 원문 내용이나 해석 버전이 달라지면 다시
+해석하며 목록 조회는 모델을 호출하지 않습니다. 해석이 미완료이거나 실패하면
+새 스캔을 실행할 수 없습니다. 새 요구는 Scope 승인 화면과 Markdown에서 확인합니다.
+
+대시보드가 필요한 입력과 확인 항목을 표시합니다. CLI의 대응 옵션은 다음과 같습니다.
+
+```bash
+aidast run "<PROGRAM_URL>" --target "<APPROVED_ASSET>" \
+  --header-input researcher_username="<HANDLE>" \
+  --policy-input testing_email="<TESTING_EMAIL>" \
+  --confirm-policy production_contact
+```
+
+키는 AI가 선언한 요구에 따라 달라지므로 화면이나 CLI 오류에 표시된 정확한 키를
+사용합니다. 여러 입력·확인에는 옵션을 반복합니다. 관련 없는 대상의 확인이나
+입력은 요구하지 않으며, 값을 입력했다는 것만으로 외부 계정의 실제 상태를
+검증했다고 간주하지 않습니다.
+
+새 스캔의 공유 요청 상태는 `result/.policy-budgets/`의 프로그램별 SQLite 파일에
+저장합니다. Recon·Attack·Validation·다중 대상이 같은 스캔 예산을 소비하고,
+프로그램/대상의 기간 제한은 새 스캔이나 단계 재시작으로 초기화되지 않습니다.
+실패·전송 결과 불명인 예약은 보수적으로 계산하며 동시성 용량은 종료 또는
+제한된 lease 만료로 해제합니다. 기록을 읽거나 쓸 수 없으면 전송을 차단합니다.
+공유 제한은 새로 생성한 정책부터 적용하며 기존 스캔의 정책·DB는 변경하지 않습니다.
+`max_scan_seconds`는 새 전송의 허가 기한입니다. 이미 시작한 브라우저·프록시
+스트림을 그 시각에 강제 종료한다는 뜻은 아니며 해당 전송의 개별 제한을 따릅니다.
+공유 제한이 있는 Validation 브라우저는 후속 요청을 전송 전에 검사할 수 없는
+리다이렉트 응답을 차단합니다. 일반 HTTP 및 Recon 프록시 경로는 각 리다이렉트를
+따로 검증하고 계산합니다. 기존 공유 제한이 없는 브라우저 정책은 유지합니다.
 
 ### Recon 계획과 정책 확인
 
@@ -208,7 +297,11 @@ Wildcard 후보는 Scope별
 | 최대 요청 수 | 2,000 |
 
 `--profile safe-recon`, `--profile focused-discovery`,
-`--profile focused-recon`은 명시했을 때만 추가 상한으로 적용됩니다.
+`--profile focused-recon`은 명시했을 때 실행 기본값과 상한으로 적용됩니다.
+요청 속도는 승인된 Scope에 명시된 제한을 우선 사용하고, 없을 때만 프로필의
+0.5/1 RPS를 사용합니다. 예를 들어 정책이 10회/초이면 두 프로필 모두 10 RPS가
+기본값입니다. 별도 근거가 있는 더 낮은 대상별 제한과 사용자가 선택한 더 낮은
+속도는 유지하며, 애플리케이션 상한은 50 RPS입니다.
 `--max-rps`, `--max-requests`, `--max-depth`, `--max-concurrency`,
 `--timeout-seconds`도 정책을 더 좁힐 수만 있고 승인된 제한을 완화할 수 없습니다.
 
@@ -462,7 +555,8 @@ history를 유지해 재개합니다.
 Report는 `Pipeline.db`의 Validation `case_id`를 선택해 로컬 초안을 만듭니다.
 통합 실행에서는 case별로 `result/ReportRun/<scan_id>/<case_id>/`에 자동 저장합니다.
 `CONFIRMED`만 draft 대상이고, `KNOWN`은 원본 case를 가리키며 `CONTESTED`는
-review-only로 남습니다. HackerOne, Intigriti, Bugcrowd를 지원하며 자동 제출하지 않습니다.
+review-only로 남습니다. HackerOne, Intigriti, Bugcrowd는 플랫폼별 형식으로 생성하고,
+플랫폼 미지정·미식별 대상은 기본 `generic` 형식을 사용합니다. 자동 제출하지 않습니다.
 
 ```bash
 aidast report run \
@@ -477,6 +571,11 @@ aidast report status \
 
 `Report.db`, `Report.json`, `Report.md`는 Validation decision과 인용 evidence에
 연결됩니다. Decision hash가 바뀌면 기존 Report는 stale로 판정됩니다.
+
+기존 스캔의 일반 보고서는 위 명령의 `--platform`을 `generic`으로 지정해 생성할 수 있습니다.
+기본 형식은 대상·취약점·요약·재현 절차·관측 결과·영향·개선 권고를 포함합니다.
+대시보드에서 일반 보고서의 Markdown과 마스킹된 ZIP을 다운로드할 때 플랫폼 제출 규칙을
+입력할 필요는 없습니다. 추가로 설정한 필수 필드와 Validation·Scope·근거 무결성 검사는 유지됩니다.
 
 ## Legacy Validation과 Report
 
@@ -558,3 +657,80 @@ redirect를 남깁니다. 없는 필드는 추측하지 않습니다. 메타데�
 
 파서, 저장, 전달 경로는 테스트했지만 실제 모델 분류 정확도 향상은 별도의
 정답 데이터 평가가 필요합니다.
+
+## 일반 제외 조건과 실제 전송
+
+Scope의 제외 문장은 AI가 제한된 조건식으로 해석합니다. 의미 범주 판단도 AI의 확률적 분류이며, 캡처 출처 검증이 그 판단의 의미적 정확성을 보장하지는 않습니다. 실제 요청 경계에서는 모델을 호출하지 않고 저장된 조건식을 결정적으로 평가합니다. 조건이 참이면 거절, 필요한 정보가 불명확하면 보류, 거짓이면 기존 호스트·경로·메서드·인증·예산 검사로 진행합니다. 지원하는 직접 조건은 정확한 호스트/메서드, 정확한 경로와 경로 구간 접두사, 쿼리 이름/값, JSON 포인터, URL 인코딩 폼 이름/값입니다. 중복 키, 모호한 경로, 지원하지 않는 인코딩/조건은 해당 조건에 필요한 경우 보류됩니다.
+
+의미 분류 캐시는 승인된 Scope, 대상, 규칙, 검증된 캡처와 전체 요청 식별자에 묶입니다. URL·쿼리·메서드·헤더·본문·작업 문맥이 달라지면 기존 분류를 재사용하지 않습니다. 가장 오래된 근거 캡처로부터 최대 24시간 이내에 만료하며, 대기 후 실제 전송 직전에도 재평가합니다. 최초 검사에서 거절/보류된 요청은 전송 및 예약이 0건입니다. 이미 유효하게 예약한 뒤 대기 중 만료된 경우에는 전송을 막지만 기존의 보수적 예산 소비는 유지될 수 있습니다. 동시 요청 묶음은 모든 구성원을 예약 전에 검사하고, governor 대기 및 실제 DNS/TCP/TLS 연결 대기가 끝난 뒤 첫 요청 바이트를 보내기 직전에도 전체 묶음을 다시 검사합니다.
+
+직접 HTTP는 자동 헤더까지 준비한 뒤 검사하며 환경 프록시를 자동 상속하지 않습니다. 프록시는 내부 제어 헤더를 제거한 후 실제 목적지·헤더·원시 본문을 검사합니다. 브라우저 지원 요청에도 실제 메서드를 사용합니다. 제외 조건이 있는 브라우저는 서비스 워커 및 주변 WebSocket 연결을 차단하고, 자동 리다이렉트/재시도 없는 한 홉 요청만 전달합니다. 브라우저 리다이렉트는 후속 전송 없이 중단됩니다. Playwright 세션 쿠키나 네이티브 프로토콜이 최종 헤더 신원을 완전히 확정하지 못하면 의미 조건은 보류하되, 알려진 직접 조건의 거짓 결과는 유지합니다.
+
+새 캡처 영수증은 실제로 전달되어 완료된 교환의 원시 요청 본문과 정확히 DB에 저장될 응답 바이트에 연결됩니다. 프록시의 로컬 403, 후보/중복/정적 대체 기록, 중단·스트리밍·누락된 본문에는 사용할 수 있는 영수증을 발급하지 않습니다. 영수증이 없는 과거의 가공/비식별 캡처에 현재 자격 증명을 합쳐 의미 근거를 재구성하지 않습니다. 기존 DB·Scope·승인 파일은 준비 과정에서 읽기 전용으로 유지합니다.
+
+현재 지원하지 않는 경계도 보류됩니다. 비관리 시스템 브라우저 로그인, 기존 CDP 브라우저 연결/복제, 정책 라우팅 해제, DNS/서브도메인 제공자/TCP 탐색은 적용 가능한 제외 조건이 있으면 시작하지 않습니다. WebSocket의 암묵적 pong/close 및 정리 프레임까지 완전하게 검사할 수 없어 해당 세션 전체를 연결 전에 보류합니다. gRPC는 실제 authority와 RPC 경로의 일치를 검사하며 알려진 직접 조건을 유지하지만, protobuf/framing 본문 조건과 불완전한 최종 신원에 의존하는 의미 조건은 보류합니다. DOM 클릭은 페이지 GET과 별도의 작업 문맥을 사용합니다. 현재 일반 버튼/폼/제어 요소 어댑터는 실제 동작 대상과 모든 로컬 효과를 확정하지 못하므로 호스트·경로·메서드·본문을 포함한 요청 조건을 미상으로 평가하고, 적용 가능한 제외 조건이 있으면 클릭을 보류합니다. 페이지 URL, href 또는 form action만으로 임의의 JavaScript 동작 전체가 관련 없다고 판정하지 않습니다. 따라서 잠재적으로 무해한 UI 탐색도 제한되며, 이 제한은 동작을 실행하지 않는 DOM/메타데이터 읽기과 구분됩니다. 실제 동작을 증명하는 별도 어댑터가 생기기 전까지 페이지 GET의 직접/의미 분류가 클릭을 허가하지 않습니다. 이후 발생한 모든 네트워크 요청은 다시 전송 경계를 통과해야 합니다.
+
+알 수 없는 최초 seed를 조회해서 분류하는 예외는 없습니다. 기존에 확보한 검증 가능한 캡처로 명시적인 오프라인 준비를 수행해야 하며, 새로운/변경된 요청은 보류될 수 있습니다. 과거 정책의 누락된 guard는 기존 실행 동작을 유지하지만 새 실행의 Scope 해석은 명시적인 제외 조건 목록(`[]` 포함)이 필요합니다.
+
+
+### Scope-time policy reference preparation
+
+Fresh Scope collection now observes actual links on each primary browser view,
+selects policy references with an offline model using observed IDs and exact parent
+quotes, and captures the selected public documents before final analysis. Public,
+authenticated browser and native collection use the same preparation step. The
+native browser only observes external links; the application retrieves them in an
+isolated HTTPS reader without browser sessions, authentication, cookies or proxy
+inheritance. Every redirect receives public-address validation and a pinned TLS
+connection preserving hostname verification.
+
+The bounds are 128 observed links per primary view or reference page, at most 6
+primary views, 8 fetched documents, depth 2, 3 redirects,
+1 MiB per raw response, 120000 combined evidence characters and an absolute 15-second
+request deadline. Unsupported, inaccessible or over-budget references remain
+explicit unresolved records. Repeated links retain each selection's parent quote
+and lifecycle phase while reusing captured content. Scope.json retains original
+program text/digest; Scope.md displays reference provenance, bodies and failures.
+The approval hashes cover the full evidence.
+
+Primary captures persist `primary_views`, each with its URL, exact captured text
+and observed links. The view text must occur verbatim in the original program
+capture; it adds no asset authority. Candidate IDs are local to a view, link source
+URLs must match that view, and each selected quote is checked against its own view.
+Persisted primary reference edges retain and validate `primary_view_index`, including
+different views sharing the same URL. Selection uses at most 14 offline calls
+(6 primary views plus 8 captured references), with at most 8 choices per call and
+112 selected-edge records. Each edge records its required, supporting or uncertain
+relationship to testing, with an exact parent quote. Required references receive
+retrieval priority; fragment variants share one document while distinct queries
+remain separate. Later views retain their observations even when an earlier view
+fills its 128-link allowance.
+Fresh extraction retains a 64-blocker limit. Saved execution rules reserve up to
+176 blockers for explicit extracted obligations and mandatory reference duties.
+Missing supporting or uncertain context becomes a grounded advisory rather than
+a blanket scan hold. An unavailable mandatory testing prerequisite still blocks
+the affected target; preparation preserves its evidence and existing restrictions.
+
+Legacy captures may omit `primary_views` and retain one flat `observed_links` list
+of at most 128 entries, selected against the original aggregate primary text.
+They cannot reconstruct missing per-view evidence and may require recollection.
+Structured views and nonempty legacy flat observations cannot be mixed or selected
+twice. Older approved files are read without rewriting their bytes or hashes.
+
+Only primary program text authorizes assets and activities. Referenced evidence
+can narrow execution rules or describe submission/reporting/public-disclosure
+obligations. Later disclosure duties alone are not testing blockers. The model
+distinguishes explicit prerequisites from uncertainty using captured evidence,
+not title matching. Advisories are shown in the dashboard and bound to agent policy
+context for Recon, Attack, chaining, validation and PoC reproduction. Explicit
+headers, rate limits, exclusions and authorization checks remain enforced.
+Fresh drafts and approval require explicit required_request_headers and
+execution_rules.exclusions lists, including [] when reviewed and absent. Complete
+approved rules are read directly at launch without additional policy retrieval or
+interpretation. Existing request-context semantic resource checks still apply.
+Historical approved artifacts remain unchanged. Their captured evidence can be
+reinterpreted into a separate versioned execution-requirements cache; catalog reads
+do not call a model. Missing mandatory evidence still requires collection/review.
+For oversized repeated evidence, the Recon planner receives one lossless copy with
+exact quote spans and digest; the approved Scope and downstream policy input remain
+unchanged, and genuinely over-limit retained input fails explicitly.

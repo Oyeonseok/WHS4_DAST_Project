@@ -88,7 +88,8 @@ class BrowserReproductionPort:
                 content_sha256=hashlib.sha256(b"").hexdigest(), content_length=0,
             )
         merged = merge_hackerone_identity(
-            merged, policy.hackerone_username
+            merged, policy.hackerone_username,
+            required_identity_headers=policy.required_identity_headers,
         )
         selectors = tuple(sorted({
             item.selector for item in attempt.assertions if item.selector is not None

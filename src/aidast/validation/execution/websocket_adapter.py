@@ -204,12 +204,14 @@ class WebSocketReproductionPort:
         except ValidationTransportError as error:
             if str(error) == "transport operation is outside current TargetPolicy" or str(error).startswith((
                 "TargetPolicy request budget exhausted", "TargetPolicy concurrency limit reached",
-                "TargetPolicy validation byte budget exhausted",
+                "TargetPolicy validation byte budget exhausted", "exclusion ",
             )):
                 return self._blocked(blind_case, "current_policy_rejected", policy_allowed=False)
             raise
 
         def session(timeout):
+            nonlocal deadline
+            deadline = min(deadline, self.clock() + timeout)
             connection, timer = None, None
 
             def abort_connection():

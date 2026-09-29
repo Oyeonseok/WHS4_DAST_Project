@@ -12,12 +12,13 @@ from pathlib import Path
 from typing import Callable, Mapping
 from urllib.error import HTTPError
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
-from urllib.request import HTTPRedirectHandler, Request, build_opener
+from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 from uuid import uuid4
 
-from aidast.core.http_safety import merge_hackerone_identity, sanitize_headers
+from aidast.core.http_safety import merge_hackerone_identity, sanitize_headers, require_request_admission
 from aidast.core.request_broker import BrokerResponse, RequestBroker, RequestPolicyError
 from aidast.recon.policy import TargetPolicy
+from aidast.core.request_governor import RequestGovernor, GovernorError
 
 from ..contracts.models import BlindCase
 from ..contracts.models import canonical_sha256
@@ -60,6 +61,26 @@ def _policy_usage(conn: sqlite3.Connection, scan_id: str, policy_id: str):
     ).fetchone()
 
 
+class _GovernedResponse:
+    """Keep capacity until the caller finishes reading and closes the body."""
+    def __init__(self, response, release):
+        self.response, self.release = response, release
+
+    def __getattr__(self, name):
+        return getattr(self.response, name)
+
+    def read(self, maximum):
+        if isinstance(self.response, HTTPError) and self.response.fp is None:
+            return b""
+        return self.response.read(maximum)
+
+    def close(self):
+        try:
+            self.response.close()
+        finally:
+            self.release()
+
+
 class ValidationRequestBroker:
     """Reserve every initial/redirect hop before an injected transport sends it."""
 
@@ -95,10 +116,14 @@ class ValidationRequestBroker:
             if request_boundary is not None else None
         )
         self.max_redirects = max_redirects
-        self.transport = transport or build_opener(_NoRedirect()).open
+        opener = build_opener(ProxyHandler({}), _NoRedirect())
+        opener.addheaders = []
+        self.transport = transport or opener.open
         self.credential_resolver = credential_resolver
         self.sleeper, self.clock = sleeper, clock
         self.request_ids: list[str] = []
+        self.governor = RequestGovernor(getattr(policy, "request_governor", None), clock=clock, sleeper=sleeper)
+        self._permits = {}
 
     def request(self, url: str, *, method: str, headers: Mapping[str, str] | None = None,
                 data: bytes | None = None, timeout: float | None = None) -> BrokerResponse:
@@ -117,23 +142,28 @@ class ValidationRequestBroker:
                 raise ValidationCredentialError("credential resolver returned invalid headers")
             merged.update(resolved)
         merged = merge_hackerone_identity(
-            merged, self.policy.hackerone_username
+            merged, self.policy.hackerone_username,
+            required_identity_headers=self.policy.required_identity_headers,
         )
         broker = RequestBroker(
-            self.policy, transport=self._ledger_transport,
+            # This ledger owns the shared permit after its owner checks.
+            self.policy.model_copy(update={"request_governor": None}), transport=self._ledger_transport,
             max_redirects=self.max_redirects, max_body_bytes=200_000,
             authority="validation",
         )
         try:
             return broker.request(url, method=method, headers=merged, data=data, timeout=timeout)
         except RequestPolicyError as exc:
-            if "does not allow" in str(exc):
+            if "does not allow" in str(exc) or "exclusion" in str(exc):
                 raise ValidationPolicyRejection(str(exc)) from exc
             raise ValidationRequestError(str(exc)) from exc
+        finally:
+            for request_id in tuple(self._permits):
+                self._release(request_id)
 
     def begin_observed_request(
         self, url: str, *, method: str, headers: Mapping[str, str] | None = None,
-        data: bytes | None = None,
+        data: bytes | None = None, identity_available: bool = False,
     ) -> str:
         """Reserve a request sent by a trusted browser transport."""
         method = method.upper()
@@ -143,12 +173,30 @@ class ValidationRequestBroker:
             allowed = False
         if not allowed:
             raise ValidationPolicyRejection("browser request is outside current TargetPolicy")
-        request_id, scheduled = self._reserve(url, method, dict(headers or {}), data)
+        headers = dict(headers or {})
+        data = bytes(data) if data is not None else None
+        def admit():
+            require_request_admission(self.policy, url=url, method=method, headers=headers,
+                body=data, identity_available=identity_available,
+                error_class=ValidationPolicyRejection, now=self.clock())
+        admit()
+        request_id, scheduled = self._reserve(url, method, headers, data)
         delay = scheduled - self.clock()
         if delay > 0:
             self.sleeper(delay)
+        self._wait_permit(request_id)
+        try:
+            admit()
+        except ValidationPolicyRejection:
+            self._release(request_id)
+            self._set_status(request_id, 'failed', error_message='exclusion held dispatch', finished_at=self.clock())
+            raise
         self._set_status(request_id, "running", dispatched_at=self.clock())
         return request_id
+
+    def observed_timeout_seconds(self, request_id: str) -> float:
+        """Trusted browser fetches use the already-admitted remaining timeout."""
+        return self._permits[request_id].timeout_seconds
 
     def complete_observed_request(
         self, request_id: str, *, response_status: int,
@@ -157,14 +205,31 @@ class ValidationRequestBroker:
         self._set_status(
             request_id, "completed", response_status=response_status,
             finished_at=self.clock(),
-            result_json={"headers": sanitize_headers(response_headers or {})},
+            result_json={"headers": sanitize_headers(response_headers or {}, identity_headers=self.policy.required_identity_headers)},
         )
+
+        self._release(request_id)
 
     def fail_observed_request(self, request_id: str, *, error_type: str) -> None:
         self._set_status(
             request_id, "outcome_unknown", error_message=error_type[:256],
             finished_at=self.clock(),
         )
+
+        self._release(request_id)
+
+    def _wait_permit(self, request_id):
+        try:
+            self._permits[request_id].wait()
+        except BaseException:
+            self._release(request_id)
+            self._set_status(request_id, "failed", error_message="shared governor rejected dispatch", finished_at=self.clock())
+            raise
+
+    def _release(self, request_id):
+        permit = self._permits.pop(request_id, None)
+        if permit is not None:
+            permit.complete()
 
     def _restrict(self, url: str, method: str) -> None:
         if self.request_boundary is not None:
@@ -184,27 +249,36 @@ class ValidationRequestBroker:
             raise ValidationPolicyRejection("path is outside the staged endpoint template")
 
     def _ledger_transport(self, request: Request, *, timeout: float):
+        def admit():
+            require_request_admission(self.policy, url=request.full_url, method=request.get_method(),
+                headers=dict(request.header_items()), body=request.data,
+                identity_available=getattr(self.transport, 'identity_available', True) is True,
+                now=self.clock(), error_class=ValidationPolicyRejection)
+        admit()
         request_id, scheduled = self._reserve(
             request.full_url, request.get_method(), dict(request.header_items()), request.data
         )
         delay = scheduled - self.clock()
         if delay > 0:
             self.sleeper(delay)
+        self._wait_permit(request_id)
         self._set_status(request_id, "running", dispatched_at=self.clock())
         try:
-            response = self.transport(request, timeout=timeout)
+            admit()
+            response = self.transport(request, timeout=min(timeout, self._permits[request_id].timeout_seconds))
         except HTTPError as exc:
             self._set_status(request_id, "completed", response_status=exc.code,
-                             finished_at=self.clock(), result_json={"headers": sanitize_headers(exc.headers or {})})
-            raise
+                             finished_at=self.clock(), result_json={"headers": sanitize_headers(exc.headers or {}, identity_headers=self.policy.required_identity_headers)})
+            return _GovernedResponse(exc, lambda: self._release(request_id))
         except Exception as exc:
+            self._release(request_id)
             self._set_status(request_id, "outcome_unknown", error_message=type(exc).__name__,
                              finished_at=self.clock())
             raise
         status = int(getattr(response, "status", getattr(response, "code", 0)))
         self._set_status(request_id, "completed", response_status=status, finished_at=self.clock(),
-                         result_json={"headers": sanitize_headers(getattr(response, "headers", {}) or {})})
-        return response
+                         result_json={"headers": sanitize_headers(getattr(response, "headers", {}) or {}, identity_headers=self.policy.required_identity_headers)})
+        return _GovernedResponse(response, lambda: self._release(request_id))
 
     def _reserve(self, url: str, method: str, headers: dict[str, str], data: bytes | None) -> tuple[str, float]:
         now_value = self.clock()
@@ -261,6 +335,13 @@ class ValidationRequestBroker:
                 conn.execute("ROLLBACK")
                 raise
         self.request_ids.append(request_id)
+        try:
+            self._permits[request_id] = self.governor.reserve(
+                url, timeout_seconds=self.policy.limits.timeout_seconds,
+            )
+        except GovernorError as exc:
+            self._set_status(request_id, "failed", error_message=str(exc), finished_at=self.clock())
+            raise ValidationRequestError(str(exc)) from exc
         return request_id, scheduled
 
     def _set_status(self, request_id: str, status: str, **values) -> None:

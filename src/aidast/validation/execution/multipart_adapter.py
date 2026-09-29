@@ -10,6 +10,8 @@ from typing import Callable
 from urllib.request import Request
 
 from aidast.recon.policy import TargetPolicy
+from aidast.core.capture_receipt import prepare_http_request, urllib_request_data
+from aidast.core.http_safety import require_request_admission, merge_hackerone_identity
 
 from ..contracts.binary import BinaryArtifactResolver, BinaryArtifactUnavailable
 from ..contracts.models import BlindCase, ReproductionObservation, canonical_json, canonical_sha256
@@ -98,7 +100,7 @@ class MultipartReproductionPort:
             message == "transport operation is outside current TargetPolicy"
             or message.startswith("TargetPolicy request budget exhausted")
             or message.startswith("TargetPolicy concurrency limit reached")
-            or message.startswith("TargetPolicy validation byte budget exhausted")
+            or message.startswith(("TargetPolicy validation byte budget exhausted", "exclusion "))
         )
 
     _read_complete_response = staticmethod(read_complete_response)
@@ -148,6 +150,14 @@ class MultipartReproductionPort:
                 )
             except Exception:
                 raise ValidationTransportError("multipart credential resolution failed") from None
+        headers = merge_hackerone_identity(headers, policy.hackerone_username,
+            required_identity_headers=policy.required_identity_headers)
+        descriptor = prepare_http_request(url, method=blind_case.method, headers=headers, body=body)
+        headers, body = descriptor['headers'], descriptor['body']
+        identity_available = getattr(self.transport, 'identity_available', True) is True
+        def admit():
+            require_request_admission(policy, url=url, method=blind_case.method, headers=headers,
+                body=body, identity_available=identity_available, error_class=ValidationTransportError)
         broker = ValidationTransportBroker(
             db_path=db_path, scan_id=scan_id, stage_run_id=stage_run_id, case_id=case_id,
             attempt_id=attempt_id, blind_case=blind_case, policy=policy, sleeper=paced_sleep,
@@ -160,14 +170,15 @@ class MultipartReproductionPort:
             runtime_kind="multipart", operation_kind="request", destination=url,
             policy_url=url, method=blind_case.method, request_bytes=len(body),
             max_response_bytes=_MAX_RESPONSE_BYTES,
-            metadata=request_metadata,
+            metadata=request_metadata, headers=headers, body=body, body_available=True,
+            identity_available=identity_available,
         )
 
         def sender(timeout: float):
             remaining()
             response, _, _ = DeadlineHttpTransport(transport=self.transport, clock=self.clock).send(
                 Request(url, data=body, headers=headers, method=blind_case.method),
-                deadline=deadline, timeout=min(timeout, remaining()),
+                deadline=deadline, timeout=min(timeout, remaining()), admission=admit,
             )
             evaluation = evaluate_http_response(
                 response, attempt.assertions, duration_ms=max(0.0, (self.clock() - started) * 1000),

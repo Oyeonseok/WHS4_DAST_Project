@@ -231,6 +231,7 @@ CREATE TABLE IF NOT EXISTS http_transactions (
     response_headers TEXT,
     response_body BLOB,
     content_type TEXT,
+    request_receipt TEXT,
     captured_at TEXT DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (endpoint_id) REFERENCES endpoints(endpoint_id) ON DELETE SET NULL
 );
@@ -728,14 +729,18 @@ def insert_http_transaction(
     response_headers: dict | None = None,
     response_body: bytes | None = None,
     content_type: str | None = None,
+    request_receipt: dict | None = None,
 ) -> str:
+    if request_receipt is not None:
+        from aidast.core.capture_receipt import validate_capture_receipt
+        request_receipt = validate_capture_receipt(request_receipt, url=url, method=method, response_body=response_body)
     transaction_id = new_id("httptx")
     conn.execute(
         """INSERT INTO http_transactions
            (http_transaction_id, endpoint_id, source, method, url,
             request_headers, request_body, response_status,
-            response_headers, response_body, content_type)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            response_headers, response_body, content_type, request_receipt)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             transaction_id,
             endpoint_id,
@@ -748,6 +753,7 @@ def insert_http_transaction(
             json.dumps(response_headers) if response_headers is not None else None,
             response_body,
             content_type,
+            json.dumps(request_receipt) if request_receipt is not None else None,
         ),
     )
     conn.commit()
@@ -806,6 +812,8 @@ CREATE INDEX IF NOT EXISTS idx_annotations_tag ON endpoint_annotations(category,
 def _migrate_context_schema(conn: sqlite3.Connection) -> None:
     """Additive v2 migration: preserve legacy rows and unknown provenance."""
     columns = {row[1] for row in conn.execute("PRAGMA table_info(http_transactions)")}
+    if "request_receipt" not in columns:
+        conn.execute("ALTER TABLE http_transactions ADD COLUMN request_receipt TEXT")
     if "origin_id" not in columns:
         conn.execute("ALTER TABLE http_transactions ADD COLUMN origin_id TEXT REFERENCES origins(origin_id)")
     conn.executescript(CONTEXT_SCHEMA)

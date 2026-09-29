@@ -74,6 +74,10 @@ absent, retain the application default.
   do not conflict with the Scope's Prohibited activities. This stage-level grant
   does not replace the request-specific approval envelope required by the Attack
   executor.
+- Set `active_non_destructive` only when `attack_allowed_methods` contains a
+  Scope-authorized state-changing method. If that list contains only
+  GET/HEAD/OPTIONS, or is empty, use `read_only` and null authorization evidence.
+  Never add a state-changing method merely to satisfy the authorization mode.
 - Validation may replay only methods already authorized for Attack; it never
   widens either the Recon or Attack boundary.
 

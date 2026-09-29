@@ -48,6 +48,8 @@ PROGRAM_URL = "https://bugcrowd.com/engagements/example"
 
 def scope_analysis() -> ScopeAnalysis:
     return ScopeAnalysis(
+        required_request_headers=[],
+        execution_rules={"exclusions": []},
         program_name="Example",
         program_description="테스트 프로그램",
         in_scope_assets=[
@@ -1045,7 +1047,7 @@ class ReconCliTests(unittest.TestCase):
         self.assertEqual(payload["policies"][0]["limits"]["requests_per_second"], 1.0)
         self.assertEqual(payload["policies"][0]["limits"]["max_requests"], 2000)
 
-    def test_hackerone_username_is_bound_to_generated_target_policy(self) -> None:
+    def test_username_alias_without_ai_requirement_does_not_invent_policy_header(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_dir:
             root = Path(temporary_dir) / "Scope"
             with (
@@ -1067,7 +1069,8 @@ class ReconCliTests(unittest.TestCase):
             )
 
         self.assertEqual(result, 0)
-        self.assertEqual(payload["policies"][0]["hackerone_username"], "alice_1")
+        self.assertIsNone(payload["policies"][0]["hackerone_username"])
+        self.assertEqual(payload["policies"][0].get("required_identity_headers", {}), {})
 
     def test_policy_only_writes_policy_without_running_executor(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_dir:

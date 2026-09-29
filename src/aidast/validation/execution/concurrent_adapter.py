@@ -8,13 +8,14 @@ import sqlite3
 import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor, TimeoutError
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Mapping
 from urllib.request import Request
 from uuid import uuid4
 
-from aidast.core.http_safety import is_sensitive_header
+from aidast.core.http_safety import is_sensitive_header, merge_hackerone_identity, require_request_admission
+from aidast.core.capture_receipt import prepare_http_request, urllib_request_data
 from aidast.core.request_broker import BrokerResponse
 from aidast.recon.policy import TargetPolicy
 
@@ -248,15 +249,24 @@ class ConcurrentReproductionPort:
     def _pre_dispatch_error(error: ValidationTransportError) -> bool:
         return str(error) == "transport operation is outside current TargetPolicy" or str(error).startswith((
             "TargetPolicy request budget exhausted", "TargetPolicy concurrency limit reached",
-            "TargetPolicy validation byte budget exhausted",
+            "TargetPolicy validation byte budget exhausted", "exclusion ",
         ))
 
     def _send(self, prepared: _PreparedRequest, method: str, deadline: float,
-              timeout: float) -> tuple[BrokerResponse, float, int, dict[str, object]]:
+              timeout: float, policy=None, *, group_admission: Callable[[], None] | None = None,
+              ) -> tuple[BrokerResponse, float, int, dict[str, object]]:
+        def admit():
+            if group_admission is not None:
+                group_admission()
+            require_request_admission(
+                policy, url=prepared.url, method=method, headers=dict(prepared.headers), body=prepared.body,
+                identity_available=getattr(self.transport, 'identity_available', True) is True,
+                error_class=ValidationTransportError)
+
         request = Request(prepared.url, data=prepared.body, headers=dict(prepared.headers), method=method)
         result, duration, dispatch_ns = DeadlineHttpTransport(
             transport=self.transport, clock=self.clock, monotonic_ns=self.monotonic_ns,
-        ).send(request, deadline=deadline, timeout=timeout)
+        ).send(request, deadline=deadline, timeout=timeout, admission=admit)
         return result, duration, dispatch_ns, self._metadata(prepared) | {
             "response_payload_sha256": hashlib.sha256(result.body).hexdigest(),
             "response_payload_length": len(result.body), "response_status": result.status_code,
@@ -303,7 +313,23 @@ class ConcurrentReproductionPort:
         except (ValueError, ConcurrentExecutionError):
             return self._observation(blind_case, outcome="blocked", observed=False, blocker_axis="encoding_transport",
                 details={"reason": "runtime_preflight_failed"})
+        def physical(item):
+            headers = merge_hackerone_identity(dict(item.headers), policy.hackerone_username,
+                required_identity_headers=policy.required_identity_headers)
+            descriptor = prepare_http_request(item.url, method=blind_case.method, headers=headers, body=item.body)
+            return replace(item, headers=descriptor['headers'], body=urllib_request_data(descriptor))
+        members = tuple(physical(item) for item in members)
+        final = physical(final) if final is not None else None
         prepared_all = members + (() if final is None else (final,))
+        try:
+            for item in prepared_all:
+                require_request_admission(policy, url=item.url, method=blind_case.method,
+                    headers=dict(item.headers), body=item.body,
+                    identity_available=getattr(self.transport, 'identity_available', True) is True,
+                    error_class=ValidationTransportError)
+        except ValidationTransportError:
+            return self._observation(blind_case, outcome='blocked', observed=False,
+                details={'reason':'request_exclusions'}, policy_allowed=False)
         if not self._policy_allowed(policy, prepared_all, blind_case.method):
             return self._observation(blind_case, outcome="blocked", observed=False,
                 details={"reason": "current_policy_rejected"}, policy_allowed=False)
@@ -312,7 +338,8 @@ class ConcurrentReproductionPort:
             case_id=case_id, attempt_id=attempt_id, blind_case=blind_case, policy=policy)
         specs = tuple(TransportOperationSpec(runtime_kind="concurrent", operation_kind="member",
             destination=item.url, policy_url=item.url, method=blind_case.method, request_bytes=len(item.body or b""),
-            max_response_bytes=_MAX_RESPONSE_BYTES, concurrency_units=1, metadata=self._metadata(item)) for item in members)
+            max_response_bytes=_MAX_RESPONSE_BYTES, concurrency_units=1, metadata=self._metadata(item), headers=dict(item.headers), body=item.body,
+            body_available=True, identity_available=getattr(self.transport, 'identity_available', True) is True) for item in members)
         try:
             reservations = broker.reserve_group(specs, "vgrp_" + uuid4().hex)
         except ValidationTransportError as error:
@@ -348,12 +375,15 @@ class ConcurrentReproductionPort:
                 wait_scheduled(reservation)
                 ready.put(index)
                 ready_barrier.wait(timeout=remaining())
+                # Synchronize readiness before the durable dispatch gate. Waiting
+                # inside sender would bunch already-paced permits into a burst.
+                try:
+                    send_barrier.wait(timeout=remaining())
+                except threading.BrokenBarrierError as exc:
+                    raise ConcurrentExecutionError("concurrent send barrier failed") from exc
                 def sender(timeout: float) -> TransportDispatchResult[tuple[BrokerResponse, float]]:
-                    try:
-                        send_barrier.wait(timeout=remaining())
-                    except threading.BrokenBarrierError as exc:
-                        raise ConcurrentExecutionError("concurrent send barrier failed") from exc
-                    response, duration, dispatch_ns, metadata = self._send(prepared, blind_case.method, deadline, timeout)
+                    response, duration, dispatch_ns, metadata = self._send(prepared, blind_case.method, deadline, timeout, policy,
+                        group_admission=broker.admission_for(reservation))
                     with dispatch_lock:
                         dispatch_times.append(dispatch_ns)
                     return TransportDispatchResult((response, duration), len(response.body), metadata)
@@ -421,7 +451,8 @@ class ConcurrentReproductionPort:
         if final is not None:
             final_spec = TransportOperationSpec(runtime_kind="concurrent", operation_kind="final_verification",
                 destination=final.url, policy_url=final.url, method=blind_case.method, request_bytes=len(final.body or b""),
-                max_response_bytes=_MAX_RESPONSE_BYTES, concurrency_units=1, metadata=self._metadata(final))
+                max_response_bytes=_MAX_RESPONSE_BYTES, concurrency_units=1, metadata=self._metadata(final), headers=dict(final.headers), body=final.body,
+                body_available=True, identity_available=getattr(self.transport, 'identity_available', True) is True)
             final_reservation: TransportReservation | None = None
             try:
                 final_reservation = broker.reserve(final_spec)
@@ -429,7 +460,8 @@ class ConcurrentReproductionPort:
                 cancel.clear()
                 wait_scheduled(final_reservation)
                 def final_sender(timeout: float) -> TransportDispatchResult[tuple[BrokerResponse, float]]:
-                    response, duration, _, metadata = self._send(final, blind_case.method, deadline, timeout)
+                    response, duration, _, metadata = self._send(final, blind_case.method, deadline, timeout, policy,
+                        group_admission=broker.admission_for(final_reservation))
                     return TransportDispatchResult((response, duration), len(response.body), metadata)
                 _, (response, duration) = broker.dispatch_reserved(final_reservation, final_sender)
                 final_evaluation = evaluate_http_response(response, attempt.final_verification.assertions, duration_ms=duration)

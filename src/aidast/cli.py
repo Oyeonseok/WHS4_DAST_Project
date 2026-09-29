@@ -55,13 +55,15 @@ from aidast.reporting import (
     report_status,
 )
 from aidast.reporting.auto import generate_scan_reports, report_platform_for_program_url
-from aidast.scope.paths import ScopePathError, identify_program, resolve_scope_directory
+from aidast.scope.paths import ScopePathError, identify_program, resolve_scope_directory, scope_revision_directory
 from aidast.scope.reader import (
     PlaywrightProgramPageReader,
     ProgramPageError,
     RuntimeBrowserProgramPageReader,
 )
 from aidast.scope.models import AssetType, ScopeAsset, ScopeDocument
+from aidast.scope.identity_headers import resolve_scope_identity_headers
+from aidast.scope.execution_rules import ScopeExecutionResolver, validate_policy_prerequisites, bind_execution_policies, validate_shared_policy_values
 from aidast.updater import UpdateError, update_aidast
 from aidast.validation import (
     ValidationAgent,
@@ -254,6 +256,8 @@ def _parser() -> argparse.ArgumentParser:
         "--policy-only", action="store_true",
         help="compile and preview per-target policy without running any recon tool",
     )
+    recon.add_argument("--refresh-exclusions", action="store_true",
+                       help="explicitly refresh exclusion classifications from existing captures (requires --policy-only)")
     selection = recon.add_mutually_exclusive_group()
     selection.add_argument(
         "--target",
@@ -296,14 +300,17 @@ def _parser() -> argparse.ArgumentParser:
         "--intigriti-username",
         type=partial(_platform_username, platform="Intigriti"),
         help=(
-            "Intigriti handle injected into X-Intigriti-Username and the "
-            "required User-Agent suffix for every Recon HTTP request"
+            "Alias for --header-input intigriti_username=VALUE when the approved "
+            "Scope declares that input slot; use --header-input for other slots"
         ),
     )
+    recon.add_argument("--policy-input", action="append", default=[], metavar="KEY=VALUE")
+    recon.add_argument("--confirm-policy", action="append", default=[], metavar="KEY")
+    recon.add_argument("--header-input", action="append", default=[], metavar="KEY=VALUE", help="Input for approved Scope required request headers; repeat for each slot")
     recon.add_argument(
         "--hackerone-username",
         type=partial(_platform_username, platform="HackerOne"),
-        help="HackerOne handle injected into X-HackerOne for approved target requests",
+        help="Alias for --header-input hackerone_username=VALUE when the approved Scope declares that input slot; use --header-input for other slots",
     )
     recon.add_argument("--auth-host", action="append", default=[], help="host allowed only during manual login bootstrap")
     recon.add_argument("--auth-path", action="append", default=[], help="path prefix allowed on --auth-host during login bootstrap")
@@ -376,6 +383,7 @@ def _parser() -> argparse.ArgumentParser:
         help=argparse.SUPPRESS,
     )
     _add_workflow_options(run)
+    run.add_argument("--scope-revision", help="use one existing approved application-owned Scope revision job ID")
     run_selection = run.add_mutually_exclusive_group(required=True)
     run_selection.add_argument(
         "--target", action="append", default=[], metavar="CANONICAL_ASSET",
@@ -398,14 +406,17 @@ def _parser() -> argparse.ArgumentParser:
         "--intigriti-username",
         type=partial(_platform_username, platform="Intigriti"),
         help=(
-            "Intigriti handle injected into X-Intigriti-Username and the "
-            "required User-Agent suffix for every Recon HTTP request"
+            "Alias for --header-input intigriti_username=VALUE when the approved "
+            "Scope declares that input slot; use --header-input for other slots"
         ),
     )
+    run.add_argument("--policy-input", action="append", default=[], metavar="KEY=VALUE")
+    run.add_argument("--confirm-policy", action="append", default=[], metavar="KEY")
+    run.add_argument("--header-input", action="append", default=[], metavar="KEY=VALUE", help="Input for approved Scope required request headers; repeat for each slot")
     run.add_argument(
         "--hackerone-username",
         type=partial(_platform_username, platform="HackerOne"),
-        help="HackerOne handle injected into X-HackerOne for approved target requests",
+        help="Alias for --header-input hackerone_username=VALUE when the approved Scope declares that input slot; use --header-input for other slots",
     )
     run.add_argument("--auth-host", action="append", default=[])
     run.add_argument("--auth-path", action="append", default=[])
@@ -604,7 +615,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     report_run.add_argument(
         "--platform", required=True,
-        choices=("hackerone", "intigriti", "bugcrowd"),
+        choices=("hackerone", "intigriti", "bugcrowd", "generic"),
     )
     report_run.add_argument("--output-dir", type=Path, default=RESULT_ROOT / "ReportRun")
     report_source = report_run.add_mutually_exclusive_group()
@@ -614,6 +625,14 @@ def _parser() -> argparse.ArgumentParser:
         "status", help="verify and inspect a Report.db"
     )
     report_status_parser.add_argument("database", type=Path)
+    for action in ("check", "export"):
+        command = report_commands.add_parser(action, help="check and prepare a masked platform submission package")
+        command.add_argument("database", type=Path, help="source-bound case Report.db")
+        command.add_argument("--requirements", type=Path, help="program requirements JSON")
+        if action == "export":
+            command.add_argument("--output", type=Path, required=True, help="new ZIP package path (existing files are preserved)")
+            command.add_argument("--revision", help="expected inspection revision SHA-256")
+            command.add_argument("--poc", action="store_true", help="include an automatically checked masked evidence replay video")
 
     # dashboard 명령어
     dashboard = commands.add_parser(
@@ -930,9 +949,9 @@ def _run_recon(
             progress = {
                 ("scope", "started"): 1, ("scope", "finished"): 2,
                 ("targets", "started"): 3, ("targets", "finished"): 4,
-                ("session", "started"): 5, ("session", "finished"): 6,
+                ("session", "started"): 19, ("session", "finished"): 20,
                 ("recon_plan", "started"): 7, ("recon_plan", "finished"): 12,
-                ("policy", "started"): 13, ("policy", "finished"): 20,
+                ("policy", "started"): 13, ("policy", "finished"): 18,
                 ("execute", "started"): 21, ("execute", "finished"): 75,
                 ("tagging", "started"): 76, ("tagging", "finished"): 88,
                 ("review", "started"): 89, ("review", "finished"): 94,
@@ -952,14 +971,23 @@ def _run_recon(
 
     program_url = args.program_url
     work("main", "scope", "started")
-    program_dir = resolve_scope_directory(program_url, args.output_dir)
+    revision = getattr(args, "scope_revision", None)
+    program_dir = (scope_revision_directory(program_url, Path(args.output_dir).expanduser().resolve(), revision)
+                   if revision is not None else resolve_scope_directory(program_url, args.output_dir))
     scope_coordinator = ScopeCoordinator(program_dir)
+    if revision is not None:
+        selected_document, selected_markdown = scope_coordinator.load_approved_scope()
+        if identify_program(str(selected_document.source.requested_url)) != identify_program(program_url):
+            raise ScopePathError("Scope revision approval does not match the requested program")
     main_agent = CodexMainAgent(
         timeout_seconds=args.codex_timeout,
         main_model=RECON_MODEL,
     )
 
-    if program_dir.exists():
+    if revision is not None:
+        scope_document, scope_markdown = selected_document, selected_markdown
+        print(f"Reusing approved Scope: {program_dir / 'Scope.md'}")
+    elif program_dir.exists():
         scope_document, scope_markdown = scope_coordinator.load_approved_scope()
         print(f"Reusing approved Scope: {program_dir / 'Scope.md'}")
     else:
@@ -976,35 +1004,39 @@ def _run_recon(
         print(f"Approved Scope saved: {program_dir / 'Scope.md'}")
     work("main", "scope", "finished")
 
+    header_values = {}
+    for raw in getattr(args, "header_input", []) or []:
+        key, separator, value = raw.partition("=")
+        if not separator or not key or key in header_values:
+            raise ReconCoordinatorError("--header-input requires unique KEY=VALUE entries")
+        header_values[key] = value
+    approved_scope_document = scope_document
+    approved_scope_markdown = scope_markdown
+    if args.execute or args.policy_only or scope_document.analysis.required_request_headers is None or scope_document.analysis.execution_rules is None:
+        resolver = ScopeExecutionResolver(Path(args.output_dir).resolve().parent / ".execution-requirements",
+                                       getattr(main_agent, "interpret_scope_execution_requirements", None))
+        try:
+            scope_document = scope_document.model_copy(update={"analysis": resolver.resolve(scope_document)})
+        except ValueError as exc:
+            raise ReconCoordinatorError(str(exc)) from exc
+    from aidast.agents.policy_guidance import effective_advisory_context
+    effective_policy_context = (
+        effective_advisory_context(scope_document.analysis.execution_rules)
+        if scope_document.analysis.execution_rules != approved_scope_document.analysis.execution_rules
+        else ""
+    )
+    if effective_policy_context:
+        scope_markdown += "\n\n" + effective_policy_context
     intigriti_username = getattr(args, "intigriti_username", None)
     hackerone_username = getattr(args, "hackerone_username", None)
-    if intigriti_username and hackerone_username:
-        raise ReconCoordinatorError(
-            "--intigriti-username and --hackerone-username cannot be combined"
+    try:
+        required_identity_headers = resolve_scope_identity_headers(
+            scope_document.analysis, identity_values=header_values, hackerone_username=hackerone_username,
+            intigriti_username=intigriti_username, require_values=args.execute,
         )
-    if (
-        args.execute
-        and "X-Intigriti-Username" in scope_markdown
-        and not intigriti_username
-    ):
-        raise ReconCoordinatorError(
-            "approved Scope requires X-Intigriti-Username; "
-            "supply --intigriti-username"
-        )
-    if args.execute and "X-HackerOne" in scope_markdown and not hackerone_username:
-        raise ReconCoordinatorError(
-            "approved Scope requires X-HackerOne; supply --hackerone-username"
-        )
-    request_headers = (
-        {
-            "X-Intigriti-Username": intigriti_username,
-            "User-Agent": f"aidast-recon/0.1 <intigriti:{intigriti_username}>",
-        }
-        if intigriti_username
-        else {"X-HackerOne": hackerone_username}
-        if hackerone_username
-        else {}
-    )
+    except ValueError as exc:
+        raise ReconCoordinatorError(str(exc)) from exc
+    request_headers = dict(required_identity_headers)
 
     work("main", "targets", "started")
     selected_targets = _select_recon_targets(
@@ -1012,6 +1044,26 @@ def _run_recon(
         requested_targets=args.target,
         all_targets=args.all_targets,
     )
+    policy_values = {}
+    for raw in getattr(args, 'policy_input', []) or []:
+        key, separator, value = raw.partition('=')
+        if not separator or not key or key in policy_values:
+            raise ReconCoordinatorError('--policy-input requires unique KEY=VALUE entries')
+        policy_values[key] = value
+    prerequisite_evidence = {}
+    if args.execute:
+        try:
+            shared_values = dict(header_values)
+            if hackerone_username is not None:
+                shared_values['hackerone_username'] = hackerone_username
+            if intigriti_username is not None:
+                shared_values['intigriti_username'] = intigriti_username
+            validate_shared_policy_values(scope_document.analysis, shared_values, policy_values)
+            prerequisite_evidence = validate_policy_prerequisites(
+                scope_document.analysis.execution_rules, [target.asset for target in selected_targets],
+                policy_values, getattr(args, 'confirm_policy', []) or [])
+        except ValueError as exc:
+            raise ReconCoordinatorError(str(exc)) from exc
     start_urls = _validate_start_url_selection(
         selected_targets,
         start_url=args.start_url,
@@ -1020,10 +1072,8 @@ def _run_recon(
     )
     # Wildcard targets first perform asset discovery. Binding their policy to
     # a single login URL would disable the approved wildcard expansion.
-    start_urls = {
-        key: value for key, value in start_urls.items()
-        if key[0] != AssetType.WILDCARD.value
-    }
+    from aidast.scope.exclusion_preparation import normalize_start_urls, selected_startup_operations
+    start_urls = normalize_start_urls(start_urls)
     if args.target:
         print("Selected canonical Scope targets:")
         for target in selected_targets:
@@ -1042,45 +1092,58 @@ def _run_recon(
             or scan_run_directory(args.attack_output_root, scan_id) is not None
         ):
             raise ReconCoordinatorError(f"scan output already exists: {scan_id}")
-    target_sessions = None
-    work("recon", "session", "started")
-    if args.execute and (
-        args.session_bundle is not None or args.login_mode == "system-browser"
-    ):
-        if args.session_bundle is not None:
-            print("지정된 타깃 세션 번들을 검증합니다.")
-        else:
-            print(
-                "운영체제 브라우저에서 로그인합니다. 로그인 중에는 "
-                "프록시와 Scope 검사를 적용하지 않습니다."
+    from aidast.scope.exclusion_preparation import prepare_exclusions, capture_databases
+    from aidast.scope.exclusion_binding import ExclusionBindingResolver
+    preparation = None
+    if getattr(args, 'refresh_exclusions', False) and not args.policy_only:
+        raise ReconCoordinatorError('--refresh-exclusions requires --policy-only')
+    if args.execute or args.policy_only:
+        try:
+            preparation_root = Path(args.output_dir).resolve().parent
+            capture_paths = capture_databases(preparation_root)
+            explicit_db = getattr(args, 'db_path', None)
+            if explicit_db is not None and explicit_db != RESULT_ROOT / 'Recon.db' and explicit_db.is_file():
+                if explicit_db not in capture_paths:
+                    capture_paths.append(explicit_db)
+            preparation = prepare_exclusions(
+                document=approved_scope_document, analysis=scope_document.analysis,
+                targets=selected_targets, result_root=Path(args.output_dir).resolve().parent,
+                start_urls=start_urls, headers=request_headers,
+                login_mode=args.login_mode if args.session_bundle is None else "none",
+                seed_identity_complete=args.session_bundle is None and len(required_identity_headers) == len(scope_document.analysis.required_request_headers or []),
+                resolver=ExclusionBindingResolver(Path(args.output_dir).resolve().parent / '.exclusion-bindings',
+                    getattr(main_agent, 'classify_exclusion_resources', None)),
+                refresh=getattr(args, 'refresh_exclusions', False),
+                database_paths=capture_paths,
             )
-        target_sessions = collect_target_sessions(
-            selected_targets, scope_id=scope_document.scope_id, run_id=scan_id,
-            identity=args.identity, start_urls=start_urls, session_bundle=args.session_bundle,
-            root=RESULT_ROOT / ".aidast_sessions",
+            # DOMAIN/IP startup needs the completed offline plan before it has
+            # an actual capability shape. Definite probe/browser/discovery holds
+            # still stop immediately; no target IO occurs during this deferral.
+            pending_plan = any(item['capability']=='UNKNOWN_STARTUP' and item['decision']=='hold'
+                               for item in preparation.diagnostics)
+            definite_block = any(item['decision']!='continue'
+                                 and not (item['capability']=='UNKNOWN_STARTUP' and item['decision']=='hold')
+                                 for item in preparation.diagnostics)
+            if args.execute and (not pending_plan or definite_block):
+                preparation.require_ready()
+        except ValueError as exc:
+            raise ReconCoordinatorError(str(exc)) from exc
+
+    from aidast.agents.policy_guidance import recon_scope_context
+    try:
+        planner_scope = recon_scope_context(
+            approved_document=approved_scope_document,
+            approved_markdown=approved_scope_markdown,
+            effective_analysis=scope_document.analysis,
+            scope_markdown=scope_markdown,
         )
-    elif args.execute and args.login_mode == "runtime-browser":
-        print(
-            "로그인 모드가 활성화되었습니다. Endpoint Discovery에서 "
-            "타깃별 Chromium 로그인 세션을 수집합니다."
-        )
-    elif args.execute and args.login_mode is None:
-        print(
-            "자동 로그인 기능 판별 모드입니다. 먼저 비로그인으로 접속하고 로그인 "
-            "폼·버튼·링크가 확인될 때만 Chromium 로그인 창을 엽니다."
-        )
-    elif args.execute:
-        print(
-            "비로그인 Recon 모드입니다. 브라우저 로그인 창을 열지 않습니다. "
-            "인증 탐색이 필요하면 --login-mode runtime-browser 또는 "
-            "--session-bundle을 사용하세요."
-        )
-    work("recon", "session", "finished")
+    except ValueError as exc:
+        raise ReconCoordinatorError(str(exc)) from exc
 
     work("main", "recon_plan", "started")
     plan = main_agent.create_recon_plan(
         scope_id=scope_document.scope_id,
-        scope_markdown=scope_markdown,
+        scope_markdown=planner_scope,
         allowed_targets=selected_targets,
     )
     work("main", "recon_plan", "finished")
@@ -1121,8 +1184,19 @@ def _run_recon(
             ))
         if complete_plan_targets:
             plan = plan.model_copy(update={"targets": complete_plan_targets})
-    elif args.execute:
+    elif args.execute or args.policy_only:
         plan = _complete_executable_recon_plan(plan, selected_targets)
+    if preparation is not None:
+        preparation.reconcile_startup(
+            selected_startup_operations(selected_targets,start_urls=start_urls,plan=plan),
+            headers=request_headers,
+            seed_identity_complete=args.session_bundle is None and len(required_identity_headers)==len(scope_document.analysis.required_request_headers or []),
+        )
+        if args.execute:
+            try:
+                preparation.require_ready()
+            except ValueError as exc:
+                raise ReconCoordinatorError(str(exc)) from exc
     tasks = ReconCoordinator().create_tasks(
         plan=plan,
         scope=scope_document,
@@ -1158,14 +1232,24 @@ def _run_recon(
             timeout_seconds=args.timeout_seconds,
             scope_max_rps=grounded_scope_request_rate(scope_document.analysis),
         )
-        work("main", "policy", "finished")
-        if hackerone_username:
+        if required_identity_headers:
             policies = {
                 key: policy.model_copy(update={
-                    "hackerone_username": hackerone_username,
+                    "hackerone_username": None,
+                    "required_identity_headers": required_identity_headers,
                 })
                 for key, policy in policies.items()
             }
+        try:
+            policies = bind_execution_policies(
+                policies, scope_document.analysis.execution_rules,
+                result_root=Path(args.output_dir).resolve().parent,
+                program_url=program_url, scan_id=scan_id, prerequisite_evidence=prerequisite_evidence)
+        except ValueError as exc:
+            raise ReconCoordinatorError(str(exc)) from exc
+        policies = preparation.attach(policies)
+        preparation.inspect_policy_starts(policies,start_urls,headers=request_headers,
+            seed_identity_complete=args.session_bundle is None and len(required_identity_headers)==len(scope_document.analysis.required_request_headers or []))
         policy_path = program_dir / "TargetPolicy.json"
         policy_path.write_text(
             json.dumps(
@@ -1177,13 +1261,57 @@ def _run_recon(
         )
         print(f"TargetPolicy 생성 및 Python 검증 완료: {policy_path}")
         _print_policy_preview(policies)
+        print("Exclusion preparation: " + json.dumps(preparation.public(), ensure_ascii=False))
+        work("main", "policy", "finished")
         if args.policy_only:
             print("Policy-only 모드: 네트워크 Recon 도구는 실행하지 않았습니다.")
             return 0
         _require_start_urls_allowed(policies, start_urls)
+        try:
+            preparation.require_ready()
+        except ValueError as exc:
+            raise ReconCoordinatorError(str(exc)) from exc
+        target_sessions = None
+        work("recon", "session", "started")
+        if args.execute and (
+            args.session_bundle is not None or args.login_mode == "system-browser"
+        ):
+            if args.session_bundle is not None:
+                print("지정된 타깃 세션 번들을 검증합니다.")
+            else:
+                print(
+                    "운영체제 브라우저에서 로그인합니다. 로그인 중에는 "
+                    "프록시와 Scope 검사를 적용하지 않습니다."
+                )
+            target_sessions = collect_target_sessions(
+                selected_targets, scope_id=scope_document.scope_id, run_id=scan_id,
+                identity=args.identity, start_urls=start_urls, session_bundle=args.session_bundle,
+                root=RESULT_ROOT / ".aidast_sessions",
+            )
+        elif args.execute and args.login_mode == "runtime-browser":
+            print(
+                "로그인 모드가 활성화되었습니다. Endpoint Discovery에서 "
+                "타깃별 Chromium 로그인 세션을 수집합니다."
+            )
+        elif args.execute and args.login_mode is None:
+            print(
+                "자동 로그인 기능 판별 모드입니다. 먼저 비로그인으로 접속하고 로그인 "
+                "폼·버튼·링크가 확인될 때만 Chromium 로그인 창을 엽니다."
+            )
+        elif args.execute:
+            print(
+                "비로그인 Recon 모드입니다. 브라우저 로그인 창을 열지 않습니다. "
+                "인증 탐색이 필요하면 --login-mode runtime-browser 또는 "
+                "--session-bundle을 사용하세요."
+            )
+
+        work("recon", "session", "finished")
+
         if prepare_attack:
             run_dir = run_output.resolve()
             run_dir.mkdir(parents=True, exist_ok=False)
+            if effective_policy_context:
+                (run_dir / "PolicyGuidance.md").write_text(effective_policy_context, encoding="utf-8")
             db_path = run_dir / "Recon.db"
             surface_path = run_dir / "Surface.json"
         else:
@@ -1352,7 +1480,7 @@ def _run_recon(
                 work("validation", "execute", "finished")
                 report_results: list[dict] = []
                 report_platform = report_platform_for_program_url(program_url)
-                if validation_result.status == "completed" and report_platform is not None:
+                if validation_result.status == "completed":
                     work("report", "draft", "started")
                     report_results = generate_scan_reports(
                         pipeline_path,
@@ -1363,8 +1491,6 @@ def _run_recon(
                     )
                     work("report", "draft", "finished")
                     print(f"Report drafts generated: {len(report_results)}")
-                elif validation_result.status == "completed":
-                    print("Automatic reports unavailable for this program platform.")
                 print(f"Recon handoff saved: {handoff_path}")
                 print(
                     f"Legacy Attack plan saved: {legacy_plan['database']} "
@@ -1559,19 +1685,20 @@ def _apply_policy_caps(
     )
     capped: dict[tuple[str, str], TargetPolicy] = {}
     for key, policy in policies.items():
-        effective_rps = min(
-            policy.limits.requests_per_second,
-            (
-                scope_max_rps
-                if scope_max_rps is not None
-                else (
-                    profile_limits.requests_per_second
-                    if profile_limits is not None
-                    else policy.limits.requests_per_second
-                )
-            ),
-            max_rps if max_rps is not None else float("inf"),
+        # Structured Scope rates replace generic defaults. Keep independently
+        # grounded target restrictions and any lower user-selected rate.
+        policy_rps = policy.limits.requests_per_second
+        if scope_max_rps is not None and not any(
+            evidence.field == "requests_per_second" for evidence in policy.restriction_evidence
+        ):
+            policy_rps = scope_max_rps
+        rate_ceiling = (
+            scope_max_rps if scope_max_rps is not None
+            else profile_limits.requests_per_second if profile_limits is not None
+            else policy_rps
         )
+        effective_rps = min(policy_rps, rate_ceiling, 50,
+                            max_rps if max_rps is not None else float("inf"))
         limits = policy.limits.model_copy(
             update={
                 "requests_per_second": effective_rps,
@@ -2004,6 +2131,34 @@ def _run_validation(
 # === Report 작성과 조회 ===
 # 확인된 사례의 보고서를 작성하거나 보고서 상태를 조회
 def _run_report(args: argparse.Namespace, *, writer: object | None = None) -> int:
+    if args.report_command in {"check", "export"}:
+        from aidast.reporting.runtime import ReportError as SubmissionError, _path
+        from aidast.reporting.submission import MAX_REQUIREMENTS_BYTES, ProgramRequirements, export_report, inspect_report, save_requirements
+
+        if args.requirements is not None:
+            try:
+                rules_path = _path(args.requirements, existing=True)
+                if rules_path.stat().st_size > MAX_REQUIREMENTS_BYTES:
+                    raise ValueError
+                rules = ProgramRequirements.model_validate_json(rules_path.read_bytes())
+            except (OSError, ValueError):
+                raise SubmissionError("program requirements could not be read or validated") from None
+            save_requirements(args.database, rules)
+        result = inspect_report(args.database)
+        if args.report_command == "check":
+            print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+            return 0 if result['ready'] else 1
+        output = _path(args.output)
+        package = export_report(args.database, expected_revision=args.revision or result['revision_sha256'], include_poc=args.poc)
+        try:
+            # Exclusive creation also protects report/source/requirements files.
+            with output.open('xb') as stream:
+                stream.write(package)
+        except OSError:
+            raise SubmissionError("export destination must be a new writable file") from None
+        print(json.dumps({'ready': True, 'revision_sha256': result['revision_sha256'],
+                          'output': str(output)}, ensure_ascii=False))
+        return 0
     if args.report_command == "status":
         with sqlite3.connect(args.database) as connection:
             version = connection.execute("PRAGMA user_version").fetchone()[0]

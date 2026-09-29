@@ -29,12 +29,56 @@ from mitmproxy import ctx, http
 # mitmdump may use a different Python environment; load only the dependency-free
 # shared helpers, without importing aidast's Pydantic-dependent package modules.
 _safety = runpy.run_path(str(Path(__file__).resolve().parents[2] / "core" / "http_safety.py"))
+_governor = runpy.run_path(str(Path(__file__).resolve().parents[2] / "core" / "request_governor.py"))
+RequestGovernor = _governor["RequestGovernor"]
+GovernorError = _governor["GovernorError"]
 sanitize_headers = _safety["sanitize_headers"]
+merge_hackerone_identity = _safety["merge_hackerone_identity"]
 validate_scope_rules = _safety["validate_scope_rules"]
 BROWSER_TOKEN_HEADER = _safety["BROWSER_TOKEN_HEADER"]
 BROWSER_MODE_HEADER = _safety["BROWSER_MODE_HEADER"]
 BROWSER_SUPPORT_MODES = _safety["BROWSER_SUPPORT_MODES"]
 scope_uses_loopback_host = _safety["scope_uses_loopback_host"]
+require_request_admission = _safety['require_request_admission']
+has_request_exclusions = _safety['has_request_exclusions']
+_receipt = runpy.run_path(str(Path(__file__).resolve().parents[2] / 'core' / 'capture_receipt.py'))
+
+
+def _wire_headers(request):
+    try:
+        return list(request.headers.items(multi=True))
+    except TypeError:
+        return dict(request.headers)
+
+
+def _protocol_exchange(request):
+    """A handshake cannot certify the future frames/control of a tunnel."""
+    if request.method.upper() == 'CONNECT':
+        return True
+    headers = _wire_headers(request)
+    items = headers.items() if isinstance(headers, dict) else headers
+    for name, value in items:
+        name = name.lower()
+        if name in {'upgrade', ':protocol'}:
+            return True
+        if name == 'connection' and 'upgrade' in {part.strip().lower() for part in value.split(',')}:
+            return True
+    return bool(getattr(request, 'protocol', None) or getattr(getattr(request, 'data', None), 'protocol', None))
+
+
+def _physical_url(request):
+    url = getattr(request, 'url', request.pretty_url)
+    actual, pretty = urlsplit(url), urlsplit(request.pretty_url)
+    def authority(parsed):
+        return parsed.scheme, parsed.hostname, parsed.port or (443 if parsed.scheme == 'https' else 80)
+    if authority(actual) != authority(pretty):
+        raise ValueError('proxy destination and displayed authority differ')
+    if getattr(request, 'host', actual.hostname) != actual.hostname or getattr(request, 'port', authority(actual)[2]) != authority(actual)[2]:
+        raise ValueError('proxy connection authority differs')
+    host_header = next((v for k,v in request.headers.items() if k.lower() == 'host'), None)
+    if host_header is not None and host_header.lower() != actual.netloc.lower():
+        raise ValueError('proxy Host differs from destination')
+    return url
 
 
 def _canonical_request_key(method: str, parsed, body: bytes | None = None) -> tuple[str, ...]:
@@ -67,6 +111,8 @@ class ScopeAndCaptureAddon:
         self._last_progress_write = 0.0
         self.seen_requests: set[tuple[str, ...]] = set()
         self.enforcement_required = True
+        self.governor = RequestGovernor(None)
+        self.governor_invalid = False
 
     def load(self, loader) -> None:
         loader.add_option(
@@ -97,6 +143,9 @@ class ScopeAndCaptureAddon:
                 path = Path(ctx.options.scope_file)
                 data = validate_scope_rules(json.loads(path.read_text(encoding="utf-8")))
                 self.allowed_hosts = set(data.get("allowed_hosts", []))
+                self.governor_invalid = data.get("request_governor") is not None
+                self.governor = RequestGovernor(data.get("request_governor"))
+                self.governor_invalid = False
                 self.rules = data
                 self.budget_used_before = max(0, int(data.get("budget_used_before", 0)))
                 self.scope_loaded = True
@@ -109,11 +158,21 @@ class ScopeAndCaptureAddon:
 
     def request(self, flow: http.HTTPFlow) -> None:
         if not self.scope_loaded:
-            if self.enforcement_required:
+            if self.enforcement_required or self.governor_invalid:
                 self._block(flow)
             return
+        execution_methods = self.rules.get("execution_allowed_methods")
+        if execution_methods is not None and (
+            not isinstance(execution_methods, list)
+            or any(method not in {"GET", "HEAD", "OPTIONS", "POST", "PUT", "PATCH", "DELETE"}
+                   for method in execution_methods)
+            or flow.request.method.upper() not in execution_methods
+        ):
+            self._block(flow)
+            return
         try:
-            parsed = urlsplit(flow.request.pretty_url)
+            physical_url = _physical_url(flow.request)
+            parsed = urlsplit(physical_url)
             port = parsed.port or (443 if parsed.scheme == "https" else 80)
         except ValueError:
             self._block(flow)
@@ -198,9 +257,6 @@ class ScopeAndCaptureAddon:
         allowed = request_allowed and (
             global_request_count <= (budget_total if priority <= 2 else noncritical_limit)
         )
-        if allowed and counts_against_budget:
-            self.request_count = candidate_request_count
-            self.seen_requests.add(request_key)
         if support_mode:
             flow.metadata["aidast_browser_support"] = support_mode
         flow.metadata["aidast_traffic_class"] = (
@@ -212,6 +268,47 @@ class ScopeAndCaptureAddon:
             "katana" if source_hint == "katana" or phase_hint == "headless" else
             "browser_observation" if support_mode else "active"
         )
+        required_headers = self.rules.get("required_identity_headers", {})
+        if allowed and host_allowed and (required_headers or self.rules.get("hackerone_username")):
+            trusted = merge_hackerone_identity(dict(flow.request.headers), self.rules.get("hackerone_username"),
+                                               required_identity_headers=required_headers)
+            for name in list(flow.request.headers):
+                if name.casefold() in {key.casefold() for key in required_headers} or name.casefold() == "x-hackerone":
+                    flow.request.headers.pop(name, None)
+            flow.request.headers.update(trusted)
+        elif allowed and not host_allowed:
+            for name in list(flow.request.headers):
+                if name.casefold() in {key.casefold() for key in required_headers}:
+                    flow.request.headers.pop(name, None)
+        def admit():
+            if _protocol_exchange(flow.request) and has_request_exclusions(self.rules):
+                raise ValueError('exclusion hold: protocol exchange has no complete enforceable descriptor')
+            raw = getattr(flow.request, 'raw_content', None)
+            require_request_admission(self.rules, url=_physical_url(flow.request),
+                method=flow.request.method, headers=_wire_headers(flow.request), body=raw,
+                body_available=isinstance(raw, bytes) and not getattr(flow.request, 'stream', False))
+        if allowed:
+            try:
+                admit()
+            except ValueError:
+                allowed = False
+        if allowed:
+            permit = None
+            try:
+                permit = self.governor.reserve(flow.request.pretty_url,
+                                               timeout_seconds=self.rules.get("timeout_seconds", 30))
+                permit.wait()
+                admit()
+                flow.metadata["aidast_governor_permit"] = permit
+            except (GovernorError, ValueError):
+                if permit is not None:
+                    permit.complete()
+                allowed = False
+        if allowed:
+            self.request_count = candidate_request_count
+            self.seen_requests.add(request_key)
+            flow.metadata['aidast_forwarded'] = True
+            flow.metadata['aidast_captured_at'] = time.time()
         if not allowed:
             flow.metadata["aidast_deferred_candidate"] = True
             self.blocked_request_count += 1
@@ -294,7 +391,18 @@ class ScopeAndCaptureAddon:
         normalized = prefix.rstrip("/")
         return path == normalized or path.startswith(normalized + "/")
 
+    @staticmethod
+    def _release_permit(flow):
+        permit = flow.metadata.pop("aidast_governor_permit", None)
+        if permit is not None:
+            permit.complete()
+
+    def error(self, flow: http.HTTPFlow) -> None:
+        flow.metadata['aidast_incomplete'] = True
+        self._release_permit(flow)
+
     def response(self, flow: http.HTTPFlow) -> None:
+        self._release_permit(flow)
         if self.out_path is None:
             return
         support_mode = flow.metadata.get("aidast_browser_support")
@@ -309,10 +417,10 @@ class ScopeAndCaptureAddon:
             "source": "mitmproxy",
             "method": flow.request.method,
             "url": flow.request.pretty_url,
-            "request_headers": sanitize_headers(dict(flow.request.headers)),
+            "request_headers": sanitize_headers(dict(flow.request.headers), identity_headers=self.rules.get("required_identity_headers", {})),
             "request_body": flow.request.get_text(strict=False) if capture_bodies and flow.request.content else None,
             "response_status": flow.response.status_code if flow.response else None,
-            "response_headers": sanitize_headers(dict(flow.response.headers)) if flow.response else None,
+            "response_headers": sanitize_headers(dict(flow.response.headers), identity_headers=self.rules.get("required_identity_headers", {})) if flow.response else None,
             "response_body": (
                 flow.response.get_text(strict=False)
                 if capture_bodies and flow.response and flow.response.content
@@ -331,6 +439,23 @@ class ScopeAndCaptureAddon:
             "browser_support": support_mode,
             "candidate_probe": bool(flow.metadata.get("aidast_candidate_probe")),
         }
+        # Only a completed forwarded exchange can attest an observed request.
+        raw = getattr(flow.request, 'raw_content', None)
+        response_raw = getattr(flow.response, 'raw_content', None) if flow.response else None
+        if (flow.metadata.get('aidast_forwarded') and not flow.metadata.get('aidast_incomplete')
+                and not any(record.get(k) for k in ('policy_blocked', 'deferred_candidate', 'candidate_probe', 'duplicate', 'static_resource'))
+                and capture_bodies and isinstance(raw, bytes) and isinstance(response_raw, bytes)
+                and not getattr(flow.request, 'stream', False) and not getattr(flow.response, 'stream', False)
+                and isinstance(record['response_body'], str)):
+            try:
+                record['request_receipt'] = _receipt['make_capture_receipt'](
+                    url=_physical_url(flow.request), method=flow.request.method,
+                    headers=_wire_headers(flow.request), body=raw,
+                    response_body=record['response_body'].encode('utf-8'),
+                    captured_at=flow.metadata['aidast_captured_at'])
+                record['captured_at'] = flow.metadata['aidast_captured_at']
+            except (ValueError, TypeError):
+                pass
         with self.out_path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
 

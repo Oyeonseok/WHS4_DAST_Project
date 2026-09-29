@@ -258,6 +258,51 @@ class TargetPolicyTests(unittest.TestCase):
                 10,
             )
 
+    def test_structured_rate_replaces_ungrounded_defaults_but_preserves_lower_caps(self) -> None:
+        from aidast.cli import _apply_policy_caps
+        from aidast.scope.execution_rules import bind_execution_policies
+        from aidast.scope.models import ScopeExecutionRules
+        from tempfile import TemporaryDirectory
+        from pathlib import Path
+
+        default = policy(limits=PolicyLimits(requests_per_second=1))
+        for maximum, expected in ((None, 10), (2, 2), (11, 10)):
+            capped = _apply_policy_caps({("URL", default.asset): default},
+                profile="safe-recon", max_rps=maximum, scope_max_rps=10,
+                max_requests=None, max_depth=None, max_concurrency=None, timeout_seconds=None)
+            self.assertEqual(next(iter(capped.values())).limits.requests_per_second, expected)
+            with TemporaryDirectory() as root:
+                bound = bind_execution_policies(capped, ScopeExecutionRules(request_limits=[dict(
+                    maximum=10, period_seconds=1, scope="program", source_quote="10 requests per second")]),
+                    result_root=Path(root), program_url="https://hackerone.com/example", scan_id="scan_rate",
+                    prerequisite_evidence={})
+                self.assertEqual(next(iter(bound.values())).request_governor.requests_per_second, expected)
+        restricted = default.model_copy(update={"restriction_evidence": [RestrictionEvidence(
+            field="requests_per_second", source_quote="This target allows one request per second.")]})
+        capped = _apply_policy_caps({("URL", restricted.asset): restricted},
+            profile="safe-recon", max_rps=10, scope_max_rps=10, max_requests=None,
+            max_depth=None, max_concurrency=None, timeout_seconds=None)
+        self.assertEqual(next(iter(capped.values())).limits.requests_per_second, 1)
+
+    def test_only_validated_rate_evidence_can_override_structured_rate(self) -> None:
+        from aidast.cli import _apply_policy_caps
+        quote = "Automated tooling: max. 10 requests per second."
+        for agent in (CodexMainAgent, NativeCodexMainAgent):
+            for proposed_rate, evidence_quote in ((0.5, "Invented rate limit."),
+                    (1, "Invented rate limit."), (10, quote)):
+                with self.subTest(agent=agent.__module__, proposed_rate=proposed_rate):
+                    item = TargetPolicyProposal(asset_type=AssetType.DOMAIN,
+                        asset="example.com", allowed_hosts=["example.com"],
+                        limits=PolicyLimits(requests_per_second=proposed_rate),
+                        restriction_evidence=[RestrictionEvidence(
+                            field="requests_per_second", source_quote=evidence_quote)])
+                    normalized = agent._normalize_grounded_execution_controls(item, quote)
+                    target = TargetPolicy(scope_id="scope", policy_id="policy", **normalized.model_dump())
+                    capped = _apply_policy_caps({("DOMAIN", target.asset): target},
+                        profile="safe-recon", max_rps=10, scope_max_rps=10,
+                        max_requests=None, max_depth=None, max_concurrency=None, timeout_seconds=None)
+                    self.assertEqual(next(iter(capped.values())).limits.requests_per_second, 10)
+
     def test_intigriti_username_rejects_header_injection(self) -> None:
         from aidast.cli import _parser
 

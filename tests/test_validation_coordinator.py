@@ -456,6 +456,25 @@ class ValidationCoordinatorTests(unittest.TestCase):
         eligibility_patch.start()
         self.addCleanup(eligibility_patch.stop)
 
+    def test_applicable_policy_precaution_can_stop_replay_without_replacing_scope(self):
+        self.policy = self.policy.model_copy(update={"policy_notes": ["Sensitive data: use owned data only"]})
+        class PrecautionAgent(FakeEligibilityAgent):
+            def assess(inner, request, correction=None):
+                if "Sensitive data" in request.policy_guidance:
+                    inner.eligibility = "INELIGIBLE"
+                return super().assess(request, correction)
+        eligibility = PrecautionAgent()
+        port = FakePort()
+        result = ValidationCoordinator(
+            db_path=self.path, agent=FakeAgent(), reproduction=port,
+            policy_provider=lambda endpoint, method: self.policy,
+            eligibility_agent=eligibility,
+        ).run("scan")
+        self.assertEqual(port.calls, [])
+        self.assertEqual(result.summary["statuses"], {"OUT_OF_SCOPE": 1})
+        self.assertEqual(eligibility.requests[0].scope_markdown, self.scope.scope_markdown)
+        self.assertEqual(eligibility.requests[0].scope_sha256, self.scope.scope_sha256)
+
     def test_ineligible_preflight_never_invokes_reproduction(self):
         self.eligibility.eligibility = "INELIGIBLE"
         port = FakePort()

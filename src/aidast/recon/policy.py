@@ -7,9 +7,11 @@ from fnmatch import fnmatchcase
 from typing import Annotated, Literal
 from urllib.parse import SplitResult, urlsplit
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from aidast.scope.models import AssetType
+from aidast.core.http_safety import validate_identity_headers
+from aidast.scope.models import AssetType, RequestLimit
+from aidast.scope.exclusions import CompiledExclusionPolicy
 
 
 HttpMethod = Literal["GET", "HEAD", "OPTIONS", "POST", "PUT", "PATCH", "DELETE"]
@@ -100,19 +102,84 @@ class TargetPolicyProposal(TargetPolicyControls):
     asset: str = Field(min_length=1)
 
 
+def normalize_read_only_attack_policy(policy: TargetPolicyProposal) -> TargetPolicyProposal:
+    """Align read-only method lists with their grant without widening permissions.
+
+    Policies containing mutation methods still require the full Scope and
+    authorization validation. Only an inconsistent grant with no mutation
+    methods is reduced to read-only, retaining the original method list.
+    """
+    if any(method not in SAFE_METHODS for method in policy.attack_allowed_methods):
+        return policy
+    if (policy.attack_authorization_mode == "read_only"
+            and policy.attack_authorization_evidence is None):
+        return policy
+    return policy.model_copy(update={
+        "attack_authorization_mode": "read_only",
+        "attack_authorization_evidence": None,
+        "policy_notes": [
+            *policy.policy_notes,
+            "Python normalized Attack authorization to read_only because no "
+            "state-changing methods are authorized; method permissions were preserved.",
+        ],
+    })
+
+
 class TargetPolicySelectionProposal(TargetPolicyControls):
     """Planner policy controls bound to an application-owned target ID."""
 
     target_id: str = Field(pattern=r"^target_[0-9]{4}$")
 
 
+class RequestGovernorBinding(StrictModel):
+    ledger_path: str = Field(min_length=1, max_length=4096)
+    scan_id: str = Field(pattern=r'^[A-Za-z0-9_-]{1,160}$')
+    program_id: str = Field(pattern=r'^[A-Za-z0-9_-]{1,160}$')
+    scan_max_requests: int = Field(strict=True, gt=0, le=100000)
+    scan_max_seconds: float | None = Field(default=None, gt=0, le=86400, allow_inf_nan=False)
+    requests_per_second: float = Field(gt=0, le=50, allow_inf_nan=False)
+    concurrency: int = Field(strict=True, ge=1, le=20)
+    request_limits: list[RequestLimit] = Field(default_factory=list, max_length=64)
+
+    @field_validator('ledger_path')
+    @classmethod
+    def absolute_ledger(cls, value):
+        from pathlib import Path
+        if not Path(value).is_absolute() or '..' in Path(value).parts or '\x00' in value:
+            raise ValueError('governor ledger requires an absolute application-owned path')
+        return value
+
+
 class TargetPolicy(TargetPolicyProposal):
+    request_exclusions: CompiledExclusionPolicy | None = Field(
+        default=None, exclude_if=lambda value: value is None,
+    )
+    execution_allowed_methods: list[HttpMethod] | None = Field(
+        default=None, min_length=1, max_length=7, exclude_if=lambda value: value is None,
+    )
+    request_governor: RequestGovernorBinding | None = Field(default=None, exclude_if=lambda value: value is None)
+    policy_prerequisite_evidence: dict[str, list[str]] = Field(default_factory=dict, exclude_if=lambda value: not value)
+
     schema_version: Literal["1.0"] = "1.0"
     scope_id: str = Field(min_length=1)
     policy_id: str = Field(min_length=1)
     hackerone_username: str | None = Field(
         default=None, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
     )
+    required_identity_headers: dict[str, str] = Field(
+        default_factory=dict, exclude_if=lambda value: not value,
+    )
+
+    @model_validator(mode='after')
+    def validate_exclusion_target(self):
+        if self.request_exclusions is not None and self.request_exclusions.target_asset != self.asset:
+            raise ValueError('exclusion guard must bind the exact policy target asset')
+        return self
+
+    @field_validator("required_identity_headers", mode="before")
+    @classmethod
+    def validate_required_identity_headers(cls, value):
+        return validate_identity_headers(value)
 
     def allows_host(self, host: str) -> bool:
         candidate = host.lower().rstrip(".")
@@ -144,6 +211,21 @@ class TargetPolicy(TargetPolicyProposal):
         return allowed and not any(
             _host_matches(candidate, pattern) for pattern in self.excluded_hosts
         )
+
+    def allows_execution_method(self, method: str) -> bool:
+        """An explicit Scope ceiling applies to every physical request."""
+        return self.execution_allowed_methods is None or method.upper() in self.execution_allowed_methods
+
+    def check_request_exclusions(self, url: str, *, method: str, headers=None,
+                                 body=None, body_available: bool = False, identity_available: bool = True, context=None, now=None) -> dict:
+        """Intersect the final physical request with the offline exclusion guard."""
+        from aidast.core.exclusion_guard import evaluate_exclusions
+        guard = self.request_exclusions
+        snapshot = guard.model_dump(mode='json') if isinstance(guard, CompiledExclusionPolicy) else guard
+        if snapshot is not None and (not isinstance(snapshot, dict) or snapshot.get('target_asset') != self.asset):
+            return {'decision': 'hold', 'rule_keys': [], 'reason': 'exclusion guard target does not match policy target'}
+        return evaluate_exclusions(snapshot, url=url, method=method, headers=headers,
+                                   body=body, body_available=body_available, identity_available=identity_available, context=context, now=now)
 
     def allows_url(self, url: str, *, method: str = "GET") -> bool:
         return self._allows_url(
@@ -182,6 +264,8 @@ class TargetPolicy(TargetPolicyProposal):
 
     def allows_browser_support_url(self, url: str, *, method: str = "GET") -> bool:
         """Allow same-origin browser support traffic without widening active scans."""
+        if not self.allows_execution_method(method):
+            return False
         # A rendered SPA commonly submits same-origin POST XHR/fetch calls
         # needed to load or transition the page. These are observations from
         # the already-approved browser page, not active tool requests. Keep
@@ -196,7 +280,7 @@ class TargetPolicy(TargetPolicyProposal):
 
     def allows_graphql_probe_url(self, url: str) -> bool:
         """Allow only explicitly enabled, same-origin GraphQL probe paths."""
-        if not self.api_probe.graphql:
+        if not self.api_probe.graphql or not self.allows_execution_method("POST"):
             return False
         try:
             path = urlsplit(url).path or "/"
@@ -210,6 +294,8 @@ class TargetPolicy(TargetPolicyProposal):
     def _allows_url(
         self, url: str, *, method: str, enforce_paths: bool, enforce_method: bool
     ) -> bool:
+        if not self.allows_execution_method(method):
+            return False
         try:
             parsed = urlsplit(url)
             host = (parsed.hostname or "").lower().rstrip(".")
@@ -232,6 +318,11 @@ class TargetPolicy(TargetPolicyProposal):
     def mitm_rules(self) -> dict:
         return {
             "enforcement_required": True,
+            **({"asset": self.asset, "request_exclusions": self.request_exclusions.model_dump(mode="json")} if self.request_exclusions is not None else {}),
+            **({"execution_allowed_methods": self.execution_allowed_methods} if self.execution_allowed_methods is not None else {}),
+            **({"request_governor": self.request_governor.model_dump(mode="json")} if self.request_governor else {}),
+            "required_identity_headers": self.required_identity_headers,
+            "hackerone_username": self.hackerone_username,
             "allowed_schemes": self.allowed_schemes,
             "allowed_hosts": self.allowed_hosts,
             "excluded_hosts": self.excluded_hosts,
