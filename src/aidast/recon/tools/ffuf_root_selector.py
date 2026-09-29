@@ -75,6 +75,7 @@ def _validate_selected_roots(
 def select_ffuf_roots_from_endpoints(
     endpoints: list[dict], *, max_roots: int = DEFAULT_MAX_ROOTS,
     target_policy: TargetPolicy | None = None,
+    model: str = RECON_MODEL,
 ) -> list[str]:
     """Select grounded ffuf roots with the bundled Codex-native skill."""
 
@@ -108,7 +109,7 @@ def select_ffuf_roots_from_endpoints(
     )
 
     try:
-        result = CodexMainAgent(main_model=RECON_MODEL)._run_structured(
+        result = CodexMainAgent(main_model=model)._run_structured(
             prompt=prompt,
             model_type=FfufRootSelection,
             artifact_name="ffuf-root-selection",

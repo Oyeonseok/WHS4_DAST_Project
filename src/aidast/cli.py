@@ -46,6 +46,7 @@ from aidast.pipeline.materialize import materialize_pipeline
 from aidast.pipeline.models import HandoffManifest, hash_artifact
 from aidast.pipeline.resume import execute_resume, inspect_resume
 from aidast.paths import RESULT_ROOT
+from aidast.core.model_calls import SQLiteModelCallSink, model_call_context, using_model_call_sink
 from aidast.reporting import (
     CaseReportAgent,
     CaseReportError,
@@ -284,6 +285,10 @@ def _parser() -> argparse.ArgumentParser:
         help="optional execution cap profile; omitted by default to preserve Scope policy",
     )
     recon.add_argument(
+        "--recon-model", type=_model_identifier,
+        help=f"Codex model for Recon decisions (default: {RECON_MODEL})",
+    )
+    recon.add_argument(
         "--max-rps",
         type=_positive_float,
         help="lower request-rate ceiling applied to every generated target policy",
@@ -396,6 +401,22 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--start-url")
     run.add_argument(
         "--profile", choices=EXECUTION_PROFILE_CHOICES, default=None
+    )
+    run.add_argument(
+        "--recon-model", type=_model_identifier,
+        help=f"Codex model for Recon decisions (default: {RECON_MODEL})",
+    )
+    run.add_argument(
+        "--attack-model", type=_model_identifier,
+        help="Codex model for Attack orchestration (default: gpt-6-sol)",
+    )
+    run.add_argument(
+        "--validation-model", type=_model_identifier,
+        help="Codex model for Validation decisions (default: gpt-6-sol)",
+    )
+    run.add_argument(
+        "--report-model", type=_model_identifier,
+        help="Codex model for Report drafting (default: gpt-6-sol)",
     )
     run.add_argument("--max-rps", type=_positive_float)
     run.add_argument("--max-requests", type=_positive_int)
@@ -540,6 +561,10 @@ def _parser() -> argparse.ArgumentParser:
     exhaustive.add_argument("--max-batches", type=_positive_int, default=100)
     exhaustive.add_argument("--retry-limit", type=_positive_int, default=3)
     exhaustive.add_argument("--codex-timeout", type=_positive_int, default=86400)
+    exhaustive.add_argument(
+        "--attack-model", type=_model_identifier,
+        help="Codex model for Attack orchestration (default: gpt-6-sol)",
+    )
     benchmark = attack_commands.add_parser(
         "benchmark-vulnbank",
         help="run the disposable loopback VulnBank Attack, Validation, and Report benchmark",
@@ -587,12 +612,20 @@ def _parser() -> argparse.ArgumentParser:
         "--scope", type=Path,
         help="approved Scope.md to bind for a standalone shared Validation run",
     )
+    validation_run.add_argument(
+        "--validation-model", type=_model_identifier,
+        help="Codex model for Validation decisions (default: gpt-6-sol)",
+    )
     validation_resume = validation_commands.add_parser(
         "resume", help="resume one failed shared Validation stage"
     )
     validation_resume.add_argument("database", type=Path)
     validation_resume.add_argument("--stage-run-id", required=True)
     validation_resume.add_argument("--policy", type=Path)
+    validation_resume.add_argument(
+        "--validation-model", type=_model_identifier,
+        help="Codex model for resumed Validation decisions (default: gpt-6-sol)",
+    )
     validation_status_parser = validation_commands.add_parser(
         "status", help="inspect shared Pipeline.db or legacy Validation.db"
     )
@@ -619,6 +652,10 @@ def _parser() -> argparse.ArgumentParser:
     )
     report_run.add_argument("--output-dir", type=Path, default=RESULT_ROOT / "ReportRun")
     report_run.add_argument("--language", choices=("ko", "en"), help="language for a generic shared-case report; use a separate output directory per version")
+    report_run.add_argument(
+        "--report-model", type=_model_identifier,
+        help="Codex model for Report drafting (default: gpt-6-sol)",
+    )
     report_source = report_run.add_mutually_exclusive_group()
     report_source.add_argument("--validation-id")
     report_source.add_argument("--case-id")
@@ -759,6 +796,12 @@ def _platform_username(value: str, *, platform: str) -> str:
 def _scan_identifier(value: str) -> str:
     if re.fullmatch(r"scan_[0-9a-f]{32}", value) is None:
         raise argparse.ArgumentTypeError("must match scan_[0-9a-f]{32}")
+    return value
+
+
+def _model_identifier(value: str) -> str:
+    if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:/-]{0,127}", value) is None or "://" in value:
+        raise argparse.ArgumentTypeError("must be a Codex model identifier (1–128 characters)")
     return value
 
 
@@ -993,7 +1036,8 @@ def _run_recon(
             raise ScopePathError("Scope revision approval does not match the requested program")
     main_agent = CodexMainAgent(
         timeout_seconds=args.codex_timeout,
-        main_model=RECON_MODEL,
+        main_model=args.recon_model or RECON_MODEL,
+        attack_model=getattr(args, "attack_model", None),
     )
 
     if revision is not None:
@@ -1155,11 +1199,12 @@ def _run_recon(
         raise ReconCoordinatorError(str(exc)) from exc
 
     work("main", "recon_plan", "started")
-    plan = main_agent.create_recon_plan(
-        scope_id=scope_document.scope_id,
-        scope_markdown=planner_scope,
-        allowed_targets=selected_targets,
-    )
+    with model_call_context(scan_id=scan_id, stage="Recon"):
+        plan = main_agent.create_recon_plan(
+            scope_id=scope_document.scope_id,
+            scope_markdown=planner_scope,
+            allowed_targets=selected_targets,
+        )
     work("main", "recon_plan", "finished")
     if args.all_targets:
         # --all-targets is an operator choice. Do not let the planning model
@@ -1225,12 +1270,13 @@ def _run_recon(
     if args.execute or args.policy_only:
         print("Main Agent가 승인된 Scope에서 타깃별 실행 정책을 생성합니다.")
         work("main", "policy", "started")
-        policies = main_agent.create_target_policies(
-            scope_id=scope_document.scope_id,
-            scope_markdown=scope_markdown,
-            plan=plan,
-            execution_start_urls=start_urls,
-        )
+        with model_call_context(scan_id=scan_id, stage="Recon"):
+            policies = main_agent.create_target_policies(
+                scope_id=scope_document.scope_id,
+                scope_markdown=scope_markdown,
+                plan=plan,
+                execution_start_urls=start_urls,
+            )
         policies = _apply_scope_host_exclusions(
             policies,
             getattr(scope_document.analysis, "out_of_scope_assets", []),
@@ -1338,6 +1384,7 @@ def _run_recon(
             scope_value=scope_document.scope_id,
             db_path=db_path,
             ffuf_wordlist=args.ffuf_wordlist,
+            recon_model=args.recon_model,
             ffuf_max_time_seconds=args.ffuf_max_time_seconds,
             target_policies=policies,
             require_policy_enforcement=True,
@@ -1370,7 +1417,8 @@ def _run_recon(
         recon_failures = 0
         try:
             work("recon", "execute", "started")
-            recon_failures = executor.run(tasks)
+            with model_call_context(scan_id=scan_id, stage="Recon"):
+                recon_failures = executor.run(tasks)
             work("recon", "execute", "finished")
             if getattr(args, "tag_after", False):
                 from aidast.recon.annotations import tag_pending_observations
@@ -1385,13 +1433,14 @@ def _run_recon(
 
                 print("Recon 완료: 저장된 관측 태깅을 시작합니다.")
                 work("recon", "tagging", "started")
-                _, failed_tags = tag_pending_observations(
-                    executor.conn,
-                    scan_id=scan_id,
-                    agent=main_agent,
-                    batch_size=args.tag_batch_size,
-                    progress=tagging_progress,
-                )
+                with model_call_context(scan_id=scan_id, stage="Recon"):
+                    _, failed_tags = tag_pending_observations(
+                        executor.conn,
+                        scan_id=scan_id,
+                        agent=main_agent,
+                        batch_size=args.tag_batch_size,
+                        progress=tagging_progress,
+                    )
                 _require_complete_recon_annotations(failed_tags)
                 work("recon", "tagging", "finished")
             if prepare_attack and not recon_failures:
@@ -1406,14 +1455,15 @@ def _run_recon(
                 if not getattr(args, "tag_after", False):
                     work("recon", "tagging", "finished")
             work("main", "review", "started")
-            recon_review = OfflineReconReview(
-                planner=main_agent,
-                conn=executor.conn,
-                scope_id=scope_document.scope_id,
-                scan_id=scan_id,
-                approved_assets=selected_targets,
-                target_policies=policies,
-            ).review()
+            with model_call_context(scan_id=scan_id, stage="Recon"):
+                recon_review = OfflineReconReview(
+                    planner=main_agent,
+                    conn=executor.conn,
+                    scope_id=scope_document.scope_id,
+                    scan_id=scan_id,
+                    approved_assets=selected_targets,
+                    target_policies=policies,
+                ).review()
             work("main", "review", "finished")
             review_path = (
                 (run_dir / "ReconReview.json") if run_dir is not None
@@ -1496,21 +1546,25 @@ def _run_recon(
                     coordinator = build_native_validation_coordinator(
                         db_path=pipeline_path,
                         policy_path=run_dir / "TargetPolicy.json",
+                        validation_model=args.validation_model,
                     )
                 work("validation", "execute", "started")
-                validation_result = coordinator.run(scan_id)
+                with model_call_context(scan_id=scan_id, stage="Validation"):
+                    validation_result = coordinator.run(scan_id)
                 work("validation", "execute", "finished")
                 report_results: list[dict] = []
                 report_platform = report_platform_for_program_url(program_url)
                 if validation_result.status == "completed":
                     work("report", "draft", "started")
-                    report_results = generate_scan_reports(
-                        pipeline_path,
-                        args.run_root.parent / "ReportRun" / scan_id,
-                        scan_id=scan_id,
-                        platform=report_platform,
-                        writer=report_writer,
-                    )
+                    with model_call_context(scan_id=scan_id, stage="Report"):
+                        report_results = generate_scan_reports(
+                            pipeline_path,
+                            args.run_root.parent / "ReportRun" / scan_id,
+                            scan_id=scan_id,
+                            platform=report_platform,
+                            writer=report_writer,
+                            model=args.report_model,
+                        )
                     work("report", "draft", "finished")
                     print(f"Report drafts generated: {len(report_results)}")
                 print(f"Recon handoff saved: {handoff_path}")
@@ -1953,7 +2007,10 @@ def _run_attack(
                 from aidast.orchestration.coverage_attack import ExhaustiveAttackCoordinator
 
                 result = ExhaustiveAttackCoordinator(
-                    agent=CodexMainAgent(timeout_seconds=args.codex_timeout),
+                    agent=CodexMainAgent(
+                        timeout_seconds=args.codex_timeout,
+                        attack_model=args.attack_model,
+                    ),
                     db_path=args.database,
                     scope_path=args.scope,
                     policy_path=args.policy,
@@ -2092,10 +2149,13 @@ def _run_validation(
         from aidast.validation import build_native_validation_coordinator
 
         if coordinator is None:
-            coordinator = build_native_validation_coordinator(
-                db_path=args.database,
-                policy_path=args.policy or args.database.parent / "TargetPolicy.json",
-            )
+            builder_args = {
+                "db_path": args.database,
+                "policy_path": args.policy or args.database.parent / "TargetPolicy.json",
+            }
+            if args.validation_model is not None:
+                builder_args["validation_model"] = args.validation_model
+            coordinator = build_native_validation_coordinator(**builder_args)
         resumed = coordinator.resume(args.stage_run_id)
         result = (
             resumed.model_dump(mode="json")
@@ -2112,19 +2172,26 @@ def _run_validation(
             }
             if args.scope is not None:
                 builder_args["scope_path"] = args.scope
+            if args.validation_model is not None:
+                builder_args["validation_model"] = args.validation_model
             coordinator = build_native_validation_coordinator(**builder_args)
-        shared_result = coordinator.run(
-            args.scan_id,
-            finding_id=args.finding_id,
-            chain_id=args.chain_id,
-        )
+        with model_call_context(scan_id=args.scan_id, stage="Validation"):
+            shared_result = coordinator.run(
+                args.scan_id,
+                finding_id=args.finding_id,
+                chain_id=args.chain_id,
+            )
         result = (
             shared_result.model_dump(mode="json")
             if hasattr(shared_result, "model_dump")
             else shared_result
         )
     else:
-        raw = ValidationAgent(reviewer or CodexValidationReviewer()).run(
+        raw = ValidationAgent(
+            reviewer or CodexValidationReviewer(
+                CodexMainAgent(main_model=args.validation_model or "gpt-6-sol")
+            )
+        ).run(
             args.database,
             args.output_dir,
             run_id=args.run_id,
@@ -2190,7 +2257,11 @@ def _run_report(args: argparse.Namespace, *, writer: object | None = None) -> in
             else report_status(args.database)
         )
     elif args.case_id:
-        result = CaseReportAgent(writer or CodexReportWriter()).run(
+        result = CaseReportAgent(
+            writer or CodexReportWriter(
+                CodexMainAgent(main_model=args.report_model or "gpt-6-sol")
+            )
+        ).run(
             args.database,
             args.output_dir,
             platform=args.platform,
@@ -2200,7 +2271,11 @@ def _run_report(args: argparse.Namespace, *, writer: object | None = None) -> in
     else:
         if args.language is not None:
             raise ValueError("report language selection requires --case-id")
-        result = ReportAgent(writer or CodexLegacyReportWriter()).run(
+        result = ReportAgent(
+            writer or CodexLegacyReportWriter(
+                CodexMainAgent(main_model=args.report_model or "gpt-6-sol")
+            )
+        ).run(
             args.database,
             args.output_dir,
             platform=args.platform,
@@ -2234,12 +2309,13 @@ def _run_tag(args: argparse.Namespace) -> int:
         print(f"Tagging batch {batch_no}/{batch_count}: "
               f"processed={processed}, failed={failed}", flush=True)
 
-    done, failed = tag_pending_observations(
-        conn, scan_id=scan_id,
-        agent=CodexMainAgent(timeout_seconds=args.codex_timeout),
-        batch_size=args.batch_size,
-        progress=_progress,
-    )
+    with model_call_context(scan_id=scan_id, stage="Recon"):
+        done, failed = tag_pending_observations(
+            conn, scan_id=scan_id,
+            agent=CodexMainAgent(timeout_seconds=args.codex_timeout),
+            batch_size=args.batch_size,
+            progress=_progress,
+        )
     print(f"Tagging complete: {done} observations processed, {failed} failed")
     return 0
 
@@ -2251,7 +2327,8 @@ def _run_resume(args: argparse.Namespace) -> int:
     except (OSError, ValueError, sqlite3.Error) as exc:
         raise MainAgentError(f"scan cannot resume: {exc}") from exc
     print(f"Resuming {plan.scan_id} from {plan.stage}", flush=True)
-    execute_resume(plan, agent=CodexMainAgent(timeout_seconds=args.codex_timeout))
+    with model_call_context(scan_id=plan.scan_id, stage=plan.stage.title()):
+        execute_resume(plan, agent=CodexMainAgent(timeout_seconds=args.codex_timeout))
     print(f"Resumed scan completed: {plan.scan_id}", flush=True)
     return 0
 
@@ -2281,5 +2358,11 @@ def _run_dashboard(args: argparse.Namespace) -> int:
     return 0
 
 
+def entrypoint() -> int:
+    """Enable local model-call history only for real command entry points."""
+    with using_model_call_sink(SQLiteModelCallSink(RESULT_ROOT)):
+        return main()
+
+
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(entrypoint())

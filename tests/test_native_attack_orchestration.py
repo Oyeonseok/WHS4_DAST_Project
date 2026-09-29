@@ -331,7 +331,7 @@ class NativeAttackMainAgentTests(unittest.TestCase):
                 self.assertNotIn("danger-full-access", command)
                 self.assertNotIn("--add-dir", command)
                 self.assertEqual(
-                    command[command.index("--model") + 1], "gpt-6-sol"
+                    command[command.index("--model") + 1], "gpt-6-luna"
                 )
                 self.assertTrue(
                     (work / ".codex/agents/aidast-attack.toml").is_file()
@@ -339,7 +339,7 @@ class NativeAttackMainAgentTests(unittest.TestCase):
                 agent_config = (
                     work / ".codex/agents/aidast-attack.toml"
                 ).read_text(encoding="utf-8")
-                self.assertIn('model = "gpt-6-sol"', agent_config)
+                self.assertIn('model = "gpt-6-luna"', agent_config)
                 self.assertIn("$aidast-policy", agent_config)
                 self.assertIn("$aidast-policy", kwargs["input"])
                 self.assertTrue((work / ".agents/skills/aidast-policy/SKILL.md").is_file())
@@ -395,7 +395,10 @@ class NativeAttackMainAgentTests(unittest.TestCase):
                 ).model_dump_json(), encoding="utf-8")
                 return SimpleNamespace(returncode=0, stderr="")
 
-            agent = CodexMainAgent(python_executable=str(Path(__file__).resolve()))
+            agent = CodexMainAgent(
+                attack_model="gpt-6-luna",
+                python_executable=str(Path(__file__).resolve()),
+            )
             with (
                 patch("aidast.agents.main.shutil.which", return_value="codex.exe"),
                 patch.object(CodexMainAgent, "_require_login"),

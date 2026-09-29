@@ -11,6 +11,10 @@ from pathlib import Path
 
 import pytest
 
+from aidast.core.model_calls import (
+    SQLiteModelCallSink, logged_model_call, read_scan_token_usage,
+    record_jsonl_usage, using_model_call_sink,
+)
 from aidast.reporting import ReportAgent, ReportDraft, ReportError, prepare_report, record_report, report_status
 
 
@@ -96,6 +100,29 @@ def test_report_agent_prepares_and_writes_separate_local_draft(validation, tmp_p
     assert path.read_bytes() == source_bytes
     assert agent.run(path, tmp_path / platform, platform=platform) == result
     assert len(calls) == 1
+
+
+def test_legacy_report_token_usage_is_attributed_to_its_scan(validation, tmp_path):
+    path, _ = validation
+
+    class Writer:
+        _main_model = "gpt-6-sol"
+
+        @logged_model_call("structured", model_attribute="_main_model")
+        def write(self, context):
+            record_jsonl_usage([json.dumps({
+                "type": "turn.completed",
+                "usage": {"input_tokens": 7, "cached_input_tokens": 3, "output_tokens": 2},
+            })])
+            return draft_for(context)
+
+    with using_model_call_sink(SQLiteModelCallSink(tmp_path)):
+        result = ReportAgent(Writer()).run(path, tmp_path / "report", platform="hackerone")
+
+    assert result["status"] == "drafted"
+    usage = read_scan_token_usage(tmp_path, "scan_1")
+    assert usage["stages"]["Report"]["total_tokens"] == 9
+    assert usage["total"]["unreported_calls"] == 0
 
 
 @pytest.mark.parametrize("status", ["needs_evidence", "rejected", "retracted", "pending"])

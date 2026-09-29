@@ -130,6 +130,10 @@ class PipelineCliTests(unittest.TestCase):
                     "run", "https://example.test/program", "--all-targets",
                     "--output-dir", str(root / "Scope"),
                     "--scan-id", scan_id,
+                    "--recon-model", "gpt-6-sol",
+                    "--attack-model", "gpt-6-luna",
+                    "--validation-model", "gpt-5.6-terra",
+                    "--report-model", "gpt-6-astra",
                     "--run-root", str(root / "Runs"),
                     "--attack-output-root", str(root / "AttackRuns"),
                     "--tag-batch-size", "2",
@@ -176,6 +180,12 @@ class PipelineCliTests(unittest.TestCase):
             self.assertEqual([(item["processed"], item["observation_total"], item["batch_number"],
                                item["batch_total"], item["progress"]) for item in tagging_updates],
                              [(2, 3, 1, 2, 84), (3, 3, 2, 2, 88)])
+            self.assertEqual(planner.call_args.kwargs["main_model"], "gpt-6-sol")
+            self.assertEqual(planner.call_args.kwargs["attack_model"], "gpt-6-luna")
+            self.assertEqual(
+                validation_coordinator.call_args.kwargs["validation_model"],
+                "gpt-5.6-terra",
+            )
             self.assertIn("Legacy Attack plan saved:", stdout.getvalue())
             database, = (root / "AttackRuns").glob("*/*/scan_*/legacy/Attack.db")
             self.assertEqual(database.relative_to(root / "AttackRuns").parts[:2], ("example-test", "program"))

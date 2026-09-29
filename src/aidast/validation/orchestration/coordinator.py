@@ -36,6 +36,7 @@ from ..contracts.runtime_semantics import (
 from .blind_consistency import bound_revalidated_assessment
 
 if TYPE_CHECKING:
+    from aidast.agents.main import CodexMainAgent
     from ..execution.impact_development import (
         ImpactDevelopmentRequest, VerifiedImpactPreconditions,
     )
@@ -104,7 +105,8 @@ class ValidationCoordinator:
                      [ValidatedCandidate, ImpactDevelopmentRequest],
                      VerifiedImpactPreconditions | dict[str, Any] | None,
                  ] | None = None,
-                 replay_preparer=None):
+                 replay_preparer=None,
+                 validation_model: str | None = None):
         self.db_path = Path(db_path).expanduser().resolve()
         self.agent = agent
         self.eligibility_agent = eligibility_agent
@@ -117,6 +119,7 @@ class ValidationCoordinator:
         self.prerequisite_resolver = prerequisite_resolver
         self.impact_development_port = impact_development_port
         self.impact_agent_factory = impact_agent_factory
+        self.validation_model = validation_model
         self.impact_precondition_verifier = impact_precondition_verifier
         self._impact_agents: list[Any] = []
         self._impact_development_records: list[dict[str, Any]] = []
@@ -369,7 +372,10 @@ class ValidationCoordinator:
             try:
                 if self.eligibility_agent is None:
                     from .eligibility_runner import CodexEligibilityRunner
-                    self.eligibility_agent = CodexEligibilityRunner()
+                    self.eligibility_agent = (
+                        CodexEligibilityRunner(self._codex_validation_agent())
+                        if self.validation_model is not None else CodexEligibilityRunner()
+                    )
                 agent_id = getattr(self.eligibility_agent, "agent_id", None)
                 if agent_id and agent_id not in self._used_agent_ids:
                     self._used_agent_ids.append(agent_id)
@@ -1803,8 +1809,13 @@ class ValidationCoordinator:
                     )
                     if runner is None:
                         factory = self.impact_agent_factory or (
-                            lambda skill_name: CodexImpactDevelopmentRunner(
-                                attack_skill_name=skill_name,
+                            lambda skill_name: (
+                                CodexImpactDevelopmentRunner(
+                                    attack_skill_name=skill_name,
+                                    agent=self._codex_validation_agent(),
+                                )
+                                if self.validation_model is not None else
+                                CodexImpactDevelopmentRunner(attack_skill_name=skill_name)
                             )
                         )
                         runner = factory(candidate.profile.profile.attack_skill_name)
@@ -1947,13 +1958,24 @@ class ValidationCoordinator:
             unfinished="impact result cites an unfinished request ledger row",
         )
 
+    def _codex_validation_agent(self) -> CodexMainAgent:
+        from aidast.agents.main import CodexMainAgent
+
+        return CodexMainAgent(
+            main_model=self.validation_model,
+            validation_model=self.validation_model,
+        )
+
     def _comparison(
         self, claim: dict[str, Any], assessment: dict[str, Any], *,
         blind_view: dict[str, Any], policy,
     ) -> ClaimComparison:
         if self.agent is None:
             from .codex_runner import CodexBlindValidationRunner
-            self.agent = CodexBlindValidationRunner()
+            self.agent = (
+                CodexBlindValidationRunner(self._codex_validation_agent())
+                if self.validation_model is not None else CodexBlindValidationRunner()
+            )
             self._owns_agent = True
         prepare = getattr(self.agent, "prepare_comparison", None)
         if callable(prepare):
@@ -1963,7 +1985,10 @@ class ValidationCoordinator:
     def _agent_call(self, method: str, first: Any, second: Any, *, model, policy=None):
         if self.agent is None:
             from .codex_runner import CodexBlindValidationRunner
-            self.agent = CodexBlindValidationRunner()
+            self.agent = (
+                CodexBlindValidationRunner(self._codex_validation_agent())
+                if self.validation_model is not None else CodexBlindValidationRunner()
+            )
             self._owns_agent = True
         if method in {"assess", "compare"} and policy is not None:
             setter = getattr(type(self.agent), "set_policy_context", None)

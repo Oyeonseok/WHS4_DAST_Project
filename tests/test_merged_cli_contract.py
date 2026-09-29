@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
+import pytest
+
 from aidast.cli import _parser, main
 from aidast.updater import UpdateResult
 
@@ -72,3 +74,43 @@ def test_recon_and_run_accept_deferred_tag_batch_size() -> None:
         parsed = _parser().parse_args(arguments)
 
         assert parsed.tag_batch_size == 50
+
+
+def test_cli_models_are_independent_and_reject_untrusted_identifiers() -> None:
+    parser = _parser()
+    parsed = parser.parse_args([
+        "run", "https://program.example", "--all-targets",
+        "--recon-model", "gpt-6-sol", "--attack-model", "gpt-6-luna",
+        "--validation-model", "gpt-5.6-terra", "--report-model", "gpt-6-astra",
+    ])
+    assert (parsed.recon_model, parsed.attack_model) == ("gpt-6-sol", "gpt-6-luna")
+    assert (parsed.validation_model, parsed.report_model) == (
+        "gpt-5.6-terra", "gpt-6-astra",
+    )
+    assert parser.parse_args([
+        "recon", "https://program.example", "--recon-model", "gpt-6-sol",
+    ]).recon_model == "gpt-6-sol"
+    assert parser.parse_args([
+        "attack", "exhaustive", "Pipeline.db", "--scan-id", "scan_" + "a" * 32,
+        "--scope", "Scope.md", "--policy", "TargetPolicy.json",
+        "--attack-model", "gpt-6-luna",
+    ]).attack_model == "gpt-6-luna"
+    assert parser.parse_args([
+        "validate", "run", "Pipeline.db", "--scan-id", "scan",
+        "--validation-model", "gpt-5.6-terra",
+    ]).validation_model == "gpt-5.6-terra"
+    assert parser.parse_args([
+        "validate", "resume", "Pipeline.db", "--stage-run-id", "stage",
+        "--validation-model", "gpt-5.6-terra",
+    ]).validation_model == "gpt-5.6-terra"
+    assert parser.parse_args([
+        "report", "run", "Pipeline.db", "--platform", "hackerone",
+        "--report-model", "gpt-6-astra",
+    ]).report_model == "gpt-6-astra"
+    for model in ("", "https://example.test/model", "model with spaces", "x" * 129):
+        for option in ("--attack-model", "--validation-model", "--report-model"):
+            with pytest.raises(SystemExit):
+                parser.parse_args([
+                    "run", "https://program.example", "--all-targets",
+                    option, model,
+                ])

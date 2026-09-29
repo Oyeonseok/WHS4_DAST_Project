@@ -9,7 +9,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
+from fastapi import (
+    FastAPI,
+    HTTPException,
+    Query,
+    Request,
+    WebSocket,
+    WebSocketDisconnect,
+)
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.exceptions import RequestValidationError
 from fastapi.exception_handlers import request_validation_exception_handler
@@ -18,22 +25,22 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from aidast.auth.manual_login import ManualLoginStore
+from aidast.core.model_calls import SQLiteModelCallSink
 from aidast.orchestration.scope import CoordinatorError, ScopeCoordinator
 from aidast.paths import RESULT_ROOT
 from aidast.reporting.poc_video import inspect_poc, prepare_poc, read_poc_video
 from aidast.reporting.runtime import ReportError
 from aidast.reporting.submission import MAX_REQUIREMENTS_BYTES, ProgramRequirements, export_report, inspect_report, save_requirements
 
-from .projection import DashboardProjector, ProjectionError, ScanNotFoundError
 from .launch import ProgramResolveRequest, ScanLaunchManager, ScanLaunchRequest, ExclusionPreparationRequest
 from .programs import ProgramRegistrationRequest, ProgramRegistry
+from .projection import DashboardProjector, ProjectionError, ScanNotFoundError
 from .reports import ReportCatalog, ReportNotFoundError
 from .scope_workflow import (
     ScopeCollectionRequest,
     ScopeDecisionRequest,
     ScopeWorkflowManager,
 )
-
 
 DEFAULT_ORIGINS = (
     "http://127.0.0.1:4173",
@@ -100,7 +107,9 @@ def create_app(
     app.state.projector = projector
     manager = launch_manager or ScanLaunchManager(resolved_root, projector)
     registry = ProgramRegistry(resolved_root)
-    workflow = scope_workflow or ScopeWorkflowManager(resolved_root, registry)
+    workflow = scope_workflow or ScopeWorkflowManager(
+        resolved_root, registry, model_call_sink=SQLiteModelCallSink(resolved_root),
+    )
     reports = ReportCatalog(resolved_root)
     manual_logins = ManualLoginStore(resolved_root)
     app.state.launch_manager = manager
@@ -406,6 +415,27 @@ def create_app(
             raise
         except (OSError, sqlite3.Error) as exc:
             raise HTTPException(status_code=503, detail="audit projection unavailable") from exc
+
+    @app.get("/api/v1/model-calls")
+    async def model_calls(
+        before: int | None = Query(default=None, ge=1),
+        limit: int = Query(default=100, ge=1, le=200),
+    ) -> dict[str, Any]:
+        try:
+            return projector.model_call_events(before=before, limit=limit)
+        except (OSError, sqlite3.Error) as exc:
+            raise HTTPException(status_code=503, detail="LLM log unavailable") from exc
+
+    @app.get("/api/v1/scans/{scan_id}/token-usage")
+    async def scan_token_usage(scan_id: str) -> dict[str, Any]:
+        try:
+            try:
+                projector.locate_database(scan_id)
+            except ScanNotFoundError:
+                manager.snapshot(scan_id)
+            return projector.scan_token_usage(scan_id)
+        except (OSError, sqlite3.Error) as exc:
+            raise HTTPException(status_code=503, detail="scan token usage unavailable") from exc
 
     @app.get("/api/v1/scans/{scan_id}/recon-activity")
     async def recon_activity(

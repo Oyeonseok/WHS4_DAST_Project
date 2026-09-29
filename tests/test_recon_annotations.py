@@ -210,6 +210,22 @@ class ObservationTests(unittest.TestCase):
         self.assertEqual(self.conn.execute('SELECT count(*) FROM endpoint_annotations').fetchone()[0], 0)
         self.assertEqual(self.conn.execute('SELECT status FROM annotation_runs').fetchone()[0], 'failed')
 
+    def test_tagging_records_bounded_batch_progress(self):
+        ObservationRecorder(self.conn, origin_id=self.origin, scan_id='scan', agent=FakeAgent()).record(
+            'login', self.items(),
+        )
+        events = [
+            json.loads(row[0])
+            for row in self.conn.execute(
+                "SELECT details_json FROM audit_events WHERE event_type='recon.activity' ORDER BY rowid"
+            )
+        ]
+        self.assertEqual(events, [
+            {'phase': 'observation_tagging', 'state': 'started', 'index': 1, 'total': 1, 'count': 2},
+            {'phase': 'observation_tagging', 'state': 'finished', 'index': 1, 'total': 1,
+             'count': 2, 'processed_count': 2, 'failed_count': 0},
+        ])
+
     def test_proxy_links_endpoint_and_scan_without_guessing_page(self):
         ObservationRecorder(self.conn, origin_id=self.origin, scan_id='scan').record('login', self.items())
         capture = Path(self.temp.name) / 'capture.jsonl'
