@@ -108,6 +108,7 @@ export function ReportSubmission({ reportId, language }: { reportId: string; lan
   const edit = (changes: Partial<RequirementsForm>) => { if (form) { setForm({ ...form, ...changes }); setDirty(true); setPocInfo(null); setPocError(''); } };
   const parsedRules = form ? parseRequirementsForm(form) : null;
   const ready = canExportSubmission(view, reportId, dirty, !!busy);
+  const generic = view?.platform === 'generic';
   const previewReady = canPreviewPoc(pocInfo, view, reportId, dirty, !!busy);
   const displayedFields = view ? { ...view.fields } : {};
   for (const check of view?.checks || []) {
@@ -169,8 +170,8 @@ export function ReportSubmission({ reportId, language }: { reportId: string; lan
   return <div className="report-submission" aria-busy={!!busy}>
     <div className="report-submission-status" role="status">
       <strong>{busy ? tk('보고서 처리 중…', 'Processing report…') : dirty ? tk('요구사항 변경사항을 저장하세요', 'Save the changed requirements') : view?.ready ? tk('자동 검사 통과 · ZIP 내보내기 가능', 'Automatic checks passed · ZIP export available') : tk('최종 내보내기 대기', 'Final export pending')}</strong>
-      <p>{tk('자동 검사 통과 후 제출 필드, 마스킹된 보고서와 증거를 ZIP으로 내려받습니다.', 'After automatic checks pass, download submission fields, the masked report and evidence as a ZIP.')}</p>
-      {view && <small>{view.platform === 'hackerone' ? 'HackerOne' : view.platform === 'intigriti' ? 'Intigriti' : 'Bugcrowd'} · {reportId}</small>}
+      <p>{generic ? tk('자동 검사 통과 후 기본 보고서와 마스킹된 증거를 ZIP으로 내려받습니다.', 'After automatic checks pass, download the general report and masked evidence as a ZIP.') : tk('자동 검사 통과 후 제출 필드, 마스킹된 보고서와 증거를 ZIP으로 내려받습니다.', 'After automatic checks pass, download submission fields, the masked report and evidence as a ZIP.')}</p>
+      {view && <small>{generic ? tk('일반 보고서', 'General report') : view.platform === 'hackerone' ? 'HackerOne' : view.platform === 'intigriti' ? 'Intigriti' : 'Bugcrowd'} · {reportId}</small>}
     </div>
     {error && <p className="form-error" role="alert">{error}</p>}
     <div className="button-row report-submission-actions">
@@ -192,12 +193,14 @@ export function ReportSubmission({ reportId, language }: { reportId: string; lan
         onError={() => { setPocInfo(null); setPocError(tk('PoC 영상 미리보기를 불러오지 못했습니다. 자동 생성을 다시 시도하세요.', 'Could not load the PoC video preview. Try automatic generation again.')); }}/ >}
     </section>
     {form && <section className="report-submission-section" aria-labelledby="report-rules-title">
-      <h3 id="report-rules-title">{tk('프로그램 제출 요구사항', 'Program submission requirements')}</h3>
-      <p className="muted">{tk('프로그램의 제출 안내나 양식을 기준으로 규칙을 설정하세요. 저장하면 자동 검사를 실행합니다.', 'Identify the rules from the program submission instructions or form. Saving runs the automatic checks.')}</p>
+      <h3 id="report-rules-title">{generic ? tk('보고서 추가 설정 (선택)', 'Additional report settings (optional)') : tk('프로그램 제출 요구사항', 'Program submission requirements')}</h3>
+      <p className="muted">{generic ? tk('기본 형식으로 내려받을 수 있습니다. 필요한 경우 필수 항목과 보고서 양식을 추가하세요.', 'Download the report in the default format. Add required fields or a custom template if needed.') : tk('프로그램의 제출 안내나 양식을 기준으로 규칙을 설정하세요. 저장하면 자동 검사를 실행합니다.', 'Identify the rules from the program submission instructions or form. Saving runs the automatic checks.')}</p>
       <fieldset disabled={!!busy} className="report-rules-form">
-        <label>{tk('요구사항 출처 (URL 또는 자료 설명)', 'Requirements source (URL or document description)')}<input value={form.source} maxLength={8192} onChange={event => edit({ source: event.target.value })}/></label>
-        <label className="report-rule-check"><input type="checkbox" checked={form.verified} onChange={event => edit({ verified: event.target.checked })}/><span>{tk('위 출처에서 프로그램의 제출 규칙을 확인했습니다', 'I identified the program submission rules from the source above')}</span></label>
-        <label className="report-rule-check"><input type="checkbox" checked={form.severityRequired} onChange={event => edit({ severityRequired: event.target.checked })}/><span>{tk('프로그램에서 심각도 입력을 요구합니다', 'The program requires severity')}</span></label>
+        {!generic && <>
+          <label>{tk('요구사항 출처 (URL 또는 자료 설명)', 'Requirements source (URL or document description)')}<input value={form.source} maxLength={8192} onChange={event => edit({ source: event.target.value })}/></label>
+          <label className="report-rule-check"><input type="checkbox" checked={form.verified} onChange={event => edit({ verified: event.target.checked })}/><span>{tk('위 출처에서 프로그램의 제출 규칙을 확인했습니다', 'I identified the program submission rules from the source above')}</span></label>
+        </>}
+        <label className="report-rule-check"><input type="checkbox" checked={form.severityRequired} onChange={event => edit({ severityRequired: event.target.checked })}/><span>{generic ? tk('심각도를 필수 항목으로 설정', 'Require severity') : tk('프로그램에서 심각도 입력을 요구합니다', 'The program requires severity')}</span></label>
         <label>{tk('필수 필드 이름 · JSON 배열', 'Required field names · JSON array')}<textarea rows={3} value={form.requiredFields} onChange={event => edit({ requiredFields: event.target.value })}/><small>{tk('예: ["title", "researcher_ip"] · 소문자와 밑줄을 사용하세요.', 'Example: ["title", "researcher_ip"] · Use lowercase names with underscores.')}</small></label>
         <label>{tk('추가 제출 필드 · JSON 객체', 'Additional submission fields · JSON object')}<textarea rows={3} value={form.additionalFields} onChange={event => edit({ additionalFields: event.target.value })}/><small>{tk('예: {"researcher_ip":"192.0.2.1"} · 기존 보고서 필드는 덮어쓸 수 없습니다.', 'Example: {"researcher_ip":"192.0.2.1"} · Existing report fields cannot be overwritten.')}</small></label>
         <label>{tk('보고서 템플릿 (선택)', 'Report template (optional)')}<textarea rows={3} maxLength={8192} value={form.reportTemplate} onChange={event => edit({ reportTemplate: event.target.value })}/></label>
@@ -221,7 +224,7 @@ export function ReportSubmission({ reportId, language }: { reportId: string; lan
           }}>{fieldLabel(check.field)}</a>}
         </li>)}</ul>
       </section>
-      <section className="report-submission-section" aria-labelledby="report-fields-title"><h3 id="report-fields-title">{tk('플랫폼 제출 필드', 'Platform submission fields')}</h3>
+      <section className="report-submission-section" aria-labelledby="report-fields-title"><h3 id="report-fields-title">{generic ? tk('보고서 항목', 'Report fields') : tk('플랫폼 제출 필드', 'Platform submission fields')}</h3>
         <dl className="report-submission-fields">{Object.entries(displayedFields).map(([key, value]) => <div key={key} id={`report-field-${key}`} tabIndex={-1}><dt>{fieldLabel(key)}</dt><dd>{value || tk('비어 있음', 'Empty')}</dd></div>)}</dl>
       </section>
       <section className="report-submission-section" aria-labelledby="report-evidence-title"><h3 id="report-evidence-title">{tk('마스킹된 증거 메타데이터', 'Masked evidence metadata')}</h3>
@@ -231,7 +234,7 @@ export function ReportSubmission({ reportId, language }: { reportId: string; lan
         {view.evidence.map(item => <details className="report-evidence" key={item.evidence_id}><summary>{item.evidence_id} · {item.kind}</summary><pre>{JSON.stringify(item.details, null, 2)}</pre><dl><dt>{tk('원본 해시', 'Source digest')}</dt><dd>{item.content_sha256}</dd><dt>{tk('마스킹된 메타데이터 해시', 'Masked metadata digest')}</dt><dd>{item.sanitized_sha256}</dd></dl></details>)}
         {!view.evidence.length && <p className="muted">{tk('표시할 증거가 없습니다.', 'No evidence to display.')}</p>}
       </section>
-      <section className="report-submission-section" aria-labelledby="report-text-title"><h3 id="report-text-title">{tk('제출용 보고서 본문', 'Submission report text')}</h3><pre className="report-preview">{view.markdown || tk('본문을 생성하려면 차단 항목을 해결하세요.', 'Resolve the blocking issues to generate the report text.')}</pre></section>
+      <section className="report-submission-section" aria-labelledby="report-text-title"><h3 id="report-text-title">{generic ? tk('보고서 본문', 'Report text') : tk('제출용 보고서 본문', 'Submission report text')}</h3><pre className="report-preview">{view.markdown || tk('본문을 생성하려면 차단 항목을 해결하세요.', 'Resolve the blocking issues to generate the report text.')}</pre></section>
     </>}
   </div>;
 }

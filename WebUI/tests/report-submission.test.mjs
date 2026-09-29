@@ -48,6 +48,21 @@ test('blocked reports remain inspectable but cannot be exported', () => {
   assert.equal(submission.canExportSubmission?.(response, 'report_' + 'e'.repeat(32)), false);
 });
 
+test('generic reports export without platform rules and still respect source blockers', () => {
+  const generic = { ...response, platform: 'generic', requirements: {
+    ...response.requirements, verified: false, source: '', severity_required: false,
+  } };
+  const parsed = submission.parseReportSubmission(generic, reportId);
+  assert.equal(parsed?.platform, 'generic');
+  assert.equal(submission.canExportSubmission(parsed, reportId), true);
+  const blocked = submission.parseReportSubmission({ ...generic, ready: false, checks: [
+    { code: 'source_integrity', level: 'blocker', field: null, message: 'Stale source' },
+  ] }, reportId);
+  assert.equal(blocked?.ready, false);
+  assert.equal(submission.canExportSubmission(blocked, reportId), false);
+  assert.equal(submission.parseReportSubmission({ ...generic, checks: blocked.checks }, reportId), null);
+});
+
 const form = { source: response.requirements.source, verified: true, severityRequired: false,
   requiredFields: '["researcher_ip"]', additionalFields: '{"researcher_ip":"192.0.2.1"}',
   reportTemplate: '', impactTemplate: 'Impact: {impact}' };

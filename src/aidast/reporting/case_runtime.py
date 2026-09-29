@@ -114,8 +114,8 @@ def _context(source: dict[str, Any], platform: str) -> dict[str, Any]:
     from .runtime import PLATFORMS, ReportError, SCHEMA_VERSION, _sha
 
     if platform not in PLATFORMS:
-        raise ReportError("platform must be hackerone, bugcrowd, or intigriti")
-    skill_root = files("aidast.skills.reporting")
+        raise ReportError("platform must be hackerone, bugcrowd, intigriti, or generic")
+    skill_root = files("aidast.skills.reporting.generic" if platform == "generic" else "aidast.skills.reporting")
     skill = skill_root.joinpath("SKILL.md").read_text(encoding="utf-8")
     template = skill_root.joinpath("references", platform + ".md").read_text(encoding="utf-8")
     context = {"schema_version": SCHEMA_VERSION, "platform": platform,
@@ -254,7 +254,11 @@ def prepare_case_report(pipeline_db: Path, output_dir: Path, *, platform: str, c
             staging.unlink(missing_ok=True)
     from .runtime import _publish
     _publish(output / "Report.context.json", canonical_json(context) + "\n")
-    _publish(output / "Report.schema.json", canonical_json(ReportDraft.model_json_schema()) + "\n")
+    schema = ReportDraft.model_json_schema()
+    if platform != "generic":
+        # Keep existing platform artifacts byte-identical across generic support upgrades.
+        schema["properties"]["platform"]["enum"].remove("generic")
+    _publish(output / "Report.schema.json", canonical_json(schema) + "\n")
     _, _, stored, _ = _load(target)
     if stored is not None:
         _publish(output / "Report.md", stored["markdown"])

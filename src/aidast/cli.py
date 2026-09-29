@@ -615,7 +615,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     report_run.add_argument(
         "--platform", required=True,
-        choices=("hackerone", "intigriti", "bugcrowd"),
+        choices=("hackerone", "intigriti", "bugcrowd", "generic"),
     )
     report_run.add_argument("--output-dir", type=Path, default=RESULT_ROOT / "ReportRun")
     report_source = report_run.add_mutually_exclusive_group()
@@ -1480,7 +1480,7 @@ def _run_recon(
                 work("validation", "execute", "finished")
                 report_results: list[dict] = []
                 report_platform = report_platform_for_program_url(program_url)
-                if validation_result.status == "completed" and report_platform is not None:
+                if validation_result.status == "completed":
                     work("report", "draft", "started")
                     report_results = generate_scan_reports(
                         pipeline_path,
@@ -1491,8 +1491,6 @@ def _run_recon(
                     )
                     work("report", "draft", "finished")
                     print(f"Report drafts generated: {len(report_results)}")
-                elif validation_result.status == "completed":
-                    print("Automatic reports unavailable for this program platform.")
                 print(f"Recon handoff saved: {handoff_path}")
                 print(
                     f"Legacy Attack plan saved: {legacy_plan['database']} "

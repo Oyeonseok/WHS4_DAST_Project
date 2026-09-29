@@ -437,12 +437,12 @@ class SharedValidationReportingTests(unittest.TestCase):
         self.assertEqual(writer.calls, 2)
         self.assertEqual(results[0]["status"], "drafted")
 
-    def test_report_platform_detects_supported_hosts_only(self):
+    def test_report_platform_detects_supported_hosts_and_defaults_to_generic(self):
         self.assertEqual(report_platform_for_program_url("https://hackerone.com/example"), "hackerone")
         self.assertEqual(report_platform_for_program_url("https://bugcrowd.com/engagements/example"), "bugcrowd")
         self.assertEqual(report_platform_for_program_url("https://app.intigriti.com/programs/example"), "intigriti")
-        self.assertIsNone(report_platform_for_program_url("https://yeswehack.com/programs/example"))
-        self.assertIsNone(report_platform_for_program_url("https://fakehackerone.com/example"))
+        self.assertEqual(report_platform_for_program_url("https://yeswehack.com/programs/example"), "generic")
+        self.assertEqual(report_platform_for_program_url("https://fakehackerone.com/example"), "generic")
 
     def test_report_uses_only_validation_evidence_from_mixed_decision_namespaces(self):
         evidence = self.complete()

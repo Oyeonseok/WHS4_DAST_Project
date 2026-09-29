@@ -5,7 +5,7 @@ export type ProgramRequirements = {
 };
 
 export type ReportSubmissionView = {
-  report_id: string; platform: 'hackerone' | 'intigriti' | 'bugcrowd'; ready: boolean;
+  report_id: string; platform: 'hackerone' | 'intigriti' | 'bugcrowd' | 'generic'; ready: boolean;
   revision_sha256: string; requirements: ProgramRequirements;
   fields: Record<string, string>; markdown: string;
   evidence: { evidence_id: string; kind: string; details: unknown; content_sha256: string; sanitized_sha256: string }[];
@@ -22,7 +22,7 @@ const nullableText = (value: unknown) => value === null || text(value);
 
 export function parseReportSubmission(value: unknown, reportId: string): ReportSubmissionView | null {
   if (!record(value) || !/^report_[a-f0-9]{32}$/.test(reportId) || value.report_id !== reportId
-    || !['hackerone', 'intigriti', 'bugcrowd'].includes(String(value.platform))
+    || !['hackerone', 'intigriti', 'bugcrowd', 'generic'].includes(String(value.platform))
     || typeof value.ready !== 'boolean' || !text(value.revision_sha256) || !digest.test(value.revision_sha256)
     || !textMap(value.fields) || !text(value.markdown)) return null;
   const rules = value.requirements;
@@ -33,7 +33,8 @@ export function parseReportSubmission(value: unknown, reportId: string): ReportS
   if (!Array.isArray(value.checks) || value.checks.length > 256 || !value.checks.every(check => record(check)
     && text(check.code) && ['pass', 'warning', 'blocker'].includes(String(check.level))
     && nullableText(check.field) && text(check.message))) return null;
-  if (value.ready && (!rules.verified || !rules.source.trim() || value.checks.some(check => check.level === 'blocker'))) return null;
+  if (value.ready && ((value.platform !== 'generic' && (!rules.verified || !rules.source.trim()))
+    || value.checks.some(check => check.level === 'blocker'))) return null;
   if (!Array.isArray(value.evidence) || value.evidence.length > 2048 || !value.evidence.every(item => record(item)
     && text(item.evidence_id) && identifier.test(item.evidence_id) && text(item.kind)
     && Object.hasOwn(item, 'details') && text(item.content_sha256) && digest.test(item.content_sha256)
@@ -45,7 +46,7 @@ export function parseReportSubmission(value: unknown, reportId: string): ReportS
 
 export function canExportSubmission(value: ReportSubmissionView | null, reportId: string, dirty = false, busy = false): boolean {
   return !dirty && !busy && !!value && value.report_id === reportId && value.ready && digest.test(value.revision_sha256)
-    && value.requirements.verified && !value.checks.some(check => check.level === 'blocker');
+    && (value.platform === 'generic' || value.requirements.verified) && !value.checks.some(check => check.level === 'blocker');
 }
 
 export type PocInfo = {

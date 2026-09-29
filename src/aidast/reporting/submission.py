@@ -294,10 +294,10 @@ def sanitize_writer_context(context: dict) -> dict:
     return copy
 
 
-def _requirements(report_db: Path) -> ProgramRequirements:
+def _requirements(report_db: Path, *, severity_required: bool = True) -> ProgramRequirements:
     path = _path(report_db.parent / "ProgramRequirements.json")
     if not path.exists():
-        return ProgramRequirements()
+        return ProgramRequirements(severity_required=severity_required)
     if not path.is_file() or path.stat().st_size > MAX_REQUIREMENTS_BYTES:
         raise ReportError("program requirements cannot be safely read")
     document = json.loads(path.read_text(encoding="utf-8"))
@@ -478,14 +478,6 @@ def inspect_report(report_db: Path) -> dict:
     def block(code: str, message: str, field: str | None = None) -> None:
         checks.append({"code": code, "level": "blocker", "field": field, "message": message})
 
-    requirements = ProgramRequirements()
-    try:
-        requirements = _requirements(path)
-    except (ValueError, OSError, UnicodeError):
-        block("program_requirements", "Program requirements are invalid or cannot be safely read.")
-    if not requirements.verified:
-        block("program_requirements", "Program requirements have not been verified.")
-
     run, context, stored = {}, {}, None
     source_fingerprint = "unavailable"
     try:
@@ -498,6 +490,14 @@ def inspect_report(report_db: Path) -> dict:
             run, context, stored, _ = case_runtime._load(path, verify_source=False)
         except (ValueError, OSError, sqlite3.Error, KeyError, TypeError):
             run, context, stored = {}, {}, None
+    generic = context.get("platform") == "generic"
+    requirements = ProgramRequirements(severity_required=not generic)
+    try:
+        requirements = _requirements(path, severity_required=not generic)
+    except (ValueError, OSError, UnicodeError):
+        block("program_requirements", "Program requirements are invalid or cannot be safely read.")
+    if not generic and not requirements.verified:
+        block("program_requirements", "Program requirements have not been verified.")
     if run:
         try:
             source_path = _path(path.parent / run["source_path"], existing=True)

@@ -555,7 +555,8 @@ history를 유지해 재개합니다.
 Report는 `Pipeline.db`의 Validation `case_id`를 선택해 로컬 초안을 만듭니다.
 통합 실행에서는 case별로 `result/ReportRun/<scan_id>/<case_id>/`에 자동 저장합니다.
 `CONFIRMED`만 draft 대상이고, `KNOWN`은 원본 case를 가리키며 `CONTESTED`는
-review-only로 남습니다. HackerOne, Intigriti, Bugcrowd를 지원하며 자동 제출하지 않습니다.
+review-only로 남습니다. HackerOne, Intigriti, Bugcrowd는 플랫폼별 형식으로 생성하고,
+플랫폼 미지정·미식별 대상은 기본 `generic` 형식을 사용합니다. 자동 제출하지 않습니다.
 
 ```bash
 aidast report run \
@@ -570,6 +571,11 @@ aidast report status \
 
 `Report.db`, `Report.json`, `Report.md`는 Validation decision과 인용 evidence에
 연결됩니다. Decision hash가 바뀌면 기존 Report는 stale로 판정됩니다.
+
+기존 스캔의 일반 보고서는 위 명령의 `--platform`을 `generic`으로 지정해 생성할 수 있습니다.
+기본 형식은 대상·취약점·요약·재현 절차·관측 결과·영향·개선 권고를 포함합니다.
+대시보드에서 일반 보고서의 Markdown과 마스킹된 ZIP을 다운로드할 때 플랫폼 제출 규칙을
+입력할 필요는 없습니다. 추가로 설정한 필수 필드와 Validation·Scope·근거 무결성 검사는 유지됩니다.
 
 ## Legacy Validation과 Report
 

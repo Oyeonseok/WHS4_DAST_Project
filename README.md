@@ -295,8 +295,9 @@ aidast run "<HACKERONE_PROGRAM_URL>" \
 
 `aidast run`은 Recon, 태깅, Handoff, Native Attack, Chaining,
 Shared Validation 순서로 실행한 뒤 현재 확정된 `CONFIRMED` case마다 Report 로컬 초안을 자동 생성합니다.
-지원 플랫폼은 HackerOne, Intigriti, Bugcrowd입니다. 확정된 case가 없거나 다른 플랫폼이면
-Report를 생성하지 않습니다. 플랫폼에 자동 제출하지 않습니다.
+HackerOne, Intigriti, Bugcrowd는 플랫폼별 형식으로 생성하고, 플랫폼이 지정되지 않거나
+지원 플랫폼으로 식별되지 않으면 기본 `generic` 보안 보고서 형식으로 생성합니다.
+확정된 case가 없으면 Report를 생성하지 않습니다. 플랫폼에 자동 제출하지 않습니다.
 
 ### 4. 검증된 case의 Report 초안 수동 생성·재실행
 
@@ -308,7 +309,8 @@ aidast report run \
   --output-dir result/ReportRun/<scan_id>/<case_id>
 ```
 
-지원 플랫폼은 `hackerone`, `intigriti`, `bugcrowd`입니다.
+보고서 형식은 `hackerone`, `intigriti`, `bugcrowd`, `generic`입니다.
+일반 대상이나 기존 스캔의 보고서를 생성하려면 위 명령에서 `--platform generic`을 사용하세요.
 `CONFIRMED` case만 초안을 만들 수 있습니다.
 
 ## 핵심 워크플로

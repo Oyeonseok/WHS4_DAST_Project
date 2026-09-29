@@ -126,10 +126,17 @@ class PipelineCliTests(unittest.TestCase):
                     "--attack-output-root", str(root / "AttackRuns"),
                 ])
             self.assertEqual(result, 0)
+            self.assertNotIn("Automatic reports unavailable", stdout.getvalue())
             progress = [
                 event for event in DashboardProjector(root).stored_events_after(scan_id, 0)
                 if event["payload"].get("message_code") == "agent.work"
             ]
+            self.assertIn(("report", "draft", "finished"), [
+                (event["payload"]["message_params"]["agent"],
+                 event["payload"]["message_params"]["step"],
+                 event["payload"]["message_params"]["state"])
+                for event in progress
+            ])
             self.assertIn(("main", "recon_plan", "started"), [
                 (event["payload"]["message_params"]["agent"],
                  event["payload"]["message_params"]["step"],

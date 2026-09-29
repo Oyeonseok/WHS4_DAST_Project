@@ -11,7 +11,7 @@ from typing import Protocol
 
 from .models import ReportDraft
 
-PLATFORMS = ("hackerone", "bugcrowd", "intigriti")
+PLATFORMS = ("hackerone", "bugcrowd", "intigriti", "generic")
 SCHEMA_VERSION = "2.0"
 
 
