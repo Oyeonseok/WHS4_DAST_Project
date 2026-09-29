@@ -5,6 +5,7 @@ import tempfile
 import json
 import io
 import os
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, call, patch
@@ -19,6 +20,7 @@ from aidast.recon.tools.playwright_driver import (
     InteractionConfig, ManualSessionConfig, PlaywrightDriver,
     _wait_for_manual_login,
 )
+from aidast.recon.tools.katana_browser import open_katana_browser
 from aidast.auth.endpoints import AuthenticationEndpoint
 from aidast.recon.tools.page_identity import canonical_visit_key, screen_fingerprint
 from aidast.scope.models import AssetType
@@ -32,6 +34,181 @@ class ReconBrowserTransportTests(unittest.TestCase):
         self.config = ManualSessionConfig(login_url=self.policy.asset, session_file="unused.json")
         self.driver = PlaywrightDriver(self.policy.asset, self.config, target_policy=self.policy,
                                        proxy_url="http://127.0.0.1:8080")
+
+    def test_katana_browser_uses_private_proxied_profile_and_keeps_live_context(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self.policy.allowed_path_prefixes = ["/"]
+            self.driver.request_headers = {"Authorization": "Bearer injected"}
+            self.driver.browser_context_token = "isolated-render-token"
+            self.config.session_file = str(Path(directory) / "session.json")
+            original = {"cookies": [{"name": "sid", "value": "private", "domain": "example.com", "path": "/"},
+                                    {"name": "foreign", "value": "leak", "domain": "other.test", "path": "/"}],
+                        "origins": [{"origin": "https://example.com", "localStorage": []}]}
+            self.driver.session_path.write_text(json.dumps(original))
+            live_context = Mock()
+            self.driver.context = live_context
+            isolated_context = Mock()
+            isolated_context.storage_state.return_value = original
+            isolated_context.cookies.return_value = [original["cookies"][0]]
+            isolated_context.new_page.return_value.evaluate.return_value = {}
+            isolated_context.new_page.return_value.goto.return_value = Mock(status=200, url=self.policy.asset)
+            isolated_context.new_page.return_value.url = self.policy.asset
+            isolated_context.new_page.return_value.locator.return_value.count.return_value = 0
+            isolated_context.new_page.return_value.locator.return_value.inner_text.return_value = ""
+            isolated_browser = Mock(contexts=[isolated_context])
+            playwright = Mock()
+            playwright.chromium.executable_path = "/fake/chrome"
+            playwright.chromium.connect_over_cdp.return_value = isolated_browser
+            self.driver.playwright = playwright
+            process = Mock()
+            process.poll.return_value = None
+            failures = []
+            with patch("aidast.recon.tools.katana_browser.subprocess.Popen", return_value=process) as popen, patch.object(
+                self.driver, "_wait_for_cdp", return_value="ws://127.0.0.1/devtools/browser/isolated"
+            ), patch.object(self.driver, "_find_free_port", return_value=9222):
+                lease = open_katana_browser(self.driver, self.driver.proxy_url, self.policy,
+                                            diagnostic_callback=lambda event, **details: failures.append((event, details)))
+            self.assertIsNotNone(lease, str(failures))
+            self.assertEqual(lease.chrome_ws_url, "ws://127.0.0.1/devtools/browser/isolated")
+            command = popen.call_args.args[0]
+            self.assertIn("--proxy-server=http://127.0.0.1:8080", command)
+            self.assertIn("--proxy-bypass-list=<-loopback>", command)
+            self.assertNotIn("--no-proxy-server", command)
+            self.assertIs(self.driver.context, live_context)
+            live_context.unroute_all.assert_not_called()
+            self.assertEqual([cookie["name"] for cookie in isolated_context.add_cookies.call_args.args[0]], ["sid"])
+            isolated_context.set_extra_http_headers.assert_called_once_with(
+                {"Authorization": "Bearer injected"}
+            )
+            isolated_context.route.assert_called_once()
+            isolated_context.unroute.assert_called_once()
+            bootstrap_guard = isolated_context.route.call_args.args[1]
+            self.assertIs(bootstrap_guard, isolated_context.unroute.call_args.args[1])
+            post_route = Mock(request=SimpleNamespace(method="POST"))
+            bootstrap_guard(post_route)
+            post_route.abort.assert_called_once_with("blockedbyclient")
+            cdn_request = SimpleNamespace(
+                method="GET", url="https://cdn.example.net/app.js",
+                resource_type="script", frame=SimpleNamespace(url=self.policy.asset),
+                is_navigation_request=lambda: False, all_headers=lambda: {},
+            )
+            cdn_route = Mock(request=cdn_request)
+            bootstrap_guard(cdn_route)
+            headers = cdn_route.continue_.call_args.kwargs["headers"]
+            self.assertEqual(headers[BROWSER_TOKEN_HEADER], "isolated-render-token")
+            self.assertEqual(headers[BROWSER_MODE_HEADER], "passive")
+            self.assertNotIn("Authorization", headers)
+            profile = lease.profile_path
+            self.assertTrue(profile.exists())
+            lease.close()
+            process.terminate.assert_called_once()
+            self.assertFalse(profile.exists())
+            self.assertEqual(json.loads(self.driver.session_path.read_text()), original)
+
+    def test_katana_timeout_diagnostics_do_not_expose_auth_header(self):
+        diagnostics = []
+        output = io.StringIO()
+        def timeout(command):
+            raise subprocess.TimeoutExpired(command, timeout=1)
+        with patch("aidast.recon.tools.endpoint_discovery.shutil.which", return_value="katana"), patch(
+            "aidast.recon.tools.endpoint_discovery._run_katana", side_effect=timeout
+        ), patch("sys.stdout", output):
+            rows = discover_with_katana(
+                self.policy.asset, mode="standard",
+                auth_headers={"Authorization": "Bearer secret-token"},
+                proxy_url=self.driver.proxy_url, target_policy=self.policy,
+                diagnostic_callback=lambda event, **details: diagnostics.append((event, details)),
+            )
+        self.assertEqual(rows, [])
+        self.assertNotIn("secret-token", output.getvalue())
+        self.assertNotIn("secret-token", str(diagnostics))
+        self.assertEqual(diagnostics[0][1]["error_type"], "TimeoutExpired")
+
+    def test_katana_stderr_diagnostics_do_not_expose_secrets(self):
+        diagnostics = []
+        output = io.StringIO()
+        completed = subprocess.CompletedProcess(["katana"], 1, "", "Bearer private-secret")
+        with patch("aidast.recon.tools.endpoint_discovery.shutil.which", return_value="katana"), patch(
+            "aidast.recon.tools.endpoint_discovery._run_katana", return_value=completed
+        ), patch("sys.stdout", output):
+            rows = discover_with_katana(
+                self.policy.asset, mode="standard", auth_headers={},
+                proxy_url=self.driver.proxy_url, target_policy=self.policy,
+                diagnostic_callback=lambda event, **details: diagnostics.append((event, details)),
+            )
+        self.assertEqual(rows, [])
+        self.assertNotIn("private-secret", output.getvalue())
+        self.assertNotIn("private-secret", str(diagnostics))
+
+    def test_katana_browser_skips_clone_for_path_restricted_policy(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self.config.session_file = str(Path(directory) / "session.json")
+            self.driver.session_path.write_text('{"cookies": [], "origins": []}')
+            self.driver.playwright = Mock()
+            with patch("aidast.recon.tools.katana_browser.subprocess.Popen") as launch, patch.object(
+                self.driver, "_find_free_port", return_value=9222
+            ) as port, patch.object(self.driver, "_wait_for_cdp", side_effect=RuntimeError("test")):
+                self.assertIsNone(open_katana_browser(self.driver, self.driver.proxy_url, self.policy))
+            port.assert_not_called()
+            launch.assert_not_called()
+
+    def test_katana_browser_rejects_auth_check_redirect_to_login(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self.policy.allowed_path_prefixes = ["/"]
+            self.config.auth_check_url = "/api/me"
+            self.config.session_file = str(Path(directory) / "session.json")
+            state = {"cookies": [], "origins": []}
+            self.driver.session_path.write_text(json.dumps(state))
+            context = Mock()
+            context.new_page.return_value.evaluate.return_value = {}
+            context.new_page.return_value.url = self.policy.asset
+            context.new_page.return_value.locator.return_value.count.return_value = 0
+            context.new_page.return_value.locator.return_value.inner_text.return_value = ""
+            context.cookies.return_value = []
+            context.new_page.return_value.goto.side_effect = [
+                Mock(status=200, url=self.policy.asset),
+                Mock(status=200, url="https://example.com/login"),
+            ]
+            playwright = Mock()
+            playwright.chromium.executable_path = "/fake/chrome"
+            playwright.chromium.connect_over_cdp.return_value.contexts = [context]
+            self.driver.playwright = playwright
+            process = Mock()
+            process.poll.return_value = None
+            failures = []
+            with patch("aidast.recon.tools.katana_browser.subprocess.Popen", return_value=process), patch.object(
+                self.driver, "_find_free_port", return_value=9222
+            ), patch.object(self.driver, "_wait_for_cdp", return_value="ws://127.0.0.1/isolated"):
+                lease = open_katana_browser(self.driver, self.driver.proxy_url, self.policy,
+                                            diagnostic_callback=lambda event, **details: failures.append((event, details)))
+            self.assertIsNone(lease)
+            self.assertEqual(failures[0][1]["step"], "verify_session", str(failures))
+            process.terminate.assert_called_once()
+
+    def test_katana_browser_rejects_default_login_redirect(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self.policy.allowed_path_prefixes = ["/"]
+            self.config.session_file = str(Path(directory) / "session.json")
+            self.driver.session_path.write_text('{"cookies": [], "origins": []}')
+            context = Mock()
+            context.new_page.return_value.goto.return_value = Mock(
+                status=200, url="https://example.com/login"
+            )
+            context.new_page.return_value.url = "https://example.com/login"
+            context.new_page.return_value.evaluate.return_value = {}
+            context.cookies.return_value = []
+            context.new_page.return_value.locator.return_value.inner_text.return_value = ""
+            playwright = Mock()
+            playwright.chromium.executable_path = "/fake/chrome"
+            playwright.chromium.connect_over_cdp.return_value.contexts = [context]
+            self.driver.playwright = playwright
+            process = Mock()
+            process.poll.return_value = None
+            with patch("aidast.recon.tools.katana_browser.subprocess.Popen", return_value=process), patch.object(
+                self.driver, "_find_free_port", return_value=9222
+            ), patch.object(self.driver, "_wait_for_cdp", return_value="ws://127.0.0.1/isolated"):
+                self.assertIsNone(open_katana_browser(self.driver, self.driver.proxy_url, self.policy))
+            process.terminate.assert_called_once()
 
     def test_redirect_loop_page_is_not_visited_as_endpoint(self):
         page = Mock(url="https://example.com/api/login/login/login")
@@ -185,6 +362,25 @@ class ReconBrowserTransportTests(unittest.TestCase):
         self.assertEqual([item["url"] for item in results], [
             "https://example.com/api/profile"
         ])
+
+    def test_sparse_cdp_result_merges_header_fallback(self):
+        calls = []
+        def run(command):
+            calls.append(command)
+            return SimpleNamespace(
+                returncode=0,
+                stdout=("https://example.com/\n" if len(calls) == 1
+                        else "https://example.com/api/profile\n"), stderr="",
+            )
+        with patch("aidast.recon.tools.endpoint_discovery.shutil.which", return_value="katana"), patch(
+            "aidast.recon.tools.endpoint_discovery._run_katana", side_effect=run
+        ):
+            rows = discover_with_katana(
+                "https://example.com/", mode="headless", auth_headers={},
+                chrome_ws_url="ws://127.0.0.1/isolated",
+            )
+        self.assertEqual(len(calls), 2)
+        self.assertEqual({item["path"] for item in rows}, {"/", "/api/profile"})
 
     def test_unparseable_cdp_headless_output_uses_header_fallback(self):
         calls = []

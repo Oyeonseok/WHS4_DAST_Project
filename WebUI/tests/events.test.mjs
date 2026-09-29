@@ -29,6 +29,17 @@ import {
 } from '../src/lib/activity.ts';
 
 const event = (id = 8, overrides = {}) => ({ version: 1, event_id: id, scan_id: DEMO_SCAN, occurred_at: '2026-09-20T06:00:00Z', type: 'log.appended', payload: { stage: 'Attack', level: 'info', message: 'Redacted fixture event' }, ...overrides });
+test('Recon activity distinguishes planned coverage and unverified detail candidates', () => {
+  const planned = {message: '', message_code: 'recon.activity', message_params: {
+    phase: 'ffuf', state: 'planned', root_count: 3, planned_requests: 14256,
+    request_budget: 500, coverage_may_be_limited: 1}};
+  assert.match(localizeActivityMessage('ko', planned), /14.?256/);
+  assert.match(localizeActivityMessage('ko', planned), /500/);
+  const deferred = {message: '', message_code: 'recon.activity', message_params: {
+    phase: 'adaptive_js', state: 'finished', detail_probe_limit: 20, detail_deferred_candidates: 3}};
+  assert.match(localizeActivityMessage('ko', deferred), /미검증 후보 3개/);
+  assert.match(localizeActivityMessage('en', deferred), /3 unverified candidates/);
+});
 test('sample preview selects demo transport without replacing the configured live mode', () => {
   assert.equal(resolveTransportMode('live', ''), 'live');
   assert.equal(resolveTransportMode('live', '?sample=0'), 'live');
@@ -140,6 +151,28 @@ test('activity codes localize live messages and audit types without exposing raw
   assert.equal(localizeActivityMessage('ko', { message: 'Recon activity', message_code: 'recon.activity', message_params: { phase: 'ffuf', state: 'finished', index: 2, total: 3, count: 4 } }), 'ffuf 경로 탐색 종료 · 대상 2/3 · 결과 4건');
   assert.equal(localizeActivityMessage('ko', { message: 'Scan paused by operator.', message_code: 'pipeline.paused' }), '스캔 실행이 일시정지됐습니다.');
 });
+test('AI tagging shows observation and batch progress in both languages', () => {
+  const log = { message: 'Agent work', message_code: 'agent.work', message_params: {
+    agent: 'recon', step: 'tagging', state: 'progress', progress: 82,
+    processed: 25, observation_total: 50, batch_number: 1, batch_total: 2, failed: 0,
+  } };
+  const parsed = parseEvent(event(8, { payload: { stage: 'Recon', level: 'info', ...log } }), DEMO_SCAN);
+  assert.ok(parsed, 'all tagging counters must survive the live event contract');
+  const snapshot = applyEvent(demoSnapshot(), parsed);
+  assert.ok(parseSnapshot(snapshot, DEMO_SCAN), 'tagging logs must not invalidate a refreshed snapshot');
+  assert.deepEqual(snapshot.logs.at(-1).message_params, log.message_params);
+  assert.equal(parseEvent(event(8, { payload: { stage: 'Recon', level: 'info', ...log,
+    message_params: { ...log.message_params, extra1: 1, extra2: 2, extra3: 3, extra4: 4 },
+  } }), DEMO_SCAN), null, 'metadata remains bounded');
+  assert.match(localizeActivityMessage('ko', log), /처리 25\/50건 · 배치 1\/2 완료/);
+  assert.match(localizeActivityMessage('ko', log), /AI 태깅 · 50%/);
+  assert.match(localizeActivityMessage('en', log), /processed 25\/50 · batches 1\/2 completed/);
+  assert.match(localizeActivityMessage('ko', { ...log, message_params: { ...log.message_params, failed: 3 } }), /실패 3건/);
+  const recovered = { ...log, message_params: { agent: 'recon', step: 'tagging', state: 'progress', processed: 25, observation_total: 50 } };
+  assert.match(localizeActivityMessage('ko', recovered), /처리 25\/50건/);
+  assert.doesNotMatch(localizeActivityMessage('ko', recovered), /undefined|배치/);
+});
+
 test('synthetic scan activity follows the selected display language', () => {
   const event = demoSnapshot().logs[0];
   assert.equal(localizeActivityMessage('en', event), 'Demo Scope and approval hashes match. Only synthetic lab data is used.');

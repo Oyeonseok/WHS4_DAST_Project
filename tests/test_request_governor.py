@@ -182,8 +182,8 @@ def delay_transaction_entry(g, clock, delay):
     from contextlib import contextmanager
     original = g._transaction
     @contextmanager
-    def delayed():
-        with original() as conn:
+    def delayed(**kwargs):
+        with original(**kwargs) as conn:
             clock.now += delay
             yield conn
     g._transaction = delayed

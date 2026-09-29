@@ -332,6 +332,7 @@ class TargetPolicy(TargetPolicyProposal):
             "excluded_path_prefixes": self.excluded_path_prefixes,
             "allowed_methods": self.allowed_methods,
             "max_requests": self.limits.max_requests,
+            "timeout_seconds": self.limits.timeout_seconds,
             "mitm_capture_bodies": self.tools.mitm_capture_bodies,
         }
 

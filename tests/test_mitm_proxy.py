@@ -1,7 +1,10 @@
 from __future__ import annotations
+import asyncio
 
 import tempfile
+import os
 import runpy
+import subprocess
 import sys
 import types
 import unittest
@@ -10,7 +13,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from aidast.recon.policy import TargetPolicy
-from aidast.recon.tools.mitm_proxy import start_mitmproxy, stop_mitmproxy
+from aidast.recon.tools.mitm_proxy import _wait_for_proxy_port, start_mitmproxy, stop_mitmproxy
 from aidast.scope.models import AssetType
 
 
@@ -83,7 +86,7 @@ class MitmAddonBudgetTests(unittest.TestCase):
             },
         )
         flow.request.pretty_url = "https://fonts.googleapis.com/css2?family=Roboto"
-        addon.request(flow)
+        asyncio.run(addon.request(flow))
         self.assertEqual(flow.response.status_code, 403)
         self.assertTrue(flow.metadata["aidast_policy_blocked"])
         self.assertEqual(addon.request_count, 0)
@@ -92,11 +95,11 @@ class MitmAddonBudgetTests(unittest.TestCase):
         addon = self._addon()
         for index in range(8):
             flow = self._flow(f"/crawl/{index}")
-            addon.request(flow)
+            asyncio.run(addon.request(flow))
             self.assertIsNone(flow.response)
 
         blocked = self._flow("/crawl/deferred")
-        addon.request(blocked)
+        asyncio.run(addon.request(blocked))
         self.assertIsNotNone(blocked.response)
         self.assertTrue(blocked.metadata["aidast_deferred_candidate"])
         self.assertEqual(addon.request_count, 8)
@@ -109,7 +112,7 @@ class MitmAddonBudgetTests(unittest.TestCase):
                 "Sec-Fetch-Mode": "cors",
             },
         )
-        addon.request(browser_api)
+        asyncio.run(addon.request(browser_api))
         self.assertIsNone(browser_api.response)
         self.assertEqual(browser_api.metadata["aidast_priority"], 1)
         self.assertEqual(addon.request_count, 9)
@@ -119,7 +122,7 @@ class MitmAddonBudgetTests(unittest.TestCase):
         katana = self._flow(
             "/crawl", headers={"X-AIDAST-Source": "katana"}
         )
-        addon.request(katana)
+        asyncio.run(addon.request(katana))
         self.assertEqual(katana.metadata["aidast_priority"], 4)
         self.assertNotIn("X-AIDAST-Source", katana.request.headers)
 
@@ -127,20 +130,20 @@ class MitmAddonBudgetTests(unittest.TestCase):
             "/crawl", headers={"X-AIDAST-Source": "katana"}
         )
         before_duplicate = addon.request_count
-        addon.request(duplicate)
+        asyncio.run(addon.request(duplicate))
         self.assertEqual(duplicate.metadata["aidast_priority"], 6)
         self.assertTrue(duplicate.metadata["aidast_duplicate"])
         self.assertEqual(addon.request_count, before_duplicate + 1)
 
         ffuf = self._flow("/guess", headers={"X-AIDAST-Source": "ffuf"})
-        addon.request(ffuf)
+        asyncio.run(addon.request(ffuf))
         self.assertEqual(ffuf.metadata["aidast_priority"], 5)
         self.assertNotIn("X-AIDAST-Source", ffuf.request.headers)
 
         static = self._flow(
             "/assets/app.js", headers={"X-AIDAST-Source": "katana"}
         )
-        addon.request(static)
+        asyncio.run(addon.request(static))
         self.assertEqual(static.metadata["aidast_priority"], 6)
         self.assertTrue(static.metadata["aidast_static_resource"])
 
@@ -151,12 +154,12 @@ class MitmAddonBudgetTests(unittest.TestCase):
             flow = self._flow(
                 "/api/items", headers={"X-AIDAST-Phase": "candidate_probe"},
             )
-            addon.request(flow)
+            asyncio.run(addon.request(flow))
             flow.response = SimpleNamespace(
                 status_code=200, headers={"Content-Type": "application/json"},
                 content=b'{}', get_text=lambda strict=False: '{}',
             )
-            addon.response(flow)
+            asyncio.run(addon.response(flow))
             import json
             record = json.loads(addon.out_path.read_text().splitlines()[0])
 
@@ -174,7 +177,7 @@ class MitmAddonBudgetTests(unittest.TestCase):
         )
 
         for request in requests:
-            addon.request(request)
+            asyncio.run(addon.request(request))
 
         self.assertEqual(addon.request_count, 4)
         self.assertTrue(all(not request.metadata["aidast_duplicate"] for request in requests))
@@ -186,24 +189,24 @@ class MitmAddonBudgetTests(unittest.TestCase):
             self._flow("/api?step=two&step=one"),
         )
         for request in requests:
-            addon.request(request)
+            asyncio.run(addon.request(request))
         self.assertEqual(addon.request_count, 2)
         self.assertTrue(all(not request.metadata["aidast_duplicate"] for request in requests))
 
     def test_get_body_changes_request_identity(self):
         addon = self._addon()
         for content in (b"first", b"second"):
-            addon.request(self._flow("/api/items", content=content))
+            asyncio.run(addon.request(self._flow("/api/items", content=content)))
         self.assertEqual(addon.request_count, 2)
 
     def test_repeated_static_requests_cannot_bypass_total_budget(self):
         addon = self._addon()
         for _ in range(8):
             flow = self._flow("/assets/app.js")
-            addon.request(flow)
+            asyncio.run(addon.request(flow))
             self.assertIsNone(flow.response)
         blocked = self._flow("/assets/app.js")
-        addon.request(blocked)
+        asyncio.run(addon.request(blocked))
         self.assertIsNotNone(blocked.response)
         self.assertEqual(addon.request_count, 8)
         self.assertTrue(blocked.metadata["aidast_duplicate"])
@@ -215,12 +218,12 @@ class MitmAddonBudgetTests(unittest.TestCase):
             addon.out_path = Path(temporary_dir) / "capture.jsonl"
             for path in ("/assets/app.js", "/api/items", "/api/items"):
                 flow = self._flow(path)
-                addon.request(flow)
+                asyncio.run(addon.request(flow))
                 flow.response = SimpleNamespace(
                     status_code=200, headers={"Content-Type": "text/plain"},
                     content=b"response-payload", get_text=lambda strict=False: "response-payload",
                 )
-                addon.response(flow)
+                asyncio.run(addon.response(flow))
             import json
             rows = [json.loads(line) for line in addon.out_path.read_text().splitlines()]
             progress = json.loads(addon.out_path.with_suffix(".progress.json").read_text())
@@ -239,11 +242,91 @@ class MitmProxyStartupTests(unittest.TestCase):
             asset="example.com", allowed_hosts=["example.com"],
         ).mitm_rules()
 
+    def test_proxy_uses_application_python_with_an_unrelated_binary_on_path(self) -> None:
+        process = MagicMock()
+        with (
+            tempfile.TemporaryDirectory() as temporary_dir,
+            patch("importlib.util.find_spec", return_value=object()),
+            patch("shutil.which", return_value="/bin/mitmdump"),
+            patch("aidast.recon.tools.mitm_proxy._find_free_port", return_value=43123),
+            patch("aidast.recon.tools.mitm_proxy.subprocess.Popen", return_value=process) as popen,
+            patch("aidast.recon.tools.mitm_proxy._wait_for_proxy_port", return_value=True),
+        ):
+            try:
+                returned, proxy_url = start_mitmproxy(
+                    Path(temporary_dir) / "capture.jsonl", scope_rules=self._rules()
+                )
+                command = popen.call_args.args[0]
+                self.assertEqual(command[0], sys.executable)
+                self.assertEqual(proxy_url, "http://127.0.0.1:43123")
+                self.assertIs(returned, process)
+            finally:
+                stop_mitmproxy(process)
+
+    def test_required_proxy_rejects_missing_python_package_even_with_system_binary(self) -> None:
+        with (
+            patch("importlib.util.find_spec", return_value=None),
+            patch("shutil.which", return_value="/bin/mitmdump"),
+            patch("aidast.recon.tools.mitm_proxy._find_free_port", return_value=43123),
+            patch("aidast.recon.tools.mitm_proxy.subprocess.Popen") as popen,
+            patch("aidast.recon.tools.mitm_proxy._wait_for_proxy_port", return_value=True),
+        ):
+            try:
+                with self.assertRaisesRegex(RuntimeError, "uv sync"):
+                    start_mitmproxy(Path("capture.jsonl"), scope_rules=self._rules())
+            finally:
+                if popen.called:
+                    stop_mitmproxy(popen.return_value)
+        popen.assert_not_called()
+
+    def test_installed_proxy_entrypoint_runs_with_empty_path(self) -> None:
+        process = MagicMock()
+        with (
+            patch("aidast.recon.tools.mitm_proxy._find_free_port", return_value=43123),
+            patch("aidast.recon.tools.mitm_proxy.subprocess.Popen", return_value=process) as popen,
+            patch("aidast.recon.tools.mitm_proxy._wait_for_proxy_port", return_value=True),
+        ):
+            start_mitmproxy(Path("capture.jsonl"))
+            command = popen.call_args.args[0]
+        completed = subprocess.run(
+            [*command, "--version"], capture_output=True, text=True,
+            env={**os.environ, "PATH": ""}, timeout=30,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn("Mitmproxy:", completed.stdout)
+
+    def test_readiness_wait_allows_a_slow_first_start(self) -> None:
+        elapsed = 0.0
+        connection = MagicMock()
+
+        def sleep(seconds):
+            nonlocal elapsed
+            elapsed += seconds
+
+        def connect(*args, **kwargs):
+            if elapsed < 9:
+                raise OSError("proxy is still initializing")
+            return connection
+
+        with (
+            patch("aidast.recon.tools.mitm_proxy.time.monotonic", side_effect=lambda: elapsed),
+            patch("aidast.recon.tools.mitm_proxy.time.sleep", side_effect=sleep),
+            patch("aidast.recon.tools.mitm_proxy.socket.create_connection", side_effect=connect),
+        ):
+            self.assertTrue(_wait_for_proxy_port(43123))
+
+    def test_readiness_wait_stops_immediately_when_proxy_exits(self) -> None:
+        process = MagicMock()
+        process.poll.return_value = 1
+        with patch("aidast.recon.tools.mitm_proxy.socket.create_connection") as connect:
+            self.assertFalse(_wait_for_proxy_port(43123, process=process))
+        connect.assert_not_called()
+
     def test_default_start_uses_a_dynamically_selected_port(self) -> None:
         process = MagicMock()
         with tempfile.TemporaryDirectory() as temporary_dir:
             with (
-                patch("aidast.recon.tools.mitm_proxy.shutil.which", return_value="/bin/mitmdump"),
+                patch("importlib.util.find_spec", return_value=object()),
                 patch("aidast.recon.tools.mitm_proxy._find_free_port", return_value=43123),
                 patch("aidast.recon.tools.mitm_proxy.subprocess.Popen", return_value=process) as popen,
                 patch("aidast.recon.tools.mitm_proxy._wait_for_proxy_port", return_value=True) as wait,
@@ -262,7 +345,7 @@ class MitmProxyStartupTests(unittest.TestCase):
         occupied = MagicMock()
         occupied.__enter__.return_value = occupied
         with (
-            patch("aidast.recon.tools.mitm_proxy.shutil.which", return_value="/bin/mitmdump"),
+            patch("importlib.util.find_spec", return_value=object()),
             patch("aidast.recon.tools.mitm_proxy.socket.create_connection", return_value=occupied),
             patch("aidast.recon.tools.mitm_proxy.subprocess.Popen") as popen,
         ):
@@ -275,7 +358,7 @@ class MitmProxyStartupTests(unittest.TestCase):
     def test_temporary_scope_file_is_removed_when_proxy_stops(self) -> None:
         process = MagicMock()
         with (
-            patch("aidast.recon.tools.mitm_proxy.shutil.which", return_value="/bin/mitmdump"),
+            patch("importlib.util.find_spec", return_value=object()),
             patch("aidast.recon.tools.mitm_proxy._find_free_port", return_value=43123),
             patch("aidast.recon.tools.mitm_proxy.subprocess.Popen", return_value=process) as popen,
             patch("aidast.recon.tools.mitm_proxy._wait_for_proxy_port", return_value=True),

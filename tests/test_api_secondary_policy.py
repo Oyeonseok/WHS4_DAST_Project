@@ -158,7 +158,7 @@ class ApiSecondaryPolicyTests(unittest.TestCase):
             raise AssertionError(url)
 
         with patch('aidast.recon.tools.api_secondary_discovery.detect_openapi',
-                   return_value=[OpenAPIDefinition(url='https://example.com/openapi.json')]), patch(
+                   return_value=[OpenAPIDefinition(url='https://example.com/openapi.json', document={'openapi': '3.0.0', 'paths': {}})]), patch(
                        'aidast.recon.tools.api_secondary_discovery.detect_graphql', return_value=[]
                    ), patch('aidast.recon.tools.api_secondary_discovery._run_zap', return_value=True), patch(
                        'aidast.recon.tools.api_secondary_discovery._parse_zap_har',
@@ -289,7 +289,8 @@ class ApiSecondaryPolicyTests(unittest.TestCase):
         policy.allowed_path_prefixes = ["/"]
         fetched: list[str] = []
         spec = {"openapi": "3.0.0", "servers": [{"url": "/b2b/v2"}],
-                "paths": {"/orders": {"post": {"responses": {"200": {"description": "OK"}}}}}}
+                "paths": {"/orders": {"get": {"responses": {"200": {"description": "OK"}}},
+                                      "post": {"responses": {"200": {"description": "OK"}}}}}}
         page = b'<html><script src="./swagger-ui-init.js"></script></html>'
         init = ("window.onload = function () {\nvar options = " + json.dumps({"swaggerDoc": spec}) + ";\n}").encode()
 
@@ -322,8 +323,11 @@ class ApiSecondaryPolicyTests(unittest.TestCase):
                 proxy_url="http://127.0.0.1:8080",
             )
 
-        self.assertEqual(imported, [spec])
-        self.assertEqual(target_urls, ["https://example.com/b2b/v2"])
+        self.assertEqual(len(imported), 1)
+        self.assertEqual(set(imported[0]["paths"]), {"/b2b/v2/orders"})
+        self.assertEqual(set(imported[0]["paths"]["/b2b/v2/orders"]), {"get"})
+        self.assertEqual(imported[0]["servers"], [{"url": "https://example.com"}])
+        self.assertEqual(target_urls, ["https://example.com/"])
         self.assertIn("https://example.com/api-docs/swagger-ui-init.js", fetched)
 
     def test_swagger_ui_skips_invalid_and_cross_origin_initializers(self) -> None:

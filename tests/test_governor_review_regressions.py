@@ -1,4 +1,5 @@
 """Offline and inert loopback regressions for shared admission boundaries."""
+import asyncio
 import time
 from pathlib import Path
 from unittest.mock import patch
@@ -164,7 +165,7 @@ def test_proxy_execution_method_ceiling_precedes_browser_support(mode, method, u
         f.configure_rules(rules)
         flow = f.flow(); flow.request.method = method; flow.request.pretty_url = url
         flow.request.headers.update({BROWSER_MODE_HEADER: mode, BROWSER_TOKEN_HEADER: 'x' * 32})
-        f.addon.request(flow)
+        asyncio.run(f.addon.request(flow))
         assert flow.metadata.get('aidast_policy_blocked')
     finally: f.doCleanups()
 

@@ -1,0 +1,88 @@
+--- a/src/aidast/recon/tools/api_secondary_discovery.py
++++ b/src/aidast/recon/tools/api_secondary_discovery.py
+@@ -90,7 +90,8 @@
+ 
+ ADAPTIVE_API_THRESHOLD = 10
+ ADAPTIVE_MAX_SCRIPTS = 5
+-ADAPTIVE_MAX_CANDIDATES = 30
++ADAPTIVE_MAX_CANDIDATES = 100
++ADAPTIVE_MAX_EXTRACTED_CANDIDATES = 500
+ ADAPTIVE_MAX_DETAIL_PROBES = 20
+ MAX_CANDIDATE_GET_PROBES = 20
+ _JS_API_PATH = re.compile(
+@@ -1270,6 +1271,22 @@
+     }
+ 
+ 
++def _literal_call_method(script: str, start: int, end: int) -> str | None:
++    """Recognize direct HTTP calls without evaluating target JavaScript."""
++    prefix = script[max(0, start - 160):start]
++    call = re.search(r"\.\s*(get|post|put|patch|delete|head|options)\s*\(\s*(?:[\w.$]+\s*\+\s*)?$", prefix, re.I)
++    if call:
++        return call.group(1).upper()
++    if re.search(r"\bfetch\s*\(\s*$", prefix):
++        options = re.match(r"\s*,\s*\{([^{}]{0,256})\}", script[end:end + 280])
++        if options:
++            method = re.search(r"\bmethod\s*:\s*['\"]([A-Za-z]+)['\"]", options.group(1))
++            if method:
++                return method.group(1).upper()
++        return "GET"
++    return None
++
++
+ def discover_adaptive_js_api_candidates(
+     base_url: str,
+     endpoints: list[dict],
+@@ -1308,7 +1325,7 @@
+     if broker is None and target_policy is not None:
+         broker = _request_broker(target_policy, proxy_url)
+ 
+-    candidates: set[str] = set()
++    candidates: dict[str, int] = {}
+     for script_url in scripts:
+         status, _, body = _http_request(
+             script_url, headers=headers, target_policy=target_policy,
+@@ -1316,16 +1333,25 @@
+         )
+         if status is None or not body:
+             continue
+-        for match in _JS_API_PATH.finditer(body.decode("utf-8", errors="replace")):
++        script = body.decode("utf-8", errors="replace")
++        for match in _JS_API_PATH.finditer(script):
+             path = match.group("path")
+-            if "{" not in path and "}" not in path:
+-                candidate_url = urljoin(base_url, path)
+-                if urlparse(candidate_url)._replace(query="", fragment="").geturl() not in observed_get_urls:
+-                    candidates.add(candidate_url)
+-            if len(candidates) >= max(1, int(max_candidates)):
+-                break
+-        if len(candidates) >= max(1, int(max_candidates)):
+-            break
++            method = _literal_call_method(script, match.start(), match.end())
++            if method not in {None, "GET"} or "{" in path or "}" in path:
++                continue
++            candidate_url = urljoin(base_url, path)
++            if urlparse(candidate_url)._replace(query="", fragment="").geturl() in observed_get_urls:
++                continue
++            rank = 0 if method == "GET" else 1
++            candidates[candidate_url] = min(rank, candidates.get(candidate_url, rank))
++            if len(candidates) > ADAPTIVE_MAX_EXTRACTED_CANDIDATES:
++                # Retain explicit GET evidence even when another bundle filled
++                # the bounded pool with unclassified string literals.
++                worst = max(candidates, key=lambda url: (candidates[url], url))
++                del candidates[worst]
++    selected_candidates = sorted(candidates, key=lambda url: (candidates[url], url))[
++        :max(1, int(max_candidates))
++    ]
+ 
+     controls: dict[str, tuple[int, dict[str, str], bytes, str]] = {}
+     for prefix in ("/api", "/rest"):
+@@ -1340,7 +1366,7 @@
+     results: list[dict] = []
+     unverified_count = 0
+     detail_probes = 0
+-    for url in sorted(candidates):
++    for url in selected_candidates:
+         if not _same_origin(url, base_url):
+             continue
+         if target_policy is not None and not target_policy.allows_url(url, method="GET"):

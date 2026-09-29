@@ -1,0 +1,14 @@
+--- a/src/aidast/recon/tools/api_secondary_discovery.py
++++ b/src/aidast/recon/tools/api_secondary_discovery.py
+@@ -1259,7 +1259,10 @@
+     """Verify matching IDs; retain distinct denied probes as observed only."""
+     if status in {401, 403} and body != _POLICY_BLOCK_BODY and missing_control is not None:
+         control_status, control_headers, control_body, control_url = missing_control
+-        if not detail_url.startswith(collection_url.rstrip("/") + "/"):
++        detail_path = urlparse(detail_url).path
++        collection_path = urlparse(collection_url).path.rstrip("/")
++        if (not _same_origin(detail_url, collection_url)
++                or not detail_path.startswith(collection_path + "/")):
+             return None
+         candidate_fp = _fingerprint(status, response_headers, body, request_url=detail_url)
+         control_fp = _fingerprint(control_status, control_headers, control_body, request_url=control_url)

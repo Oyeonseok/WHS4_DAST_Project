@@ -36,21 +36,26 @@ class BrokerResponse:
 class RequestBroker:
     """A transport must perform exactly one hop; the default disables redirects.
 
-    Injection is intended for trusted adapters and offline test fakes. Responses
-    expose sanitized headers; bodies remain available for in-memory processing
+    Injection is intended for trusted adapters and offline test fakes.
+    A trusted proxy transport can own shared accounting for each physical hop.
+    Destination, identity and exclusion checks still run in the broker.
+    Responses expose sanitized headers; bodies remain available for in-memory processing
     unless capture_bodies is disabled explicitly.
     """
 
     def __init__(self, policy: TargetPolicy | None, *, transport: Callable | None = None,
                  max_redirects: int = 10, max_body_bytes: int = 200_000,
                  budget_limit: int | None = None,
-                 authority: Literal["recon", "validation"] = "recon") -> None:
+                 authority: Literal["recon", "validation"] = "recon",
+                 governor_owner: Literal["broker", "transport"] = "broker") -> None:
         if not isinstance(policy, TargetPolicy):
             raise RequestPolicyError("an approved TargetPolicy is required for HTTP requests")
         if max_redirects < 0 or max_body_bytes < 0:
             raise ValueError("request bounds must be nonnegative")
         if authority not in {"recon", "validation"}:
             raise ValueError("unsupported HTTP request authority")
+        if governor_owner not in {"broker", "transport"} or (governor_owner == "transport" and transport is None):
+            raise ValueError("transport accounting requires a trusted custom transport")
         self.policy = policy
         self.authority = authority
         opener = build_opener(ProxyHandler({}), _NoRedirect())
@@ -63,7 +68,8 @@ class RequestBroker:
         self.budget_limit = budget_limit
         self.request_count = 0
         try:
-            self.governor = RequestGovernor(getattr(policy, "request_governor", None))
+            governor = RequestGovernor(getattr(policy, "request_governor", None))
+            self.governor = governor if governor_owner == "broker" else RequestGovernor(None)
         except GovernorError as exc:
             raise RequestPolicyError(str(exc)) from exc
 

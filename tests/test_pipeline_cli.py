@@ -67,6 +67,12 @@ class PipelineCliTests(unittest.TestCase):
                     conn, scan_id=kwargs["scan_id"], scope_type="approved_scope",
                     scope_value=kwargs["scope_value"],
                 )
+                from aidast.recon.annotations import ObservationRecorder
+                asset = db.insert_asset(conn, scan_id=kwargs["scan_id"], identifier="example.com", asset_type="DOMAIN")
+                origin = db.upsert_origin(conn, asset_id=asset, scheme="https", host="example.com", port=443, base_url="https://example.com")
+                ObservationRecorder(conn, origin_id=origin, scan_id=kwargs["scan_id"]).record(
+                    "fixture", [{"method": "GET", "path": f"/page-{index}"} for index in range(3)],
+                )
                 return SimpleNamespace(conn=conn, scan_id=kwargs["scan_id"], run=lambda tasks: None)
 
             stdout = io.StringIO()
@@ -100,6 +106,8 @@ class PipelineCliTests(unittest.TestCase):
                 redirect_stdout(stdout),
             ):
                 coordinator.return_value.load_approved_scope.return_value = (scope, "scope fixture")
+                from test_recon_annotations import FakeAgent
+                planner.return_value._run_structured.side_effect = FakeAgent()._run_structured
                 planner.return_value.create_recon_plan.side_effect = plan_recon
                 planner.return_value.create_target_policies.return_value = {
                     ('WILDCARD', '*.example.com'): TargetPolicy(
@@ -124,6 +132,7 @@ class PipelineCliTests(unittest.TestCase):
                     "--scan-id", scan_id,
                     "--run-root", str(root / "Runs"),
                     "--attack-output-root", str(root / "AttackRuns"),
+                    "--tag-batch-size", "2",
                 ])
             self.assertEqual(result, 0)
             self.assertNotIn("Automatic reports unavailable", stdout.getvalue())
@@ -161,6 +170,12 @@ class PipelineCliTests(unittest.TestCase):
                               if event["payload"].get("stage") == "Recon"
                               and "progress" in event["payload"]["message_params"]]
             self.assertEqual(recon_progress, sorted(recon_progress))
+            tagging_updates = [event["payload"]["message_params"] for event in progress
+                               if event["payload"]["message_params"].get("step") == "tagging"
+                               and event["payload"]["message_params"].get("state") == "progress"]
+            self.assertEqual([(item["processed"], item["observation_total"], item["batch_number"],
+                               item["batch_total"], item["progress"]) for item in tagging_updates],
+                             [(2, 3, 1, 2, 84), (3, 3, 2, 2, 88)])
             self.assertIn("Legacy Attack plan saved:", stdout.getvalue())
             database, = (root / "AttackRuns").glob("*/*/scan_*/legacy/Attack.db")
             self.assertEqual(database.relative_to(root / "AttackRuns").parts[:2], ("example-test", "program"))

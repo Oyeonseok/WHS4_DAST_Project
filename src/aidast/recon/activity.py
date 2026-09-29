@@ -19,10 +19,19 @@ TOOL_PHASES = frozenset({
     "katana_headless", "playwright_interaction", "ffuf",
     "api_secondary", "openapi_detection", "graphql_detection",
     "zap_openapi", "zap_graphql", "mitm_capture",
+    "adaptive_js", "adaptive_js_followup", "observed_json_recovery",
 })
+ACTIVITY_COUNTS = ("count", "root_count", "index", "total", "allowed_count", "blocked_count", "duplicate_count",
+                   "planned_requests", "request_budget", "max_time_seconds", "coverage_may_be_limited",
+                   "detail_probe_limit", "detail_deferred_candidates", "detail_route_templates")
 PHASES = TASK_PHASES | TOOL_PHASES
 STATES = frozenset({"started", "finished", "skipped", "failed", "planned", "found"})
 STOP_REASONS = frozenset({"time_limit", "action_limit", "page_limit", "completed"})
+ERROR_TYPES = frozenset({
+    "Error", "TimeoutError", "TimeoutExpired", "TargetClosedError",
+    "RuntimeError", "OSError", "PermissionError", "FileNotFoundError",
+    "ConnectionError", "ValueError", "AttributeError", "BrowserError",
+})
 
 
 def _bounded_number(value: object) -> int | None:
@@ -96,18 +105,26 @@ def activity_from_diagnostic(event: str, details: dict[str, object]) -> dict[str
     elif event in {"ffuf_root_started", "ffuf_root_finished"}:
         phase = "ffuf"
         state = "started" if event == "ffuf_root_started" else "finished"
+    elif event == 'completed' and details.get('component') == 'adaptive_js':
+        phase, state = 'adaptive_js', 'finished'
     else:
         return None
     if not isinstance(phase, str) or phase not in PHASES or state not in STATES:
         return None
     record: dict[str, str | int] = {"phase": str(phase), "state": state}
-    for key in ("count", "root_count", "index", "total", "allowed_count", "blocked_count", "duplicate_count"):
-        value = _bounded_number(details.get(key))
+    for key in ACTIVITY_COUNTS:
+        raw = details.get(key)
+        if key == 'coverage_may_be_limited' and type(raw) is bool:
+            raw = int(raw)
+        value = _bounded_number(raw)
         if value is not None:
             record[key] = value
     reason = details.get("reason")
     if phase in {"playwright_priority", "playwright_interaction"} and isinstance(reason, str) and reason in STOP_REASONS:
         record["reason"] = reason
+    error_type = details.get("error_type")
+    if state == "failed" and isinstance(error_type, str) and error_type in ERROR_TYPES:
+        record["error_type"] = error_type
     return record
 
 
@@ -121,11 +138,14 @@ def validated_activity(value: Any) -> dict[str, str | int] | None:
     if state == "found":
         return _url_activity(value) if phase == "endpoint_discovery" else None
     record: dict[str, str | int] = {"phase": value["phase"], "state": value["state"]}
-    for key in ("count", "root_count", "index", "total", "allowed_count", "blocked_count", "duplicate_count"):
+    for key in ACTIVITY_COUNTS:
         number = _bounded_number(value.get(key))
         if number is not None:
             record[key] = number
     reason = value.get("reason")
     if phase in {"playwright_priority", "playwright_interaction"} and isinstance(reason, str) and reason in STOP_REASONS:
         record["reason"] = reason
+    error_type = value.get("error_type")
+    if state == "failed" and isinstance(error_type, str) and error_type in ERROR_TYPES:
+        record["error_type"] = error_type
     return record

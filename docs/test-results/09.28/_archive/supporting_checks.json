@@ -1,0 +1,309 @@
+{
+  "neon_policy_replay": {
+    "note": "Representative policy fields reconstructed from the validator error, not a recovered original model response.",
+    "results": [
+      {
+        "mode": "active_non_destructive",
+        "attack_methods": [
+          "GET",
+          "HEAD",
+          "OPTIONS"
+        ],
+        "status": "rejected",
+        "error_type": "MainAgentError",
+        "error": "unsafe target policy: active Attack policy must authorize a state-changing method",
+        "external_model_called": false,
+        "target_requests": 0
+      },
+      {
+        "mode": "read_only",
+        "attack_methods": [
+          "GET",
+          "HEAD",
+          "OPTIONS"
+        ],
+        "status": "accepted",
+        "external_model_called": false,
+        "target_requests": 0
+      }
+    ]
+  },
+  "neon_policy_refactor": {
+    "status": "accepted",
+    "mode": "read_only",
+    "evidence": null,
+    "attack_methods": [
+      "GET",
+      "HEAD",
+      "OPTIONS"
+    ],
+    "policy_notes": [
+      "Python normalized Attack authorization to read_only because no state-changing methods are authorized; method permissions were preserved."
+    ],
+    "external_model_called": false,
+    "target_requests": 0,
+    "note": "Replay uses representative fields reconstructed from the captured failure; original model response was not retained."
+  },
+  "neon_cookie_auth_replay": {
+    "scan_id": "scan_53cb19e063944e49a9ac3e6cfbec6b97",
+    "network_requests": 0,
+    "synthetic_credentials": true,
+    "login_form_visible": false,
+    "auth_check_url": null,
+    "observed_cookie_names": [
+      "AUTH_SESSION_ID",
+      "KEYCLOAK_IDENTITY",
+      "KEYCLOAK_SESSION",
+      "_gorilla_csrf",
+      "_ga",
+      "keycloak_token",
+      "zenith",
+      "_ga_18NPNJD444",
+      "_ga_1N4XQ6V7JN"
+    ],
+    "local_storage_keys": [
+      "neon_last_auth_provider"
+    ],
+    "auth_header_names": [
+      "Cookie"
+    ],
+    "cookie_only_auth_ready": false,
+    "bearer_auth_ready": true
+  },
+  "neon_console_observation": {
+    "scan_id": "scan_a6c6d358c4c44f42a3acf317e560bc2d",
+    "observed_at": "2026-09-28T05:19:51.207593+00:00",
+    "method": "read-only Chromium CDP DOM check, without navigation or external requests",
+    "flags": {
+      "visible_password": false,
+      "invite_required": false,
+      "has_projects": true,
+      "has_create_project": true
+    },
+    "pipeline_phase": "waiting for browser authentication",
+    "policy_validation": "passed",
+    "dns_http_origin_discovery": "passed",
+    "authentication_shape": "target cookies; localStorage has settings/provider keys, no JWT candidate key",
+    "cookie_names": [
+      "AUTH_SESSION_ID",
+      "KEYCLOAK_IDENTITY",
+      "KEYCLOAK_SESSION",
+      "keycloak_token",
+      "zenith"
+    ],
+    "secret_values_recorded": false,
+    "confirmed_failure": [
+      {
+        "stage": "endpoint_discovery",
+        "status": "failed",
+        "error_type": "RuntimeError",
+        "message": "browser authentication was not detected before the login timeout",
+        "started_at": "2026-09-28T05:22:43.607369+00:00",
+        "ended_at": "2026-09-28T05:22:43.607382+00:00"
+      }
+    ],
+    "recon_db": "result/Runs/hackerone/neon_bbp/scan_a6c6d358c4c44f42a3acf317e560bc2d/Recon.db",
+    "diagnosis": "Cookie-only authentication is not accepted by browser readiness despite observed Neon console entry."
+  },
+  "neon_latest_early_failure": {
+    "scan_id": "scan_11442cbfd28042318ab6f5b236ca97f8",
+    "started_at": "2026-09-28T05:13:33.911644Z",
+    "finished_at": "2026-09-28T05:14:15.967843Z",
+    "duration_seconds": 42.056199,
+    "status": "failed",
+    "run_directory_exists": false,
+    "recon_db_exists": false,
+    "pipeline_logs_exist": false,
+    "persisted_error": "AI DAST pipeline exited with an error.",
+    "exact_exception_available": false,
+    "confirmed_boundary": "before persisted Recon initialization",
+    "note": "Do not attribute this scan to login timeout, invitation code, or a specific policy validation error without captured stderr."
+  },
+  "manual_login_verification": {
+    "feature": "dashboard manual login confirmation",
+    "backend_tests": {
+      "passed": 167,
+      "subtests_passed": 9
+    },
+    "ui_tests": {
+      "passed": 63
+    },
+    "ui_build": "passed with Node 24.18.0",
+    "browser_smoke": {
+      "same_browser_context": true,
+      "cookie_only": true,
+      "auth_api_called": false,
+      "cross_origin_return_accepted": true,
+      "auth_state": "operator_confirmed",
+      "ui_button_hides_after_acceptance": true,
+      "page_errors": []
+    },
+    "review": "Previous cross-origin event pumping, passwordless login and downstream auth API recheck issues resolved; no remaining material findings.",
+    "live_dashboard": {
+      "port": 8000,
+      "manual_login_api": true,
+      "health": "ok",
+      "scan_stdout_stderr_captured": true
+    },
+    "neon_rescan_performed": false,
+    "auth_state_semantics": "operator_confirmed, not server_verified"
+  },
+  "query_collection_detail": {
+    "origin": "http://127.0.0.1:3001/",
+    "authenticated": true,
+    "get_requests": 4,
+    "collection_path": "/api/Quantitys",
+    "collection_has_query": true,
+    "collection_status": 200,
+    "control_status": 500,
+    "detail_path": "/api/Quantitys/1",
+    "detail_status": 403,
+    "verification_status": "observed",
+    "access_status": "forbidden",
+    "source_sha256": {
+      "src/aidast/recon/tools/api_secondary_discovery.py": "7586604fadfed1a1637669ed40f0e86785a6487d4d675e8cb95c70c066bfbdb1",
+      "src/aidast/recon/annotations.py": "949b8a9ab0089f251ad1b65819f485dcab1fd89266b239ccc823abd8fcc0e9b4"
+    },
+    "credentials_or_bodies_saved": false
+  },
+  "juice_session_auth": [
+    {
+      "token_cookie_restored_as_session_cookie": false,
+      "browser": {
+        "cookie_token_present": false,
+        "storage_token_present": true
+      },
+      "browser_whoami": [
+        {
+          "status": 200,
+          "authenticated": false,
+          "authorization_matches_saved_jwt": true
+        },
+        {
+          "status": 200,
+          "authenticated": false,
+          "authorization_matches_saved_jwt": true
+        }
+      ],
+      "external_headers_match_saved_jwt": true,
+      "external_whoami_authenticated": false,
+      "external_whoami_status": 200
+    },
+    {
+      "token_cookie_restored_as_session_cookie": true,
+      "browser": {
+        "cookie_token_present": true,
+        "storage_token_present": true
+      },
+      "browser_whoami": [
+        {
+          "status": 200,
+          "authenticated": false,
+          "authorization_matches_saved_jwt": true
+        },
+        {
+          "status": 200,
+          "authenticated": true,
+          "authorization_matches_saved_jwt": true
+        }
+      ],
+      "external_headers_match_saved_jwt": true,
+      "external_whoami_authenticated": true,
+      "external_whoami_status": 200
+    }
+  ],
+  "neon_attack_user_agent_comparison": {
+    "scan_id": "scan_2503dd7e9a844a2c97b101443682e738",
+    "target": "https://console-stage.neon.build/app/",
+    "method": "GET",
+    "changed_variable": "User-Agent",
+    "policy": {
+      "requests_per_second": 0.5,
+      "concurrency": 1,
+      "timeout_seconds": 15
+    },
+    "redirects_followed": false,
+    "required_header": {
+      "X-Bug-Bounty": "lkhlkh0823"
+    },
+    "source": "result/test-runs/09.28/neon-transport-20260928/results.json",
+    "source_sha256": "027f0f7597e2a6ada4f251a7e36686dd7ca9ea5a673e7786f8fd54c86b893451",
+    "results": [
+      {
+        "variant": "baseline",
+        "timestamp": "2026-09-28T07:00:55.476522+00:00",
+        "error_type": "RequestGuardError",
+        "message": "HTTP request outcome is unknown"
+      },
+      {
+        "variant": "baseline",
+        "changed_headers": [],
+        "timestamp": "2026-09-28T07:03:03.023179+00:00",
+        "request_id": "http_069309412c1549899dfdb8b9c517b947",
+        "status": 403,
+        "bytes": 17,
+        "body_sha256": "2938e9f1284180959e33ab1718d0793a72ff6e4cdb8108c34dcd14e69446de5c",
+        "cloudflare_1010": true,
+        "content_type": "text/plain; charset=UTF-8",
+        "server": "cloudflare",
+        "location_without_query": null,
+        "redirect_followed": false,
+        "credential_reference_used": true,
+        "elapsed_seconds": 0.275
+      },
+      {
+        "variant": "ua_browser",
+        "changed_headers": [
+          "user-agent"
+        ],
+        "timestamp": "2026-09-28T07:03:14.633640+00:00",
+        "request_id": "http_afd36898aaed49938755ed71a9fb6d42",
+        "status": 200,
+        "bytes": 59929,
+        "body_sha256": "f76f198bf701493a0d5695b7061aa093fe2f36c5a3c36b1f5928144b237d2643",
+        "cloudflare_1010": false,
+        "content_type": "text/html; charset=utf-8",
+        "server": "cloudflare",
+        "location_without_query": null,
+        "redirect_followed": false,
+        "credential_reference_used": true,
+        "elapsed_seconds": 0.758
+      },
+      {
+        "variant": "baseline",
+        "changed_headers": [],
+        "timestamp": "2026-09-28T07:03:30.992173+00:00",
+        "request_id": "http_97385d4db6ec4eeab369c435bd7a986b",
+        "status": 403,
+        "bytes": 17,
+        "body_sha256": "2938e9f1284180959e33ab1718d0793a72ff6e4cdb8108c34dcd14e69446de5c",
+        "cloudflare_1010": true,
+        "content_type": "text/plain; charset=UTF-8",
+        "server": "cloudflare",
+        "location_without_query": null,
+        "redirect_followed": false,
+        "credential_reference_used": true,
+        "elapsed_seconds": 0.133
+      },
+      {
+        "variant": "ua_browser",
+        "changed_headers": [
+          "user-agent"
+        ],
+        "timestamp": "2026-09-28T07:03:40.709601+00:00",
+        "request_id": "http_a98cfca365144c938a79f0957e3c8a9b",
+        "status": 200,
+        "bytes": 59930,
+        "body_sha256": "102bc55c20c3bed638a78658b772220d23e32f85673efe566a6e8704c55ff3c8",
+        "cloudflare_1010": false,
+        "content_type": "text/html; charset=utf-8",
+        "server": "cloudflare",
+        "location_without_query": null,
+        "redirect_followed": false,
+        "credential_reference_used": true,
+        "elapsed_seconds": 0.736
+      }
+    ],
+    "interpretation": "UA change affected Cloudflare 1010 for this benign GET only; not proof of login or vulnerability; no product changes or full rescan."
+  }
+}

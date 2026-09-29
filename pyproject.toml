@@ -10,6 +10,7 @@ readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
   "cryptography>=41,<46",
+  "mitmproxy>=12.2.3,<13",
   "playwright>=1.55,<2",
   "pydantic>=2.12,<3",
   "pyyaml>=6.0.2,<7",
@@ -44,6 +45,7 @@ where = ["src"]
 "aidast.skills.scope" = ["SKILL.md"]
 "aidast.skills.policy" = ["SKILL.md"]
 "aidast.skills.ffuf_root_selection" = ["SKILL.md"]
+"aidast.skills.recon_patterns" = ["SKILL.md"]
 "aidast.skills.target_policy" = ["SKILL.md"]
 "aidast.skills.attack" = [
   "manifest.json",

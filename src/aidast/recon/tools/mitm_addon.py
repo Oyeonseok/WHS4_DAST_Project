@@ -42,6 +42,7 @@ scope_uses_loopback_host = _safety["scope_uses_loopback_host"]
 require_request_admission = _safety['require_request_admission']
 has_request_exclusions = _safety['has_request_exclusions']
 _receipt = runpy.run_path(str(Path(__file__).resolve().parents[2] / 'core' / 'capture_receipt.py'))
+_authentication_key = runpy.run_path(str(Path(__file__).with_name('request_identity.py')))['authentication_key']
 
 
 def _wire_headers(request):
@@ -81,14 +82,14 @@ def _physical_url(request):
     return url
 
 
-def _canonical_request_key(method: str, parsed, body: bytes | None = None) -> tuple[str, ...]:
+def _canonical_request_key(method: str, parsed, body: bytes | None = None, *, headers=None) -> tuple[str, ...]:
     """Keep distinct query/body requests separate without retaining their values."""
     query = parsed.query or ""
     query_digest = hashlib.sha256(query.encode()).hexdigest() if query else ""
     body_digest = hashlib.sha256(body).hexdigest() if body else ""
     port = parsed.port or (443 if parsed.scheme == "https" else 80)
     return (method.upper(), parsed.scheme.lower(), (parsed.hostname or "").lower().rstrip("."),
-            str(port), parsed.path or "/", query_digest, body_digest)
+            str(port), parsed.path or "/", query_digest, body_digest, _authentication_key(headers))
 
 
 def _host_matches(host: str, pattern: str) -> bool:
@@ -106,6 +107,7 @@ class ScopeAndCaptureAddon:
         self.out_path: Path | None = None
         self.rules: dict = {}
         self.request_count = 0
+        self.pending_request_count = 0
         self.blocked_request_count = 0
         self.budget_used_before = 0
         self._last_progress_write = 0.0
@@ -156,7 +158,7 @@ class ScopeAndCaptureAddon:
         if "out_file" in updated and ctx.options.out_file:
             self.out_path = Path(ctx.options.out_file)
 
-    def request(self, flow: http.HTTPFlow) -> None:
+    async def request(self, flow: http.HTTPFlow) -> None:
         if not self.scope_loaded:
             if self.enforcement_required or self.governor_invalid:
                 self._block(flow)
@@ -194,6 +196,7 @@ class ScopeAndCaptureAddon:
         budget_total = max(1, int(self.rules.get("budget_total", max_requests)))
         browser_reserve = max(1, int(budget_total * 0.20))
         noncritical_limit = max(0, budget_total - browser_reserve)
+        self.active_request_limit = noncritical_limit
         support_mode = self._authorized_browser_support(
             flow, parsed, host_allowed, host_excluded
         )
@@ -209,7 +212,7 @@ class ScopeAndCaptureAddon:
             (".js", ".css", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".woff", ".woff2", ".ttf", ".map")
         ) or resource in {"script", "style", "image", "font", "media"}
         request_key = _canonical_request_key(
-            method, parsed, getattr(flow.request, "content", b"") or b""
+            method, parsed, getattr(flow.request, "content", b"") or b"", headers=flow.request.headers
         )
         duplicate = request_key in self.seen_requests
         fetch_mode = str(flow.request.headers.get("Sec-Fetch-Mode", "")).lower()
@@ -252,7 +255,7 @@ class ScopeAndCaptureAddon:
         # admitted. A rejected candidate is deferred, not consumed: otherwise
         # a flood of low-priority traffic beyond its quota could also exhaust
         # the reserved capacity for browser/API and document observations.
-        candidate_request_count = self.request_count + int(counts_against_budget)
+        candidate_request_count = self.request_count + self.pending_request_count + int(counts_against_budget)
         global_request_count = self.budget_used_before + candidate_request_count
         allowed = request_allowed and (
             global_request_count <= (budget_total if priority <= 2 else noncritical_limit)
@@ -294,18 +297,21 @@ class ScopeAndCaptureAddon:
                 allowed = False
         if allowed:
             permit = None
+            self.pending_request_count += 1
             try:
-                permit = self.governor.reserve(flow.request.pretty_url,
-                                               timeout_seconds=self.rules.get("timeout_seconds", 30))
-                permit.wait()
+                timeout = self.rules.get("timeout_seconds", 30)
+                permit = await self.governor.acquire_async(flow.request.pretty_url,
+                                                          timeout_seconds=timeout)
                 admit()
                 flow.metadata["aidast_governor_permit"] = permit
             except (GovernorError, ValueError):
                 if permit is not None:
-                    permit.complete()
+                    await permit.complete_async()
                 allowed = False
+            finally:
+                self.pending_request_count -= 1
         if allowed:
-            self.request_count = candidate_request_count
+            self.request_count += 1
             self.seen_requests.add(request_key)
             flow.metadata['aidast_forwarded'] = True
             flow.metadata['aidast_captured_at'] = time.time()
@@ -326,6 +332,8 @@ class ScopeAndCaptureAddon:
             "allowed_requests": self.request_count,
             "blocked_requests": self.blocked_request_count,
             "used_before": self.budget_used_before,
+            "active_requests_remaining": (max(0, self.active_request_limit - self.budget_used_before - self.request_count)
+                                          if hasattr(self, 'active_request_limit') else None),
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }
         try:
@@ -392,29 +400,33 @@ class ScopeAndCaptureAddon:
         return path == normalized or path.startswith(normalized + "/")
 
     @staticmethod
-    def _release_permit(flow):
+    async def _release_permit(flow):
         permit = flow.metadata.pop("aidast_governor_permit", None)
         if permit is not None:
-            permit.complete()
+            await permit.complete_async()
 
-    def error(self, flow: http.HTTPFlow) -> None:
+    async def error(self, flow: http.HTTPFlow) -> None:
         flow.metadata['aidast_incomplete'] = True
-        self._release_permit(flow)
+        await self._release_permit(flow)
 
-    def response(self, flow: http.HTTPFlow) -> None:
-        self._release_permit(flow)
+    async def response(self, flow: http.HTTPFlow) -> None:
+        await self._release_permit(flow)
         if self.out_path is None:
             return
         support_mode = flow.metadata.get("aidast_browser_support")
+        response_media = str(flow.response.headers.get('content-type', '') if flow.response else '').split(';', 1)[0].strip().lower()
+        script_evidence = response_media in {'application/javascript', 'text/javascript', 'application/ecmascript',
+                                           'text/ecmascript', 'application/x-javascript'}
         capture_bodies = (
             self.scope_loaded
             and self.rules.get("mitm_capture_bodies", False) is True
             and support_mode != "passive"
-            and not flow.metadata.get("aidast_static_resource")
-            and not flow.metadata.get("aidast_duplicate")
+            and (script_evidence or not flow.metadata.get("aidast_static_resource"))
+            and (script_evidence or not flow.metadata.get("aidast_duplicate"))
         )
         record = {
             "source": "mitmproxy",
+            "authentication_key": _authentication_key(flow.request.headers),
             "method": flow.request.method,
             "url": flow.request.pretty_url,
             "request_headers": sanitize_headers(dict(flow.request.headers), identity_headers=self.rules.get("required_identity_headers", {})),

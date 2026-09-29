@@ -76,6 +76,7 @@ class ScanLaunchRequest(BaseModel):
     max_concurrency: int | None = Field(default=None, ge=1, le=20)
     timeout_seconds: int | None = Field(default=None, ge=1, le=120)
     max_depth: int | None = Field(default=None, ge=0, le=10)
+    ffuf_max_time_seconds: int = Field(default=150, ge=0, le=86400)
     tag_batch_size: int = Field(default=25, ge=1, le=200)
     login_mode: str = "none"
     start_url: str | None = Field(default=None, max_length=2048)
@@ -443,6 +444,10 @@ class ScanLaunchManager:
             argv.extend(("--scope-revision", scope.directory.name))
         if request.max_rps is not None:
             argv.extend(("--max-rps", str(request.max_rps)))
+        wordlist = self.project_root / "resources" / "wordlists" / "common.txt"
+        if wordlist.is_file():
+            argv.extend(("--ffuf-wordlist", str(wordlist)))
+        argv.extend(("--ffuf-max-time-seconds", str(request.ffuf_max_time_seconds)))
         if request.max_depth is not None:
             argv.extend(("--max-depth", str(request.max_depth)))
         if request.max_concurrency is not None:

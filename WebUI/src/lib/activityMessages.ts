@@ -54,6 +54,21 @@ export function agentWorkLabel(language: Language, params: Record<string, string
   const name = language === 'ko' ? agentNames[agent] : agentNamesEn[agent];
   const description = (language === 'ko' ? agentStepsKo : agentStepsEn)[`${agent}:${params.step}`];
   if (!description) return language === 'ko' ? `${name} 작업 상태 변경` : `${name} work changed`;
+  if (agent === 'recon' && params.step === 'tagging'
+      && Number.isInteger(params.processed) && Number.isInteger(params.observation_total)
+      && Number(params.processed) >= 0 && Number(params.observation_total) > 0) {
+    const percentage = Math.floor(100 * Number(params.processed) / Number(params.observation_total));
+    const parts = [`${percentage}%`, language === 'ko' ? `처리 ${params.processed}/${params.observation_total}건`
+      : `processed ${params.processed}/${params.observation_total}`];
+    if (Number.isInteger(params.batch_number) && Number.isInteger(params.batch_total)) {
+      parts.push(language === 'ko' ? `배치 ${params.batch_number}/${params.batch_total} 완료`
+        : `batches ${params.batch_number}/${params.batch_total} completed`);
+    }
+    if (Number.isInteger(params.failed) && Number(params.failed) > 0) {
+      parts.push(language === 'ko' ? `실패 ${params.failed}건` : `failed ${params.failed}`);
+    }
+    return `${name} · ${language === 'ko' ? 'AI 태깅' : 'AI tagging'} · ${parts.join(' · ')}`;
+  }
   if (language === 'ko') return `${name} · ${description} ${params.state === 'finished' ? '완료' : '중'}`;
   return `${name} · ${description} ${params.state === 'finished' ? 'completed' : 'in progress'}`;
 }
@@ -85,6 +100,7 @@ const reconPhaseLabels: Record<string, string> = {
   api_secondary: 'API 명세·GraphQL 추가 탐색', openapi_detection: 'OpenAPI 명세 확인',
   graphql_detection: 'GraphQL 엔드포인트 확인', zap_openapi: 'ZAP OpenAPI 탐색',
   zap_graphql: 'ZAP GraphQL 탐색', mitm_capture: 'mitmproxy 요청 캡처',
+  adaptive_js: 'JS 근거 분석', adaptive_js_followup: '새 문서·JS 추가 분석', observed_json_recovery: '관측 JSON 경로 검증',
 };
 const reconStateLabels: Record<string, string> = {
   started: '시작', finished: '종료', skipped: '건너뜀', failed: '실패', planned: '작업 범위 결정',
@@ -139,7 +155,11 @@ export function reconActivityLabel(params: Record<string, string | number>): str
   const duplicates = typeof params.duplicate_count === 'number' && params.duplicate_count > 0
     ? ` · 이미 본 화면 ${params.duplicate_count}개 건너뜀` : '';
   const reason = { time_limit: '시간 상한 도달', action_limit: '동작 상한 도달', page_limit: '페이지 상한 도달' }[String(params.reason)] ?? '';
-  return `${phase} ${state}${root}${count}${roots}${captured}${duplicates}${reason ? ` · ${reason}` : ''}`;
+  const plan = typeof params.planned_requests === 'number'
+    ? ` · 계획 ${params.planned_requests}회${typeof params.request_budget === 'number' ? ` / 전체 예산 ${params.request_budget}회` : ''}${params.coverage_may_be_limited === 1 ? ' · 제한으로 일부 탐색 생략 가능' : ''}` : '';
+  const deferred = Number(params.detail_deferred_candidates) > 0
+    ? ` · 상세 GET 한도 ${params.detail_probe_limit}개, 미검증 후보 ${params.detail_deferred_candidates}개` : '';
+  return `${phase} ${state}${root}${count}${roots}${plan}${captured}${duplicates}${deferred}${reason ? ` · ${reason}` : ''}`;
 }
 
 const koreanMessages: Record<string, (params: Record<string, string | number>) => string> = {
@@ -214,6 +234,7 @@ const reconPhaseLabelsEn: Record<string, string> = {
   api_secondary: 'API specification and GraphQL discovery', openapi_detection: 'OpenAPI specification detection',
   graphql_detection: 'GraphQL endpoint detection', zap_openapi: 'ZAP OpenAPI discovery',
   zap_graphql: 'ZAP GraphQL discovery', mitm_capture: 'mitmproxy request capture',
+  adaptive_js: 'JS evidence analysis', adaptive_js_followup: 'New document and JS analysis', observed_json_recovery: 'Observed JSON verification',
 };
 const reconStateLabelsEn: Record<string, string> = {
   started: 'started', finished: 'finished', skipped: 'skipped', failed: 'failed', planned: 'work scope planned',
@@ -263,7 +284,11 @@ function reconActivityLabelEn(params: Record<string, string | number>): string {
   const duplicates = typeof params.duplicate_count === 'number' && params.duplicate_count > 0
     ? ` · ${params.duplicate_count} known pages skipped` : '';
   const reason = { time_limit: 'time limit reached', action_limit: 'action limit reached', page_limit: 'page limit reached' }[String(params.reason)] ?? '';
-  return `${phase} ${state}${target}${count}${roots}${captured}${duplicates}${reason ? ` · ${reason}` : ''}`;
+  const plan = typeof params.planned_requests === 'number'
+    ? ` · ${params.planned_requests} planned requests${typeof params.request_budget === 'number' ? ` / total budget ${params.request_budget}` : ''}${params.coverage_may_be_limited === 1 ? ' · limits may reduce coverage' : ''}` : '';
+  const deferred = Number(params.detail_deferred_candidates) > 0
+    ? ` · detail GET limit ${params.detail_probe_limit}, ${params.detail_deferred_candidates} unverified candidates` : '';
+  return `${phase} ${state}${target}${count}${roots}${plan}${captured}${duplicates}${deferred}${reason ? ` · ${reason}` : ''}`;
 }
 function scopeBrowserProgressEn(message: string): string {
   const staticMessages: Record<string, string> = {

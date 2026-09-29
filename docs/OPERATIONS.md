@@ -345,6 +345,22 @@ Phase 2 Chromium 로그인 창을 다시 열어 직접 로그인할 수 있습�
 로그인 취소, 세션 저장 실패, 타깃 복귀 실패 시 자동 탐색을 시작하지 않습니다.
 수동 로그인 중 Enter 입력은 최대 5분 대기하며, 입력이 없으면 현재 세션을
 자동 저장합니다.
+대시보드에서 시작한 `runtime-browser` 스캔은 로그인 대기 안내에 **로그인 완료**
+버튼을 표시합니다. 열린 Chromium에서 로그인과 초대 코드 등 가입 절차를 마치고
+대상 사이트로 돌아온 뒤 버튼을 누릅니다. 브라우저가 살아 있고 대상 화면에
+로그인 입력이나 명확한 접근 제한 안내가 남아 있지 않으면 같은 세션으로 Recon을
+계속합니다. 제한 화면이 남아 있으면 해당 절차를 마친 뒤 다시 확인할 수 있습니다.
+5분 안에 사용자 확인이 없으면 실패 처리하며 자동으로 수집을 시작하지 않습니다.
+
+확인은 스캔 ID와 해당 로그인 요청 ID에 연결됩니다. 다른 스캔, 교체된 요청,
+만료된 요청에는 적용되지 않습니다. 쿠키 인증도 지원하며 특정 인증 API의 성공
+응답이나 `Authorization` 헤더를 요구하지 않습니다. 이후 API의 인증·권한 오류는
+사용자 확인을 취소하거나 전체 로그인 흐름을 자동으로 다시 시작하는 근거로 쓰지
+않습니다. 브라우저나 저장된 세션이 사라진 경우에는 기존 세션 복구 절차를 사용합니다.
+
+확인 상태는 비밀정보 없는 `result/.webui/manual_login.db`에 저장하고, 감사 기록은
+`recon.operator_login_confirmed` / `operator_confirmed`로 남깁니다. 이 기록은 사용자의
+확인 사실이며 서버 인증 검증이나 모든 엔드포인트의 접근 권한을 보장하지 않습니다.
 
 수동 로그인 트래픽은 Recon 관측에 포함하지 않으며 외부 로그인 URL을 탐색 대상으로
 추가하지 않습니다. `--auth-host`와 `--auth-path`는 호환을 위해 남아 있지만 자동
@@ -375,6 +391,16 @@ mitmproxy는 다음 우선순위로 admission control을 수행합니다.
 Katana와 ffuf에는 속도, 동시성, 깊이 제한을 전달합니다. Playwright를 포함한 프록시
 트래픽은 scheme, host, port, path, method, 총 요청 수를 다시 검사합니다.
 정책 강제 모드에서 `mitmdump`를 시작할 수 없으면 Recon은 실행되지 않습니다.
+mitmproxy는 `pyproject.toml`과 `uv.lock`에 관리되는 필수 Python 의존성입니다.
+프록시는 `sys.executable`로 mitmproxy의 `mitmdump` 진입점을 실행하므로 대시보드,
+CLI, editable tool 설치 모두 자기 Python 환경을 사용합니다. 시스템 PATH의
+별도 mitmdump 바이너리는 사용하지 않습니다. addon이 공유 요청 예산 기록을
+읽고 쓰므로 해당 Python에는 표준 `sqlite3` 모듈이 필요합니다.
+신규 설치는 `uv sync` 또는 `uv tool install --editable .`로 준비합니다.
+기존 설치는 `uv sync --locked`와, editable tool을 사용한다면
+`uv tool install --force --editable .`로 갱신한 뒤 대시보드를 재시작합니다.
+프록시 포트 준비는 첫 실행의 모듈 초기화를 고려해 최대 30초 기다립니다.
+준비 중 프로세스가 종료되면 대기 기한까지 기다리지 않고 실패를 감지합니다.
 
 실행 순서는 인증된 브라우저/API 관측, Katana 경로 발견, 새 Katana 경로의
 Playwright 상호작용 확장, ffuf 순서입니다. Playwright의 두 pass는 방문 URL과
