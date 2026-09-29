@@ -20,6 +20,7 @@ from pydantic import BaseModel, Field
 from aidast.auth.manual_login import ManualLoginStore
 from aidast.orchestration.scope import CoordinatorError, ScopeCoordinator
 from aidast.paths import RESULT_ROOT
+from aidast.reporting.poc_video import inspect_poc, prepare_poc, read_poc_video
 from aidast.reporting.runtime import ReportError
 from aidast.reporting.submission import MAX_REQUIREMENTS_BYTES, ProgramRequirements, export_report, inspect_report, save_requirements
 
@@ -453,9 +454,27 @@ def create_app(
         require_same_origin(request)
         return report_action(report_id, lambda database: save_requirements(database, payload))
 
+    @app.get("/api/v1/reports/{report_id}/poc")
+    async def report_poc_info(report_id: str) -> dict[str, Any]:
+        return await asyncio.to_thread(report_action, report_id, inspect_poc)
+
+    @app.post("/api/v1/reports/{report_id}/poc")
+    async def report_poc_prepare(report_id: str, request: Request,
+                                 revision: str | None = Query(default=None, pattern=r'^[a-f0-9]{64}$')) -> dict[str, Any]:
+        require_same_origin(request)
+        return await asyncio.to_thread(report_action, report_id, lambda database: prepare_poc(database, expected_revision=revision))
+
+    @app.get("/api/v1/reports/{report_id}/poc/video")
+    async def report_poc_video(report_id: str, revision: str = Query(pattern=r'^[a-f0-9]{64}$')) -> Response:
+        metadata, media = await asyncio.to_thread(report_action, report_id, lambda database: read_poc_video(database, expected_revision=revision))
+        return Response(media, media_type="video/webm", headers={
+            "Content-Disposition": 'inline; filename="Video.webm"', "Cache-Control": "no-store",
+            "X-Content-Type-Options": "nosniff",
+        })
+
     @app.get("/api/v1/reports/{report_id}/export")
-    async def report_export(report_id: str, revision: str | None = Query(default=None, pattern=r'^[a-f0-9]{64}$')) -> Response:
-        package = report_action(report_id, lambda database: export_report(database, expected_revision=revision))
+    async def report_export(report_id: str, revision: str | None = Query(default=None, pattern=r'^[a-f0-9]{64}$'), include_poc: bool = False) -> Response:
+        package = await asyncio.to_thread(report_action, report_id, lambda database: export_report(database, expected_revision=revision, include_poc=include_poc))
         return Response(package, media_type="application/zip", headers={
             "Content-Disposition": f'attachment; filename="{report_id}.zip"',
             "Cache-Control": "no-store",

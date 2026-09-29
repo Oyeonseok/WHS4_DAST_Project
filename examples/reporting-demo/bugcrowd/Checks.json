@@ -1,0 +1,36 @@
+{
+  "checks": [
+    {
+      "code": "metadata_only",
+      "field": null,
+      "level": "warning",
+      "message": "Evidence files contain text metadata only. Raw bodies, images and videos are unavailable; pattern masking cannot identify arbitrary unlabeled secrets."
+    },
+    {
+      "code": "claim_quality",
+      "field": null,
+      "level": "warning",
+      "message": "Field presence and evidence citations do not establish every report claim."
+    }
+  ],
+  "ready": true,
+  "redactions": [
+    {
+      "count": 15,
+      "kind": "email"
+    },
+    {
+      "count": 7,
+      "kind": "token"
+    }
+  ],
+  "report_id": "report_a8c996adb3144e499f570e800b5b845c",
+  "revision_sha256": "c4fc058955df9bedc5c70d8a5b1290c46b849b2c022e89aa56e9224a98abcc11",
+  "sample_notice": "SYNTHETIC EXAMPLE / OFFLINE FIXTURE. No real target was tested; not a real program submission.",
+  "verification": {
+    "fake_secret_values_absent": true,
+    "manifest_hashes_match": true,
+    "original_report_files_unchanged": true,
+    "source_paths_absent": true
+  }
+}

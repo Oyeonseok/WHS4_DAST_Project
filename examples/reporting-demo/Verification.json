@@ -1,0 +1,61 @@
+{
+  "generated_by": "aidast.reporting.submission.export_report",
+  "live_requests_made": false,
+  "platforms": [
+    {
+      "evidence_files": 3,
+      "platform": "hackerone",
+      "ready": true,
+      "redactions": [
+        {
+          "count": 15,
+          "kind": "email"
+        },
+        {
+          "count": 7,
+          "kind": "token"
+        }
+      ],
+      "revision_sha256": "77f139074ede98f0632e23a6244c20309e35c22a934b260f18208a69761bbfe4",
+      "zip_sha256": "673fa877faf3dfc07dbe8c8cb3ef2c1eb81d6158882fb40d3e9f626aa768bb05",
+      "zip_size_bytes": 5952
+    },
+    {
+      "evidence_files": 3,
+      "platform": "intigriti",
+      "ready": true,
+      "redactions": [
+        {
+          "count": 15,
+          "kind": "email"
+        },
+        {
+          "count": 7,
+          "kind": "token"
+        }
+      ],
+      "revision_sha256": "4b9142761831a6cbf643cf77d4336fab8bec6045afae71f1daf96448839d9e45",
+      "zip_sha256": "fd1fe453fae64283a5573afa1339afbd17db4c519081683c05af8e8ed998e1b3",
+      "zip_size_bytes": 5990
+    },
+    {
+      "evidence_files": 3,
+      "platform": "bugcrowd",
+      "ready": true,
+      "redactions": [
+        {
+          "count": 15,
+          "kind": "email"
+        },
+        {
+          "count": 7,
+          "kind": "token"
+        }
+      ],
+      "revision_sha256": "c4fc058955df9bedc5c70d8a5b1290c46b849b2c022e89aa56e9224a98abcc11",
+      "zip_sha256": "659edd52dac031b91fe2140f86265b378e7bc16c3d81e340f6c9af52691fa404",
+      "zip_size_bytes": 6057
+    }
+  ],
+  "sample_notice": "SYNTHETIC EXAMPLE / OFFLINE FIXTURE. No real target was tested; not a real program submission."
+}

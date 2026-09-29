@@ -38,4 +38,5 @@ dialog:has(.report-submission){width:min(860px,calc(100% - 32px))}
 .report-evidence dl{font-size:11px;color:var(--muted);margin-bottom:0}
 .report-evidence dd{margin:4px 0 10px;overflow-wrap:anywhere;font-family:Consolas,monospace}
 .report-submission .report-preview{padding:14px;background:var(--bg);border:1px solid var(--line);border-radius:5px;font-size:12px}
+.report-poc-video{display:block;width:100%;max-width:1280px;border:1px solid var(--line);border-radius:5px;background:var(--bg)}
 @media(max-width:660px){.report-submission-actions button{width:100%}.report-checks li{display:block}.report-checks span,.report-checks a{display:block;margin-top:5px}}

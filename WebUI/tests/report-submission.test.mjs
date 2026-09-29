@@ -71,3 +71,50 @@ test('invalid rules fail before saving and edited rules disable export', () => {
   ]) assert.equal(submission.parseRequirementsForm?.({ ...form, ...changes }), null);
   assert.equal(submission.canExportSubmission?.(response, reportId, true), false);
 });
+
+const poc = { status: 'ready', mode: 'evidence_replay', source_revision: response.revision_sha256,
+  filename: 'Video.webm', sha256: 'e'.repeat(64), byte_size: 500000, duration_seconds: 10,
+  width: 1280, height: 720, chapters: 2 };
+
+test('PoC metadata accepts bounded evidence replay and empty cache states', () => {
+  assert.equal(typeof submission.parsePocInfo, 'function');
+  assert.deepEqual(submission.parsePocInfo?.(poc), poc);
+  for (const status of ['missing', 'stale', 'blocked']) {
+    const info = { status, mode: 'evidence_replay', source_revision: null, filename: null,
+      sha256: null, byte_size: null, duration_seconds: null, width: null, height: null, chapters: null };
+    assert.deepEqual(submission.parsePocInfo?.(info), info);
+  }
+});
+
+test('PoC status must be a string even for an empty cache', () => {
+  const empty = { mode: 'evidence_replay', source_revision: null, filename: null,
+    sha256: null, byte_size: null, duration_seconds: null, width: null, height: null, chapters: null };
+  for (const status of [['missing'], { status: 'missing' }, null, 0, true]) {
+    assert.equal(submission.parsePocInfo({ ...empty, status }), null);
+  }
+});
+
+test('malformed ready PoC metadata never produces a preview', () => {
+  assert.equal(typeof submission.parsePocInfo, 'function');
+  for (const changes of [{ status: 'unknown' }, { mode: 'live' }, { source_revision: null },
+    { source_revision: 'x'.repeat(64) }, { filename: '../Video.webm' }, { sha256: null },
+    { byte_size: 0 }, { byte_size: 10000001 }, { byte_size: 2.5 }, { duration_seconds: NaN },
+    { duration_seconds: 61 }, { duration_seconds: 5 }, { width: 1920 }, { height: 1080 },
+    { chapters: 0 }, { chapters: 13 }, { chapters: 1.5 }, { width: null },
+  ]) assert.equal(submission.parsePocInfo?.({ ...poc, ...changes }), null);
+  assert.equal(submission.parsePocInfo?.({ ...poc, status: 'missing' }), null);
+});
+
+test('preview and export reject stale report, dirty rules and pending actions', () => {
+  assert.equal(typeof submission.canPreviewPoc, 'function');
+  assert.equal(submission.canPreviewPoc?.(poc, response, reportId), true);
+  for (const info of [null, { ...poc, status: 'stale' }, { ...poc, source_revision: 'f'.repeat(64) },
+    { ...poc, byte_size: 10000001 }]) assert.equal(submission.canPreviewPoc?.(info, response, reportId), false);
+  assert.equal(submission.canPreviewPoc?.(poc, response, 'report_' + 'f'.repeat(32)), false);
+  assert.equal(submission.canPreviewPoc?.(poc, response, reportId, true), false);
+  assert.equal(submission.canPreviewPoc?.(poc, response, reportId, false, true), false);
+  assert.equal(submission.canPreviewPoc?.(poc, { ...response, ready: false }, reportId), false);
+  assert.equal(submission.canExportSubmission?.(response, reportId, false, true), false);
+  // Missing cache does not require users to manually prepare a video before export.
+  assert.equal(submission.canExportSubmission?.(response, reportId, false, false), true);
+});

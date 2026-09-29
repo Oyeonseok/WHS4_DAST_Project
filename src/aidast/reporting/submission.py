@@ -1,6 +1,6 @@
 """Masked, source-bound submission packages; persisted report bytes stay immutable.
 
-Only text metadata is supported. Pattern masking cannot identify arbitrary,
+Evidence input supports text metadata only; optional video replays this masked view. Pattern masking cannot identify arbitrary,
 unlabelled secrets and never claims to recover raw request bodies or attachments.
 """
 from __future__ import annotations
@@ -593,7 +593,7 @@ def inspect_report(report_db: Path) -> dict:
     return view
 
 
-def export_report(report_db: Path, *, expected_revision: str | None = None) -> bytes:
+def export_report(report_db: Path, *, expected_revision: str | None = None, include_poc: bool = False) -> bytes:
     """Export only freshly checked files, bound to the revision shown to the user."""
     view = inspect_report(report_db)
     if expected_revision is not None and expected_revision != view["revision_sha256"]:
@@ -613,10 +613,17 @@ def export_report(report_db: Path, *, expected_revision: str | None = None) -> b
     files["Manifest.json"] = (canonical_json(manifest) + "\n").encode()
     if sum(len(data) for data in files.values()) > MAX_PACKAGE_BYTES:
         raise ReportError('submission package exceeds the byte budget')
-    # A second inspection catches changes during package preparation.
-    current = inspect_report(report_db)
-    if not current["ready"] or current["revision_sha256"] != view["revision_sha256"]:
-        raise ReportError("submission revision changed during export")
+    if include_poc:
+        from .poc_video import MAX_MEDIA_BYTES, MAX_POC_METADATA_BYTES, prepare_poc, _read_poc_files
+        prepare_poc(report_db, expected_revision=view["revision_sha256"])
+        _, poc_files = _read_poc_files(report_db, expected_revision=view["revision_sha256"])
+        for name, data in poc_files.items():
+            destination = "PoC/" + name
+            files[destination] = data
+            manifest["files"].append({"name": destination, "sha256": hashlib.sha256(data).hexdigest(), "size_bytes": len(data)})
+        files["Manifest.json"] = (canonical_json(manifest) + "\n").encode()
+        if sum(len(data) for data in files.values()) > MAX_PACKAGE_BYTES + MAX_MEDIA_BYTES + MAX_POC_METADATA_BYTES:
+            raise ReportError('submission package exceeds the byte budget')
     output = io.BytesIO()
     with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         for name, data in files.items():
@@ -624,4 +631,8 @@ def export_report(report_db: Path, *, expected_revision: str | None = None) -> b
             entry.compress_type = zipfile.ZIP_DEFLATED
             entry.external_attr = 0o600 << 16
             archive.writestr(entry, data)
+    # Inspect after compression so changes during ZIP creation also block delivery.
+    current = inspect_report(report_db)
+    if not current["ready"] or current["revision_sha256"] != view["revision_sha256"]:
+        raise ReportError("submission revision changed during export")
     return output.getvalue()

@@ -178,3 +178,57 @@ def test_cli_export_refuses_to_overwrite_source_file(report_case, tmp_path):
     assert main(['report', 'export', prepared['report_db'], '--requirements', str(rules),
                  '--output', str(fixture.path)]) != 0
     assert fixture.path.read_bytes() == before
+
+
+def test_poc_api_origin_revision_blocking_and_cached_video(report_case, monkeypatch):
+    from aidast.reporting import poc_video
+    import threading
+    renderer_threads = []
+    def render(storyboard, directory, deadline):
+        renderer_threads.append(threading.get_ident())
+        return b'\x1a\x45\xdf\xa3' + b'fixture video' * 12, ['a' * 64] * len(storyboard['chapters'])
+    monkeypatch.setattr(poc_video, '_render_and_encode', render)
+    _, prepared, root = report_case
+    endpoint = '/api/v1/reports/' + prepared['report_id']
+    async def run(client):
+        event_thread = threading.get_ident()
+        assert (await client.get(endpoint + '/poc')).json()['status'] == 'blocked'
+        assert (await client.post(endpoint + '/poc')).status_code == 403
+        assert (await client.post(endpoint + '/poc', headers={'Origin': 'https://outside.invalid'})).status_code == 403
+        assert (await client.post(endpoint + '/poc', headers={'Origin': 'http://test'})).status_code == 409
+        assert (await client.get(endpoint + '/poc/video')).status_code == 422
+        for path, method in [('/poc', client.post), ('/poc/video', client.get)]:
+            invalid = await method(endpoint + path, params={'revision': 'private-secret-invalid'}, headers={'Origin': 'http://test'})
+            assert invalid.status_code == 422 and 'private-secret-invalid' not in invalid.text
+        view = (await client.post(endpoint + '/requirements', json=RULES, headers={'Origin': 'http://test'})).json()
+        assert (await client.get(endpoint + '/poc')).json()['status'] == 'missing'
+        assert (await client.get(endpoint + '/poc/video', params={'revision': view['revision_sha256']})).status_code == 409
+        assert renderer_threads == []
+        ready = await client.post(endpoint + '/poc', params={'revision': view['revision_sha256']}, headers={'Origin': 'http://test'})
+        assert ready.status_code == 200 and ready.json()['status'] == 'ready'
+        assert renderer_threads and renderer_threads[0] != event_thread
+        video = await client.get(endpoint + '/poc/video', params={'revision': view['revision_sha256']})
+        assert video.status_code == 200 and video.headers['content-type'] == 'video/webm'
+        assert video.headers['cache-control'] == 'no-store'
+        assert hashlib.sha256(video.content).hexdigest() == ready.json()['sha256']
+        archive = await client.get(endpoint + '/export', params={'revision': view['revision_sha256'], 'include_poc': 'true'})
+        assert archive.status_code == 200
+        with zipfile.ZipFile(io.BytesIO(archive.content)) as package:
+            assert package.read('PoC/Video.webm') == video.content
+        await client.post(endpoint + '/requirements', json={**RULES, 'source': 'changed rules'}, headers={'Origin': 'http://test'})
+        assert (await client.get(endpoint + '/poc')).json()['status'] == 'stale'
+        assert (await client.get(endpoint + '/poc/video', params={'revision': view['revision_sha256']})).status_code == 409
+    request_scenario(root, run)
+
+
+def test_cli_poc_export_includes_verified_media(report_case, tmp_path, monkeypatch):
+    from aidast.reporting import poc_video
+    monkeypatch.setattr(poc_video, '_render_and_encode', lambda storyboard, directory, deadline:
+                        (b'\x1a\x45\xdf\xa3' + b'fixture video' * 12, ['b' * 64] * len(storyboard['chapters'])))
+    _, prepared, _ = report_case
+    rules = tmp_path / 'rules.json'
+    rules.write_text(json.dumps(RULES))
+    output = tmp_path / 'video-report.zip'
+    assert main(['report', 'export', prepared['report_db'], '--requirements', str(rules), '--output', str(output), '--poc']) == 0
+    with zipfile.ZipFile(output) as package:
+        assert 'PoC/Video.webm' in package.namelist()

@@ -631,6 +631,7 @@ def _parser() -> argparse.ArgumentParser:
         if action == "export":
             command.add_argument("--output", type=Path, required=True, help="new ZIP package path (existing files are preserved)")
             command.add_argument("--revision", help="expected inspection revision SHA-256")
+            command.add_argument("--poc", action="store_true", help="include an automatically checked masked evidence replay video")
 
     # dashboard 명령어
     dashboard = commands.add_parser(
@@ -2086,7 +2087,7 @@ def _run_report(args: argparse.Namespace, *, writer: object | None = None) -> in
             print(json.dumps(result, ensure_ascii=False, sort_keys=True))
             return 0 if result['ready'] else 1
         output = _path(args.output)
-        package = export_report(args.database, expected_revision=args.revision or result['revision_sha256'])
+        package = export_report(args.database, expected_revision=args.revision or result['revision_sha256'], include_poc=args.poc)
         try:
             # Exclusive creation also protects report/source/requirements files.
             with output.open('xb') as stream:

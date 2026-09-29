@@ -43,9 +43,37 @@ export function parseReportSubmission(value: unknown, reportId: string): ReportS
   return value as unknown as ReportSubmissionView;
 }
 
-export function canExportSubmission(value: ReportSubmissionView | null, reportId: string, dirty = false): boolean {
-  return !dirty && !!value && value.report_id === reportId && value.ready && digest.test(value.revision_sha256)
+export function canExportSubmission(value: ReportSubmissionView | null, reportId: string, dirty = false, busy = false): boolean {
+  return !dirty && !busy && !!value && value.report_id === reportId && value.ready && digest.test(value.revision_sha256)
     && value.requirements.verified && !value.checks.some(check => check.level === 'blocker');
+}
+
+export type PocInfo = {
+  status: 'missing' | 'ready' | 'stale' | 'blocked'; mode: 'evidence_replay';
+  source_revision: string | null; filename: string | null; sha256: string | null;
+  byte_size: number | null; duration_seconds: number | null; width: number | null;
+  height: number | null; chapters: number | null;
+};
+
+export function parsePocInfo(value: unknown): PocInfo | null {
+  if (!record(value) || value.mode !== 'evidence_replay' || !text(value.status)
+    || !['missing', 'ready', 'stale', 'blocked'].includes(value.status)) return null;
+  if (value.status !== 'ready') {
+    return ['source_revision', 'filename', 'sha256', 'byte_size', 'duration_seconds', 'width', 'height', 'chapters']
+      .every(key => value[key] === null) ? value as PocInfo : null;
+  }
+  if (!text(value.source_revision) || !digest.test(value.source_revision) || value.filename !== 'Video.webm'
+    || !text(value.sha256) || !digest.test(value.sha256) || typeof value.byte_size !== 'number'
+    || !Number.isSafeInteger(value.byte_size) || value.byte_size < 1 || value.byte_size > 10000000
+    || value.width !== 1280 || value.height !== 720 || typeof value.chapters !== 'number'
+    || !Number.isSafeInteger(value.chapters) || value.chapters < 1 || value.chapters > 12
+    || value.duration_seconds !== value.chapters * 5) return null;
+  return value as PocInfo;
+}
+
+export function canPreviewPoc(info: PocInfo | null, view: ReportSubmissionView | null, reportId: string, dirty = false, busy = false): boolean {
+  return canExportSubmission(view, reportId, dirty, busy) && !!info && !!parsePocInfo(info)
+    && info.status === 'ready' && info.source_revision === view?.revision_sha256;
 }
 
 export type RequirementsForm = {
