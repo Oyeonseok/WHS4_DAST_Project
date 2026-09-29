@@ -550,6 +550,52 @@ def test_recon_progress_advances_when_planned_tasks_finish(tmp_path: Path) -> No
     assert underway["logs"][-1]["message_params"]["step"] == "review"
 
 
+def test_tagging_progress_recovers_running_worker_counts_without_duplicate_logs(tmp_path: Path) -> None:
+    database = _fixture(tmp_path)
+    with sqlite3.connect(database) as conn:
+        conn.execute("UPDATE scans SET status='running',finished_at=NULL")
+        conn.execute("UPDATE stage_runs SET status='running'")
+        conn.executescript("""
+            CREATE TABLE endpoint_observations (observation_id TEXT, endpoint_id TEXT);
+            CREATE TABLE endpoint_annotations (annotation_id TEXT, observation_id TEXT);
+            INSERT INTO assets VALUES ('other-asset','other-scan','other.example.com');
+            INSERT INTO origins VALUES ('other-origin','other-asset');
+            INSERT INTO endpoints VALUES ('other-endpoint','other-origin','GET','/other');
+            INSERT INTO endpoint_observations VALUES ('other-observation','other-endpoint');
+            INSERT INTO endpoint_annotations VALUES ('other-tag','other-observation');
+        """)
+        conn.executemany("INSERT INTO endpoint_observations VALUES (?, 'endpoint')",
+                         [(f"obs-{index}",) for index in range(50)])
+        conn.executemany("INSERT INTO endpoint_annotations VALUES (?,?)",
+                         [(f"tag-{index}", f"obs-{index}") for index in range(25)])
+        conn.execute("INSERT INTO endpoint_annotations VALUES ('second-category','obs-0')")
+    projector = DashboardProjector(tmp_path)
+    projector.record_event(SCAN_ID, source_key="tagging-start", event_type="log.appended",
+        payload={"stage": "Recon", "message": "Agent work", "message_code": "agent.work",
+                 "message_params": {"agent": "recon", "step": "tagging", "state": "started", "progress": 76}})
+    first = projector.snapshot(SCAN_ID)
+    assert first["progress"] == 82
+    assert first["logs"][-1]["message_params"]["processed"] == 25
+    assert first["logs"][-1]["message_params"]["observation_total"] == 50
+    assert projector.snapshot(SCAN_ID)["last_event_id"] == first["last_event_id"]
+    with sqlite3.connect(database) as conn:
+        conn.execute("INSERT INTO endpoint_annotations VALUES ('next','obs-25')")
+    next_state = projector.snapshot(SCAN_ID)
+    assert next_state["logs"][-1]["message_params"]["processed"] == 26
+    assert next_state["last_event_id"] > first["last_event_id"]
+    projector.record_event(SCAN_ID, source_key="tagging-failed", event_type="log.appended",
+        payload={"stage": "Recon", "message": "Agent work", "message_code": "agent.work",
+                 "message_params": {"agent": "recon", "step": "tagging", "state": "failed", "progress": 82}})
+    failed = projector.snapshot(SCAN_ID)
+    assert failed["logs"][-1]["message_params"]["state"] == "failed"
+    projector.record_event(SCAN_ID, source_key="review-start", event_type="log.appended",
+        payload={"stage": "Recon", "message": "Agent work", "message_code": "agent.work",
+                 "message_params": {"agent": "main", "step": "review", "state": "started", "progress": 89}})
+    review = projector.snapshot(SCAN_ID)
+    assert review["progress"] == 89
+    assert review["logs"][-1]["message_params"]["step"] == "review"
+
+
 def test_validation_progress_advances_with_case_phases_and_decisions(tmp_path: Path) -> None:
     database = _fixture(tmp_path)
     with sqlite3.connect(database) as conn:
@@ -1030,6 +1076,9 @@ def test_dashboard_cli_defaults_and_rejects_remote_bind(tmp_path: Path) -> None:
 
 
 def test_scan_launcher_builds_fixed_argv_and_streams_pre_database_logs(tmp_path: Path) -> None:
+    wordlist = tmp_path / "resources" / "wordlists" / "common.txt"
+    wordlist.parent.mkdir(parents=True)
+    wordlist.write_text("api\napp\n", encoding="utf-8")
     projector = DashboardProjector(tmp_path)
     captured: dict[str, Any] = {}
     waiting = threading.Event()
@@ -1099,6 +1148,7 @@ def test_scan_launcher_builds_fixed_argv_and_streams_pre_database_logs(tmp_path:
         max_depth=1,
         max_concurrency=1,
         timeout_seconds=10,
+        ffuf_max_time_seconds=0,
         tag_batch_size=17,
         login_mode="none",
         start_url="https://prismlife.com/app",
@@ -1113,6 +1163,9 @@ def test_scan_launcher_builds_fixed_argv_and_streams_pre_database_logs(tmp_path:
     assert argv[1:4] == ["-m", "aidast", "run"]
     assert argv[argv.index("--target") + 1] == "prismlife.com"
     assert argv[argv.index("--max-requests") + 1] == "120"
+    assert "--ffuf-wordlist" in argv
+    assert argv[argv.index("--ffuf-wordlist") + 1] == str(wordlist)
+    assert argv[argv.index("--ffuf-max-time-seconds") + 1] == "0"
     assert argv[argv.index("--max-rps") + 1] == "0.4"
     assert argv[argv.index("--max-depth") + 1] == "1"
     assert argv[argv.index("--max-concurrency") + 1] == "1"

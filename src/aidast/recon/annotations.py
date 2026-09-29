@@ -100,7 +100,7 @@ def sanitize_evidence(value) -> dict:
     if not isinstance(value, dict):
         return {}
     result = {}
-    for key in ('parent_url', 'redirect_url', 'fuzz_root'):
+    for key in ('parent_url', 'redirect_url', 'fuzz_root', 'collection_url'):
         if isinstance(value.get(key), str) and value[key]:
             result[key] = safe_url(value[key])
     for key in ('html_tag', 'html_attribute', 'content_type'):
@@ -108,10 +108,13 @@ def sanitize_evidence(value) -> dict:
             result[key] = safe_text(value[key])[:200]
     if isinstance(value.get('verification_reason'), str):
         result['verification_reason'] = safe_text(value['verification_reason'])[:80]
-    for key in ('response_status', 'content_length', 'word_count', 'line_count'):
+    if (isinstance(value.get('access_status'), str)
+            and value['access_status'] in {'authentication_required', 'forbidden'}):
+        result['access_status'] = value['access_status']
+    for key in ('response_status', 'control_status', 'content_length', 'word_count', 'line_count'):
         number = value.get(key)
         if type(number) is int and 0 <= number <= 10**12:
-            if key != 'response_status' or 100 <= number <= 599:
+            if key not in {'response_status', 'control_status'} or 100 <= number <= 599:
                 result[key] = number
     seeds = value.get('seed_paths')
     if isinstance(seeds, list):

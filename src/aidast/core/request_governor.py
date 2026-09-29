@@ -1,12 +1,13 @@
 """Dependency-free durable outbound safety limits, also loaded by mitmdump.
 
 Reservations never refund request units. Periods are rolling windows; pending
-reservations count toward them too. Capacity exhaustion rejects immediately so
-synchronous proxy hooks cannot deadlock waiting for their own response hooks.
+reservations count toward them too. Synchronous admission rejects immediately;
+async proxy admission can wait within its timeout while response hooks run.
 """
 from __future__ import annotations
 
 from contextlib import contextmanager
+import asyncio
 import json
 import math
 from pathlib import Path
@@ -18,6 +19,14 @@ from uuid import uuid4
 
 class GovernorError(ValueError):
     """Shared request accounting cannot authorize a dispatch."""
+
+
+class GovernorBusyError(GovernorError):
+    """Capacity or a finite rolling window can become available later."""
+
+    def __init__(self, message, *, retry_after=0.02):
+        super().__init__(message)
+        self.retry_after = retry_after
 
 
 def _number(value, name, maximum=1e12, integer=False):
@@ -80,11 +89,11 @@ class RequestGovernor:
         self.binding = json.loads(json.dumps(binding, allow_nan=False))
 
     @contextmanager
-    def _transaction(self):
+    def _transaction(self, *, nonblocking=False):
         conn = None
         try:
-            conn = sqlite3.connect(self.path, timeout=5, isolation_level=None)
-            conn.execute('PRAGMA busy_timeout=5000')
+            conn = sqlite3.connect(self.path, timeout=0 if nonblocking else 5, isolation_level=None)
+            conn.execute('PRAGMA busy_timeout=' + ('0' if nonblocking else '5000'))
             conn.execute('BEGIN IMMEDIATE')
             conn.execute('CREATE TABLE IF NOT EXISTS governor_scans (program TEXT, scan TEXT, started REAL NOT NULL, configuration TEXT NOT NULL, last_dispatch REAL, PRIMARY KEY(program,scan))')
             conn.execute('CREATE TABLE IF NOT EXISTS governor_requests (id TEXT PRIMARY KEY, program TEXT NOT NULL, scan TEXT NOT NULL, origin TEXT NOT NULL, units INTEGER NOT NULL, capacity INTEGER NOT NULL, charged REAL NOT NULL, expires REAL NOT NULL, state TEXT NOT NULL)')
@@ -93,6 +102,8 @@ class RequestGovernor:
             conn.execute('COMMIT')
         except sqlite3.Error as exc:
             if conn is not None and conn.in_transaction: conn.rollback()
+            if nonblocking and (getattr(exc, 'sqlite_errorcode', 0) & 255) in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED}:
+                raise GovernorBusyError('shared request ledger busy') from exc
             raise GovernorError('shared governor ledger unavailable or invalid') from exc
         except BaseException:
             if conn is not None and conn.in_transaction: conn.rollback()
@@ -124,9 +135,13 @@ class RequestGovernor:
                 where += ' AND charged>?'; args.append(now - rule['period_seconds'])
             used = conn.execute('SELECT coalesce(sum(units),0) FROM governor_requests WHERE ' + where, args).fetchone()[0]
             if used + units > rule['maximum']:
+                if rule['period_seconds'] is not None and units <= rule['maximum']:
+                    oldest = conn.execute('SELECT min(charged) FROM governor_requests WHERE ' + where, args).fetchone()[0]
+                    retry_after = max(0.01, oldest + rule['period_seconds'] - now) if oldest is not None else 0.02
+                    raise GovernorBusyError('shared policy request quota exhausted', retry_after=retry_after)
                 raise GovernorError('shared policy request quota exhausted')
 
-    def reserve(self, url, units=1, timeout_seconds=30, *, concurrency_units=1):
+    def reserve(self, url, units=1, timeout_seconds=30, *, concurrency_units=1, _nonblocking=False):
         if self.binding is None:
             return _Permit(None, None, timeout_seconds)
         _number(units, 'request units', integer=True)
@@ -135,18 +150,53 @@ class RequestGovernor:
         _number(timeout_seconds, 'request timeout', maximum=86400)
         origin, ident = _origin(url), uuid4().hex
         b = self.binding
-        with self._transaction() as conn:
+        with self._transaction(nonblocking=_nonblocking) as conn:
             now = self.clock()
             deadline, _ = self._scan(conn, now)
             used, active = conn.execute("SELECT coalesce(sum(units),0),coalesce(sum(CASE WHEN state IN ('reserved','running') AND expires>? THEN capacity ELSE 0 END),0) FROM governor_requests WHERE program=? AND scan=?", (now, b['program_id'], b['scan_id'])).fetchone()
             if used + units > b['scan_max_requests']:
                 raise GovernorError('shared scan request budget exhausted')
             if active + concurrency_units > b['concurrency']:
-                raise GovernorError('shared request concurrency limit reached')
+                raise GovernorBusyError('shared request concurrency limit reached')
             self._quotas(conn, origin, units, now)
             expires = min(now + timeout_seconds + 30, deadline)
             conn.execute("INSERT INTO governor_requests VALUES (?,?,?,?,?,?,?,?,'reserved')", (ident, b['program_id'], b['scan_id'], origin, units, concurrency_units, now, expires))
         return _Permit(self, ident, timeout_seconds)
+
+    async def acquire_async(self, url, units=1, timeout_seconds=30, *, concurrency_units=1):
+        """Wait for temporary limits without blocking the proxy event loop.
+
+        Pending capacity retries do not charge a request. A reserved permit is
+        released if pacing is cancelled or the admission timeout expires.
+        Permanent budget/quota and policy errors are never retried.
+        """
+        _number(timeout_seconds, 'request timeout', maximum=86400)
+        loop = asyncio.get_running_loop()
+        end = loop.time() + timeout_seconds
+        permit = None
+        try:
+            async with asyncio.timeout(timeout_seconds):
+                while True:
+                    remaining = end - loop.time()
+                    if remaining <= 0:
+                        raise TimeoutError()
+                    try:
+                        permit = self.reserve(url, units, remaining, concurrency_units=concurrency_units, _nonblocking=True)
+                        break
+                    except GovernorBusyError as exc:
+                        await asyncio.sleep(min(exc.retry_after, remaining))
+                await permit.wait_async()
+                remaining = end - loop.time()
+                if remaining <= 0:
+                    raise TimeoutError()
+                permit.timeout_seconds = min(permit.timeout_seconds, remaining)
+                return permit
+        except BaseException as exc:
+            if permit is not None:
+                await permit.complete_async()
+            if isinstance(exc, TimeoutError):
+                raise GovernorError('shared request deadline exhausted while waiting') from exc
+            raise
 
 
 class _Permit:
@@ -159,30 +209,60 @@ class _Permit:
         g = self.governor
         if g is None: return
         while True:
-            with g._transaction() as conn:
-                now = g.clock()
-                deadline, previous = g._scan(conn, now)
-                row = conn.execute('SELECT origin,units,expires,state,charged FROM governor_requests WHERE id=?', (self.ident,)).fetchone()
-                # Lock acquisition and ledger reads are part of admission time.
-                now = g.clock()
-                if now >= deadline:
-                    raise GovernorError('shared scan deadline exhausted')
-                if self.done or row is None or row[3] != 'reserved' or now >= row[2]:
-                    raise GovernorError('request permit expired or already dispatched')
-                rate = g.binding['requests_per_second']
-                due = max(now, previous + row[1] / rate if previous is not None else row[4] + (row[1] - 1) / rate)
-                if due >= deadline or due >= row[2]:
-                    raise GovernorError('shared request deadline exhausted while pacing')
-                if due <= now:
-                    self.timeout_seconds = min(self.timeout, deadline - now)
-                    g._quotas(conn, row[0], row[1], now, self.ident)
-                    conn.execute("UPDATE governor_requests SET state='running',charged=?,expires=? WHERE id=?", (now, min(now + self.timeout + 30, deadline), self.ident))
-                    conn.execute('UPDATE governor_scans SET last_dispatch=? WHERE program=? AND scan=?', (now, g.binding['program_id'], g.binding['scan_id']))
-                    return
-            g.sleeper(due - now)
+            delay = self._dispatch_delay()
+            if delay is None:
+                return
+            g.sleeper(delay)
 
-    def complete(self, outcome='completed'):
+    async def wait_async(self):
+        if self.governor is None:
+            return
+        while True:
+            try:
+                delay = self._dispatch_delay(nonblocking=True)
+            except GovernorBusyError as exc:
+                delay = exc.retry_after
+            if delay is None:
+                return
+            await asyncio.sleep(delay)
+
+    def _dispatch_delay(self, *, nonblocking=False):
+        g = self.governor
+        with g._transaction(nonblocking=nonblocking) as conn:
+            now = g.clock()
+            deadline, previous = g._scan(conn, now)
+            row = conn.execute('SELECT origin,units,expires,state,charged FROM governor_requests WHERE id=?', (self.ident,)).fetchone()
+            # Lock acquisition and ledger reads are part of admission time.
+            now = g.clock()
+            if now >= deadline:
+                raise GovernorError('shared scan deadline exhausted')
+            if self.done or row is None or row[3] != 'reserved' or now >= row[2]:
+                raise GovernorError('request permit expired or already dispatched')
+            rate = g.binding['requests_per_second']
+            due = max(now, previous + row[1] / rate if previous is not None else row[4] + (row[1] - 1) / rate)
+            if due >= deadline or due >= row[2]:
+                raise GovernorError('shared request deadline exhausted while pacing')
+            if due <= now:
+                self.timeout_seconds = min(self.timeout, deadline - now)
+                g._quotas(conn, row[0], row[1], now, self.ident)
+                conn.execute("UPDATE governor_requests SET state='running',charged=?,expires=? WHERE id=?", (now, min(now + self.timeout + 30, deadline), self.ident))
+                conn.execute('UPDATE governor_scans SET last_dispatch=? WHERE program=? AND scan=?', (now, g.binding['program_id'], g.binding['scan_id']))
+                return
+            return due - now
+
+    async def complete_async(self):
+        end = asyncio.get_running_loop().time() + 5
+        while True:
+            try:
+                self.complete(_nonblocking=True)
+                return
+            except GovernorBusyError:
+                if asyncio.get_running_loop().time() >= end:
+                    raise
+                await asyncio.sleep(0.02)
+
+    def complete(self, outcome='completed', *, _nonblocking=False):
         if self.governor is None or self.done: return
-        with self.governor._transaction() as conn:
+        with self.governor._transaction(nonblocking=_nonblocking) as conn:
             conn.execute("UPDATE governor_requests SET state='complete' WHERE id=?", (self.ident,))
         self.done = True

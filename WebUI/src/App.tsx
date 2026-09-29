@@ -290,6 +290,7 @@ export default function App() {
   const [maxConcurrency, setMaxConcurrency] = useState(2);
   const [timeoutSeconds, setTimeoutSeconds] = useState(15);
   const [maxDepth, setMaxDepth] = useState(2);
+  const [ffufMaxTimeSeconds, setFfufMaxTimeSeconds] = useState(150);
   const [tagBatchSize, setTagBatchSize] = useState(25);
   const [policyValues, setPolicyValues] = useState<Record<string, string>>({});
   const [identityValues, setIdentityValues] = useState<Record<string, string>>({});
@@ -928,6 +929,7 @@ export default function App() {
           scope_id: selectedScope.scope_id, targets: selectedTargets, profile: scanProfile,
           max_requests: maxRequests, max_rps: maxRps, max_concurrency: maxConcurrency,
           timeout_seconds: timeoutSeconds, max_depth: maxDepth, tag_batch_size: tagBatchSize,
+          ffuf_max_time_seconds: ffufMaxTimeSeconds,
           login_mode: loginMode, authorization_confirmed: true,
           identity_values: headerIdentityValues(selectedScope.execution_requirements, identityValues),
           ...policyLaunchValues(selectedScope.execution_requirements, selectedTargets, policyValues, policyConfirmations),
@@ -1113,7 +1115,8 @@ export default function App() {
         ? latestReconActivity : last;
       const name = language === 'ko' ? agentNames[agent] : agentNamesEn[agent];
       const message = activity ? localizeActivityMessage(language, activity) : '';
-      const running = snapshot?.status === 'running' && activity?.message_params?.state === 'started'
+      const running = snapshot?.status === 'running'
+        && ['started', 'progress'].includes(String(activity?.message_params?.state))
         && (agent === 'main' ? snapshot.stage === 'Recon' : activity?.stage === snapshot.stage);
       return <article key={agent} className={running ? 'is-active' : ''}>
         <div><strong>{name}</strong>
@@ -1208,6 +1211,7 @@ export default function App() {
     && maxConcurrency >= 1 && maxConcurrency <= selectedLimits.concurrency
     && timeoutSeconds >= 1 && timeoutSeconds <= selectedLimits.timeout_seconds
     && maxDepth >= 0 && maxDepth <= selectedLimits.max_depth
+    && Number.isInteger(ffufMaxTimeSeconds) && ffufMaxTimeSeconds >= 0 && ffufMaxTimeSeconds <= 86400
     && isValidTagBatchSize(tagBatchSize);
   const canLaunch = !demo && !!selectedScope && selectedTargets.length > 0
     && selectedTargets.every(target => selectedScope.targets.some(item => item.asset === target))
@@ -1247,6 +1251,7 @@ export default function App() {
         <div className="form-grid"><label className="form-field"><span>{tr('Requests per second')} <small>≤ {selectedLimits?.requests_per_second}</small></span><input type="number" min="0.1" step="0.1" max={selectedLimits?.requests_per_second} value={maxRps} onChange={event => setMaxRps(Number(event.target.value))}/></label><label className="form-field"><span>{tr('Concurrency')} <small>≤ {selectedLimits?.concurrency}</small></span><input type="number" min="1" max={selectedLimits?.concurrency} value={maxConcurrency} onChange={event => setMaxConcurrency(Number(event.target.value))}/></label></div>
         <div className="scan-rate-summary" aria-live="polite"><span>{tk('이번 스캔의 공유 요청 속도 상한', 'This scan shared request-rate cap')}</span><strong>{maxRps > 0 ? `${maxRps} ${tr('requests per second unit')}` : tr('Enter a valid request rate')}</strong>{requestInterval !== null && <small>{language === 'ko' ? `평균 ${requestInterval}초에 1회 요청` : `Average one request every ${requestInterval} seconds`}</small>}</div>
         <div className="form-grid"><label className="form-field"><span>{tr('Timeout seconds')} <small>≤ {selectedLimits?.timeout_seconds}</small></span><input type="number" min="1" max={selectedLimits?.timeout_seconds} value={timeoutSeconds} onChange={event => setTimeoutSeconds(Number(event.target.value))}/></label><label className="form-field"><span>{tr('Maximum depth')} <small>≤ {selectedLimits?.max_depth}</small></span><input type="number" min="0" max={selectedLimits?.max_depth} value={maxDepth} onChange={event => setMaxDepth(Number(event.target.value))}/></label></div>
+        <label className="form-field"><span>{tk('추가 경로 탐색 시간 (초/루트)', 'Additional path discovery time (seconds/root)')} <small>{tk('0 = 시간 제한 없음', '0 = no time limit')}</small></span><input type="number" min="0" max="86400" value={ffufMaxTimeSeconds} onChange={event => setFfufMaxTimeSeconds(Number(event.target.value))}/></label>
         <div className="form-grid"><label className="form-field"><span>{tr('Tag batch size')} <small>1–200</small></span><input type="number" min="1" max="200" step="1" value={tagBatchSize} onChange={event => setTagBatchSize(Number(event.target.value))} aria-describedby="tag-batch-size-hint"/><small id="tag-batch-size-hint">{tr('Observations per model call · 25 recommended (300-second model timeout)')}</small></label><label className="form-field"><span>{tr('Login behavior')}</span><select value={loginMode} onChange={event => setLoginMode(event.target.value as 'none' | 'runtime-browser')}><option value="none">{tr('No login prompt')}</option><option value="runtime-browser">{tr('Open runtime browser')}</option></select></label></div>
         {!!selectedScope.execution_requirements.execution_rules?.exclusions?.length && <div><ScopeExclusionStatus count={selectedScope.execution_requirements.execution_rules.exclusions.length} preparation={exclusionPreparation}/><button className="secondary-button" disabled={!canLaunch || preparingExclusions} onClick={() => void prepareExclusions()}>{tk(preparingExclusions ? '확인 중…' : '저장된 증거로 제외 조건 확인', preparingExclusions ? 'Checking…' : 'Check exclusions from saved evidence')}</button></div>}
         {loginMode === 'runtime-browser' && <p className="requirements-note">{tk('스캔 중 열린 브라우저에서 5분 안에 로그인을 완료하세요. 인증 토큰과 로그인 화면 종료가 확인되면 자동으로 진행합니다. 토큰을 사용하지 않는 사이트는 자동 확인에 실패할 수 있습니다.', 'Complete login in the opened browser within five minutes. The scan continues when an authentication token is detected and the login form closes. Sites without a token may not be confirmed automatically.')}</p>}

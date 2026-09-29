@@ -1,4 +1,5 @@
 """Exclusions stop physical calls before consuming request capacity (offline IO)."""
+import asyncio
 import io
 import time
 from types import SimpleNamespace
@@ -181,7 +182,7 @@ def test_proxy_block_before_budget_and_private_support_cannot_bypass():
     a,f=proxy_fixture(compiled(rule(predicate('method','POST'))))
     f.request.method='POST'
     f.request.headers.update({'x-aidast-browser-token':'test-token','x-aidast-browser-mode':'same-origin'})
-    a.request(f)
+    asyncio.run(a.request(f))
     assert f.response is not None and f.response.status_code==403
     assert a.request_count==0
 
@@ -191,7 +192,7 @@ def test_proxy_actual_destination_disagrees_with_pretty_host():
     f.request.pretty_url='https://example.com/public'
     f.request.url='https://outside.test/support'
     f.request.host='outside.test'
-    a.request(f)
+    asyncio.run(a.request(f))
     assert f.response is not None and f.response.status_code==403
     assert a.request_count==0
 
@@ -277,10 +278,10 @@ def test_proxy_receipt_roundtrip_preserves_actual_raw_request_and_stored_respons
     f.request.content=b'decoded-body'
     a.rules['mitm_capture_bodies']=True
     a.out_path=tmp_path/'capture.jsonl'
-    a.request(f)
+    asyncio.run(a.request(f))
     assert f.response is None
     f.response=SimpleNamespace(status_code=200,headers={'content-type':'text/plain'},raw_content=b'raw',content=b'Public documentation for all visitors.',get_text=lambda strict=False:'Public documentation for all visitors.',stream=False)
-    a.response(f)
+    asyncio.run(a.response(f))
     record=json.loads(a.out_path.read_text())
     assert record['request_receipt']['body_sha256']==hashlib.sha256(b'actual-compressed-wire').hexdigest()
     assert record['request_receipt']['request_key']==request_key(f.request.url,'GET',f.request.headers,f.request.raw_content)
@@ -303,14 +304,14 @@ def test_proxy_never_certifies_synthetic_or_incomplete_capture(tmp_path,control)
     if control=='streamed':f.request.stream=True
     if control=='candidate':f.request.headers['X-AIDAST-Phase']='candidate_probe'
     if control=='blocked':f.request.url=f.request.pretty_url='https://example.com/support'
-    a.request(f)
-    if control=='error':a.error(f)
+    asyncio.run(a.request(f))
+    if control=='error':asyncio.run(a.error(f))
     if control!='blocked':
         f.response=SimpleNamespace(status_code=200,headers={},raw_content=b'visible',content=b'visible',get_text=lambda strict=False:'visible',stream=False)
     else:
         f.response.get_text=lambda strict=False:'Blocked'
         f.response.raw_content=b'Blocked'
-    a.response(f)
+    asyncio.run(a.response(f))
     assert 'request_receipt' not in json.loads(a.out_path.read_text())
 
 
@@ -372,6 +373,19 @@ def test_multipart_body_required_context_holds_before_transport():
         assert result.outcome=='blocked' and not calls
         assert f.conn.execute('SELECT count(*) FROM validation_transport_operations').fetchone()[0]==0
     finally:f.doCleanups()
+
+
+def test_unmanaged_cloned_cdp_browser_is_held_before_process(tmp_path,monkeypatch):
+    from aidast.recon.tools.katana_browser import open_katana_browser
+    from unittest.mock import Mock
+    d=browser_driver(compiled())
+    d.playwright=Mock()
+    d.session_config.session_file=str(tmp_path/'session.json')
+    d.session_path.write_text('{}')
+    launched=[]
+    monkeypatch.setattr('aidast.recon.tools.katana_browser.subprocess.Popen',lambda *a,**k:launched.append(a))
+    with pytest.raises(ValueError,match='exclusion'):open_katana_browser(d,d.proxy_url,d.target_policy)
+    assert not launched
 
 
 def test_group_rechecks_all_members_after_first_wait(validation_fixture):
@@ -502,7 +516,7 @@ def test_proxy_malformed_present_guard_cannot_disable_enforcement(raw,allowed):
         raw = dict(compiled(), target_asset='example.com', rules=[], rule_digest=rule_digest([]))
     a.rules['request_exclusions']=raw
     f.request.url=f.request.pretty_url='https://example.com/public'
-    a.request(f)
+    asyncio.run(a.request(f))
     assert (f.response is None)==allowed
     assert a.request_count==int(allowed)
 

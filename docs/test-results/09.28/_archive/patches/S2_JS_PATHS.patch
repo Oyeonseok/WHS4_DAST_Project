@@ -1,0 +1,194 @@
+--- a/src/aidast/recon/tools/api_secondary_discovery.py
++++ b/src/aidast/recon/tools/api_secondary_discovery.py
+@@ -36,6 +36,7 @@
+ from aidast.core.request_broker import RequestBroker, RequestPolicyError
+ from aidast.recon.policy import TargetPolicy
+ from aidast.recon.verification import successful_response
++from aidast.recon.tools.js_api_paths import extract_js_api_paths
+ 
+ 
+ # =========================================================
+@@ -1334,9 +1335,7 @@
+         if status is None or not body:
+             continue
+         script = body.decode("utf-8", errors="replace")
+-        for match in _JS_API_PATH.finditer(script):
+-            path = match.group("path")
+-            method = _literal_call_method(script, match.start(), match.end())
++        for path, method in extract_js_api_paths(script, _literal_call_method):
+             if method not in {None, "GET"} or "{" in path or "}" in path:
+                 continue
+             candidate_url = urljoin(base_url, path)
+--- a/src/aidast/recon/tools/js_api_paths.py
++++ b/src/aidast/recon/tools/js_api_paths.py
+@@ -0,0 +1,170 @@
++"""Static JS URL fragments, without evaluating code or guessing path values.
++
++Recognizes quoted literals, origin-prefixed templates and class-local URL bases.
++Unresolved path expressions remain templates for subsequent evidence-based binding.
++This is a small lexical analyzer, not a general JavaScript interpreter.
++"""
++from __future__ import annotations
++
++import re
++from collections.abc import Callable
++from dataclasses import dataclass
++
++@dataclass(frozen=True)
++class _Literal:
++    start: int
++    end: int
++    value: str | None
++
++
++def _literals(script: str) -> list[_Literal]:
++    """Single-pass scanner; unterminated/escaped strings cannot backtrack."""
++    result = []
++    index = 0
++    regex_allowed = True
++    identifier = re.compile(r"[A-Za-z_$][\w$]*")
++    while index < len(script):
++        start = index
++        if script.startswith("//", index):
++            end = script.find("\n", index + 2)
++            index = len(script) if end < 0 else end
++            result.append(_Literal(start, index, None))
++        elif script.startswith("/*", index):
++            end = script.find("*/", index + 2)
++            index = len(script) if end < 0 else end + 2
++            result.append(_Literal(start, index, None))
++        elif script[index] == "/" and regex_allowed:
++            index += 1
++            in_character_class = False
++            while index < len(script):
++                char = script[index]
++                if char == "\\":
++                    index += 2
++                    continue
++                if char == "[":
++                    in_character_class = True
++                elif char == "]":
++                    in_character_class = False
++                elif char == "/" and not in_character_class:
++                    index += 1
++                    while index < len(script) and script[index].isalpha():
++                        index += 1
++                    break
++                elif char in "\r\n":
++                    break
++                index += 1
++            result.append(_Literal(start, index, None))
++            regex_allowed = False
++        elif script[index] in "\"'`":
++            regex_allowed = False
++            quote = script[index]
++            index += 1
++            while index < len(script):
++                if script[index] == "\\":
++                    index += 2
++                elif script[index] == quote:
++                    result.append(_Literal(start, index + 1, script[start + 1:index]))
++                    index += 1
++                    break
++                else:
++                    index += 1
++            else:
++                result.append(_Literal(start, len(script), None))
++        elif script[index].isspace():
++            index += 1
++        elif token := identifier.match(script, index):
++            regex_allowed = token.group() in {"return", "throw", "case", "void", "typeof", "delete", "yield", "await", "new"}
++            index = token.end()
++        else:
++            regex_allowed = script[index] in "([{=,:;!?&|+-*%^~/"
++            index += 1
++    return result
++
++
++_CLASS = re.compile(r'\bclass(?:\s+[\w$]+)?(?:\s+extends\s+[\w.$]+)?\s*$')
++_PROPERTY = re.compile(r'(?:\bthis\.)?(?P<name>[A-Za-z_$][\w$]*)\s*=\s*(?:[\w.$]+\s*\+\s*)?$')
++_CONCAT = re.compile(r'\.\s*(?:get|post|put|patch|delete|head|options)\s*\(\s*this\.(?P<name>[\w$]+)\s*\+\s*$', re.I)
++_INTERPOLATION = re.compile(r'\$\{([^{}]+)\}')
++_API = re.compile(r'^/(?:api|rest)(?:/|$)', re.I)
++
++
++def _class_ranges(script: str, literals: list) -> list[tuple[int, int]]:
++    skips = {match.start: match.end for match in literals}
++    stack: list[int | None] = []
++    ranges = []
++    index = 0
++    while index < len(script):
++        if index in skips:
++            index = skips[index]
++            continue
++        char = script[index]
++        if char == '{':
++            start = index + 1 if _CLASS.search(script[max(0, index - 160):index]) else None
++            stack.append(start)
++        elif char == '}' and stack:
++            start = stack.pop()
++            if start is not None:
++                ranges.append((start, index))
++        index += 1
++    return sorted(ranges)
++
++
++def extract_js_api_paths(
++    script: str, method_at: Callable[[str, int, int], str | None],
++) -> list[tuple[str, str | None]]:
++    """Return path expressions and their HTTP method evidence in source order."""
++    literals = _literals(script)
++    ranges = _class_ranges(script, literals)
++
++    def scope_at(position: int) -> tuple[int, int] | None:
++        return next((scope for scope in reversed(ranges) if scope[0] <= position < scope[1]), None)
++
++    # Distinct classes often use the same property name for different APIs.
++    # Resolve only an unambiguous base inside the enclosing class.
++    bases: dict[tuple[tuple[int, int], str], set[str]] = {}
++    for match in literals:
++        value = match.value
++        if value is None or not _API.match(value) or '${' in value:
++            continue
++        scope = scope_at(match.start)
++        assignment = _PROPERTY.search(script[max(0, match.start - 160):match.start])
++        if scope is not None and assignment:
++            bases.setdefault((scope, assignment.group('name')), set()).add(value)
++
++    def resolve_base(scope, name: str) -> str | None:
++        values = bases.get((scope, name), set())
++        return next(iter(values)) if len(values) == 1 else None
++
++    results = []
++    for match in literals:
++        value = match.value
++        if value is None:
++            continue
++        method = method_at(script, match.start, match.end)
++        scope = scope_at(match.start)
++        concat = _CONCAT.search(script[max(0, match.start - 160):match.start])
++        if concat:
++            base = resolve_base(scope, concat.group('name'))
++            if base is not None:
++                value = base + value
++            elif not _API.match(value):
++                continue
++        if value.startswith('${'):
++            leading = _INTERPOLATION.match(value)
++            if leading is None:
++                continue
++            expression = leading.group(1).strip()
++            base = resolve_base(scope, expression.removeprefix('this.')) if expression.startswith('this.') else None
++            remainder = value[leading.end():]
++            if base is not None:
++                value = base + remainder
++            elif _API.match(remainder):
++                # The leading expression is an origin prefix; never send it as
++                # a host. The caller still restricts candidates to its origin.
++                value = remainder
++            else:
++                continue
++        value = value.replace('\\/', '/')
++        if _API.match(value) and len(value) <= 512 and '\\' not in value:
++            results.append((value, method))
++    return results

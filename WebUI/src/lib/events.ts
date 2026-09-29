@@ -42,7 +42,7 @@ const messageMetadata = (v: Record<string, unknown>): boolean =>
   (v.message_code === undefined || v.message_code === null || (text(v.message_code) && v.message_code.length <= 100))
   && (v.audit_id === undefined || (text(v.audit_id) && v.audit_id.length > 0 && v.audit_id.length <= 256))
   && (v.message_params === undefined || (record(v.message_params)
-    && Object.keys(v.message_params).length <= 8
+    && Object.keys(v.message_params).length <= (v.message_code === 'agent.work' ? 12 : 8)
     && Object.entries(v.message_params).every(([key, item]) => typeof item === 'number' && Number.isFinite(item)
       || text(item) && item.length <= (v.message_code === 'recon.activity' && key === 'url' ? 1024 : 180))));
 const stage = (v: unknown): v is Stage => stages.includes(v as Stage);

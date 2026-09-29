@@ -128,6 +128,21 @@ uv sync --group dev
 editable tool로 연결되어 있으므로 clone 폴더의 코드 수정은 재설치 없이 바로
 반영됩니다.
 
+mitmproxy는 프로젝트 의존성에 포함되어 `uv sync`와
+`uv tool install --editable .`에서 함께 설치됩니다. Recon 프록시는 AI DAST를
+실행한 Python 환경을 사용하므로 시스템 PATH의 `mitmdump` 설치는 필요하지 않습니다.
+Python에는 표준 `sqlite3` 모듈이 있어야 합니다.
+
+기존 사용자가 이번 변경을 받아온 뒤에는 저장소에서 다음 명령으로 의존성을
+갱신하고 실행 중인 대시보드를 다시 시작합니다.
+
+```bash
+uv sync --locked
+uv tool install --force --editable .
+```
+
+프로젝트 `.venv`의 `aidast`만 사용하는 경우에는 첫 번째 명령으로 충분합니다.
+
 ### 설치 확인과 로그인
 
 설치를 확인하고 Codex에 로그인합니다.
@@ -158,12 +173,13 @@ clone한 저장소에 연결된 editable 설치에서는 저장소가 깨끗한�
 
 ```text
 subfinder  dnsx  naabu  nmap
-katana     ffuf  mitmdump
+katana     ffuf
 ```
 
 일부 선택 도구는 없으면 건너뜁니다. 단, wildcard 자산 발견에 필요한
 Subfinder가 없거나 실패하면 해당 타깃을 실패 처리하고, 정책 강제에 필요한
-`mitmdump`를 시작하지 못하면 Recon을 실행하지 않습니다.
+프로젝트 Python 환경의 mitmproxy를 시작하지 못하면 Recon을 실행하지 않습니다.
+mitmproxy는 위의 Python 의존성 설치 과정에서 자동으로 준비됩니다.
 
 ## 웹 대시보드
 

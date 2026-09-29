@@ -21,6 +21,7 @@ from typing import Any
 
 from aidast.pipeline.locations import iter_run_directories, scan_run_directory
 from aidast.recon.activity import validated_activity
+from aidast.recon.tagging_progress import tagging_counts, tagging_progress_params
 
 
 STAGES = ("Scope", "Recon", "Attack", "Chaining", "Validation", "Report")
@@ -615,6 +616,9 @@ class DashboardProjector:
             "program_id": scope.program_id,
             "program_name": scope.program_name,
         }
+        if (state["stage"] == "Recon" and state["status"] == "running"
+                and {"endpoint_observations", "endpoint_annotations"} <= tables):
+            state["_tagging_counts"] = tagging_counts(conn, scan_id)
         return state, audits
 
     def audit_log(self, scan_id: str) -> list[dict[str, Any]]:
@@ -727,6 +731,7 @@ class DashboardProjector:
         state: dict[str, Any],
         audits: list[sqlite3.Row],
     ) -> None:
+        counts = state.pop("_tagging_counts", None)
         for row in audits:
             activity = (
                 validated_activity(_json_object(row["details_json"]))
@@ -751,15 +756,36 @@ class DashboardProjector:
 
         if state["stage"] == "Recon" and state["status"] == "running":
             work_row = event_conn.execute(
-                """SELECT json_extract(payload_json,'$.message_params.progress')
+                """SELECT event_id,payload_json
                 FROM web_events WHERE scan_id=? AND event_type='log.appended'
                 AND json_extract(payload_json,'$.message_code')='agent.work'
                 AND json_extract(payload_json,'$.stage')='Recon'
                 ORDER BY event_id DESC LIMIT 1""",
                 (scan_id,),
             ).fetchone()
-            if work_row and type(work_row[0]) is int and 0 <= work_row[0] <= 98:
-                state["progress"] = max(state["progress"], work_row[0])
+            if work_row:
+                params = _json_object(work_row["payload_json"]).get("message_params", {})
+                progress = params.get("progress")
+                if type(progress) is int and 0 <= progress <= 98:
+                    state["progress"] = max(state["progress"], progress)
+                # Older workers only publish the start milestone. Recover their
+                # committed results, gated by the latest work step so review and
+                # export can never be replaced by stale tagging activity.
+                if (counts and counts[0] > 0 and params.get("agent") == "recon"
+                        and params.get("step") == "tagging" and params.get("state") in {"started", "progress"}):
+                    total, processed = counts
+                    previous_processed = params.get("processed")
+                    if previous_processed is None or processed > previous_processed:
+                        details = {"agent": "recon", "step": "tagging", "state": "progress",
+                                   **tagging_progress_params(total, processed)}
+                        if type(params.get("failed")) is int:
+                            details["failed"] = params["failed"]
+                        self._append(event_conn, scan_id=scan_id,
+                            source_key=f"tagging-counts:{work_row['event_id']}:{total}:{processed}",
+                            occurred_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                            event_type="log.appended", payload={"stage": "Recon", "level": "info",
+                                "message": "Agent work", "message_code": "agent.work", "message_params": details})
+                        state["progress"] = max(state["progress"], details["progress"])
 
         previous_row = event_conn.execute(
             "SELECT state_json FROM web_projection_state WHERE scan_id=?", (scan_id,)

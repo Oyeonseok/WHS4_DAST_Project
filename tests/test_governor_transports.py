@@ -1,3 +1,4 @@
+import asyncio
 import json
 import sqlite3
 from pathlib import Path
@@ -59,13 +60,17 @@ def test_proxy_shared_concurrency_releases_on_error_and_response():
     try:
         rules = proxy_fixture.policy().mitm_rules(); rules['request_governor'] = binding(f.root, concurrency=1, requests_per_second=50)
         f.configure_rules(rules)
-        first = f.flow(); f.addon.request(first)
-        second = f.flow(); f.addon.request(second)
-        assert second.metadata.get('aidast_policy_blocked')
-        f.addon.error(first)
-        third = f.flow(); f.addon.request(third)
-        assert not third.metadata.get('aidast_policy_blocked')
-        f.addon.response(third)
+        async def exercise():
+            first = f.flow(); await f.addon.request(first)
+            second = f.flow()
+            pending = asyncio.create_task(f.addon.request(second))
+            await asyncio.sleep(0.02)
+            assert not pending.done()
+            await f.addon.error(first)
+            await asyncio.wait_for(pending, 1)
+            assert not second.metadata.get('aidast_policy_blocked')
+            await f.addon.response(second)
+        asyncio.run(exercise())
         with sqlite3.connect(f.root / 'budget.db') as c:
             assert c.execute("SELECT count(*) FROM governor_requests WHERE state='complete'").fetchone()[0] == 2
     finally: f.doCleanups()
@@ -100,7 +105,7 @@ def test_malformed_proxy_binding_blocks_even_observation_mode():
         rules = proxy_fixture.policy().mitm_rules(); rules['request_governor'] = {}
         f.addon.enforcement_required = False
         f.configure_rules(rules)
-        flow = f.flow(); f.addon.request(flow)
+        flow = f.flow(); asyncio.run(f.addon.request(flow))
         assert flow.metadata.get('aidast_policy_blocked')
     finally: f.doCleanups()
 

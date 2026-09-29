@@ -836,6 +836,7 @@ class ReconExecutor:
             raw = discover_endpoints(
                 url,
                 ffuf_wordlist=self.ffuf_wordlist,
+                mitm_capture_path=capture_path,
                 ffuf_max_time_seconds=self.ffuf_max_time_seconds,
                 mitm_proxy_url=proxy_url,
                 target_policy=policy,

@@ -1,4 +1,5 @@
 from __future__ import annotations
+import asyncio
 
 import importlib.util
 import io
@@ -202,7 +203,7 @@ class ProxyBoundaryTests(unittest.TestCase):
         flow = self.flow()
         flow.request.pretty_url = "https://sso.example.net/login"
         flow.request.headers["referer"] = "https://example.com/app"
-        self.addon.request(flow)
+        asyncio.run(self.addon.request(flow))
         self.assertTrue(flow.metadata["aidast_policy_blocked"])
 
     def test_proxy_blocks_explicit_and_wildcard_host_exclusions(self):
@@ -218,7 +219,7 @@ class ProxyBoundaryTests(unittest.TestCase):
             with self.subTest(url=url):
                 flow = self.flow()
                 flow.request.pretty_url = url
-                self.addon.request(flow)
+                asyncio.run(self.addon.request(flow))
                 self.assertTrue(flow.metadata["aidast_policy_blocked"])
 
     def test_missing_and_invalid_rules_fail_closed(self):
@@ -227,7 +228,7 @@ class ProxyBoundaryTests(unittest.TestCase):
                 if rules is not None:
                     self.configure_rules(rules)
                 flow = self.flow()
-                self.addon.request(flow)
+                asyncio.run(self.addon.request(flow))
                 self.assertTrue(flow.metadata["aidast_policy_blocked"])
 
     def test_invalid_reload_clears_previous_policy(self):
@@ -236,7 +237,7 @@ class ProxyBoundaryTests(unittest.TestCase):
         self.ctx.options.scope_file = str(self.root / "missing.json")
         self.addon.configure({"scope_file"})
         flow = self.flow()
-        self.addon.request(flow)
+        asyncio.run(self.addon.request(flow))
         self.assertTrue(flow.metadata["aidast_policy_blocked"])
 
     def test_browser_support_requires_proxy_token_and_strips_marker_headers(self):
@@ -251,7 +252,7 @@ class ProxyBoundaryTests(unittest.TestCase):
             BROWSER_TOKEN_HEADER: token,
             BROWSER_MODE_HEADER: "same-origin",
         })
-        self.addon.request(flow)
+        asyncio.run(self.addon.request(flow))
         self.assertNotIn("aidast_policy_blocked", flow.metadata)
         self.assertEqual(flow.metadata["aidast_browser_support"], "same-origin")
         self.assertNotIn(BROWSER_TOKEN_HEADER, flow.request.headers)
@@ -263,7 +264,7 @@ class ProxyBoundaryTests(unittest.TestCase):
             BROWSER_TOKEN_HEADER: "wrong-browser-token-value",
             BROWSER_MODE_HEADER: "same-origin",
         })
-        self.addon.request(forged)
+        asyncio.run(self.addon.request(forged))
         self.assertTrue(forged.metadata["aidast_policy_blocked"])
 
     def test_passive_browser_dependency_is_not_persisted(self):
@@ -281,7 +282,7 @@ class ProxyBoundaryTests(unittest.TestCase):
         self.configure_rules(policy().mitm_rules())
         self.addon.out_path = self.root / "capture.jsonl"
         flow = self.flow()
-        self.addon.response(flow)
+        asyncio.run(self.addon.response(flow))
         record = json.loads(self.addon.out_path.read_text())
         self.assertEqual(record["request_body"], "sensitive")
         self.assertEqual(record["response_body"], "sensitive")
@@ -295,7 +296,7 @@ class ProxyBoundaryTests(unittest.TestCase):
         self.configure_rules(restricted.mitm_rules())
         self.addon.out_path = self.root / "capture.jsonl"
         flow = self.flow()
-        self.addon.response(flow)
+        asyncio.run(self.addon.response(flow))
         record = json.loads(self.addon.out_path.read_text())
         self.assertIsNone(record["request_body"])
         self.assertIsNone(record["response_body"])
@@ -316,8 +317,8 @@ class ProxyBoundaryTests(unittest.TestCase):
         self.assertEqual(insert.call_args.kwargs["request_headers"], {"Cookie": "[REDACTED]"})
         self.assertEqual(insert.call_args.kwargs["response_headers"], {"Set-Cookie": "[REDACTED]"})
 
-    def test_required_proxy_cannot_silently_skip_missing_binary(self):
-        with patch("aidast.recon.tools.mitm_proxy.shutil.which", return_value=None), self.assertRaises(RuntimeError):
+    def test_required_proxy_cannot_silently_skip_missing_python_package(self):
+        with patch("importlib.util.find_spec", return_value=None), self.assertRaises(RuntimeError):
             start_mitmproxy(self.root / "capture.jsonl", scope_rules=policy().mitm_rules())
 
     def test_invalid_rules_cannot_start_a_proxy(self):

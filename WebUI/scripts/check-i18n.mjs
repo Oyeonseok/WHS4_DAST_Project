@@ -48,6 +48,11 @@ for (const path of sources(root)) {
 
 const messageCatalogText = readFileSync(join(root, 'lib/activityMessages.ts'), 'utf8');
 const messageCodes = new Set([...messageCatalogText.matchAll(/^\s*'([a-z_.]+)':\s*(?:\(\)|params)\s*=>/gm)].map(match => match[1]));
+// Structured messages may use a shared language-aware renderer rather than
+// separate entries in the static dictionaries.
+for (const match of messageCatalogText.matchAll(/if\s*\(code\s*===\s*'([a-z_.]+)'\)\s*return\s+\w+\(language,/g)) {
+  messageCodes.add(match[1]);
+}
 const backendRoot = resolve(root, '../../src/aidast/web');
 for (const filename of ['scope_workflow.py', 'launch.py', 'projection.py']) {
   const backend = readFileSync(join(backendRoot, filename), 'utf8');

@@ -21,6 +21,7 @@ from aidast.core.http_safety import has_request_exclusions, require_request_admi
 from aidast.core.request_governor import RequestGovernor
 
 import json
+import re
 import os
 import sys
 import socket
@@ -159,6 +160,23 @@ class ManualSessionConfig:
     timeout_ms: int = 15_000
 
 
+_BASE_SAFE_ACTION_SELECTOR = (
+    '[role="tab"], button[aria-controls], button[aria-expanded], '
+    'button[aria-haspopup], [role="button"][aria-controls], '
+    '[role="button"][aria-expanded], [role="button"][aria-haspopup], summary, nav button'
+)
+_READ_ACTION_SELECTOR = (
+    _BASE_SAFE_ACTION_SELECTOR + ', button[aria-label], button[title], '
+    '[role="button"][aria-label], [tabindex="0"][aria-label]'
+)
+_DIALOG_CLOSE_SELECTOR = (
+    ':is(dialog, [role="dialog"], [aria-modal="true"]) '
+    ':is(button[aria-label*="close" i], button[title*="close" i], '
+    'button[mat-dialog-close], [role="button"][aria-label*="close" i])'
+)
+_READ_ACTION_LABEL = re.compile(r"\b(?:view|details?|show|read)\b|more information|상세|정보 보기", re.I)
+
+
 @dataclass
 class InteractionConfig:
 
@@ -223,6 +241,9 @@ class InteractionConfig:
         "비밀번호 변경",
         "비밀번호 재설정",
     )
+
+    # Opt in only when broader read controls are useful for this target.
+    expand_read_controls: bool = False
 
 
 # =========================================================
@@ -2956,22 +2977,10 @@ class PlaywrightDriver:
             self.interaction_config
         )
 
-        # 일반 a[href]는 Katana에게 맡긴다.
-        #
-        # Playwright는 메뉴/탭/Accordion 등
-        # Interaction이 필요한 요소 중심.
-        candidates = (
-            page.locator(
-                '[role="tab"], '
-                'button[aria-controls], '
-                'button[aria-expanded], '
-                'button[aria-haspopup], '
-                '[role="button"][aria-controls], '
-                '[role="button"][aria-expanded], '
-                '[role="button"][aria-haspopup], '
-                'summary, '
-                'nav button'
-            )
+        # Explicit read labels extend menus/tabs without selecting arbitrary
+        # buttons. A modal close consumes the same action allowance as a click.
+        candidates = page.locator(
+            _READ_ACTION_SELECTOR if config.expand_read_controls else _BASE_SAFE_ACTION_SELECTOR
         )
 
         try:
@@ -2986,9 +2995,9 @@ class PlaywrightDriver:
 
         actions = 0
 
-        for index in range(
-            count
-        ):
+        index = 0
+        close_failed = False
+        while index < count:
 
             if (
                 actions
@@ -3002,11 +3011,15 @@ class PlaywrightDriver:
 
             try:
 
-                element = (
-                    candidates.nth(
-                        index
-                    )
-                )
+                closing = (page.locator(_DIALOG_CLOSE_SELECTOR).filter(visible=True)
+                           if config.expand_read_controls else None)
+                is_close = closing is not None and not close_failed and closing.count() > 0
+                if is_close:
+                    element = closing.first
+                    close_failed = True
+                else:
+                    element = candidates.nth(index)
+                    index += 1
 
                 if not element.is_visible():
                     continue
@@ -3064,6 +3077,17 @@ class PlaywrightDriver:
                     )
                 )
 
+                base_action = not config.expand_read_controls or is_close or element.evaluate(
+                    "el => el.matches(" + json.dumps(_BASE_SAFE_ACTION_SELECTOR) + ")",
+                    timeout=2000,
+                )
+                read_label = " ".join((text, aria_label, title))
+                if not base_action and (
+                    not _READ_ACTION_LABEL.search(read_label)
+                    or re.search(r"\bclose\b", read_label)
+                ):
+                    continue
+
                 # -------------------------------------
                 # 위험 Action 제외
                 # -------------------------------------
@@ -3093,30 +3117,14 @@ class PlaywrightDriver:
                     )
                 )
 
-                if tag == "button":
-
-                    button_type = (
-                        element.get_attribute(
-                            "type", timeout=2000
-                        )
-                        or ""
-                    ).lower()
-
-                    inside_form = (
-                        element.evaluate(
-                            """
-                            el =>
-                                !!el.closest('form')
-                            """,
-                            timeout=2000,
-                        )
-                    )
-
-                    if inside_form and (
-                        button_type != "button"
-                        or not config.allow_form_submission
-                    ):
-
+                inside_form = element.evaluate(
+                    "el => !!el.closest('form')", timeout=2000,
+                )
+                if inside_form and not config.allow_form_submission:
+                    continue
+                if tag == "button" and inside_form:
+                    button_type = (element.get_attribute("type", timeout=2000) or "").lower()
+                    if button_type != "button":
                         continue
 
                 # -------------------------------------
@@ -3149,6 +3157,7 @@ class PlaywrightDriver:
                         pass
 
                 actions += 1
+                close_failed = False
 
                 if (
                     self._auth_expired

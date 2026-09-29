@@ -32,6 +32,29 @@ def test_sparse_surface_recovers_api_paths_from_first_party_script(monkeypatch) 
     assert len(requested) <= 5
 
 
+def test_dense_surface_verifies_new_query_conditions_on_a_seen_path(monkeypatch) -> None:
+    requested = []
+
+    def fake_request(url, **kwargs):
+        requested.append((url, kwargs.get("method", "GET")))
+        if url.endswith("main.js"):
+            return 200, {"content-type": "application/javascript"}, b'fetch("/api/seen"); fetch("/api/new")'
+        if "__aidast_missing_control__" in url:
+            return 404, {"content-type": "application/json"}, b'{"error":"missing"}'
+        return 200, {"content-type": "application/json"}, b'{"data":[]}'
+
+    monkeypatch.setattr(secondary, "_http_request", fake_request)
+    observed = [{"method": "GET", "path": "/main.js", "url": "https://example.test/main.js"}]
+    observed += [{"method": "GET", "path": f"/api/route{i}"} for i in range(10)]
+    observed.append({"method": "GET", "path": "/api/seen", "url": "https://example.test/api/seen?view=full"})
+    results = secondary.discover_adaptive_js_api_candidates("https://example.test/", observed)
+
+    assert {item["path"] for item in results} == {"/api/new", "/api/seen"}
+    assert requested.count(("https://example.test/api/seen", "GET")) == 1
+    assert not any(url.endswith("/api/seen?view=full") for url, _ in requested)
+    assert all(method == "GET" for _, method in requested)
+
+
 def test_spa_fallback_response_is_not_accepted_as_api(monkeypatch) -> None:
     def fake_request(url, **_kwargs):
         if url.endswith("main.js"):
@@ -205,6 +228,65 @@ def test_endpoint_discovery_feeds_adaptive_candidates_to_final_surface(monkeypat
     )
 
     assert any(item["path"] == "/api/products" for item in results)
+
+
+def test_endpoint_discovery_hands_katana_isolated_cdp_and_closes_it(monkeypatch) -> None:
+    driver = MagicMock()
+    driver.get_http_results.return_value = []
+    driver.get_websocket_results.return_value = []
+    driver.drain_observations.return_value = []
+    driver.drain_authentication_observations.return_value = []
+    driver.get_auth_headers.return_value = {}
+    lease = MagicMock(chrome_ws_url="ws://127.0.0.1/isolated")
+    calls = []
+    monkeypatch.setattr(discovery, "PlaywrightDriver", lambda *_args, **_kwargs: driver)
+    monkeypatch.setattr(discovery, "open_katana_browser", lambda *_args, **_kwargs: lease, raising=False)
+    monkeypatch.setattr(discovery, "discover_with_katana", lambda *_args, **kwargs: calls.append(kwargs) or [])
+    monkeypatch.setattr(discovery, "discover_with_ffuf", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(discovery, "discover_api_secondary", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(discovery, "discover_adaptive_js_api_candidates", lambda *_args, **_kwargs: [])
+
+    discovery.discover_endpoints("https://example.test/", ffuf_wordlist=None,
+                                 enable_playwright_interaction=False)
+
+    assert [call["chrome_ws_url"] for call in calls if call["mode"] == "headless"] == [lease.chrome_ws_url]
+    lease.close.assert_called_once()
+    driver.pause_policy_routing.assert_not_called()
+    driver.resume_policy_routing.assert_not_called()
+
+
+def test_endpoint_discovery_falls_back_to_headers_when_clone_unavailable(monkeypatch) -> None:
+    driver = MagicMock()
+    driver.get_http_results.return_value = []
+    driver.get_websocket_results.return_value = []
+    driver.drain_observations.return_value = []
+    driver.drain_authentication_observations.return_value = []
+    driver.get_auth_headers.return_value = {"Authorization": "Bearer private"}
+    calls = []
+    diagnostics = []
+    def fake_katana(*_args, **kwargs):
+        calls.append(kwargs)
+        if kwargs["mode"] == "headless":
+            kwargs["diagnostic_callback"]("tool_error", mode="headless", error_type="TimeoutExpired")
+        return []
+    monkeypatch.setattr(discovery, "PlaywrightDriver", lambda *_args, **_kwargs: driver)
+    monkeypatch.setattr(discovery, "open_katana_browser", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(discovery, "discover_with_katana", fake_katana)
+    monkeypatch.setattr(discovery, "discover_with_ffuf", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(discovery, "discover_api_secondary", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(discovery, "discover_adaptive_js_api_candidates", lambda *_args, **_kwargs: [])
+
+    discovery.discover_endpoints("https://example.test/", ffuf_wordlist=None,
+                                 enable_playwright_interaction=False,
+                                 diagnostic_callback=lambda event, **details: diagnostics.append((event, details)))
+
+    headless = next(call for call in calls if call["mode"] == "headless")
+    assert headless["chrome_ws_url"] is None
+    assert headless["auth_headers"] == {"Authorization": "Bearer private"}
+    assert any(event == "phase_error" and details.get("phase") == "katana_headless"
+               and details.get("error_type") == "TimeoutExpired" for event, details in diagnostics)
+    driver.pause_policy_routing.assert_not_called()
+    driver.resume_policy_routing.assert_not_called()
 
 
 def test_api_spec_candidate_is_observed_but_not_promoted_to_verified_surface(monkeypatch) -> None:

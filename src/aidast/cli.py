@@ -318,8 +318,8 @@ def _parser() -> argparse.ArgumentParser:
     recon.add_argument("--surface-path", type=Path, default=RESULT_ROOT / "Surface.json")
     recon.add_argument("--ffuf-wordlist")
     recon.add_argument(
-        "--ffuf-max-time-seconds", type=_positive_int, default=150,
-        help="maximum ffuf runtime per root in seconds (default: 150)",
+        "--ffuf-max-time-seconds", type=_nonnegative_int, default=150,
+        help="maximum ffuf runtime per root in seconds; 0 means unlimited (default: 150)",
     )
     recon.add_argument(
         "--diagnostic-logs", action="store_true",
@@ -422,8 +422,8 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--auth-path", action="append", default=[])
     run.add_argument("--ffuf-wordlist")
     run.add_argument(
-        "--ffuf-max-time-seconds", type=_positive_int, default=150,
-        help="maximum ffuf runtime per root in seconds (default: 150)",
+        "--ffuf-max-time-seconds", type=_nonnegative_int, default=150,
+        help="maximum ffuf runtime per root in seconds; 0 means unlimited (default: 150)",
     )
     run.add_argument(
         "--diagnostic-logs", action="store_true",
@@ -726,6 +726,16 @@ def _positive_float(value: str) -> float:
 
 
 # 입력값을 양수 정수로 검증하며 변환
+def _nonnegative_int(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be a nonnegative integer") from exc
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("must be zero or greater")
+    return parsed
+
+
 def _positive_int(value: str) -> int:
     try:
         parsed = int(value)
@@ -940,7 +950,7 @@ def _run_recon(
         from aidast.web.projection import DashboardProjector
         projector = DashboardProjector(Path(os.environ["AIDAST_RESULT_ROOT"]))
 
-    def work(agent: str, step: str, state: str) -> None:
+    def work(agent: str, step: str, state: str, **details: str | int) -> None:
         if projector is None or scan_id is None:
             return
         stage = "Recon" if agent in {"main", "recon"} else agent.title()
@@ -959,6 +969,7 @@ def _run_recon(
             }.get((step, state))
             if progress is not None:
                 params["progress"] = progress
+        params.update(details)
         projector.record_event(
             scan_id, source_key=f"work:{uuid4().hex}",
             event_type="log.appended",
@@ -1360,6 +1371,15 @@ def _run_recon(
             work("recon", "execute", "finished")
             if getattr(args, "tag_after", False):
                 from aidast.recon.annotations import tag_pending_observations
+                from aidast.recon.tagging_progress import tagging_counts, tagging_progress_params
+
+                def tagging_progress(n: int, total: int, done: int, failed: int) -> None:
+                    print(f"Tagging batch {n}/{total}: processed={done}, failed={failed}", flush=True)
+                    observation_total, processed = tagging_counts(executor.conn, scan_id)
+                    work("recon", "tagging", "progress",
+                         **tagging_progress_params(observation_total, processed),
+                         batch_number=n, batch_total=total, failed=failed)
+
                 print("Recon 완료: 저장된 관측 태깅을 시작합니다.")
                 work("recon", "tagging", "started")
                 _, failed_tags = tag_pending_observations(
@@ -1367,12 +1387,10 @@ def _run_recon(
                     scan_id=scan_id,
                     agent=main_agent,
                     batch_size=args.tag_batch_size,
-                    progress=lambda n, total, done, failed: print(
-                        f"Tagging batch {n}/{total}: processed={done}, failed={failed}",
-                        flush=True,
-                    ),
+                    progress=tagging_progress,
                 )
                 _require_complete_recon_annotations(failed_tags)
+                work("recon", "tagging", "finished")
             if prepare_attack and not recon_failures:
                 from aidast.pipeline.browser_credentials import register_browser_session_credentials
 
@@ -1382,7 +1400,8 @@ def _run_recon(
                 )
                 if registered:
                     print(f"Attack 인증 세션 참조 {len(registered)}개 등록 완료")
-                work("recon", "tagging", "finished")
+                if not getattr(args, "tag_after", False):
+                    work("recon", "tagging", "finished")
             work("main", "review", "started")
             recon_review = OfflineReconReview(
                 planner=main_agent,

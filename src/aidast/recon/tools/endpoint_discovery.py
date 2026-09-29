@@ -13,12 +13,11 @@
    - Cookie / Authorization Header 사용
 
 3. Authenticated Katana Headless
-   - Playwright 로그인 Chromium에 CDP 연결
+   - 저장된 세션을 복제한 독립 Chromium에 CDP 연결
    - 실패 시 Header 방식 Fallback
 
-4. Playwright Runtime 복구
-   - Katana가 Context를 종료했어도
-     session.json으로 새로운 Browser 생성
+4. Playwright Runtime 유지
+   - Katana가 로그인 Browser Context를 변경하지 않음
 
 5. Katana 결과 Merge
 
@@ -65,6 +64,7 @@ from aidast.paths import RESULT_ROOT
 from .api_secondary_discovery import (
     discover_api_secondary,
     discover_adaptive_js_api_candidates,
+    recover_observed_json_gets,
 )
 
 from .playwright_driver import (
@@ -72,6 +72,9 @@ from .playwright_driver import (
     ManualSessionConfig,
     PlaywrightDriver,
 )
+from .katana_browser import open_katana_browser
+from .ai_patterns import CodexPatternPlanner
+from .mitm_proxy import read_observed_recon_responses, read_recent_json_responses
 
 from .ffuf_root_selector import (
     FfufRootSelectionError,
@@ -365,6 +368,15 @@ def _deduplicate_results(
         unique[key]["observation_variants"].extend(
             result.get("observation_variants", [dict(result)])
         )
+        from aidast.recon.verification import result_verification_status
+        strengths = {'candidate': 0, 'observed': 1, 'verified': 2}
+        if strengths[result_verification_status(result)] > strengths[result_verification_status(unique[key])]:
+            # Keep the full URL and evidence of the stronger observation.
+            # Query variants remain separate evidence; never label an earlier
+            # candidate's URL verified using another query's response.
+            previous = unique[key]
+            unique[key] = dict(result, method=method, path=path,
+                               sources=previous['sources'], observation_variants=previous['observation_variants'])
 
         stored_sources = (
             unique[key]
@@ -664,6 +676,8 @@ def discover_with_katana(
     if target_policy is not None and not proxy_url:
         raise ValueError("policy-enforced katana requires a proxy")
 
+    cdp_probe_results: list[dict] = []
+
     if shutil.which(
         "katana"
     ) is None:
@@ -711,15 +725,8 @@ def discover_with_katana(
             "katana", target_policy.limits.requests_per_second
         )
 
-    # -proxy는 katana 자체가 HTTP 클라이언트로 요청을 보낼 때만 의미가 있다
-    # (Standard 모드, 그리고 아래 Header fallback - 둘 다 katana 내장
-    # 클라이언트/내장 브라우저를 직접 띄우는 구조). CDP 모드(-cwu)는 이미
-    # 떠 있는 Playwright Chromium에 붙기만 하고, 그 브라우저는 OS 레벨
-    # 프록시가 아니라 Playwright 자체의 context.route()/context.on("request")
-    # (playwright_driver.py _guard_request/on_request)로 이미 정책 강제와
-    # 관측을 다 하고 있다 - 그 브라우저는 애초에 --no-proxy-server로 켜져서
-    # -proxy를 준들 반영될 방법이 없다. base_command에 무조건 붙이지 않고
-    # 필요한 두 모드에만 개별적으로 붙인다.
+    # -proxy applies to Katana's own HTTP client (standard and header fallback).
+    # In CDP mode, the isolated Chromium process itself uses the policy proxy.
     proxy_flags = (
         [
             "-proxy",
@@ -768,11 +775,11 @@ def discover_with_katana(
             print(
                 "  [경고] "
                 "Katana Standard 실패: "
-                f"{exc}"
+                f"{type(exc).__name__}"
             )
 
             diagnose_process(
-                "tool_error", error_type=type(exc).__name__, message=str(exc),
+                "tool_error", error_type=type(exc).__name__,
             )
 
             return []
@@ -789,6 +796,7 @@ def discover_with_katana(
 
         completed = None
         cdp_no_usable_results = False
+        cdp_sparse_results = False
 
         # ---------------------------------------------
         # Playwright 로그인 Chromium에 CDP 연결
@@ -798,7 +806,7 @@ def discover_with_katana(
 
             print(
                 "  [Katana Headless] "
-                "로그인 Chromium CDP 연결"
+                "독립 Chromium CDP 연결"
             )
 
             command = (
@@ -839,12 +847,12 @@ def discover_with_katana(
                 print(
                     "  [경고] "
                     "Katana CDP 실패: "
-                    f"{exc}"
+                    f"{type(exc).__name__}"
                 )
 
                 diagnose_process(
                     "tool_error", launch_mode="cdp",
-                    error_type=type(exc).__name__, message=str(exc),
+                    error_type=type(exc).__name__,
                 )
 
                 completed = None
@@ -862,6 +870,7 @@ def discover_with_katana(
                     emit_summary=False,
                 )
                 cdp_no_usable_results = not cdp_probe_results
+                cdp_sparse_results = len(cdp_probe_results) < 5
                 if cdp_no_usable_results:
                     print(
                         "  [Katana Headless] CDP에서 사용 가능한 endpoint가 없어 "
@@ -872,6 +881,9 @@ def discover_with_katana(
                         returncode=completed.returncode,
                         stdout_line_count=len((completed.stdout or "").splitlines()),
                     )
+                elif cdp_sparse_results:
+                    diagnose_process("sparse_results", launch_mode="cdp",
+                                     count=len(cdp_probe_results))
 
         # ---------------------------------------------
         # CDP 실패 또는 빈 결과 → Header 방식 Headless
@@ -883,7 +895,7 @@ def discover_with_katana(
             or (
                 chrome_ws_url is not None
                 and completed is not None
-                and cdp_no_usable_results
+                and (cdp_no_usable_results or cdp_sparse_results)
             )
         ):
 
@@ -917,6 +929,11 @@ def discover_with_katana(
                 ]
             )
 
+            # A non-empty but tiny CDP result can mean a blocked lazy/CDN
+            # script. Give the independent header crawler a short second pass.
+            if cdp_sparse_results and "-ct" in command:
+                command[command.index("-ct") + 1] = "45s"
+
             _append_headers(
                 command,
                 auth_headers,
@@ -938,15 +955,15 @@ def discover_with_katana(
                 print(
                     "  [경고] "
                     "Katana Headless 실패: "
-                    f"{exc}"
+                    f"{type(exc).__name__}"
                 )
 
                 diagnose_process(
                     "tool_error", launch_mode="header_fallback",
-                    error_type=type(exc).__name__, message=str(exc),
+                    error_type=type(exc).__name__,
                 )
 
-                return []
+                return cdp_probe_results
 
     else:
 
@@ -962,14 +979,14 @@ def discover_with_katana(
 
     if completed is None:
 
-        return []
+        return cdp_probe_results
 
     if diagnostic_callback is not None:
         diagnose_process(
             "katana_process",
             returncode=completed.returncode,
             stdout_line_count=len(completed.stdout.splitlines()),
-            stderr=completed.stderr or "",
+            stderr_line_count=len((completed.stderr or "").splitlines()),
         )
 
     if completed.returncode != 0:
@@ -980,17 +997,10 @@ def discover_with_katana(
             f"(code={completed.returncode})"
         )
 
-        if completed.stderr:
+        return cdp_probe_results
 
-            print(
-                "  [Katana stderr] "
-                f"{completed.stderr.strip()[:500]}"
-            )
-
-        return []
-
-    return (
-        _parse_katana_output(
+    return _deduplicate_results(
+        cdp_probe_results + _parse_katana_output(
             completed.stdout,
 
             base_url=base_url,
@@ -1092,6 +1102,18 @@ def _build_ffuf_roots(
 # ffuf
 # =========================================================
 
+def _active_proxy_budget_available(capture_path) -> bool:
+    """Stop useless tool passes; the proxy remains the admission authority."""
+    if capture_path is None:
+        return True
+    try:
+        value = json.loads(Path(capture_path).with_suffix('.progress.json').read_text())
+        remaining = value.get('active_requests_remaining')
+        return not (type(remaining) is int and remaining <= 0)
+    except (OSError, ValueError, TypeError, AttributeError):
+        return True
+
+
 def discover_with_ffuf(
     base_url: str,
     *,
@@ -1103,6 +1125,7 @@ def discover_with_ffuf(
     target_policy: TargetPolicy | None = None,
     max_time_seconds: int = 150,
     diagnostic_callback=None,
+    budget_available: Callable[[], bool] | None = None,
 ) -> list[dict]:
     parsed_base = urlparse(base_url)
     ffuf_origin = (
@@ -1165,17 +1188,22 @@ def discover_with_ffuf(
     except FfufRootSelectionError as exc:
         print(
             "  [경고] ffuf Root 선택 Agent 실패, "
-            f"기존 Prefix 방식으로 대체: {exc}"
+            f"기존 Prefix 방식으로 대체: {type(exc).__name__}"
         )
-        roots = _build_ffuf_roots(seed_endpoints)
+        roots = []
 
     if not roots:
         print(
             "  [경고] 선택된 ffuf Root가 없어 "
             "기존 Prefix 방식으로 대체"
         )
-        roots = _build_ffuf_roots(seed_endpoints)
+        roots = []
 
+    baseline_seed = [item for item in seed_endpoints if not re.search(
+        r'\.(?:js|mjs|css|png|jpg|jpeg|gif|svg|ico|woff2?|ttf|map)$',
+        str(item.get('path') or '').split('?', 1)[0], re.I)]
+    baseline_roots = _build_ffuf_roots(baseline_seed, max_depth=1, max_roots=3)
+    roots = list(dict.fromkeys(baseline_roots + roots))[:50]
     if target_policy is not None:
         roots = [
             root for root in roots
@@ -1193,7 +1221,14 @@ def discover_with_ffuf(
             "ffuf_roots", component="endpoint_discovery",
             root_count=len(roots), roots=roots,
             wordlist_lines=wordlist_lines,
-            max_time_seconds=max_time_seconds if target_policy is not None else None,
+            max_time_seconds=max_time_seconds,
+            planned_requests=wordlist_lines * len(roots),
+            minimum_duration_seconds=(wordlist_lines * len(roots) / target_policy.limits.requests_per_second
+                                      if target_policy is not None else None),
+            request_budget=(target_policy.limits.max_requests if target_policy is not None else None),
+            coverage_may_be_limited=bool(target_policy is not None and (
+                wordlist_lines * len(roots) > target_policy.limits.max_requests
+                or (max_time_seconds > 0 and wordlist_lines / target_policy.limits.requests_per_second > max_time_seconds))),
         )
 
     results: list[
@@ -1207,6 +1242,10 @@ def discover_with_ffuf(
         roots,
         start=1,
     ):
+        if budget_available is not None and not budget_available():
+            if diagnostic_callback is not None:
+                diagnostic_callback('phase_completed', phase='ffuf', reason='active_request_budget_exhausted')
+            break
         if diagnostic_callback is not None:
             diagnostic_callback("ffuf_root_started", index=index, total=len(roots))
 
@@ -1281,17 +1320,17 @@ def discover_with_ffuf(
             # forward. Exclude those responses before ffuf reports endpoints.
             command += ["-fr", "Blocked by AI-DAST TargetPolicy"]
 
+        command += ["-maxtime", str(max_time_seconds)]
         if target_policy is not None:
             command += [
                 "-t", str(target_policy.limits.concurrency),
                 "-timeout", str(target_policy.limits.timeout_seconds),
-                "-maxtime", str(max_time_seconds),
             ]
             command += _tool_rate_args(
                 "ffuf", target_policy.limits.requests_per_second
             )
 
-        run_timeout = max_time_seconds + 30 if target_policy is not None else 180
+        run_timeout = max_time_seconds + 30 if max_time_seconds > 0 else None
 
         _append_headers(
             command,
@@ -1319,7 +1358,7 @@ def discover_with_ffuf(
 
             print(
                 "    [경고] "
-                f"ffuf 실패: {exc}"
+                f"ffuf 실패: {type(exc).__name__}"
             )
 
             tmp_path.unlink(
@@ -1542,6 +1581,7 @@ def discover_endpoints(
     base_url: str,
     *,
     ffuf_wordlist: str | None = None,
+    mitm_capture_path: Path | None = None,
     ffuf_max_time_seconds: int = 150,
     request_headers: dict[str, str] | None = None,
 
@@ -1615,6 +1655,7 @@ def discover_endpoints(
             diagnostic_callback(event, component="endpoint_discovery", **details)
 
     katana_states: dict[str, str] = {}
+    katana_error_types: dict[str, str] = {}
 
     def katana_diagnostic(event, **details):
         mode = details.get("mode")
@@ -1623,6 +1664,9 @@ def discover_endpoints(
                 katana_states[mode] = "skipped"
             elif event == "tool_error" or (event == "katana_process" and details.get("returncode") != 0):
                 katana_states[mode] = "failed"
+                error_type = details.get("error_type")
+                if isinstance(error_type, str):
+                    katana_error_types[mode] = error_type
             elif event == "katana_process":
                 katana_states[mode] = "finished"
         if diagnostic_callback is not None:
@@ -1845,10 +1889,10 @@ def discover_endpoints(
                          reason=getattr(driver, "last_interaction_stop_reason", None),
                          duplicate_count=getattr(driver, "last_interaction_duplicate_screens", 0))
             except Exception as exc:
-                print(f"  [경고] 초기 Playwright 관측 실패: {exc}")
+                print(f"  [경고] 초기 Playwright 관측 실패: {type(exc).__name__}")
                 diagnose(
                     "phase_error", phase="playwright_priority",
-                    error_type=type(exc).__name__, message=str(exc),
+                    error_type=type(exc).__name__,
                 )
             observe_browser("playwright_priority")
         else:
@@ -1908,7 +1952,8 @@ def discover_endpoints(
 
         observe("katana_standard", standard_results, passive_metadata=True)
         diagnose({"skipped": "phase_skipped", "failed": "phase_error"}.get(katana_states.get("standard"), "phase_completed"),
-                 phase="katana_standard", count=len(standard_results))
+                 phase="katana_standard", count=len(standard_results),
+                 error_type=katana_error_types.get("standard"))
 
         # ---------------------------------------------
         # Headless
@@ -1921,36 +1966,31 @@ def discover_endpoints(
             diagnose("phase_started", phase="katana_headless")
             driver.ensure_session()
             auth_headers = driver.get_auth_headers()
-            # Reuse the authenticated Chromium CDP so Katana can observe the
-            # browser's real XHR/fetch traffic, including POST requests.
-            chrome_ws_url = driver.get_chrome_ws_url()
             print()
             print("  [2/2] Katana Headless")
-            # katana가 -cwu로 이 브라우저에 별도 CDP 세션을 붙이면 katana
-            # 자신도 같은 target에서 Fetch 도메인을 구독해 결과를 캡처하는데,
-            # Playwright driver의 context.route()가 이미 같은 target의
-            # Fetch 이벤트를 구독 중이라 충돌한다(CDP는 target당 Fetch
-            # 구독자를 하나만 안정적으로 지원) - katana의 캡처 콜백이 전혀
-            # 안 불려서 결과가 항상 0건으로 나오는 원인이었음(실측 확인:
-            # pause 전 Headless raw 0건 -> pause 적용 후 raw 97건). katana
-            # subprocess가 도는 동안은 우리가 동기 대기만 해서 그 창에서
-            # 우리 쪽 트래픽이 나갈 일이 없으므로, 그 구간만 라우팅을
-            # 내려서 katana에게 Fetch 도메인을 양보한다.
-            driver.pause_policy_routing()
+            # Katana's Fetch subscription conflicts with Playwright routing
+            # when both attach to the login context. Give it a separate,
+            # policy-proxied browser and leave the live session untouched.
+            katana_browser = open_katana_browser(
+                driver, mitm_proxy_url, target_policy,
+                diagnostic_callback=katana_diagnostic,
+            )
             try:
                 headless_results = discover_with_katana(
                     base_url,
                     mode="headless",
                     auth_headers=auth_headers,
-                    chrome_ws_url=chrome_ws_url,
+                    chrome_ws_url=katana_browser.chrome_ws_url if katana_browser else None,
                     proxy_url=mitm_proxy_url,
                     target_policy=target_policy,
                     diagnostic_callback=katana_diagnostic,
                 )
             finally:
-                driver.resume_policy_routing()
+                if katana_browser is not None:
+                    katana_browser.close()
             diagnose({"skipped": "phase_skipped", "failed": "phase_error"}.get(katana_states.get("headless"), "phase_completed"),
-                     phase="katana_headless", count=len(headless_results))
+                     phase="katana_headless", count=len(headless_results),
+                     error_type=katana_error_types.get("headless"))
         else:
             print("  [건너뜀] TargetPolicy에서 Katana Headless가 허용되지 않음")
             diagnose("phase_skipped", phase="katana_headless")
@@ -2048,12 +2088,9 @@ def discover_endpoints(
             except Exception as exc:
                 interaction_failed = True
 
-                print(
-                    "  [경고] "
-                    "Playwright Interaction 실패: "
-                    f"{exc}"
-                )
-                diagnose("phase_error", phase="playwright_interaction")
+                print(f"  [경고] Playwright Interaction 실패: {type(exc).__name__}")
+                diagnose("phase_error", phase="playwright_interaction",
+                         error_type=type(exc).__name__)
         else:
             diagnose("phase_skipped", phase="playwright_interaction")
 
@@ -2080,69 +2117,35 @@ def discover_endpoints(
                      reason=getattr(driver, "last_interaction_stop_reason", None),
                      duplicate_count=getattr(driver, "last_interaction_duplicate_screens", 0))
 
-        # Recover literal API routes from a few first-party bundles when
-        # normal browser and crawler observations leave the API surface sparse.
+        ffuf_results: list[dict] = []
+
+        # Recover literal API routes from first-party scripts declared by captured
+        # documents, including HTML discovered by ffuf.
+        from .adaptive_state import AdaptiveDiscoveryState
+        from .mitm_proxy import ReconCaptureCursor
+        adaptive_state = AdaptiveDiscoveryState()
+        capture_cursor = ReconCaptureCursor()
         adaptive_js_results: list[dict] = []
         if authenticated_run:
             driver.ensure_session()
         try:
             adaptive_js_results = discover_adaptive_js_api_candidates(
                 base_url,
-                _deduplicate_results(katana_results + login_results + playwright_results),
+                _deduplicate_results(katana_results + login_results + playwright_results + ffuf_results),
+                observed_responses=read_observed_recon_responses(mitm_capture_path, cursor=capture_cursor),
                 headers=driver.get_auth_headers(),
                 target_policy=target_policy,
                 proxy_url=mitm_proxy_url,
                 diagnostic_callback=diagnostic_callback,
+                ai_pattern_planner=CodexPatternPlanner() if target_policy is not None and mitm_proxy_url else None,
+                state=adaptive_state,
             )
         except Exception as exc:
             diagnose(
                 "phase_error", phase="adaptive_js",
-                error_type=type(exc).__name__, message=str(exc),
+                error_type=type(exc).__name__,
             )
         observe("adaptive_js", adaptive_js_results)
-
-        # =================================================
-        # PHASE 4
-        # Authenticated ffuf
-        # =================================================
-
-        print()
-        print("  ==================================")
-        print(
-            "  PHASE 4 - "
-            + ("Authenticated ffuf" if authenticated_run else "ffuf")
-        )
-        print("  ==================================")
-
-        driver.ensure_session()
-        auth_headers = driver.get_auth_headers()
-        # Feed ffuf with crawler, login, and browser-observed paths.
-        ffuf_seed_results = _deduplicate_results(
-            katana_results + login_results + playwright_results + adaptive_js_results
-        )
-        diagnose(
-            "deduplication", phase="ffuf_seeds",
-            input_count=(
-                len(katana_results) + len(login_results) + len(playwright_results)
-                + len(adaptive_js_results)
-            ),
-            unique_count=len(ffuf_seed_results),
-            endpoints=endpoint_rows(ffuf_seed_results),
-        )
-        diagnose("phase_started", phase="ffuf")
-        ffuf_results = discover_with_ffuf(
-            base_url,
-            wordlist=ffuf_wordlist,
-            seed_endpoints=ffuf_seed_results,
-            auth_headers=auth_headers,
-            proxy_url=mitm_proxy_url,
-            target_policy=target_policy,
-            max_time_seconds=ffuf_max_time_seconds,
-            diagnostic_callback=diagnostic_callback,
-        )
-        observe("ffuf", ffuf_results)
-        if (target_policy is None or target_policy.tools.ffuf_enabled) and ffuf_wordlist and shutil.which("ffuf") and Path(ffuf_wordlist).is_file():
-            diagnose("phase_completed", phase="ffuf", count=len(ffuf_results))
 
         websocket_results = (
             driver.get_websocket_results()
@@ -2241,6 +2244,7 @@ def discover_endpoints(
                 base_url,
 
                 primary_results,
+                observed_responses=read_observed_recon_responses(mitm_capture_path),
 
                 headers=(
                     auth_headers
@@ -2260,15 +2264,107 @@ def discover_endpoints(
             print(
                 "  [경고] "
                 "API Secondary Discovery 실패: "
-                f"{exc}"
+                f"{type(exc).__name__}"
             )
             diagnose(
                 "phase_error", phase="api_secondary",
-                error_type=type(exc).__name__, message=str(exc),
+                error_type=type(exc).__name__,
             )
 
         observe("api_secondary", secondary_results)
+        # Spend the finite active quota on observed JS/DOM/schema reads before
+        # wordlist traffic; the same Scope, governor and count gates still apply.
+        # =================================================
+        # PHASE 4
+        # Authenticated ffuf
+        # =================================================
+
+        print()
+        print("  ==================================")
+        print(
+            "  ffuf - "
+            + ("Authenticated ffuf" if authenticated_run else "ffuf")
+        )
+        print("  ==================================")
+
+        driver.ensure_session()
+        auth_headers = driver.get_auth_headers()
+        # Feed ffuf with crawler, login, and browser-observed paths.
+        ffuf_seed_results = _deduplicate_results(
+            katana_results + login_results + playwright_results + adaptive_js_results + secondary_results
+        )
+        diagnose(
+            "deduplication", phase="ffuf_seeds",
+            input_count=(
+                len(katana_results) + len(login_results) + len(playwright_results)
+            ),
+            unique_count=len(ffuf_seed_results),
+            endpoints=endpoint_rows(ffuf_seed_results),
+        )
+        diagnose("phase_started", phase="ffuf")
+        ffuf_results = discover_with_ffuf(
+            base_url,
+            wordlist=ffuf_wordlist,
+            seed_endpoints=ffuf_seed_results,
+            auth_headers=auth_headers,
+            proxy_url=mitm_proxy_url,
+            target_policy=target_policy,
+            max_time_seconds=ffuf_max_time_seconds,
+            diagnostic_callback=diagnostic_callback,
+            budget_available=lambda: _active_proxy_budget_available(mitm_capture_path),
+        )
+        observe("ffuf", ffuf_results)
+        if (target_policy is None or target_policy.tools.ffuf_enabled) and ffuf_wordlist and shutil.which("ffuf") and Path(ffuf_wordlist).is_file():
+            diagnose("phase_completed", phase="ffuf", count=len(ffuf_results))
+
+        primary_results = _deduplicate_results(primary_results + ffuf_results)
         observe_browser("playwright_final")
+
+        # Fuzzing may reveal a document or script unavailable in the first pass.
+        # Reuse earlier modules/requests while consuming only appended captures.
+        # A bounded follow-up also lets newly fetched JSON supply argument values.
+        for followup in range(3):
+            new_capture = read_observed_recon_responses(mitm_capture_path, cursor=capture_cursor)
+            diagnose('phase_started', phase='adaptive_js_followup', pass_number=followup + 1)
+            try:
+                extra = discover_adaptive_js_api_candidates(
+                    base_url, _deduplicate_results(primary_results + secondary_results),
+                    observed_responses=new_capture, headers=driver.get_auth_headers(),
+                    target_policy=target_policy, proxy_url=mitm_proxy_url,
+                    diagnostic_callback=diagnostic_callback, state=adaptive_state,
+                    ai_pattern_planner=CodexPatternPlanner() if target_policy is not None and mitm_proxy_url else None,
+                )
+                observe('adaptive_js_followup', extra)
+                adaptive_js_results = _deduplicate_results(adaptive_js_results + extra)
+                primary_results = _deduplicate_results(primary_results + extra)
+                diagnose('phase_completed', phase='adaptive_js_followup', count=len(extra),
+                         capture_evictions=capture_cursor.evicted_records,
+                         evidence_evictions=adaptive_state.evicted_evidence)
+            except Exception as exc:
+                diagnose('phase_error', phase='adaptive_js_followup', error_type=type(exc).__name__)
+                break
+
+        diagnose("phase_started", phase="observed_json_recovery")
+        try:
+            recovery_headers = driver.get_auth_headers()
+            if target_policy is not None:
+                from aidast.core.http_safety import merge_hackerone_identity
+                recovery_headers = merge_hackerone_identity(recovery_headers, target_policy.hackerone_username,
+                    required_identity_headers=target_policy.required_identity_headers)
+            adaptive_state.observe(read_observed_recon_responses(mitm_capture_path, cursor=capture_cursor),
+                                   recovery_headers)
+            recovered = recover_observed_json_gets(
+                base_url, primary_results + secondary_results,
+                observed_responses=adaptive_state.observations(recovery_headers),
+                headers=recovery_headers, target_policy=target_policy, proxy_url=mitm_proxy_url,
+                state=adaptive_state,
+            )
+            observe("observed_json_recovery", recovered)
+            secondary_results.extend(recovered)
+            diagnose("phase_completed", phase="observed_json_recovery", count=len(recovered),
+                     verified_count=sum(item.get("verification_status") == "verified" for item in recovered))
+        except Exception as exc:
+            diagnose("phase_error", phase="observed_json_recovery", error_type=type(exc).__name__)
 
         # =================================================
         # Final

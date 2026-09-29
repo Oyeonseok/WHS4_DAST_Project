@@ -1,6 +1,8 @@
 """Final review regressions: fake wire only, no target or model calls."""
+import asyncio
 import json
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -48,18 +50,20 @@ def test_proxy_upgrade_entire_exchange_precedes_budget_and_receipt(tmp_path, for
     else:
         f.request.protocol = 'websocket'
     reservations = []
-    a.governor = SimpleNamespace(reserve=lambda *args, **kwargs: reservations.append(args) or
-        SimpleNamespace(wait=lambda: None, complete=lambda: None))
+    async def acquire(*args, **kwargs):
+        reservations.append(args)
+        return SimpleNamespace(complete_async=AsyncMock())
+    a.governor = SimpleNamespace(acquire_async=acquire)
     a.out_path = tmp_path / 'capture.jsonl'
     a.rules['mitm_capture_bodies'] = True
-    a.request(f)
+    asyncio.run(a.request(f))
     held = kind in {'applicable', 'malformed'}
     assert bool(f.metadata.get('aidast_forwarded')) is not held
     assert a.request_count == len(reservations) == int(not held)
     if held:
         f.response.get_text = lambda strict=False: 'Blocked'
         f.response.raw_content = b'Blocked'
-        a.response(f)
+        asyncio.run(a.response(f))
         assert 'request_receipt' not in json.loads(a.out_path.read_text())
 
 

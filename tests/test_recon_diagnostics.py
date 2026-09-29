@@ -12,6 +12,33 @@ from aidast.recon.executor import ReconExecutor
 from aidast.recon.tools.endpoint_discovery import _parse_katana_output
 
 
+def test_phase_error_exposes_only_allowlisted_exception_name():
+    record = activity_from_diagnostic("phase_error", {
+        "phase": "playwright_interaction", "error_type": "TimeoutError",
+        "message": "Bearer secret", "step": "run_interaction_pass",
+    })
+    assert record == {"phase": "playwright_interaction", "state": "failed",
+                      "error_type": "TimeoutError"}
+    assert validated_activity({**record, "message": "Bearer secret"}) == record
+    assert activity_from_diagnostic("phase_error", {
+        "phase": "playwright_interaction", "error_type": "secret.token",
+    }) == {"phase": "playwright_interaction", "state": "failed"}
+    assert activity_from_diagnostic("phase_error", {
+        "phase": "katana_headless", "error_type": "TimeoutExpired",
+    }) == {"phase": "katana_headless", "state": "failed", "error_type": "TimeoutExpired"}
+
+
+def test_dashboard_preserves_discovery_limits_without_raw_policy_evidence():
+    planned = activity_from_diagnostic('ffuf_roots', dict(root_count=3, planned_requests=14256,
+        request_budget=500, max_time_seconds=0, coverage_may_be_limited=True, headers={'Cookie':'secret'}))
+    assert planned['planned_requests'] == 14256 and planned['request_budget'] == 500
+    assert planned['coverage_may_be_limited'] == 1
+    assert 'headers' not in planned and validated_activity(planned) == planned
+    details = activity_from_diagnostic('completed', dict(component='adaptive_js', detail_probe_limit=20,
+        detail_deferred_candidates=3, detail_route_templates=23))
+    assert details['phase'] == 'adaptive_js' and details['detail_deferred_candidates'] == 3
+
+
 class ReconDiagnosticsTests(unittest.TestCase):
     def test_executor_persists_safe_activity_without_optional_diagnostics(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_dir:

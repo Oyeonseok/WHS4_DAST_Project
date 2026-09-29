@@ -7,10 +7,12 @@ katana/ffuf/Playwright 전부가 이 프록시를 거쳐가게 되며, mitmdump�
 from __future__ import annotations
 
 import json
-import shutil
+import importlib.util
+from collections import deque
 import socket
 import subprocess
 import sqlite3
+import sys
 import tempfile
 import time
 from pathlib import Path
@@ -31,7 +33,7 @@ def _wait_for_proxy_port(
     port: int,
     *,
     process: subprocess.Popen | None = None,
-    timeout: float = 8.0,
+    timeout: float = 30.0,
 ) -> bool:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -52,10 +54,14 @@ def start_mitmproxy(
     scope_file: Path | None = None
     if scope_rules is not None:
         validate_scope_rules(scope_rules)
-    if shutil.which("mitmdump") is None:
+    if importlib.util.find_spec("mitmproxy") is None:
         if required:
-            raise RuntimeError("required policy proxy is unavailable: mitmdump is not installed")
-        print("  [건너뜀] mitmdump 미설치 - mitmproxy 관찰 없이 진행")
+            raise RuntimeError(
+                "required policy proxy is unavailable: mitmproxy is not installed "
+                "in the AI DAST Python environment; run uv sync "
+                "(for an editable tool installation: uv tool install --force --editable .)"
+            )
+        print("  [건너뜀] 현재 Python 환경에 mitmproxy 미설치 - uv sync로 설치하세요")
         return None, None
 
     selected_port = port if port is not None else _find_free_port()
@@ -70,7 +76,8 @@ def start_mitmproxy(
             pass
 
     command = [
-        "mitmdump", "-s", str(_ADDON_PATH), "-p", str(selected_port),
+        sys.executable, "-c", "from mitmproxy.tools.main import mitmdump; mitmdump()",
+        "-s", str(_ADDON_PATH), "-p", str(selected_port),
         "--set", "http2=false",
         "--set", f"out_file={capture_path}",
         "--set", f"enforcement_required={'true' if required else 'false'}",
@@ -236,3 +243,121 @@ def ingest_mitm_capture(conn: sqlite3.Connection, jsonl_path: Path, *, origin_id
         f"예산 보류 후보 {deferred}건"
     )
     return count, blocked
+
+
+def read_recent_json_responses(jsonl_path: Path | None) -> list[dict]:
+    """Read complete positive JSON evidence across the capture, with bounded memory."""
+    rows = ReconCaptureCursor().read(jsonl_path)
+    return [row for row in reversed(rows) if type(row.get('response_status')) is int
+            and 200 <= row['response_status'] < 300 and not row.get('candidate_probe')
+            and any(str(k).lower() == 'content-type' and (
+                str(v).split(';', 1)[0].strip().lower() == 'application/json'
+                or str(v).split(';', 1)[0].strip().lower().endswith('+json'))
+                for k, v in row['response_headers'].items())][:100]
+
+
+def read_observed_collection_responses(jsonl_path: Path | None) -> list[dict]:
+    """Read a bounded snapshot of existing capture; never store headers or bodies elsewhere."""
+    return _read_observed_responses(jsonl_path, include_documents=False)
+
+
+def read_observed_recon_responses(jsonl_path: Path | None, *, cursor=None) -> list[dict]:
+    """Include captured HTML script declarations and JSON response binding inputs."""
+    return cursor.read(jsonl_path) if cursor is not None else _read_observed_responses(jsonl_path, include_documents=True)
+
+
+class ReconCaptureCursor:
+    """Consume appended complete records; bound retained evidence, not traffic.
+
+    Noise and oversized complete rows never prevent reading later evidence.
+    An incomplete tail remains unread until the writer finishes its newline.
+    """
+
+    def __init__(self):
+        self.offset = 0
+        self.identity = None
+        self.evicted_records = 0
+
+    def read(self, jsonl_path: Path | None) -> list[dict]:
+        if jsonl_path is None or not Path(jsonl_path).is_file():
+            return []
+        path = Path(jsonl_path)
+        stat = path.stat()
+        identity = (str(path.resolve()), stat.st_dev, stat.st_ino)
+        if self.identity != identity or stat.st_size < self.offset:
+            self.offset = 0
+        self.identity = identity
+        retained = {False: deque(), True: deque()}
+        retained_bytes = {False: 0, True: 0}
+        with path.open('rb') as capture:
+            capture.seek(self.offset)
+            while capture.tell() < stat.st_size:
+                start = capture.tell()
+                line = capture.readline(min(2_100_000, stat.st_size - start))
+                if not line.endswith(b'\n'):
+                    # Skip a completed oversized row using fixed-size chunks.
+                    while capture.tell() < stat.st_size and not line.endswith(b'\n'):
+                        line = capture.readline(min(65536, stat.st_size - capture.tell()))
+                    if not line.endswith(b'\n'):
+                        self.offset = start
+                        break
+                    self.offset = capture.tell()
+                    continue
+                self.offset = capture.tell()
+                try:
+                    record = json.loads(line)
+                except (ValueError, UnicodeDecodeError):
+                    continue
+                if not isinstance(record, dict) or (record.get('method') != 'GET'
+                        or record.get('capture_bodies') is not True or record.get('policy_blocked')):
+                    continue
+                headers = record.get('response_headers')
+                body = record.get('response_body')
+                if not isinstance(headers, dict) or not isinstance(body, str):
+                    continue
+                media = next((str(v).split(';', 1)[0].strip().lower()
+                              for k, v in headers.items() if str(k).lower() == 'content-type'), '')
+                status = record.get('response_status')
+                script = media in {'application/javascript', 'text/javascript', 'application/ecmascript',
+                                   'text/ecmascript', 'application/x-javascript'}
+                if (record.get('static_resource') or record.get('duplicate')) and not script:
+                    continue
+                if media in {'text/html', 'application/xhtml+xml'} or script:
+                    if type(status) is not int or not 200 <= status < 300:
+                        continue
+                elif media != 'application/json' and not media.endswith('+json'):
+                    continue
+                elif type(status) is not int or not (200 <= status < 300 or status in {401, 403}):
+                    continue
+                size = len(line)
+                snapshot = {key: record.get(key) for key in (
+                    'method', 'url', 'response_status', 'response_headers', 'response_body',
+                    'policy_blocked', 'capture_bodies', 'authentication_key', 'candidate_probe',
+                    'static_resource', 'duplicate',
+                )}
+                denied = status in {401, 403}
+                retained[denied].append((snapshot, size, self.offset))
+                retained_bytes[denied] += size
+                while (len(retained[denied]) > (30 if denied else 120)
+                       or retained_bytes[denied] > (1_000_000 if denied else 7_000_000)):
+                    _, previous_size, _ = retained[denied].popleft()
+                    retained_bytes[denied] -= previous_size
+                    self.evicted_records += 1
+        return [row for row, size, position in sorted(
+            (*retained[False], *retained[True]), key=lambda value: value[2])]
+
+
+def _read_observed_responses(jsonl_path: Path | None, *, include_documents: bool) -> list[dict]:
+    rows = ReconCaptureCursor().read(jsonl_path)
+    if include_documents:
+        return rows
+    from urllib.parse import urlsplit
+    results = []
+    for row in rows:
+        try:
+            segments = urlsplit(row.get('url', '')).path.strip('/').split('/')
+        except (TypeError, ValueError):
+            continue
+        if len(segments) == 2 and segments[0].lower() == 'api':
+            results.append(row)
+    return results[-100:]

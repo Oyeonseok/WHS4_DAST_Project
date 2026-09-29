@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import pytest
 from scope_test_support import publish_legacy_scope
 from aidast.scope.models import ScopeAnalysis
@@ -129,10 +130,10 @@ def test_proxy_enforces_generic_policy_headers_and_redacts_capture(tmp_path):
     addon.rules['required_identity_headers'] = {'Research-Contact': 'private@example.test'}
     addon.out_path = tmp_path / 'capture.jsonl'
     flow = MitmAddonBudgetTests._flow('/app', headers={'research-contact': 'forged', 'Cookie': 'sid=secret'})
-    addon.request(flow)
+    asyncio.run(addon.request(flow))
     assert flow.request.headers.get('Research-Contact') == 'private@example.test'
     assert 'research-contact' not in flow.request.headers
-    addon.response(flow)
+    asyncio.run(addon.response(flow))
     entry = json.loads(addon.out_path.read_text())
     assert entry['request_headers']['Research-Contact'] == '[REDACTED]'
     assert entry['request_headers']['Cookie'] == '[REDACTED]'

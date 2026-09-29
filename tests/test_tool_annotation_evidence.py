@@ -71,7 +71,7 @@ class ToolEvidenceTests(unittest.TestCase):
                 seed_endpoints=[{'path': '/api/users', 'source': 'katana'}], auth_headers=None,
                 root_selector=lambda _: ['/', '/api'])
         self.assertEqual(len(items), 1)
-        self.assertEqual(len(items[0]['observation_variants']), 2)
+        self.assertEqual(len(items[0]['observation_variants']), 3)
         self.assertEqual(items[0]['evidence']['content_length'], 51)
         self.assertNotIn('hidden', json.dumps(items))
 
