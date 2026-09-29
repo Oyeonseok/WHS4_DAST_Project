@@ -8,7 +8,10 @@ export type ReportSubmissionView = {
   report_id: string; platform: 'hackerone' | 'intigriti' | 'bugcrowd' | 'generic'; ready: boolean;
   revision_sha256: string; requirements: ProgramRequirements;
   fields: Record<string, string>; markdown: string;
-  evidence: { evidence_id: string; kind: string; details: unknown; content_sha256: string; sanitized_sha256: string }[];
+  language?: 'ko' | 'en';
+  rendered_impact?: string;
+  evidence: { evidence_id: string; kind: string; details: unknown; content_sha256: string; sanitized_sha256: string;
+    display?: { label: string; response: string; result: string } }[];
   checks: { code: string; level: 'pass' | 'warning' | 'blocker'; field: string | null; message: string }[];
   redactions: { kind: string; count: number }[];
 };
@@ -19,12 +22,17 @@ const record = (value: unknown): value is Record<string, unknown> => !!value && 
 const text = (value: unknown): value is string => typeof value === 'string';
 const textMap = (value: unknown): value is Record<string, string> => record(value) && Object.keys(value).length <= 128 && Object.values(value).every(text);
 const nullableText = (value: unknown) => value === null || text(value);
+const evidenceDisplay = (value: unknown) => record(value)
+  && ['label', 'response', 'result'].every(key => text(value[key]))
+  && Object.values(value).every(value => text(value) && value.length <= 512);
 
 export function parseReportSubmission(value: unknown, reportId: string): ReportSubmissionView | null {
   if (!record(value) || !/^report_[a-f0-9]{32}$/.test(reportId) || value.report_id !== reportId
     || !['hackerone', 'intigriti', 'bugcrowd', 'generic'].includes(String(value.platform))
     || typeof value.ready !== 'boolean' || !text(value.revision_sha256) || !digest.test(value.revision_sha256)
-    || !textMap(value.fields) || !text(value.markdown)) return null;
+    || !textMap(value.fields) || !text(value.markdown)
+    || (Object.hasOwn(value, 'language') && value.language !== 'ko' && value.language !== 'en')
+    || (Object.hasOwn(value, 'rendered_impact') && !text(value.rendered_impact))) return null;
   const rules = value.requirements;
   if (!record(rules) || typeof rules.verified !== 'boolean' || !text(rules.source)
     || typeof rules.severity_required !== 'boolean' || !Array.isArray(rules.required_fields)
@@ -38,7 +46,8 @@ export function parseReportSubmission(value: unknown, reportId: string): ReportS
   if (!Array.isArray(value.evidence) || value.evidence.length > 2048 || !value.evidence.every(item => record(item)
     && text(item.evidence_id) && identifier.test(item.evidence_id) && text(item.kind)
     && Object.hasOwn(item, 'details') && text(item.content_sha256) && digest.test(item.content_sha256)
-    && text(item.sanitized_sha256) && digest.test(item.sanitized_sha256))) return null;
+    && text(item.sanitized_sha256) && digest.test(item.sanitized_sha256)
+    && (!Object.hasOwn(item, 'display') || evidenceDisplay(item.display)))) return null;
   if (!Array.isArray(value.redactions) || value.redactions.length > 128 || !value.redactions.every(item => record(item)
     && text(item.kind) && typeof item.count === 'number' && Number.isSafeInteger(item.count) && item.count >= 0)) return null;
   return value as unknown as ReportSubmissionView;

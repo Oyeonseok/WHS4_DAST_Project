@@ -149,6 +149,7 @@ class CodexReportWriter:
 
     def write(self, context: dict) -> dict:
         from aidast.reporting.models import ReportDraft
+        from aidast.reporting.presentation import writing_guidance
 
         report_json = json.dumps(context, ensure_ascii=False, indent=2)
         return self._agent._run_structured(
@@ -161,6 +162,8 @@ not recompute a context hash: copy `context_sha256` exactly into
 `source_context_sha256`. Do
 not browse, submit, execute commands, or add facts absent from the confirmed
 validation. Return only the object required by the output schema.
+
+{writing_guidance(context.get("platform", ""), context.get("language", "ko"))}
 
 <untrusted_report_context_json>
 {report_json}

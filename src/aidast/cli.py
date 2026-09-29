@@ -618,6 +618,7 @@ def _parser() -> argparse.ArgumentParser:
         choices=("hackerone", "intigriti", "bugcrowd", "generic"),
     )
     report_run.add_argument("--output-dir", type=Path, default=RESULT_ROOT / "ReportRun")
+    report_run.add_argument("--language", choices=("ko", "en"), help="language for a generic shared-case report; use a separate output directory per version")
     report_source = report_run.add_mutually_exclusive_group()
     report_source.add_argument("--validation-id")
     report_source.add_argument("--case-id")
@@ -2192,8 +2193,11 @@ def _run_report(args: argparse.Namespace, *, writer: object | None = None) -> in
             args.output_dir,
             platform=args.platform,
             case_id=args.case_id,
+            language=args.language,
         )
     else:
+        if args.language is not None:
+            raise ValueError("report language selection requires --case-id")
         result = ReportAgent(writer or CodexLegacyReportWriter()).run(
             args.database,
             args.output_dir,
