@@ -160,7 +160,7 @@ def _observed_url(base_url: str, normalized_path: str) -> str | None:
     """Show an origin and normalized path only; omit URL credentials and query values."""
     base = urlsplit(base_url)
     path = normalized_path.split("?", 1)[0].split("#", 1)[0]
-    if base.scheme != "https" or not base.hostname or "@" in base.netloc or not path.startswith("/") or path.startswith("//"):
+    if base.scheme not in {"http", "https"} or not base.hostname or "@" in base.netloc or not path.startswith("/") or path.startswith("//"):
         return None
     return urlunsplit((base.scheme, base.netloc, path, "", ""))[:1024]
 
@@ -477,6 +477,13 @@ class DashboardProjector:
         else:
             progress = 0
 
+        from aidast.attack.coverage_snapshot import read_coverage_snapshot
+        attack_coverage = read_coverage_snapshot(conn, scan_id, include_gaps=False) if stage_name == 'Attack' else None
+        if attack_coverage and attack_coverage['total']:
+            progress = round(100 * attack_coverage['resolved'] / attack_coverage['total'])
+            if attack_coverage['unfinished'] and stage_statuses.get('Attack') == 'completed':
+                stage_statuses['Attack'] = 'running'
+
         requests = 0
         for table in ("http_transactions", "attack_http_requests", "validation_http_requests"):
             if table in tables:
@@ -616,6 +623,9 @@ class DashboardProjector:
             "program_id": scope.program_id,
             "program_name": scope.program_name,
         }
+        if (attack_coverage and attack_coverage['unfinished'] and state['status'] == 'completed'
+                and stage_statuses.get('Attack') == 'running'):
+            state['status'] = 'running'
         if (state["stage"] == "Recon" and state["status"] == "running"
                 and {"endpoint_observations", "endpoint_annotations"} <= tables):
             state["_tagging_counts"] = tagging_counts(conn, scan_id)
@@ -872,22 +882,26 @@ class DashboardProjector:
 
     def attack_tasks(self, scan_id: str) -> dict[str, Any]:
         """Expose the latest Attack work queue without request bodies or credentials."""
+        from aidast.attack.coverage_snapshot import read_coverage_snapshot
+        from aidast.recon.annotations import safe_text
         with self._lock:
             database = self.locate_database(scan_id)
             with closing(self._source(database)) as source:
                 tables = _tables(source)
                 if "stage_runs" not in tables or "attack_tasks" not in tables:
-                    return {"scan_id": scan_id, "stage_run_id": None, "tasks": [], "attempt_count": 0}
+                    return {"scan_id": scan_id, "stage_run_id": None, "tasks": [], "attempt_count": 0, "coverage": read_coverage_snapshot(source, scan_id)}
                 stage = source.execute(
                     """SELECT stage_run_id,status FROM stage_runs
                     WHERE scan_id=? AND stage='attack' ORDER BY rowid DESC LIMIT 1""",
                     (scan_id,),
                 ).fetchone()
                 if stage is None:
-                    return {"scan_id": scan_id, "stage_run_id": None, "tasks": [], "attempt_count": 0}
+                    return {"scan_id": scan_id, "stage_run_id": None, "tasks": [], "attempt_count": 0, "coverage": read_coverage_snapshot(source, scan_id)}
                 has_attempts = "attack_attempts" in tables
                 attempt_select = "count(a.attempt_id)" if has_attempts else "0"
                 attempt_join = "LEFT JOIN attack_attempts a ON a.task_id=t.task_id" if has_attempts else ""
+                endpoint_urls = {}
+                endpoint_methods = {}
                 observed: dict[str, list[dict[str, str]]] = {}
                 if {"endpoints", "origins", "assets"}.issubset(tables):
                     endpoints = source.execute(
@@ -901,6 +915,8 @@ class DashboardProjector:
                         row["endpoint_id"]: _observed_url(row["base_url"], row["normalized_path"])
                         for row in endpoints
                     }
+
+                    endpoint_methods = {row['endpoint_id']: row['method'] for row in endpoints}
 
                     def add_evidence(skill: str, method: str, url: str | None, hint: str) -> None:
                         if not url:
@@ -942,7 +958,7 @@ class DashboardProjector:
                             if "set-cookie" in headers:
                                 add_evidence("hunt-session", method, url, "Set-Cookie 응답 헤더")
                 rows = source.execute(
-                    f"""SELECT t.task_id,t.skill_name,t.status,t.payload_json,t.created_at,
+                    f"""SELECT t.task_id,t.endpoint_id,t.skill_name,t.status,t.payload_json,t.created_at,
                     {attempt_select} AS attempt_count FROM attack_tasks t {attempt_join}
                     WHERE t.stage_run_id=? GROUP BY t.task_id ORDER BY t.rowid LIMIT 100""",
                     (stage["stage_run_id"],),
@@ -967,6 +983,28 @@ class DashboardProjector:
                                 if attempt["base_url"] and attempt["normalized_path"] else None,
                                 "outcome": str(attempt["outcome"] or "unknown")[:32],
                             })
+                    task_coverage = None
+                    if payload.get('coverage_id') and 'attack_coverage_items' in tables:
+                        coverage_row = source.execute("SELECT vuln_class,injection_location,parameter_name,required_identity_role,status,disposition_reason FROM attack_coverage_items WHERE scan_id=? AND coverage_id=? AND endpoint_id=?", (scan_id, payload['coverage_id'], row['endpoint_id'])).fetchone()
+                        if coverage_row:
+                            task_coverage = dict(coverage_row)
+                            task_coverage['disposition_reason'] = safe_text(task_coverage['disposition_reason'] or '')[:1000]
+                    linked_url = endpoint_urls.get(row['endpoint_id'])
+                    linked_method = endpoint_methods.get(row['endpoint_id'], '')
+                    if row['endpoint_id']:
+                        exact_endpoint = source.execute("SELECT e.method,e.normalized_path,o.base_url FROM endpoints e JOIN origins o ON o.origin_id=e.origin_id JOIN assets a ON a.asset_id=o.asset_id WHERE e.endpoint_id=? AND a.scan_id=?", (row['endpoint_id'], scan_id)).fetchone()
+                        if exact_endpoint:
+                            linked_method = exact_endpoint['method']
+                            linked_url = _observed_url(exact_endpoint['base_url'], exact_endpoint['normalized_path'])
+                            if 'endpoint_observations' in tables:
+                                for capture in source.execute('SELECT observed_url FROM endpoint_observations WHERE endpoint_id=? AND observed_url IS NOT NULL ORDER BY rowid DESC LIMIT 16', (row['endpoint_id'],)):
+                                    captured = urlsplit(str(capture['observed_url']))
+                                    base = urlsplit(exact_endpoint['base_url'])
+                                    if (captured.scheme, captured.hostname, captured.port or (443 if captured.scheme == 'https' else 80)) == (base.scheme, base.hostname, base.port or (443 if base.scheme == 'https' else 80)):
+                                        linked_url = _observed_url(exact_endpoint['base_url'], captured.path)
+                                        break
+                    linked_urls = ([{'method': linked_method, 'url': linked_url, 'hint': 'Endpoint hypothesis'}]
+                                   if linked_url else []) if row['endpoint_id'] else observed.get(str(row['skill_name']), [])
                     tasks.append({
                         "task_id": str(row["task_id"])[:128],
                         "skill_name": str(row["skill_name"])[:128],
@@ -975,7 +1013,8 @@ class DashboardProjector:
                         if isinstance(reasons, list) else [],
                         "attempt_count": int(row["attempt_count"]),
                         "created_at": _utc(row["created_at"]),
-                        "observed_urls": observed.get(str(row["skill_name"]), []),
+                        "observed_urls": linked_urls,
+                        "coverage": task_coverage,
                         "recent_attempts": attempts,
                     })
                 return {
@@ -984,6 +1023,8 @@ class DashboardProjector:
                     "stage_status": str(stage["status"]),
                     "tasks": tasks,
                     "attempt_count": sum(task["attempt_count"] for task in tasks),
+                    "total_attempt_count": source.execute("SELECT count(*) FROM attack_attempts WHERE scan_id=?", (scan_id,)).fetchone()[0] if has_attempts else 0,
+                    "coverage": read_coverage_snapshot(source, scan_id),
                 }
 
     def validations(self, scan_id: str) -> dict[str, Any]:

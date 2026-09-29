@@ -55,6 +55,7 @@ where = ["src"]
   "controller/scripts/*.sql",
   "library/*/SKILL.md",
 ]
+"aidast.skills.attack.planning" = ["SKILL.md"]
 "aidast.skills.attack.orchestrator" = ["SKILL.md"]
 "aidast.skills.attack.live" = ["SKILL.md", "references/*.md"]
 "aidast.skills.chaining.orchestrator" = ["SKILL.md"]

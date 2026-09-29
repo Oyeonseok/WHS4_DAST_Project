@@ -85,6 +85,16 @@ def test_approved_handoff_scope_controls_validation_and_report(tmp_path, eligibi
 
 
 class EmptyAttackAgent:
+    def _run_structured(self, *, prompt, model_type, **kwargs):
+        context = json.loads(prompt.split('<untrusted_recon_json>\n', 1)[1].split('\n</untrusted_recon_json>', 1)[0])
+        return model_type.model_validate({'endpoints': [
+            {'endpoint_id': endpoint['endpoint_id'], 'hypotheses': [{
+                'vuln_class': 'idor', 'annotation_ids': [endpoint['annotations'][0]['annotation_id']],
+                'parameter_name': 'object_id', 'injection_location': 'query',
+                'required_identity_role': 'authenticated', 'rationale': 'Observed object identifier.'}],
+             'disposition': 'planned', 'reason': 'Identifier warrants identity comparison.'}
+            for endpoint in context['endpoints']]})
+
     def run_attack_orchestrator(self, **kwargs) -> AttackStageResult:
         for task in kwargs["attack_tasks"]:
             transition_task(
@@ -92,14 +102,7 @@ class EmptyAttackAgent:
                 kwargs["scan_id"],
                 kwargs["stage_run_id"],
                 task["task_id"],
-                "running",
-            )
-            transition_task(
-                kwargs["db_path"],
-                kwargs["scan_id"],
-                kwargs["stage_run_id"],
-                task["task_id"],
-                "completed",
+                "skipped", "missing authentication identity for owned/foreign object controls",
             )
         return AttackStageResult(
             status="COMPLETED",
@@ -252,6 +255,7 @@ def test_recon_snapshot_drives_downstream_pipeline_without_mutation() -> None:
                 WHERE stage IN ('attack','chaining','validation')
                 ORDER BY created_at"""
             ).fetchall() == [
+                ("attack", "completed"),
                 ("attack", "completed"),
                 ("chaining", "skipped"),
                 ("validation", "completed"),

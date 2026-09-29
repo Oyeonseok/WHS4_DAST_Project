@@ -97,6 +97,8 @@ def inspect_resume(result_root: Path, scan_id: str) -> ResumePlan:
             latest[str(stage)] = (str(stage_run_id), str(status))
         if latest.get("recon", (None, None))[1] != "completed":
             raise ValueError("retry requires a completed Recon stage")
+        from aidast.attack.coverage_snapshot import attack_work_unfinished
+        unfinished_attack = attack_work_unfinished(conn, scan_id)
         targets = tuple(
             str(row[0]) for row in conn.execute(
                 "SELECT DISTINCT identifier FROM assets WHERE scan_id=? ORDER BY identifier",
@@ -109,7 +111,7 @@ def inspect_resume(result_root: Path, scan_id: str) -> ResumePlan:
         if previous is None:
             return ResumePlan(scan_id, scope_id, stage, None, database, scope_path, policy_path, targets)
         stage_run_id, status = previous
-        if status == "failed":
+        if status == "failed" or (stage == "attack" and status == "completed" and unfinished_attack):
             return ResumePlan(scan_id, scope_id, stage, stage_run_id, database, scope_path, policy_path, targets)
         if status not in ({"completed"} if stage == "attack" else {"completed", "skipped"}):
             raise ValueError(f"{stage} is still active or cannot be retried: {status}")

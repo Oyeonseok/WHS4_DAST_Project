@@ -28,6 +28,7 @@ class ExhaustiveAttackResult:
     stage_run_ids: tuple[str, ...]
     finding_ids: tuple[str, ...]
     coverage: dict[str, Any]
+    attack_agent_ids: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -53,6 +54,7 @@ class ExhaustiveAttackCoordinator:
         self.batch_size = batch_size
         self.max_batches = max_batches
         self.retry_limit = retry_limit
+        self._agent_ids: list[str] = []
 
     def run(self, scan_id: str) -> ExhaustiveAttackResult:
         if not self.db_path.is_file() or not self.scope_path.is_file() or not self.policy_path.is_file():
@@ -106,6 +108,7 @@ class ExhaustiveAttackCoordinator:
                     existing_findings=existing_findings,
                     existing_attempts=existing_attempts,
                 )
+                self._agent_ids.extend(result.attack_agent_ids)
                 with closing(sqlite3.connect(self.db_path)) as conn, conn:
                     conn.row_factory = sqlite3.Row
                     conn.execute("PRAGMA foreign_keys=ON")
@@ -189,6 +192,7 @@ class ExhaustiveAttackCoordinator:
             scan_id=scan_id, database=str(self.db_path), batches=len(stages),
             stage_run_ids=tuple(stages), finding_ids=findings,
             coverage=final.to_dict(),
+            attack_agent_ids=tuple(self._agent_ids),
         )
 
     def _start_batch(self, scan_id: str) -> tuple[str, list[dict[str, Any]]]:

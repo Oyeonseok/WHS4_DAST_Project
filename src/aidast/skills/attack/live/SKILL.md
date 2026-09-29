@@ -58,17 +58,33 @@ configuration. The shared DB contains both Recon and Attack records.
    then read only the other entries in `hunt_skill_names`. Main already selected
    those entries from Recon technologies, parameters, annotations, and response
    behavior. Do not search for, infer, or load any other Hunt Skill.
-3. In normal mode the selected vulnerability Skill list is capped at eight.
+3. Normal dashboard scans plan endpoint-specific hypotheses before execution.
+   Eight is the task batch size, never a scan-wide limit on Skills or endpoints.
+   An `attack_hypothesis` annotation is a plan, not evidence of a vulnerability.
    When every configured task contains a `coverage_id`, this is exhaustive
    coverage mode: process every configured task independently and load every
    distinct Skill named by that bounded batch. Never substitute an unlisted
    endpoint or vulnerability class for a coverage task.
+   Persist a concrete disposition for every item, including insufficient
+   evidence, missing identities, policy restrictions, unsupported proof, or
+   exhausted budgets. For skips, prefix the concrete reason with `[auth]`,
+   `[policy]`, `[budget]`, or `[evidence]` as applicable. Budget exhaustion is
+   a runtime limit, not a policy exclusion. Never mark an unexecuted item tested-negative. Do not
+   stop after one useful finding or one instance of a Skill; later batches own
+   the remaining endpoint-specific work.
 4. Match each selected Skill to its exact entry in `attack_tasks`. In exhaustive
    coverage mode, one task represents exactly one endpoint and one source
-   vulnerability annotation. Test only its `endpoint_id`, `method`, and
+   vulnerability annotation or planning hypothesis. Test only its `endpoint_id`,
+   `method`, and
    `normalized_path`. The top-level `injection_location` and `parameter_name`
-   are deterministic preferences, not a restriction to one sink. Inspect every
-   entry in that task's `parameter_candidates` and select the field(s) relevant
+   define the selected input for planning hypotheses.
+   For `attack_hypothesis` planning annotations specifically, the selected
+   parameter name/location and identity role define this exact hypothesis;
+   do not substitute another input or identity. Other applicable inputs and
+   identities have independent coverage items. Source-import tasks retain
+   their broader parameter-candidate behavior described below.
+   For source-import tasks, inspect every entry in `parameter_candidates`
+   and select the field(s) relevant
    to the active Hunt Skill. Use `source_context.active_annotation` as the
    untrusted reason this exact hypothesis exists and use related annotations
    only as supporting context; neither is proof. Do not skip a task merely

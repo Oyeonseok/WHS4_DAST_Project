@@ -106,6 +106,34 @@ CREATE INDEX IF NOT EXISTS idx_attack_coverage_status
 CREATE INDEX IF NOT EXISTS idx_attack_coverage_endpoint
     ON attack_coverage_items(scan_id, endpoint_id);
 
+CREATE TABLE IF NOT EXISTS attack_endpoint_reviews (
+    scan_id TEXT NOT NULL REFERENCES scans(scan_id),
+    endpoint_id TEXT NOT NULL REFERENCES endpoints(endpoint_id),
+    evidence_sha256 TEXT NOT NULL CHECK(length(evidence_sha256)=64),
+    status TEXT NOT NULL CHECK(status IN ('planned','insufficient_evidence','not_applicable')),
+    reason TEXT NOT NULL,
+    hypothesis_count INTEGER NOT NULL CHECK(hypothesis_count>=0),
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY(scan_id,endpoint_id)
+);
+
+CREATE TABLE IF NOT EXISTS attack_planning_diagnostics (
+    diagnostic_id TEXT PRIMARY KEY NOT NULL,
+    scan_id TEXT NOT NULL REFERENCES scans(scan_id),
+    endpoint_id TEXT REFERENCES endpoints(endpoint_id),
+    stage_run_id TEXT REFERENCES stage_runs(stage_run_id),
+    evidence_sha256 TEXT NOT NULL CHECK(length(evidence_sha256)=64),
+    attempt_number INTEGER NOT NULL CHECK(attempt_number BETWEEN 0 AND 2),
+    reason_code TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    proposal_json TEXT NOT NULL CHECK(json_valid(proposal_json)),
+    status TEXT NOT NULL DEFAULT 'rejected' CHECK(status IN ('rejected','resolved','superseded','unresolved')),
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_attack_planning_diagnostics
+    ON attack_planning_diagnostics(scan_id,status,endpoint_id);
+
 CREATE TABLE IF NOT EXISTS attack_coverage_events (
     event_id TEXT PRIMARY KEY NOT NULL,
     coverage_id TEXT NOT NULL REFERENCES attack_coverage_items(coverage_id),

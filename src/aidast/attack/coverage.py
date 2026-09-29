@@ -23,6 +23,7 @@ VULNERABILITY_SKILLS: dict[str, str] = {
     "auth_bypass": "hunt-auth-bypass",
     "brute_force": "hunt-brute-force",
     "business_logic": "hunt-business-logic",
+    "cors": "hunt-cors",
     "csrf": "hunt-csrf",
     "file_upload": "hunt-file-upload",
     "idor": "hunt-idor",
@@ -32,6 +33,14 @@ VULNERABILITY_SKILLS: dict[str, str] = {
     "llm_ai": "hunt-llm-ai",
     "race_condition": "hunt-race-condition",
     "session": "hunt-session",
+    "open_redirect": "hunt-open-redirect",
+    "host_header": "hunt-host-header",
+    "websocket": "hunt-websocket",
+    "grpc": "hunt-grpc",
+    "oauth": "hunt-oauth",
+    "spa_api": "hunt-spa-api",
+    "source_artifacts": "hunt-source-leak",
+    "cloud_misconfig": "hunt-cloud-misconfig",
     # The source importer uses source_leak for response-side information
     # disclosure, debug output, and detailed errors. hunt-source-leak is limited
     # to build/source artifacts, so the broader misc workflow is the correct
@@ -41,6 +50,18 @@ VULNERABILITY_SKILLS: dict[str, str] = {
     "ssrf": "hunt-ssrf",
     "xss": "hunt-xss",
 }
+
+def hypothesis_skill_catalog() -> dict[str, str]:
+    """Include every installed vulnerability Skill without a global type cap."""
+    from aidast.attack.skill_selector import available_attack_skill_names
+    available = set(available_attack_skill_names()) - {'hunt-dispatch'}
+    catalog = {name: skill for name, skill in VULNERABILITY_SKILLS.items() if skill in available}
+    for skill in sorted(available):
+        name = skill.removeprefix('hunt-').replace('-', '_')
+        if skill not in catalog.values():
+            catalog.setdefault(name, skill)
+    return catalog
+
 
 RETRYABLE_STATUSES = frozenset({"pending", "error_retryable"})
 TERMINAL_STATUSES = frozenset({
@@ -219,23 +240,24 @@ def _source_context(
            WHERE annotation_id=?""",
         (annotation_id,),
     ).fetchone()
+    active = dict(annotation) if annotation is not None else None
+    if active and active['category'] == 'attack_hypothesis':
+        metadata = json.loads(active['rationale'])
+        active['rationale'] = str(metadata.get('rationale', ''))[:2000]
+        active['hypothesis_only'] = True
+        active['grounding_annotation_ids'] = metadata.get('grounding_annotation_ids', [])
+    elif active:
+        active['rationale'] = str(active['rationale'])[:2000]
     related = conn.execute(
         """SELECT an.category,an.tag,an.rationale
            FROM endpoint_annotations an
            JOIN endpoint_observations eo ON eo.observation_id=an.observation_id
-           WHERE eo.endpoint_id=? AND an.annotation_id<>?
+           WHERE eo.endpoint_id=? AND an.annotation_id<>? AND an.category<>'attack_hypothesis'
            ORDER BY an.category,an.tag LIMIT 32""",
         (endpoint_id, annotation_id),
     ).fetchall()
     return {
-        "active_annotation": (
-            {
-                "category": str(annotation["category"]),
-                "tag": str(annotation["tag"]),
-                "rationale": str(annotation["rationale"])[:2000],
-            }
-            if annotation is not None else None
-        ),
+        "active_annotation": active,
         "related_annotations": [
             {
                 "category": str(row["category"]),
@@ -256,7 +278,7 @@ def ensure_coverage_manifest(database: Path, scan_id: str) -> CoverageManifestRe
         if scan is None or scan["status"] != "completed" or not scan["finished_at"]:
             raise ValueError("coverage planning requires a completed Recon scan")
         rows = conn.execute(
-            """SELECT an.annotation_id,an.tag,e.endpoint_id,e.method,
+            """SELECT an.annotation_id,an.tag,an.category,an.rationale,e.endpoint_id,e.method,
                       e.normalized_path,COALESCE(e.auth_required,0) auth_required
                FROM endpoint_annotations an
                JOIN endpoint_observations eo ON eo.observation_id=an.observation_id
@@ -266,12 +288,13 @@ def ensure_coverage_manifest(database: Path, scan_id: str) -> CoverageManifestRe
                JOIN assets a ON a.asset_id=o.asset_id
                WHERE a.scan_id=? AND ar.scan_id=? AND ar.status='completed'
                  AND an.category IN (
-                     'source_vulnerability','benchmark_catalog_vulnerability'
+                     'source_vulnerability','benchmark_catalog_vulnerability','attack_hypothesis'
                  )
                  AND COALESCE(e.is_excluded,0)=0
                ORDER BY e.endpoint_id,an.tag,an.annotation_id""",
             (scan_id, scan_id),
         ).fetchall()
+        planning_skills = hypothesis_skill_catalog()
         inserted = 0
         counts: Counter[str] = Counter()
         for row in rows:
@@ -286,6 +309,18 @@ def ensure_coverage_manifest(database: Path, scan_id: str) -> CoverageManifestRe
             location = str(preferred["location"]) if preferred else "endpoint"
             parameter = str(preferred["name"]) if preferred else ""
             identity = "authenticated" if row["auth_required"] else "unauthenticated"
+            if row['category'] == 'attack_hypothesis':
+                metadata = json.loads(row['rationale'])
+                if (metadata.get('scan_id') != scan_id or metadata.get('endpoint_id') != row['endpoint_id']
+                        or metadata.get('vuln_class') != vuln_class or metadata.get('hypothesis_only') is not True
+                        or vuln_class not in planning_skills):
+                    raise ValueError('Invalid endpoint hypothesis binding')
+                skill_name = planning_skills[vuln_class]
+                location, parameter = metadata['injection_location'], metadata['parameter_name']
+                identity = metadata['required_identity_role']
+                if identity not in {'authenticated', 'unauthenticated'} or ((location, parameter) != ('endpoint', '')
+                        and (location, parameter) not in {(item['location'], item['name']) for item in parameter_candidates}):
+                    raise ValueError('Invalid endpoint hypothesis parameter or identity')
             key_fields = {
                 "scan_id": scan_id,
                 "endpoint_id": row["endpoint_id"],
@@ -552,10 +587,48 @@ def transition_coverage(
     )
 
 
+def _selected_http_evidence(
+    conn: sqlite3.Connection, coverage: sqlite3.Row, attempt: sqlite3.Row,
+    stage_run_id: str, task_id: str, *, exact: bool, request_ids: list[str] | None = None,
+) -> bool:
+    query = "SELECT r.request_id FROM attack_http_requests r WHERE r.scan_id=? AND r.stage_run_id=? AND r.task_id=? AND r.request_fingerprint=? AND r.status='completed' AND r.response_status IS NOT NULL"
+    params: tuple = (coverage['scan_id'], stage_run_id, task_id, attempt['request_fingerprint'])
+    if exact:
+        if attempt['endpoint_id'] != coverage['endpoint_id']:
+            return False
+        method = conn.execute('SELECT method FROM endpoints WHERE endpoint_id=?', (coverage['endpoint_id'],)).fetchone()[0]
+        query += """ AND r.endpoint_reference_id=? AND r.method=? AND (
+            (?='unauthenticated' AND json_extract(r.result_json,'$.credential_reference_id') IS NULL)
+            OR (?='authenticated' AND json_extract(r.result_json,'$.credential_reference_id') IN (
+                SELECT credential_reference_id FROM credential_references WHERE scan_id=?)))"""
+        params += (coverage['endpoint_id'], method, coverage['required_identity_role'], coverage['required_identity_role'], coverage['scan_id'])
+    for request in conn.execute(query, params):
+        if request_ids is None or request[0] in request_ids:
+            return True
+    return False
+
+
+def _hypothesis_finding_evidence(
+    conn: sqlite3.Connection, coverage: sqlite3.Row, finding_id: str,
+    stage_run_id: str, task_id: str,
+) -> bool:
+    spec = conn.execute('SELECT endpoint_id,injection_location,parameter_name,runtime_contract_json,source_attempt_ids_json,source_request_ids_json FROM finding_reproduction_specs WHERE finding_id=?', (finding_id,)).fetchone()
+    location = 'body' if coverage['injection_location'] in {'json', 'form'} else coverage['injection_location']
+    if (not spec or spec['endpoint_id'] != coverage['endpoint_id'] or not spec['runtime_contract_json']
+            or (location != 'endpoint' and (spec['injection_location'], spec['parameter_name']) != (location, coverage['parameter_name']))):
+        return False
+    source_attempt_ids = json.loads(spec['source_attempt_ids_json'])
+    source_request_ids = json.loads(spec['source_request_ids_json'])
+    for attempt in conn.execute("SELECT attempt_id,endpoint_id,request_fingerprint FROM attack_attempts WHERE scan_id=? AND task_id=? AND finding_id=? AND outcome='confirmed'", (coverage['scan_id'], task_id, finding_id)):
+        if attempt['attempt_id'] in source_attempt_ids and _selected_http_evidence(conn, coverage, attempt, stage_run_id, task_id, exact=True, request_ids=source_request_ids):
+            return True
+    return False
+
+
 def _adopt_existing_findings(conn: sqlite3.Connection, scan_id: str) -> int:
     """Bind prior evidence to the exact DB coverage item without re-probing."""
     rows = conn.execute(
-        """SELECT c.*,min(a.finding_id) matched_finding_id
+        """SELECT DISTINCT c.*,a.finding_id matched_finding_id,a.task_id matched_task_id,t.stage_run_id matched_stage_run_id,an.category
            FROM attack_coverage_items c
            JOIN attack_attempts a
              ON a.scan_id=c.scan_id AND a.endpoint_id=c.endpoint_id
@@ -564,11 +637,21 @@ def _adopt_existing_findings(conn: sqlite3.Connection, scan_id: str) -> int:
            JOIN findings f ON f.finding_id=a.finding_id AND f.scan_id=a.scan_id
            JOIN finding_reproduction_specs r ON r.finding_id=f.finding_id
             AND r.runtime_contract_json IS NOT NULL
+           JOIN endpoint_annotations an ON an.annotation_id=c.annotation_id
+           LEFT JOIN attack_tasks t ON t.task_id=a.task_id AND t.scan_id=c.scan_id
            WHERE c.scan_id=? AND c.status='pending'
-           GROUP BY c.coverage_id""",
+             AND (an.category<>'attack_hypothesis' OR (
+                 json_extract(t.payload_json,'$.coverage_id')=c.coverage_id
+                 AND (c.injection_location='endpoint' OR (r.parameter_name=c.parameter_name
+                    AND r.injection_location=CASE c.injection_location WHEN 'json' THEN 'body' WHEN 'form' THEN 'body' ELSE c.injection_location END))))
+           ORDER BY c.coverage_id,a.finding_id""",
         (scan_id,),
     ).fetchall()
+    adopted = set()
     for row in rows:
+        if row['coverage_id'] in adopted or (row['category'] == 'attack_hypothesis' and not _hypothesis_finding_evidence(conn, row, row['matched_finding_id'], row['matched_stage_run_id'], row['matched_task_id'])):
+            continue
+        adopted.add(row['coverage_id'])
         transition_coverage(
             conn, row["coverage_id"], "running",
             "adopting existing evidence-bound Attack finding",
@@ -580,7 +663,7 @@ def _adopt_existing_findings(conn: sqlite3.Connection, scan_id: str) -> int:
             stage_run_id=row["last_stage_run_id"], task_id=row["last_task_id"],
             finding_id=row["matched_finding_id"],
         )
-    return len(rows)
+    return len(adopted)
 
 
 def claim_coverage_batch(
@@ -624,6 +707,9 @@ def claim_coverage_batch(
         source_context = _source_context(
             conn, str(row["endpoint_id"]), str(row["annotation_id"]),
         )
+        if source_context.get('active_annotation', {}).get('category') == 'attack_hypothesis':
+            parameter_candidates = [item for item in parameter_candidates
+                if (item['location'], item['name']) == (row['injection_location'], row['parameter_name'])]
         task_id = create_task(
             conn, stage_run_id=stage_run_id, skill_name=row["skill_name"],
             endpoint_id=row["endpoint_id"],
@@ -708,21 +794,27 @@ def reconcile_coverage_batch(
     conn: sqlite3.Connection, *, stage_run_id: str, retry_limit: int = 3,
 ) -> None:
     rows = conn.execute(
-        """SELECT c.*,t.status task_status,t.error_message
+        """SELECT c.*,t.status task_status,t.error_message,an.category,e.method
            FROM attack_coverage_items c
+           JOIN endpoint_annotations an ON an.annotation_id=c.annotation_id
+           JOIN endpoints e ON e.endpoint_id=c.endpoint_id
            JOIN attack_tasks t ON t.task_id=c.last_task_id
            WHERE c.last_stage_run_id=? AND c.status='running'""",
         (stage_run_id,),
     ).fetchall()
     for row in rows:
         attempts = conn.execute(
-            """SELECT attempt_id,outcome,finding_id FROM attack_attempts
+            """SELECT attempt_id,outcome,finding_id,request_fingerprint,endpoint_id FROM attack_attempts
                WHERE scan_id=? AND task_id=? ORDER BY created_at,attempt_id""",
             (row["scan_id"], row["last_task_id"]),
         ).fetchall()
         finding_ids = sorted({str(item["finding_id"]) for item in attempts if item["finding_id"]})
         outcomes = {str(item["outcome"] or "") for item in attempts}
         task_status = str(row["task_status"])
+        if row['category'] == 'attack_hypothesis':
+            finding_ids = [finding_id for finding_id in finding_ids
+                if _hypothesis_finding_evidence(conn, row, finding_id, stage_run_id, row['last_task_id'])]
+        negative_http_evidence = bool(attempts) and all(_selected_http_evidence(conn, row, item, stage_run_id, row['last_task_id'], exact=row['category'] == 'attack_hypothesis') for item in attempts)
         if finding_ids:
             transition_coverage(
                 conn, row["coverage_id"], "candidate",
@@ -730,7 +822,7 @@ def reconcile_coverage_batch(
                 stage_run_id=stage_run_id, task_id=row["last_task_id"],
                 finding_id=finding_ids[0],
             )
-        elif task_status == "completed" and attempts and outcomes <= {
+        elif task_status == "completed" and negative_http_evidence and outcomes <= {
             "negative", "rejected",
         }:
             transition_coverage(
@@ -742,7 +834,8 @@ def reconcile_coverage_batch(
             reason = str(row["error_message"] or "Attack marked the item inapplicable")
             lowered = reason.casefold()
             status = (
-                "blocked_auth" if _authentication_blocker(reason)
+                "unsupported" if lowered.startswith(("[budget]", "[evidence]"))
+                else "blocked_auth" if lowered.startswith("[auth]") or _authentication_blocker(reason)
                 else "policy_excluded" if any(token in lowered for token in ("policy", "scope", "prohibited"))
                 else "unsupported"
             )
