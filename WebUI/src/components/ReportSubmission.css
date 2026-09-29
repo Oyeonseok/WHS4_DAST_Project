@@ -39,4 +39,19 @@ dialog:has(.report-submission){width:min(860px,calc(100% - 32px))}
 .report-evidence dd{margin:4px 0 10px;overflow-wrap:anywhere;font-family:Consolas,monospace}
 .report-submission .report-preview{padding:14px;background:var(--bg);border:1px solid var(--line);border-radius:5px;font-size:12px}
 .report-poc-video{display:block;width:100%;max-width:1280px;border:1px solid var(--line);border-radius:5px;background:var(--bg)}
+.report-document{padding:28px;background:var(--bg);border:1px solid var(--line);border-radius:8px;margin:24px 0;font-size:14px;line-height:1.85}
+.report-document-kicker{color:var(--accent);font-size:12px;font-weight:600}
+.report-document h2{font-size:25px;line-height:1.4;margin:10px 0 24px;overflow-wrap:anywhere}
+.report-document section{padding:16px 0;border-top:1px solid var(--line)}
+.report-document h3{font-size:15px;margin:0 0 9px}
+.report-document p,.report-document li{white-space:pre-wrap;overflow-wrap:anywhere;margin:0}
+.report-document li{padding-left:5px;margin-bottom:12px}
+.report-document-facts,.report-document-comparison{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:0 24px}
+.report-document-table{overflow-x:auto}
+.report-document table{width:100%;border-collapse:collapse;text-align:left;font-size:12px}
+.report-document th,.report-document td{padding:10px;border-bottom:1px solid var(--line);overflow-wrap:anywhere}
+.report-document th{color:var(--muted);font-weight:600}
+.report-document-note{font-size:12px;margin-top:16px!important}
+.report-submission-section>summary{cursor:pointer;font-weight:600;font-size:14px}
+@media(max-width:660px){.report-document{padding:18px}.report-document-facts,.report-document-comparison{grid-template-columns:1fr}.report-document h2{font-size:21px}}
 @media(max-width:660px){.report-submission-actions button{width:100%}.report-checks li{display:block}.report-checks span,.report-checks a{display:block;margin-top:5px}}

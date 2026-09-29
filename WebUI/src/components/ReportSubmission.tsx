@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import type { Language } from '../lib/i18n';
 import { canExportSubmission, canPreviewPoc, parsePocInfo, parseReportSubmission, parseRequirementsForm, type PocInfo, type ProgramRequirements, type ReportSubmissionView, type RequirementsForm } from '../lib/reportSubmission';
 import './ReportSubmission.css';
+import { ReportDocument } from './ReportDocument';
 
 const formFromRules = (rules: ProgramRequirements): RequirementsForm => ({ source: rules.source, verified: rules.verified,
   severityRequired: rules.severity_required, requiredFields: JSON.stringify(rules.required_fields, null, 2),
@@ -161,6 +162,10 @@ export function ReportSubmission({ reportId, language }: { reportId: string; lan
     });
   };
   const downloadDraft = () => void run('draft', async signal => {
+    if (view?.platform === 'generic' && view.markdown && !dirty) {
+      downloadBlob(new Blob([view.markdown], { type: 'text/markdown;charset=utf-8' }), `${reportId}.md`);
+      return;
+    }
     const response = await fetch(endpoint(''), { signal, credentials: 'same-origin', cache: 'no-store' });
     if (!response.ok) throw new Error(tk(`초안을 내려받지 못했습니다 (${response.status}).`, `Could not download the draft (${response.status}).`));
     const blob = await response.blob();
@@ -179,6 +184,7 @@ export function ReportSubmission({ reportId, language }: { reportId: string; lan
       <button className="secondary-button" disabled={!!busy || dirty} onClick={() => void run('inspect', inspect)}>{tk('자동 검사 다시 실행', 'Run automatic checks')}</button>
       <button className="secondary-button" disabled={!!busy} onClick={downloadDraft}>{tk('로컬 초안 .md 내려받기', 'Download local draft .md')}</button>
     </div>
+    {view && generic && !view.requirements.report_template && <ReportDocument view={view} language={language}/>}
     <section className="report-submission-section" aria-labelledby="report-poc-title">
       <h3 id="report-poc-title">{tk('PoC 설명 영상', 'PoC explanation video')}</h3>
       <label className="report-rule-check"><input type="checkbox" checked={includePoc} disabled={!!busy || dirty || !view?.ready}
@@ -218,23 +224,24 @@ export function ReportSubmission({ reportId, language }: { reportId: string; lan
             ? 'Evidence is text metadata, with an optional explanation video. Raw bodies, original images and screen recordings are unavailable, and pattern masking cannot find every secret.' : check.message}</span>
           {check.field && <a href={`#report-field-${check.field}`} onClick={event => {
             event.preventDefault()
-            const target = document.getElementById(`report-field-${check.field}`)
+            const target = document.getElementById(`report-field-${check.field}`) || document.getElementById(`report-extra-${check.field}`)
+            target?.closest('details')?.setAttribute('open', '')
             target?.scrollIntoView({ block: 'nearest' })
             target?.focus()
           }}>{fieldLabel(check.field)}</a>}
         </li>)}</ul>
       </section>
-      <section className="report-submission-section" aria-labelledby="report-fields-title"><h3 id="report-fields-title">{generic ? tk('보고서 항목', 'Report fields') : tk('플랫폼 제출 필드', 'Platform submission fields')}</h3>
-        <dl className="report-submission-fields">{Object.entries(displayedFields).map(([key, value]) => <div key={key} id={`report-field-${key}`} tabIndex={-1}><dt>{fieldLabel(key)}</dt><dd>{value || tk('비어 있음', 'Empty')}</dd></div>)}</dl>
-      </section>
-      <section className="report-submission-section" aria-labelledby="report-evidence-title"><h3 id="report-evidence-title">{tk('마스킹된 증거 메타데이터', 'Masked evidence metadata')}</h3>
+      <details className="report-submission-section" open={generic ? undefined : true}><summary id="report-fields-title">{generic ? tk('보고서 추가 항목 확인', 'Inspect additional report fields') : tk('플랫폼 제출 필드', 'Platform submission fields')}</summary>
+        <dl className="report-submission-fields">{Object.entries(displayedFields).map(([key, value]) => <div key={key} id={`${generic ? 'report-extra' : 'report-field'}-${key}`} tabIndex={-1}><dt>{fieldLabel(key)}</dt><dd>{value || tk('비어 있음', 'Empty')}</dd></div>)}</dl>
+      </details>
+      <details className="report-submission-section"><summary id="report-evidence-title">{tk('상세 검증 기록 · 마스킹 정보', 'Detailed validation records · masking')}</summary>
         <p className="muted">{tk('증거는 텍스트 메타데이터이며 선택한 경우 설명 영상을 포함합니다. 원문, 원본 이미지와 화면 녹화는 제공하지 않습니다.', 'Evidence is text metadata, with an explanation video when selected. Raw bodies, original images and screen recordings are unavailable.')}</p>
         <ul className="report-redactions">{view.redactions.map(item => <li key={item.kind}>{language === 'ko' ? redactionLabels[item.kind] || '민감정보' : item.kind} <strong>{item.count}</strong></li>)}</ul>
         {!view.redactions.length && <p className="muted">{tk('마스킹된 항목 0개', '0 masked items')}</p>}
-        {view.evidence.map(item => <details className="report-evidence" key={item.evidence_id}><summary>{item.evidence_id} · {item.kind}</summary><pre>{JSON.stringify(item.details, null, 2)}</pre><dl><dt>{tk('원본 해시', 'Source digest')}</dt><dd>{item.content_sha256}</dd><dt>{tk('마스킹된 메타데이터 해시', 'Masked metadata digest')}</dt><dd>{item.sanitized_sha256}</dd></dl></details>)}
+        {view.evidence.map((item, index) => <details className="report-evidence" key={item.evidence_id}><summary>{item.display?.label || tk('검증 기록', 'Validation record')} {index + 1}</summary><pre>{JSON.stringify(item.details, null, 2)}</pre><dl><dt>{tk('원본 해시', 'Source digest')}</dt><dd>{item.content_sha256}</dd><dt>{tk('마스킹된 메타데이터 해시', 'Masked metadata digest')}</dt><dd>{item.sanitized_sha256}</dd></dl></details>)}
         {!view.evidence.length && <p className="muted">{tk('표시할 증거가 없습니다.', 'No evidence to display.')}</p>}
-      </section>
-      <section className="report-submission-section" aria-labelledby="report-text-title"><h3 id="report-text-title">{generic ? tk('보고서 본문', 'Report text') : tk('제출용 보고서 본문', 'Submission report text')}</h3><pre className="report-preview">{view.markdown || tk('본문을 생성하려면 차단 항목을 해결하세요.', 'Resolve the blocking issues to generate the report text.')}</pre></section>
+      </details>
+      {(!generic || view.requirements.report_template) && <section className="report-submission-section" aria-labelledby="report-text-title"><h3 id="report-text-title">{generic ? tk('보고서 본문', 'Report text') : tk('제출용 보고서 본문', 'Submission report text')}</h3><pre className="report-preview">{view.markdown || tk('본문을 생성하려면 차단 항목을 해결하세요.', 'Resolve the blocking issues to generate the report text.')}</pre></section>}
     </>}
   </div>;
 }

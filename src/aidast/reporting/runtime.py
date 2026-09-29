@@ -108,20 +108,36 @@ class ReportAgent:
 
     def run(
         self, pipeline_db: Path, output_dir: Path, *, platform: str, case_id: str,
+        language: str | None = None,
     ) -> dict:
         from .case_runtime import _load, prepare_case_report, record_case_report
+        from .presentation import report_language
+
+        if language is not None and language not in ("ko", "en"):
+            raise ReportError("report language must be ko or en")
+        if language is not None and platform != "generic":
+            raise ReportError("language selection is supported for generic reports")
 
         result = prepare_case_report(
             pipeline_db, output_dir, platform=platform, case_id=case_id,
         )
         if result.get("eligibility") in {"known", "review_only"}:
             return result
-        if self.writer is None or result["status"] == "drafted":
+        database = Path(result["report_db"])
+        if result["status"] == "drafted":
+            if language is not None and language != report_language(database, platform=platform):
+                raise ReportError("a translated report requires a separate output directory")
+            return result
+        if platform == "generic":
+            locale = language or report_language(database, platform=platform)
+            _publish(database.parent / "Report.language.json", _json({"language": locale}) + "\n")
+        if self.writer is None:
             return result
         _, context, _, _ = _load(Path(result["report_db"]))
         from .submission import sanitize_writer_context
 
         writer_context = sanitize_writer_context(context)
+        writer_context["language"] = report_language(Path(result["report_db"]), platform=platform)
         writer_context["output_schema"] = ReportDraft.model_json_schema()
         return record_case_report(
             Path(result["report_db"]), self.writer.write(writer_context),

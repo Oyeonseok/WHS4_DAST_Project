@@ -41,6 +41,7 @@ def generate_scan_reports(
     scan_id: str,
     platform: str = "generic",
     writer: ReportWriter | None = None,
+    language: str | None = None,
 ) -> list[dict]:
     """Generate one local draft per current confirmed case for this scan."""
     if platform not in PLATFORMS:
@@ -69,6 +70,7 @@ def generate_scan_reports(
                         output_root / _case_directory(case_id),
                         platform=platform,
                         case_id=case_id,
+                        language=language,
                     )
                     break
                 except ValueError as exc:

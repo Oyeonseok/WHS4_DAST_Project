@@ -28,7 +28,7 @@ from .models import validate_draft
 from .runtime import ReportError, _path
 
 POLICY_VERSION = "text-metadata-v2"
-PROFILE_VERSION = "submission-v1"
+PROFILE_VERSION = "submission-v3"
 MAX_METADATA_BYTES = 65536
 MAX_REQUIREMENTS_BYTES = 131072
 MAX_MARKDOWN_BYTES = 2_000_000
@@ -389,14 +389,16 @@ def _fields(draft, context: dict) -> tuple[dict[str, str], dict[str, str]]:
         cited = getattr(draft, name)
         common[name] = cited.text if cited else ""
     common["prerequisites"] = "\n".join(item.text for item in draft.prerequisites)
-    common["steps_to_reproduce"] = "\n".join(f"{i}. {item.text}" for i, item in enumerate(draft.steps_to_reproduce, 1))
+    common["steps_to_reproduce"] = "\n".join(
+        f"{i}. " + (re.sub(r"^\s*\d+[.)]\s+", "", item.text) if draft.platform == "generic" else item.text)
+        for i, item in enumerate(draft.steps_to_reproduce, 1))
     common["remediation"] = draft.remediation or ""
     # Endpoint must come from explicit source metadata, never guessed from an asset.
     endpoints = []
     for item in context["validation"]["evidence"]:
         details = item.get("details", {})
         if isinstance(details, dict):
-            candidate = details.get("endpoint") or details.get("url")
+            candidate = details.get("endpoint") or details.get("url") or details.get("response_url")
             if isinstance(candidate, str):
                 endpoints.append(candidate)
     common["endpoint"] = endpoints[0] if endpoints else ""
@@ -451,7 +453,16 @@ def _masked_template(template: str | None, masker: _Masker) -> str | None:
     return ''.join(pieces)
 
 
-def _markdown(fields: dict[str, str], values: dict[str, str], requirements: dict, evidence: list[dict], attachment_ids: list[str]) -> str:
+def _markdown(fields: dict[str, str], values: dict[str, str], requirements: dict, evidence: list[dict], attachment_ids: list[str], *, platform: str = "", language: str = "ko") -> str:
+    if platform == "generic":
+        from .presentation import generic_markdown
+        body = _template(requirements["report_template"], values) if requirements["report_template"] is not None else None
+        result = generic_markdown(fields, evidence, body, language=language)
+        if requirements["impact_template"] is not None:
+            result += "\n## " + ("Additional impact statement" if language == "en" else "추가 영향 설명") + "\n\n" + _template(requirements["impact_template"], values) + "\n"
+        if len(result.encode()) > MAX_MARKDOWN_BYTES:
+            raise ReportError('report exceeds the rendered byte budget')
+        return result
     if requirements["report_template"] is not None:
         body = _template(requirements["report_template"], values)
     else:
@@ -480,6 +491,7 @@ def inspect_report(report_db: Path) -> dict:
 
     run, context, stored = {}, {}, None
     source_fingerprint = "unavailable"
+    attempt_kinds: dict[str, str] = {}
     try:
         run, context, stored, stale = case_runtime._load(path)
         if stale:
@@ -491,6 +503,12 @@ def inspect_report(report_db: Path) -> dict:
         except (ValueError, OSError, sqlite3.Error, KeyError, TypeError):
             run, context, stored = {}, {}, None
     generic = context.get("platform") == "generic"
+    from .presentation import report_language
+    language = "ko" if generic else "en"
+    try:
+        language = report_language(path, platform=context.get("platform", ""))
+    except (ValueError, OSError, UnicodeError):
+        block("report_language", "Report language metadata is invalid or cannot be safely read.")
     requirements = ProgramRequirements(severity_required=not generic)
     try:
         requirements = _requirements(path, severity_required=not generic)
@@ -505,6 +523,12 @@ def inspect_report(report_db: Path) -> dict:
             source_fingerprint = canonical_sha256(current_source)
             if case_runtime._context(current_source, context["platform"]) != context:
                 block("source_integrity", "Current Validation source or scope eligibility differs from the report.")
+            with closing(sqlite3.connect(source_path.as_uri() + "?mode=ro", uri=True)) as conn:
+                attempt_kinds = dict(conn.execute("""SELECT e.evidence_id,a.attempt_kind
+                    FROM validation_evidence e JOIN validation_attempts a ON a.attempt_id=e.attempt_id
+                    JOIN validation_cases c ON c.case_id=e.case_id
+                    WHERE c.case_id=? AND e.stage_run_id=c.decision_stage_run_id
+                    AND a.case_id=e.case_id AND a.stage_run_id=e.stage_run_id""", (run["case_id"],)))
         except (ValueError, OSError, sqlite3.Error, KeyError, TypeError):
             block("source_integrity", "Current Validation source could not be verified.")
             try:
@@ -560,6 +584,12 @@ def inspect_report(report_db: Path) -> dict:
     evidence = [{**item, "details": masker.clean(item["details"])} for item in evidence]
     for item in evidence:
         item["sanitized_sha256"] = canonical_sha256(item["details"])
+        if generic:
+            from .presentation import evidence_display
+            item["display"] = evidence_display(item, attempt_kinds.get(item["evidence_id"]), language=language)
+    if generic:
+        order = {"positive_control": 0, "negative_control": 1, "target": 2}
+        evidence.sort(key=lambda item: order.get(attempt_kinds.get(item["evidence_id"], ""), 3))
 
     if fields:
         mandatory = ["title", "asset", "weakness", "summary", "steps_to_reproduce", "expected_behavior", "actual_behavior", "impact"]
@@ -573,9 +603,12 @@ def inspect_report(report_db: Path) -> dict:
                 field = "technical_severity" if name == "severity" and context["platform"] == "bugcrowd" else name
                 block("required_field", "A required submission field is missing.", field)
     markdown = ""
+    rendered_impact = ""
     if fields:
         try:
-            markdown = _markdown(fields, aliases, public_requirements, evidence, attachment_ids)
+            markdown = _markdown(fields, aliases, public_requirements, evidence, attachment_ids, platform=context.get("platform", ""), language=language)
+            if generic and public_requirements["impact_template"] is not None:
+                rendered_impact = _template(public_requirements["impact_template"], aliases)
         except ValueError:
             block("program_template", "Program template contains invalid, unknown or empty placeholders, or exceeds the byte budget.")
     checks.append({"code": "metadata_only", "level": "warning", "field": None, "message": "Evidence files contain text metadata only. Raw bodies, images and videos are unavailable; pattern masking cannot identify arbitrary unlabeled secrets."})
@@ -583,6 +616,9 @@ def inspect_report(report_db: Path) -> dict:
     view = {"report_id": run.get("report_id", ""), "platform": context.get("platform", ""), "ready": not any(c["level"] == "blocker" for c in checks),
             "requirements": public_requirements, "fields": fields, "markdown": markdown, "evidence": evidence, "checks": checks,
             "redactions": [{"kind": kind, "count": count} for kind, count in sorted(masker.counts.items())]}
+    if generic:
+        view["language"] = language
+        view["rendered_impact"] = rendered_impact
     if len(canonical_json(view).encode()) > MAX_PACKAGE_BYTES:
         block('submission_size', 'Submission exceeds the aggregate byte budget.')
         view['ready'] = False
@@ -602,6 +638,8 @@ def export_report(report_db: Path, *, expected_revision: str | None = None, incl
         raise ReportError("submission export is blocked by automatic checks")
     submission = {"report_id": view["report_id"], "platform": view["platform"], "revision_sha256": view["revision_sha256"],
                   "fields": view["fields"], "requirements": view["requirements"], "evidence_files": [f"Evidence/evidence-{i:03d}.json" for i in range(1, len(view["evidence"]) + 1)]}
+    if "language" in view:
+        submission["language"] = view["language"]
     files = {"Report.md": view["markdown"].encode(), "Submission.json": (canonical_json(submission) + "\n").encode()}
     for i, evidence in enumerate(view["evidence"], 1):
         files[f"Evidence/evidence-{i:03d}.json"] = (canonical_json(evidence) + "\n").encode()
@@ -610,6 +648,8 @@ def export_report(report_db: Path, *, expected_revision: str | None = None, incl
                 "files": [{"name": name, "sha256": hashlib.sha256(data).hexdigest(), "size_bytes": len(data)} for name, data in files.items()],
                 "evidence": [{"evidence_id": item["evidence_id"], "kind": item["kind"], "content_sha256": item["content_sha256"], "sanitized_sha256": item["sanitized_sha256"], "status": "metadata_sanitized"} for item in view["evidence"]],
                 "checks": view["checks"], "redactions": view["redactions"]}
+    if "language" in view:
+        manifest["language"] = view["language"]
     files["Manifest.json"] = (canonical_json(manifest) + "\n").encode()
     if sum(len(data) for data in files.values()) > MAX_PACKAGE_BYTES:
         raise ReportError('submission package exceeds the byte budget')

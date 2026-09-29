@@ -26,6 +26,13 @@ test('submission response belongs to the selected report and preserves safe expo
   assert.equal(submission.parseReportSubmission?.(response, 'report_' + 'e'.repeat(32)), null);
 });
 
+test('report content locale is preserved independently of the UI and invalid locales are rejected', () => {
+  assert.equal(submission.parseReportSubmission({ ...response, platform: 'generic', language: 'en' }, reportId)?.language, 'en');
+  assert.equal(submission.parseReportSubmission({ ...response, language: 'unknown' }, reportId), null);
+  assert.equal(submission.parseReportSubmission({ ...response, language: null }, reportId), null);
+  assert.notEqual(submission.parseReportSubmission(response, reportId), null);
+});
+
 test('malformed and contradictory checks never enable submission export', () => {
   assert.equal(typeof submission.parseReportSubmission, 'function');
   for (const value of [null, {}, { ...response, ready: 'true' },
@@ -46,6 +53,13 @@ test('blocked reports remain inspectable but cannot be exported', () => {
   assert.equal(parsed?.ready, false);
   assert.equal(submission.canExportSubmission?.(parsed, reportId), false);
   assert.equal(submission.canExportSubmission?.(response, 'report_' + 'e'.repeat(32)), false);
+});
+
+test('reader-facing evidence summaries remain text and cannot accept malformed display data', () => {
+  const evidence = { ...response.evidence[0], display: { label: '재현 요청', response: 'HTTP 200', result: '판별 조건 충족' } };
+  const value = { ...response, evidence: [evidence] };
+  assert.deepEqual(submission.parseReportSubmission(value, reportId)?.evidence[0].display, evidence.display);
+  assert.equal(submission.parseReportSubmission({ ...value, evidence: [{ ...evidence, display: { ...evidence.display, result: 200 } }] }, reportId), null);
 });
 
 test('generic reports export without platform rules and still respect source blockers', () => {
