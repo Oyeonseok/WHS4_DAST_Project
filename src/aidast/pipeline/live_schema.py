@@ -5,6 +5,19 @@ from __future__ import annotations
 import sqlite3
 
 
+VALIDATION_REPLAY_PLAN_SCHEMA = """
+CREATE TABLE IF NOT EXISTS validation_replay_plans (
+    case_id TEXT NOT NULL REFERENCES validation_cases(case_id),
+    stage_run_id TEXT NOT NULL REFERENCES stage_runs(stage_run_id),
+    source_spec_sha256 TEXT NOT NULL CHECK(length(source_spec_sha256)=64),
+    profile_sha256 TEXT NOT NULL CHECK(length(profile_sha256)=64),
+    runtime_contract_json TEXT NOT NULL CHECK(json_valid(runtime_contract_json)),
+    runtime_sha256 TEXT NOT NULL CHECK(length(runtime_sha256)=64),
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY(case_id,stage_run_id)
+)
+"""
+
 LIVE_PIPELINE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS pipeline_sources (
     scan_id TEXT PRIMARY KEY NOT NULL REFERENCES scans(scan_id),
@@ -726,6 +739,7 @@ def migrate_live_pipeline_schema(conn: sqlite3.Connection) -> None:
 
     migrate_pipeline_schema(conn)
     conn.executescript(LIVE_PIPELINE_SCHEMA)
+    conn.execute(VALIDATION_REPLAY_PLAN_SCHEMA)
     _remove_known_similarity(conn)
     _add_attack_attempt_columns(conn)
     _add_live_columns(conn)

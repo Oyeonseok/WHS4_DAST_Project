@@ -134,6 +134,7 @@ class ChainReproductionPort:
                     case_id=case_id, attempt_id=attempt_id, blind_case=step_blind,
                     policy=policy, transport=self.transport,
                     credential_resolver=self.credential_resolver,
+                    credential_references=(() if attempt.identity_mode == "anonymous" else None),
                 )
                 started = self.clock()
                 response = broker.request(url, method=step.method, headers=headers, data=data)

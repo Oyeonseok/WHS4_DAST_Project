@@ -136,6 +136,44 @@ class ValidationRuntimeContractTests(unittest.TestCase):
             canonical_sha256(raw),
         )
 
+    def test_session_verification_rejects_external_write_and_status_only_requests(self):
+        base = legacy_contract_document()
+        verification = {
+            "endpoint_template": "/account", "token_path": ["authentication", "token"],
+            "request": {}, "assertions": [{
+                "assertion_id": "account", "kind": "json_equals", "path": ["id"], "expected": 7,
+            }],
+        }
+        for change in ({"endpoint_template": "//evil.invalid/account"},
+                       {"endpoint_template": "/%2e%2e/account"},
+                       {"request": {"json_body": {"write": True}}},
+                       {"assertions": [{"assertion_id": "ok", "kind": "status_equals", "expected": 200}]}):
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                validate_runtime_contract({**base, "session_verification": {**verification, **change}})
+
+    def test_auth_bypass_sensitivity_gap_proposes_session_verification(self):
+        from aidast.validation.core.decision import evaluate_impact, ImpactGapAnalyzer
+        from aidast.validation.core.profiles import SkillProfileResolver
+        proposals = ImpactGapAnalyzer().analyze(
+            profile=SkillProfileResolver().resolve("hunt-auth-bypass").profile,
+            impact=evaluate_impact(2, 0, 2), evidence_ids=("proof",),
+        )
+        self.assertTrue(any(item["gap_axis"] == "sensitivity" for item in proposals))
+
+    def test_anonymous_control_can_use_same_request_without_changing_legacy_hash(self):
+        from aidast.validation.core.profiles import SkillProfileResolver
+        from aidast.validation.contracts.runtime_semantics import validate_runtime_semantics
+        proof = {"assertion_id": "foreign-owner", "kind": "json_equals", "path": ["data", 0, "id"], "expected": 1}
+        attempt = {"request": {}, "assertions": [proof]}
+        contract = HttpRuntimeContract.model_validate({
+            "schema_version": 1, "target": attempt,
+            "positive_control": {"request": {}, "assertions": [{"assertion_id": "healthy", "kind": "status_equals", "expected": 401}], "identity_mode": "anonymous"},
+            "negative_control": {**attempt, "identity_mode": "anonymous"},
+        })
+        validate_runtime_semantics(contract, SkillProfileResolver().resolve("hunt-api-misconfig").profile)
+        self.assertEqual(contract.negative_control.identity_mode, "anonymous")
+        self.assertNotIn("identity_mode", contract.target.model_dump(mode="json"))
+
     def test_unknown_explicit_runtime_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "unsupported runtime kind"):
             validate_runtime_contract({"runtime_kind": "raw", "schema_version": 1})

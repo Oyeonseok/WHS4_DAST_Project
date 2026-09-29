@@ -77,11 +77,32 @@ them to the finding. It also requires exactly one `reproduction` object:
 {"method":"GET","endpoint_template":"/api/items/{id}","injection_location":"path","parameter_name":"id","payload_template":{"id":"<slot:string>"},"required_identity_roles":[],"source_request_ids":["HTTP ledger request ID"],"runtime_contract":{"schema_version":1,"target":{"request":{"path_parameters":{"id":"target-object"}},"assertions":[{"assertion_id":"target-effect","kind":"json_equals","path":["owner_id"],"expected":"other-user"}]},"positive_control":{"request":{"path_parameters":{"id":"owned-object"}},"assertions":[{"assertion_id":"healthy-path","kind":"status_equals","expected":200}]},"negative_control":{"request":{"path_parameters":{"id":"inert-object"}},"assertions":[{"assertion_id":"target-effect","kind":"json_equals","path":["owner_id"],"expected":"other-user"}]}}}
 ```
 
-For HTTP findings, include `runtime_contract` whenever the target effect can be
-expressed with bounded response assertions. Each attempt declares path/query
+Include an immutable `runtime_contract` whenever the target effect can be
+expressed with bounded response assertions. If the contract is missing, native
+Validation prepares target and control requests from the captured execution
+context before replay; do not treat this missing metadata as a verdict.
+For HTTP findings, each attempt declares path/query
 values, non-secret headers, one JSON or text body, and one to sixteen assertions.
 Supported assertion kinds are `status_equals`, `header_equals`, `body_contains`,
 `json_equals`, `duration_at_least_ms`, and `duration_at_most_ms`.
+
+For optional deeper HTTP login impact checks, add `session_verification` to the runtime
+contract. Capture a same-origin protected GET resource during Attack and declare
+its literal path, the JSON path of the returned bearer token, and an assertion
+on an observed account ID or protected account field. Do not store the token.
+Validation uses a fresh token for each target replay and reads the same resource
+without a credential for the negative control. A public resource cannot prove
+authenticated access. For example:
+
+```json
+{"endpoint_template":"/rest/user/whoami","token_path":["authentication","token"],"request":{},"assertions":[{"assertion_id":"account-id","kind":"json_equals","path":["user","id"],"expected":7}]}
+```
+
+The example is the value of `runtime_contract.session_verification`; choose the
+actual captured resource and observed account field for the target application.
+It must be a body-free GET with JSON content assertions. If account access has
+not yet been proven, retain a weaker bounded reproduction and explicitly state
+that usable authenticated impact remains unverified.
 
 For DOM effects, use a `runtime_kind: "browser"` contract. Each target/control
 attempt contains a body-free `navigation`, a bounded `wait_ms`, and assertions

@@ -108,6 +108,25 @@ class ValidationRuntimeSemanticTests(unittest.TestCase):
         self.assertIsNone(validate_runtime_semantics(contract('"sourcesContent":'), profile))
         self.assertIsNone(validate_runtime_semantics(contract('"openapi":'), profile))
 
+    def test_auth_bypass_score_is_not_capped_by_optional_session_proof(self):
+        axis = {"score": 2, "evidence_ids": ("t1",), "reason": "Controlled login bypass observed."}
+        assessment = BlindAssessment.model_validate({
+            "case_id": "case", "blind_case_sha256": "f" * 64,
+            "reproduced": True, "signal_types": ("authorization_boundary",),
+            "target_attempt_ids": ("target-1", "target-2", "target-3"),
+            "control_attempt_ids": ("positive", "negative"), "evidence_ids": ("t1",),
+            "impact_boundary": axis, "impact_sensitivity": axis,
+            "impact_actor_requirements": axis, "conclusion": "Controlled replay and controls support authentication bypass.",
+        })
+        proof = {"assertion_id": "login", "kind": "body_contains", "expected": '\"authentication\"'}
+        runtime = HttpRuntimeContract(
+            schema_version=1, target=http_attempt("target", proof),
+            positive_control=http_attempt("healthy", proof), negative_control=http_attempt("inert", proof),
+        )
+        bounded, rule = bound_profile_proof_assessment(self.profile("hunt-auth-bypass"), runtime, assessment)
+        self.assertEqual(bounded, assessment)
+        self.assertIsNone(rule)
+
     def test_field_name_only_proof_cannot_raise_pre_impact_sensitivity(self):
         axis = {"score": 1, "evidence_ids": ("evidence",), "reason": "Agent raw score."}
         assessment = BlindAssessment.model_validate({

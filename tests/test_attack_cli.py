@@ -404,6 +404,19 @@ class AttackCliTests(unittest.TestCase):
                 self.assertEqual(stored_json, canonical_json(normalized))
                 self.assertEqual(stored_sha256, canonical_sha256(normalized))
 
+    def test_finding_allows_runtime_contract_preparation_in_validation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path, payload, _ = self.protocol_finding_fixture(
+                Path(directory), runtime_kind="multipart", skill_name="hunt-file-upload",
+            )
+            document = json.loads(payload.read_text())
+            document["reproduction"].pop("runtime_contract")
+            payload.write_text(json.dumps(document))
+            commit_finding(path, "scan", payload)
+            with sqlite3.connect(path) as conn:
+                self.assertEqual(conn.execute("SELECT count(*) FROM findings").fetchone()[0], 1)
+                self.assertIsNone(conn.execute("SELECT runtime_contract_json FROM finding_reproduction_specs").fetchone()[0])
+
     def test_exhaustive_coverage_finding_requires_runtime_contract(self):
         with tempfile.TemporaryDirectory() as directory:
             database, payload, _ = self.protocol_finding_fixture(
@@ -517,7 +530,13 @@ class AttackCliTests(unittest.TestCase):
                     Path(directory), runtime_kind="multipart", skill_name="hunt-cors",
                 )
                 document = json.loads(payload.read_text(encoding="utf-8"))
-                document["reproduction"].pop("runtime_contract")
+                proof = {"assertion_id": "cors-origin", "kind": "header_equals",
+                         "header": "Access-Control-Allow-Origin", "expected": "https://redacted.invalid"}
+                document["reproduction"]["runtime_contract"] = {
+                    "schema_version": 1,
+                    **{kind: {"request": {"query_parameters": {"variant": variant}}, "assertions": [proof]}
+                       for kind, variant in (("target", "target"), ("positive_control", "baseline"), ("negative_control", "inert"))},
+                }
                 mutate(document["reproduction"])
                 payload.write_text(json.dumps(document), encoding="utf-8")
 

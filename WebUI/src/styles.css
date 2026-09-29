@@ -557,6 +557,11 @@ html[lang=ko] .eyebrow{font-size:13px;font-weight:600;color:var(--accent)}
 .validation-facts>div{min-width:115px;padding:9px 12px;border-radius:6px;background:var(--soft)}
 .validation-facts dt{font-size:12px;color:var(--muted)}
 .validation-facts dd{margin:4px 0 0;font-size:16px;font-variant-numeric:tabular-nums}
+.validation-impact{width:100%;overflow-wrap:anywhere}
+.validation-impact dl{display:grid;gap:10px;margin:12px 0}
+.validation-impact dl>div{padding:10px 12px;border:1px solid var(--line);border-radius:6px}
+.validation-impact dt{font-size:13px;font-weight:600}
+.validation-impact dd{margin:5px 0 0;font-size:13px;line-height:1.6;color:var(--muted)}
 .finding-verdict{display:grid;justify-items:start;gap:13px;margin-top:22px;padding-top:20px;border-top:1px solid var(--line)}
 .finding-verdict h3{font-size:17px}
 @media(max-width:660px){

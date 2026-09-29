@@ -18,6 +18,8 @@ export type ValidationCase = {
     readonly known_source_case_id?: string;
     readonly severity?: string;
     readonly impact_score?: number;
+    readonly reproduced?: boolean;
+    readonly impact_axes?: Partial<Record<'boundary' | 'sensitivity' | 'actor_requirements', { readonly score: number; readonly reason?: string }>>;
   };
   readonly evidence?: {
     readonly attempts: Readonly<Record<string, Readonly<Record<string, number>>>>;
@@ -26,6 +28,13 @@ export type ValidationCase = {
 };
 
 export type FindingVerdict = 'tp' | 'fp' | 'duplicate' | 'pending' | 'inconclusive';
+
+export function findingValidationStatus(finding: Pick<Finding, 'id'>, cases: readonly ValidationCase[]): ValidationStatus | null {
+  const validation = cases.find(item => item.target_kind === 'finding' && item.target_id === finding.id);
+  if (validation?.processing_phase !== 'completed') return null;
+  if (validation.current_status === 'KNOWN' && !knownSourceCase(validation, cases)) return 'INCONCLUSIVE';
+  return validation.current_status;
+}
 
 export function knownSourceCase(validation: ValidationCase, cases: readonly ValidationCase[]): ValidationCase | undefined {
   if (validation.processing_phase !== 'completed' || validation.current_status !== 'KNOWN') return undefined;
@@ -74,7 +83,17 @@ export function parseValidationCases(value: unknown, scanId: string): Validation
     && 'current_status' in item && (item.current_status === null || typeof item.current_status === 'string' && statuses.includes(item.current_status))
     && (!('decision' in item) || item.decision !== null && typeof item.decision === 'object'
       && (!('known_source_case_id' in item.decision) || typeof item.decision.known_source_case_id === 'string')
-      && (!('reason' in item.decision) || typeof item.decision.reason === 'string'))
+      && (!('reason' in item.decision) || typeof item.decision.reason === 'string')
+      && (!('reproduced' in item.decision) || typeof item.decision.reproduced === 'boolean')
+      && (!('severity' in item.decision) || typeof item.decision.severity === 'string')
+      && (!('impact_score' in item.decision) || typeof item.decision.impact_score === 'number'
+        && Number.isInteger(item.decision.impact_score) && item.decision.impact_score >= 0 && item.decision.impact_score <= 9)
+      && (!('impact_axes' in item.decision) || item.decision.impact_axes !== null && typeof item.decision.impact_axes === 'object'
+        && !Array.isArray(item.decision.impact_axes)
+        && Object.entries(item.decision.impact_axes).every(([key, axis]) => ['boundary', 'sensitivity', 'actor_requirements'].includes(key)
+          && axis !== null && typeof axis === 'object' && 'score' in axis && typeof axis.score === 'number'
+          && Number.isInteger(axis.score) && axis.score >= 0 && axis.score <= 3
+          && (!('reason' in axis) || typeof axis.reason === 'string'))))
     && (!('evidence' in item) || item.evidence !== null && typeof item.evidence === 'object'
       && 'attempts' in item.evidence && item.evidence.attempts !== null && typeof item.evidence.attempts === 'object'
       && Object.values(item.evidence.attempts).every(counts => counts !== null && typeof counts === 'object'

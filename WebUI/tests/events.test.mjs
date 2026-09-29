@@ -9,8 +9,25 @@ import { scopeCollectionRequest } from '../src/lib/scope.ts';
 import { activityHeightBounds, clampPanelWidth, panelBounds } from '../src/lib/layout.ts';
 import { resolveTransportMode } from '../src/lib/transport.ts';
 import { auditLevel, readAuditAcknowledgements, saveAuditAcknowledgements } from '../src/lib/audit.ts';
-import { filterFindings, findingVerdict, parseValidationCases, reportCaseForFinding } from '../src/lib/validation.ts';
+import { filterFindings, findingVerdict, findingValidationStatus, parseValidationCases, reportCaseForFinding } from '../src/lib/validation.ts';
 import { DEMO_VALIDATIONS } from '../src/data/demo.ts';
+
+test('completed validation distinguishes missing replay from reproduced insufficient impact', () => {
+  const finding = { id: 'f' };
+  const base = { case_id: 'c', target_kind: 'finding', target_id: 'f', processing_phase: 'completed', updated_at: '' };
+  assert.equal(findingValidationStatus(finding, [{ ...base, current_status: 'UNDERPOWERED' }]), 'UNDERPOWERED');
+  assert.equal(findingValidationStatus(finding, [{ ...base, current_status: 'INCONCLUSIVE' }]), 'INCONCLUSIVE');
+  assert.equal(findingValidationStatus(finding, [{ ...base, processing_phase: 'blind_replay', current_status: 'CONFIRMED' }]), null);
+});
+
+test('validation parser rejects malformed impact axes and reproduction flags', () => {
+  const base = { case_id: 'c', target_kind: 'finding', target_id: 'f', processing_phase: 'completed', current_status: 'UNDERPOWERED', updated_at: '' };
+  const parsed = decision => parseValidationCases({ scan_id: 's', cases: [{ ...base, decision }] }, 's');
+  assert.ok(parsed({ reproduced: true, impact_axes: { sensitivity: { score: 0, reason: 'Missing protected access' } } }));
+  for (const decision of [{ reproduced: 'true' }, { severity: {} }, { impact_score: 10 },
+    { impact_axes: null }, { impact_axes: { sensitivity: { score: 4 } } },
+    { impact_axes: { sensitivity: { score: 0, reason: {} } } }]) assert.equal(parsed(decision), null);
+});
 import {
   advanceEstimatedProgress,
   currentStageProgressStatus,

@@ -163,6 +163,11 @@ configuration. The shared DB contains both Recon and Attack records.
    fact is useful context but is never a substitute for this promotion. When an
    exact safe-method request can test a Validation profile's declared impact path,
    include it as `impact_development_contract`; otherwise omit it.
+   For optional deeper login impact checks, declare a captured protected GET in
+   `runtime_contract.session_verification`, with the fresh response token's
+   JSON path and an observed account-field assertion. An authentication/token
+   marker can support controlled login reproduction; a session read supplies additional impact evidence. Follow the database
+   contract for the bounded declaration; never retain a raw returned token.
 9. Close all leads for the task, then transition it to `completed`. A coverage
    task with no request/attempt evidence must be `skipped` with the exact blocker
    reason; never mark it completed merely to empty the queue. Continue until

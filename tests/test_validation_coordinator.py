@@ -64,6 +64,19 @@ class FakePort:
         )
 
 
+class FakeReplayPreparer:
+    agent_id = "preparer_fixture"
+    calls = 0
+    def prepare(self, context, correction=None):
+        self.calls += 1
+        proof = {"assertion_id": "owner", "kind": "json_equals", "path": ["owner_id"], "expected": 7}
+        return {"reason": "Reconstruct from captured object request.", "runtime_contract": {
+            "schema_version": 1,
+            "target": {"request": {"path_parameters": {"id": 1}}, "assertions": [proof]},
+            "positive_control": {"request": {"path_parameters": {"id": 1}}, "assertions": [{"assertion_id": "healthy", "kind": "status_equals", "expected": 200}]},
+            "negative_control": {"request": {"path_parameters": {"id": 2}}, "assertions": [proof]},
+        }}
+
 class ConditionalEligibilityAgent(FakeEligibilityAgent):
     def __init__(self, post="ELIGIBLE", mutation=None):
         super().__init__()
@@ -533,7 +546,7 @@ class ValidationCoordinatorTests(unittest.TestCase):
             ).fetchone()[0], 0)
 
     def test_profile_audit_resume_restores_pre_impact_raw_axes(self):
-        def cap_sensitivity(profile, runtime, assessment):
+        def cap_sensitivity(profile, runtime, assessment, *, observations=()):
             sensitivity = assessment.impact_sensitivity.model_copy(update={
                 "score": 0, "reason": "Fixture proof cap.",
             })
@@ -1284,6 +1297,100 @@ class ValidationCoordinatorTests(unittest.TestCase):
             self.assertEqual(row, ("CONFIRMED", "completed"))
             self.assertEqual(conn.execute("SELECT count(*) FROM validation_attempts").fetchone()[0], 5)
 
+    def test_missing_http_contract_is_prepared_and_controls_are_executed(self):
+        preparer = FakeReplayPreparer()
+        calls = []
+        def transport(request, timeout):
+            calls.append(request.full_url)
+            body = b'{"owner_id":7}' if request.full_url.endswith('/1') else b'{"owner_id":2}'
+            return SimpleNamespace(status=200, headers={}, read=lambda n: body, close=lambda: None)
+        coordinator = ValidationCoordinator(
+            db_path=self.path, agent=FakeAgent(), reproduction=HttpReproductionPort(transport=transport),
+            policy_provider=lambda endpoint, method: self.policy, replay_preparer=preparer,
+        )
+        result = coordinator.run("scan")
+        self.assertEqual(result.summary["statuses"], {"CONFIRMED": 1})
+        self.assertEqual(preparer.calls, 1)
+        self.assertEqual(calls, ['https://test/objects/1', 'https://test/objects/2',
+                                 'https://test/objects/1', 'https://test/objects/1', 'https://test/objects/1'])
+        with db.connect(self.path) as conn:
+            kinds = conn.execute('SELECT attempt_kind,count(*) FROM validation_attempts GROUP BY attempt_kind').fetchall()
+            self.assertEqual(dict(kinds), {'positive_control': 1, 'negative_control': 1, 'target': 3})
+            self.assertIsNone(conn.execute('SELECT runtime_contract_json FROM finding_reproduction_specs').fetchone()[0])
+            self.assertEqual(conn.execute('SELECT count(*) FROM validation_replay_plans').fetchone()[0], 1)
+
+    def test_prepared_replay_resumes_without_redrafting_or_resending(self):
+        preparer = FakeReplayPreparer()
+        calls = []
+        def transport(request, timeout):
+            calls.append(request.full_url)
+            body = b'{"owner_id":7}' if request.full_url.endswith('/1') else b'{"owner_id":2}'
+            return SimpleNamespace(status=200, headers={}, read=lambda n: body, close=lambda: None)
+        with self.assertRaises(ValidationCoordinatorError):
+            ValidationCoordinator(
+                db_path=self.path, agent=CrashedAgent(), reproduction=HttpReproductionPort(transport=transport),
+                policy_provider=lambda endpoint, method: self.policy, replay_preparer=preparer,
+            ).run("scan")
+        with db.connect(self.path) as conn:
+            stage = conn.execute("SELECT stage_run_id FROM stage_runs WHERE stage='validation'").fetchone()[0]
+            original_plan = conn.execute("SELECT runtime_contract_json,runtime_sha256 FROM validation_replay_plans").fetchone()
+        self.assertEqual(len(calls), 5)
+        result = ValidationCoordinator(
+            db_path=self.path, agent=FakeAgent(), reproduction=HttpReproductionPort(transport=transport),
+            policy_provider=lambda endpoint, method: self.policy,
+        ).resume(stage)
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(preparer.calls, 1)
+        self.assertEqual(len(calls), 5)
+        with db.connect(self.path) as conn:
+            self.assertEqual(conn.execute("SELECT runtime_contract_json,runtime_sha256 FROM validation_replay_plans").fetchone(), original_plan)
+            self.assertEqual(conn.execute("SELECT current_status FROM validation_cases").fetchone()[0], "CONFIRMED")
+
+    def test_invalid_preparation_retries_before_reporting_no_execution(self):
+        class InvalidPreparer:
+            agent_id = "invalid_preparer"
+            corrections = []
+            def prepare(self, context, correction=None):
+                self.corrections.append(correction)
+                return {"runtime_contract": {"schema_version": 1}, "reason": "incomplete"}
+        preparer = InvalidPreparer()
+        calls = []
+        result = ValidationCoordinator(
+            db_path=self.path, agent=FakeAgent(),
+            reproduction=HttpReproductionPort(transport=lambda *args: calls.append(args)),
+            policy_provider=lambda endpoint, method: self.policy, replay_preparer=preparer,
+        ).run("scan")
+        self.assertEqual(result.summary["statuses"], {"INCONCLUSIVE": 1})
+        self.assertEqual(len(preparer.corrections), 2)
+        self.assertIsNone(preparer.corrections[0])
+        self.assertTrue(preparer.corrections[1])
+        self.assertEqual(calls, [])
+        with db.connect(self.path) as conn:
+            self.assertEqual(conn.execute("SELECT count(*) FROM validation_attempts").fetchone()[0], 0)
+            self.assertEqual(conn.execute("SELECT count(*) FROM validation_replay_plans").fetchone()[0], 0)
+            decision = json.loads(conn.execute("SELECT decision_json FROM validation_cases").fetchone()[0])
+            self.assertEqual(decision["reason"], "replay_preparation_invalid")
+            self.assertEqual(decision["phase"], "replay_preparation")
+
+    def test_default_preparer_failure_isolated_to_case(self):
+        from aidast.agents.main import MainAgentError
+        from aidast.validation.orchestration.replay_preparation import CodexReplayPreparer
+        from unittest.mock import Mock
+        agent = Mock()
+        agent._run_structured.side_effect = MainAgentError("Fixture CLI invalid JSON output")
+        result = ValidationCoordinator(
+            db_path=self.path, agent=FakeAgent(), reproduction=HttpReproductionPort(),
+            policy_provider=lambda endpoint, method: self.policy,
+            replay_preparer=CodexReplayPreparer(agent=agent),
+        ).run("scan")
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(result.summary["statuses"], {"INCONCLUSIVE": 1})
+        self.assertEqual(agent._run_structured.call_count, 2)
+        with db.connect(self.path) as conn:
+            decision = json.loads(conn.execute("SELECT decision_json FROM validation_cases").fetchone()[0])
+            self.assertEqual(decision["reason"], "replay_preparation_failed")
+            self.assertEqual(conn.execute("SELECT count(*) FROM validation_attempts").fetchone()[0], 0)
+
     def test_native_http_preflight_isolates_missing_contract(self):
         agent = CountingAgent()
         result = ValidationCoordinator(
@@ -1537,6 +1644,8 @@ class ValidationCoordinatorTests(unittest.TestCase):
             coordinator.impact_development_port, NativeImpactDevelopmentPort,
         )
         self.assertIsNotNone(coordinator.prerequisite_resolver.policy_provider)
+        from aidast.validation.orchestration.replay_preparation import CodexReplayPreparer
+        self.assertIsInstance(coordinator.replay_preparer, CodexReplayPreparer)
 
     def test_native_builder_wires_protocol_adapters_with_shared_resources(self):
         from aidast.validation.execution.concurrent_adapter import ConcurrentReproductionPort
