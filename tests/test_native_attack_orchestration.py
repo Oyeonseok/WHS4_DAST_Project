@@ -82,7 +82,7 @@ def completed_pipeline(root: Path) -> Path:
     return path
 
 
-class NativeAttackCoordinatorTests(unittest.TestCase):
+class LegacyNativeAttackCoordinatorTests(unittest.TestCase):
     def test_authenticated_credential_reference_is_bound_to_attack_tasks(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -99,7 +99,7 @@ class NativeAttackCoordinatorTests(unittest.TestCase):
                 )
             main = FakeNativeMain()
             AttackCoordinator(agent=main, db_path=database, scope_path=scope,
-                              policy_path=policy).run("scan_native")
+                              policy_path=policy).run_selected_skills("scan_native")
             tasks = main.calls[0]["attack_tasks"]
             assert tasks
             assert all(task["credential_references"][0]["credential_reference_id"] == reference
@@ -124,7 +124,7 @@ class NativeAttackCoordinatorTests(unittest.TestCase):
 
             result = AttackCoordinator(
                 agent=main, db_path=database, scope_path=scope, policy_path=policy
-            ).run("scan_native")
+            ).run_selected_skills("scan_native")
 
             self.assertEqual(result.attack_agent_ids, ["/root/aidast_attack"])
             self.assertEqual(len(main.calls), 1)
@@ -147,9 +147,9 @@ class NativeAttackCoordinatorTests(unittest.TestCase):
                 agent=FakeNativeMain(), db_path=database, scope_path=scope,
                 policy_path=policy,
             )
-            coordinator.run("scan_native")
+            coordinator.run_selected_skills("scan_native")
             with self.assertRaisesRegex(AttackCoordinatorError, "already exists"):
-                coordinator.run("scan_native")
+                coordinator.run_selected_skills("scan_native")
 
     def test_foreign_database_reference_is_not_bound_and_is_rejected(self) -> None:
         class ForeignDatabaseMain(FakeNativeMain):
@@ -177,7 +177,7 @@ class NativeAttackCoordinatorTests(unittest.TestCase):
                 AttackCoordinator(
                     agent=ForeignDatabaseMain(), db_path=database,
                     scope_path=scope, policy_path=policy,
-                ).run("scan_native")
+                ).run_selected_skills("scan_native")
 
     def test_unresolved_lead_prevents_stage_completion(self) -> None:
         class UnresolvedLeadMain(FakeNativeMain):
@@ -207,7 +207,7 @@ class NativeAttackCoordinatorTests(unittest.TestCase):
                 scope_path=scope, policy_path=policy,
             )
             with self.assertRaisesRegex(AttackCoordinatorError, "unresolved lead"):
-                coordinator.run("scan_native")
+                coordinator.run_selected_skills("scan_native")
 
     def test_failed_stage_can_resume_without_reusing_stage_or_tasks(self) -> None:
         class FailOnceMain(FakeNativeMain):
@@ -229,8 +229,8 @@ class NativeAttackCoordinatorTests(unittest.TestCase):
                 agent=main, db_path=database, scope_path=scope, policy_path=policy,
             )
             with self.assertRaisesRegex(AttackCoordinatorError, "interrupted"):
-                coordinator.run("scan_native")
-            result = coordinator.run("scan_native")
+                coordinator.run_selected_skills("scan_native")
+            result = coordinator.run_selected_skills("scan_native")
             self.assertEqual(result.status, "COMPLETED")
             with closing(sqlite3.connect(database)) as conn:
                 stages = conn.execute(

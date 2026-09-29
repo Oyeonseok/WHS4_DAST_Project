@@ -195,8 +195,8 @@ def _attack_destination(url: str) -> tuple[str, str, str, int]:
     return origin, (_PATH_IDENTIFIER.sub("/:id", path) or "/"), host, port
 
 
-def _recon_candidate_endpoint(db_path: Path, *, scan_id: str, url: str) -> str | None:
-    """Find a Recon candidate at the same normalized path, independent of method."""
+def _recon_candidate_endpoint(db_path: Path, *, scan_id: str, url: str, method: str | None = None) -> str | None:
+    """Find a Recon candidate; actual request provenance must also match method."""
     parsed = urlsplit(url)
     _, normalized_path, host, port = _attack_destination(url)
     with closing(sqlite3.connect(db_path)) as conn:
@@ -207,9 +207,9 @@ def _recon_candidate_endpoint(db_path: Path, *, scan_id: str, url: str) -> str |
                JOIN assets a ON a.asset_id=o.asset_id
                WHERE a.scan_id=? AND e.is_excluded=0
                  AND lower(rtrim(o.host,'.'))=? AND o.scheme=? AND o.port=?
-                 AND e.normalized_path=?
+                 AND e.normalized_path=? AND (? IS NULL OR upper(e.method)=?)
                ORDER BY e.endpoint_id""",
-            (scan_id, host, parsed.scheme, port, normalized_path),
+            (scan_id, host, parsed.scheme, port, normalized_path, method, method),
         ).fetchall()
     return rows[0][0] if rows else None
 
@@ -222,7 +222,7 @@ def _endpoint_provenance(
     )
     if observed is not None:
         return "network_observed", observed
-    candidate = _recon_candidate_endpoint(db_path, scan_id=scan_id, url=url)
+    candidate = _recon_candidate_endpoint(db_path, scan_id=scan_id, url=url, method=method)
     if candidate is not None:
         return "recon_candidate", candidate
     return "agent_proposed", None

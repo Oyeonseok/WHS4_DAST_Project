@@ -1,8 +1,10 @@
-"""Start exactly one native Attack Agent after Recon completes."""
+"""Plan endpoint hypotheses and execute bounded native Attack batches."""
 
 from __future__ import annotations
 
 import sqlite3
+import os
+from uuid import uuid4
 from contextlib import closing
 from pathlib import Path
 
@@ -37,6 +39,83 @@ class AttackCoordinator:
         self._policy_path = Path(policy_path).expanduser().resolve()
 
     def run(self, scan_id: str) -> AttackStageResult:
+        from aidast.attack.coverage_snapshot import attack_work_unfinished
+        from aidast.attack.recon_hypotheses import plan_recon_attack
+        from aidast.attack.coverage import ensure_coverage_manifest
+        from aidast.orchestration.coverage_attack import ExhaustiveAttackCoordinator
+
+        for path in (self._db_path, self._scope_path, self._policy_path):
+            if not path.is_file():
+                raise AttackCoordinatorError(f'Attack input not found: {path}')
+        with closing(sqlite3.connect(self._db_path)) as conn:
+            scan = conn.execute('SELECT status,finished_at FROM scans WHERE scan_id=?', (scan_id,)).fetchone()
+            if scan is None or scan[0] != 'completed' or not scan[1]:
+                raise AttackCoordinatorError('Attack requires a completed Recon scan')
+            prior = conn.execute("""SELECT stage_run_id,status FROM stage_runs
+                WHERE scan_id=? AND stage='attack' ORDER BY rowid DESC LIMIT 1""", (scan_id,)).fetchone()
+            if prior and (prior[1] in {'pending', 'running'} or (prior[1] == 'completed' and not attack_work_unfinished(conn, scan_id))):
+                raise AttackCoordinatorError(f'Attack stage already exists for this scan: {prior[0]} ({prior[1]})')
+        with closing(sqlite3.connect(self._db_path)) as conn, conn:
+            planning_stage = start_stage_run(conn, scan_id=scan_id, stage='attack')
+        try:
+            plan_recon_attack(self._db_path, scan_id, agent=self._agent,
+                progress=lambda processed, total: self._planning_progress(scan_id, processed, total),
+                stage_run_id=planning_stage,
+                repair_progress=lambda processed, total, attempt, issues: self._planning_progress(
+                    scan_id, processed, total, repair_attempt=attempt, issue_count=issues))
+            manifest = ensure_coverage_manifest(self._db_path, scan_id)
+        except BaseException as exc:
+            with closing(sqlite3.connect(self._db_path)) as conn, conn:
+                finish_stage_run(conn, planning_stage, status='failed', error_message=str(exc))
+            if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+                raise
+            raise AttackCoordinatorError(str(exc)) from exc
+        with closing(sqlite3.connect(self._db_path)) as conn, conn:
+            finish_stage_run(conn, planning_stage, status='completed')
+        if not manifest.total:
+            return AttackStageResult(status='COMPLETED', scan_id=scan_id,
+                db_path=str(self._db_path), stage_run_id=planning_stage,
+                summary='Every endpoint was reviewed; no evidence-grounded executable hypothesis was identified.')
+        try:
+            result = ExhaustiveAttackCoordinator(agent=self._agent, db_path=self._db_path,
+                scope_path=self._scope_path, policy_path=self._policy_path, batch_size=8,
+                max_batches=min(1000, max(100, ((manifest.total + 7) // 8) * 3))).run(scan_id)
+        except BaseException as exc:
+            with closing(sqlite3.connect(self._db_path)) as conn, conn:
+                latest = conn.execute("SELECT stage_run_id,status FROM stage_runs WHERE scan_id=? AND stage='attack' ORDER BY rowid DESC LIMIT 1", (scan_id,)).fetchone()
+                if latest is None or latest[1] != 'failed':
+                    failed_stage = latest[0] if latest and latest[1] == 'running' else start_stage_run(conn, scan_id=scan_id, stage='attack')
+                    finish_stage_run(conn, failed_stage, status='failed', error_message=str(exc))
+            if isinstance(exc, (KeyboardInterrupt, SystemExit, AttackCoordinatorError)):
+                raise
+            raise AttackCoordinatorError(str(exc)) from exc
+        completion_stage = result.stage_run_ids[-1] if result.stage_run_ids else planning_stage
+        with closing(sqlite3.connect(self._db_path)) as conn, conn:
+            latest = conn.execute("SELECT stage_run_id,status FROM stage_runs WHERE scan_id=? AND stage='attack' ORDER BY rowid DESC LIMIT 1", (scan_id,)).fetchone()
+            if latest and latest[1] != 'completed':
+                completion_stage = start_stage_run(conn, scan_id=scan_id, stage='attack')
+                finish_stage_run(conn, completion_stage, status='completed')
+        return AttackStageResult(status='COMPLETED', scan_id=scan_id,
+            db_path=str(self._db_path), stage_run_id=completion_stage,
+            finding_ids=list(result.finding_ids), attack_agent_ids=list(result.attack_agent_ids),
+            summary=f"Endpoint hypothesis coverage: {result.coverage['total']} dispositions across {result.batches} batches; {result.coverage['by_status']}")
+
+    @staticmethod
+    def _planning_progress(scan_id: str, processed: int, total: int, *, repair_attempt: int | None = None, issue_count: int = 0) -> None:
+        root = os.environ.get('AIDAST_RESULT_ROOT')
+        if not root:
+            return
+        from aidast.web.projection import DashboardProjector
+        DashboardProjector(Path(root)).record_event(scan_id, source_key=f'work:{uuid4().hex}',
+            event_type='log.appended', payload={'stage': 'Attack', 'level': 'info',
+                'message': 'Agent work', 'message_code': 'agent.work',
+                'message_params': {'agent': 'attack', 'step': 'planning', 'state': 'progress',
+                                   'processed': processed, 'endpoint_total': total,
+                                   **({'repair_attempt': repair_attempt, 'repair_limit': 2,
+                                       'validation_issue_count': issue_count} if repair_attempt is not None else {})}})
+
+    def run_selected_skills(self, scan_id: str) -> AttackStageResult:
+        """Legacy explicit Skill-batch entrypoint; normal scans use endpoint coverage."""
         if not self._db_path.is_file():
             raise AttackCoordinatorError(f"pipeline DB not found: {self._db_path}")
         if not self._scope_path.is_file():

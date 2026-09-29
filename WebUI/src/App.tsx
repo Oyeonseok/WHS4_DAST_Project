@@ -19,6 +19,7 @@ import {
   type ScopeActivityEvent,
 } from './lib/activity';
 import { displayStageStatus, mergeReconActivityLogs, parseReconActivityPage, reconDiscoveries, stages, type Finding, type Log, type ReportDraftStatus, type Snapshot } from './lib/events';
+import { coverageMetrics, coverageStatusLabels, type AttackCoverage, type HypothesisCoverage } from './lib/attackCoverage';
 import { agentNames, agentNamesEn, agentOrder, localizeActivityMessage, localizeAuditEventType, reconActivityPurpose } from './lib/activityMessages';
 import { auditLevel, readAuditAcknowledgements, saveAuditAcknowledgements, type AuditEntry } from './lib/audit';
 import { initialLanguage, translate, type Language } from './lib/i18n';
@@ -57,8 +58,8 @@ import { useManualLogin } from './hooks/useManualLogin';
 const pages = ['Overview', 'Scopes / Programs', 'Scans', 'Findings', 'Validation', 'Reports', 'Audit log', 'Settings'] as const;
 type Page = typeof pages[number];
 type ScanSummary = { scan_id: string; status: Snapshot['status']; started_at: string; finished_at: string | null; targets?: string[] };
-type AttackTask = { task_id: string; skill_name: string; status: string; selection_reasons: string[]; observed_urls: { method: string; url: string; hint: string }[]; attempt_count: number; recent_attempts: { method: string; url: string | null; outcome: string }[] };
-type AttackTaskSnapshot = { scan_id: string; stage_run_id: string | null; stage_status?: string; tasks: AttackTask[]; attempt_count: number };
+type AttackTask = { coverage?: HypothesisCoverage | null; task_id: string; skill_name: string; status: string; selection_reasons: string[]; observed_urls: { method: string; url: string; hint: string }[]; attempt_count: number; recent_attempts: { method: string; url: string | null; outcome: string }[] };
+type AttackTaskSnapshot = { coverage?: AttackCoverage | null; total_attempt_count?: number; scan_id: string; stage_run_id: string | null; stage_status?: string; tasks: AttackTask[]; attempt_count: number };
 type ScopeTarget = { asset_type: string; asset: string; description: string; maximum_severity: string };
 type ApprovedScope = { scope_id: string; program_id: string; program_name: string; platform: string; targets: ScopeTarget[]; identity_header: 'hackerone' | 'intigriti' | null; approved_by: string; execution_requirements: ScopeExecutionRequirements };
 type ScopeStatus = 'scope_required' | 'collecting' | 'awaiting_browser' | 'paused' | 'cancelling' | 'cancelled' | 'review_required' | 'approved' | 'rejected' | 'failed';
@@ -374,13 +375,15 @@ export default function App() {
   const manualLogin = useManualLogin(scanId, snapshot?.status || '', !demo && !!scanId);
   const currentStageStatus = snapshot?.stage_statuses?.[snapshot.stage];
   const scanProgressStatus = currentStageProgressStatus(snapshot?.status, currentStageStatus);
-  const scanProgress = useEstimatedProgress(snapshot ? `${snapshot.scan_id}:${snapshot.stage}` : scanId, snapshot?.progress ?? 0, scanProgressStatus);
+  const estimatedScanProgress = useEstimatedProgress(snapshot ? `${snapshot.scan_id}:${snapshot.stage}` : scanId, snapshot?.progress ?? 0, scanProgressStatus);
   const retryAction = snapshot ? scanRetryAction(snapshot) : null;
   const cancelling = cancelRequest?.scanId === scanId;
   const cancelPhase = cancelling ? cancelRequest.phase : null;
   const scopeActive = isScopeActivityActive(workflowProgram?.scope_status);
   const scopeProgress = scopeCollectionProgress(workflowProgram?.scope_status, scopeEvents);
   const scopeProgressStatus = workflowProgram?.scope_status;
+  const scanProgress = snapshot?.stage === 'Attack' && attackTaskSnapshot?.scan_id === snapshot.scan_id && attackTaskSnapshot.coverage?.total
+    ? snapshot.progress : estimatedScanProgress;
   const displayedScopeProgress = useEstimatedProgress(
     workflowProgram?.scope_job_id ?? '',
     scopeProgress,
@@ -1107,12 +1110,22 @@ export default function App() {
   </table>{rows.length === 0 && <p className="table-empty">{tr('No findings match this view.')}</p>}</div>;
   const currentAttackTasks = attackTaskSnapshot?.scan_id === scanId ? attackTaskSnapshot : null;
   const attackTasksContent = <section className="scan-attack-tasks" aria-label={tk("공격 작업과 선택 근거", "Attack tasks and selection evidence")}>
-    <div className="scan-attack-tasks-heading"><h3>{tk("공격 작업", "Attack tasks")} <small>{tk(`${currentAttackTasks?.tasks.length ?? 0}개 · 기록된 시도 ${currentAttackTasks?.attempt_count ?? 0}건`, `${currentAttackTasks?.tasks.length ?? 0} tasks · ${currentAttackTasks?.attempt_count ?? 0} recorded attempts`)}</small></h3></div>
+    <div className="scan-attack-tasks-heading"><h3>{tk("공격 작업", "Attack tasks")} <small>{tk(`현재 배치 ${currentAttackTasks?.tasks.length ?? 0}개 · 전체 기록된 시도 ${currentAttackTasks?.total_attempt_count ?? currentAttackTasks?.attempt_count ?? 0}건`, `Current batch: ${currentAttackTasks?.tasks.length ?? 0} tasks · ${currentAttackTasks?.total_attempt_count ?? currentAttackTasks?.attempt_count ?? 0} total recorded attempts`)}</small></h3></div>
     <p className="scan-attack-tasks-note">{tk("관찰 URL은 정찰 결과에서 작업 선택의 근거가 된 주소입니다. 실제 공격 요청 대상은 시도 기록이 생기면 별도로 표시됩니다. URL의 쿼리 값과 응답 헤더 값은 표시하지 않습니다.", "Observed URLs explain why a task was selected from recon. Actual attack targets appear in the attempt history. Query values and response header values are hidden.")}</p>
+    {currentAttackTasks?.coverage && <div className="scan-coverage-summary">
+      <p><strong>{tk("URL별 가설 검토", "Endpoint hypothesis review")}</strong> {currentAttackTasks.coverage.endpoints_reviewed}/{currentAttackTasks.coverage.endpoints_total} · {tk("처리 상태 확정", "Resolved dispositions")} {currentAttackTasks.coverage.resolved}/{currentAttackTasks.coverage.total}</p>
+      <div className="scan-stats">{coverageMetrics(currentAttackTasks.coverage).map(item => <div key={item.key}><span>{language === 'ko' ? item.ko : item.en}</span><strong>{item.value}</strong></div>)}</div>
+      <p className="scan-attack-tasks-note">{tk("가설은 취약점 확정이 아닙니다. 인증·정책·예산 등의 사유로 건너뛴 작업은 실제 검증 수에 포함하지 않습니다. 8개씩 배치로 실행하며 전체 가설을 추적합니다.", "Hypotheses are not confirmed vulnerabilities. Authentication, policy and budget skips do not count as tested. Work runs in batches of eight while tracking the entire queue.")}</p>
+      {currentAttackTasks.coverage.gaps_total > 0 && <details><summary>{tk(`미검증·제외 사유 ${currentAttackTasks.coverage.gaps_total}건`, `${currentAttackTasks.coverage.gaps_total} untested or excluded items`)}</summary>
+        {currentAttackTasks.coverage.gaps.map((gap, index) => <p key={index}><code>{gap.method} {gap.url}</code> · {gap.vuln_class && `${gap.vuln_class} · `}{coverageStatusLabels[gap.status]?.[language === 'ko' ? 0 : 1] ?? gap.status}<br/>{gap.reason}</p>)}
+        {currentAttackTasks.coverage.gaps_truncated && <p>{tk("첫 200건을 표시합니다. 전체 기록은 Pipeline.db에 저장됩니다.", "Showing the first 200 items. The full record is stored in Pipeline.db.")}</p>}
+      </details>}
+    </div>}
     {attackTaskError && <p className="form-error" role="alert">{attackTaskError}</p>}
     {currentAttackTasks?.tasks.map(task => <article className="scan-attack-task" key={task.task_id}>
       <div className="scan-attack-task-title"><strong>{(language === 'ko' ? attackSkillLabels : attackSkillLabelsEn)[task.skill_name] || task.skill_name}</strong><Badge tone={task.status === 'failed' ? 'critical' : task.status === 'completed' ? 'success' : 'warning'}>{(language === 'ko' ? attackTaskStatusLabels : attackTaskStatusLabelsEn)[task.status] || task.status}</Badge></div>
       <small className="mono">{task.skill_name} · {task.task_id}</small>
+      {task.coverage && <p><b>{tk("검증 입력", "Test input")}</b> <code>{task.coverage.injection_location}{task.coverage.parameter_name ? `: ${task.coverage.parameter_name}` : ''}</code> · {task.coverage.required_identity_role === 'authenticated' ? tk("인증된 사용자 조건", "Authenticated baseline") : tk("비인증 조건", "Unauthenticated baseline")} · {coverageStatusLabels[task.coverage.status]?.[language === 'ko' ? 0 : 1] ?? task.coverage.status}{task.coverage.disposition_reason && <><br/>{task.coverage.disposition_reason}</>}</p>}
       <p><b>{tk("선택 힌트", "Selection hints")}</b> {task.selection_reasons.map(reason => (language === 'ko' ? attackReasonLabels : attackReasonLabelsEn)[reason] || reason).join(', ') || tk("기록 없음", "No record")}</p>
       <div><b>{tk("관련 정찰 URL", "Related recon URLs")}</b>{task.observed_urls.length ? <ul>{task.observed_urls.map((item, index) => <li key={`${item.url}-${index}`}><code>{item.method} {item.url}</code><span>{item.hint}</span></li>)}</ul> : <p>{tk("이 작업에 연결된 URL 근거가 없습니다. 선택 힌트를 재검토하세요.", "This task has no linked URL evidence. Review the selection hints.")}</p>}</div>
       <div><b>{tk("실제 시도", "Actual attempts")}</b> {tk(`${task.attempt_count}건`, `${task.attempt_count} attempts`)}{task.recent_attempts.length > 0 && <ul>{task.recent_attempts.map((item, index) => <li key={index}><code>{item.method} {item.url || tk("URL 기록 없음", "No URL recorded")}</code><span>{(language === 'ko' ? attackOutcomeLabels : attackOutcomeLabelsEn)[item.outcome] || item.outcome}</span></li>)}</ul>}</div>

@@ -365,7 +365,7 @@ class AttackRequestGuardTests(unittest.TestCase):
                     "SELECT count(*) FROM attack_authorization_envelopes"
                 ).fetchone()[0]
             self.assertEqual(request_auth, (
-                "scope_active_mutation", "policy", "recon_candidate",
+                "scope_active_mutation", "policy", "agent_proposed",
                 "application_mutation",
             ))
             self.assertEqual(envelopes, 0)

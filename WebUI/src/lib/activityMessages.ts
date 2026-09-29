@@ -27,6 +27,7 @@ const agentStepsKo: Record<string, string> = {
   'main:review': '정찰 결과 요약과 추가 작업 검토',
   'recon:export': '정찰 결과와 서비스 주소 내보내기',
   'main:handoff': '정찰 산출물 검증과 공격 작업 전달',
+  'attack:planning': 'URL별 태그·입력·인증 조건에 따른 검증 가설 계획',
   'attack:execute': '공격 작업 선택·실행과 후보 근거 기록',
   'chaining:execute': '확인된 후보 간 연계 경로 분석',
   'validation:execute': '후보 재현과 대조 결과 검증',
@@ -43,6 +44,7 @@ const agentStepsEn: Record<string, string> = {
   'main:review': 'summarizing recon results and reviewing next tasks',
   'recon:export': 'exporting recon results and service URLs',
   'main:handoff': 'verifying recon artifacts and preparing attack work',
+  'attack:planning': 'planning hypotheses from endpoint tags, inputs and authentication',
   'attack:execute': 'selecting attack tasks and recording evidence',
   'chaining:execute': 'analyzing paths between confirmed candidates',
   'validation:execute': 'reproducing candidates and checking controls',
@@ -54,6 +56,15 @@ export function agentWorkLabel(language: Language, params: Record<string, string
   const name = language === 'ko' ? agentNames[agent] : agentNamesEn[agent];
   const description = (language === 'ko' ? agentStepsKo : agentStepsEn)[`${agent}:${params.step}`];
   if (!description) return language === 'ko' ? `${name} 작업 상태 변경` : `${name} work changed`;
+  if (agent === 'attack' && params.step === 'planning'
+      && Number.isInteger(params.processed) && Number.isInteger(params.endpoint_total)
+      && Number(params.endpoint_total) > 0) {
+    const correction = Number.isInteger(params.repair_attempt) && Number.isInteger(params.repair_limit)
+      ? language === 'ko' ? ` · 가설 보정 ${params.repair_attempt}/${params.repair_limit} · 근거 불일치 ${params.validation_issue_count ?? 0}건`
+        : ` · hypothesis correction ${params.repair_attempt}/${params.repair_limit} · ${params.validation_issue_count ?? 0} grounding issues`
+      : '';
+    return `${name} · ${description} · ${params.processed}/${params.endpoint_total} ${language === 'ko' ? 'URL 검토' : 'endpoints reviewed'}${correction}`;
+  }
   if (agent === 'recon' && params.step === 'tagging'
       && Number.isInteger(params.processed) && Number.isInteger(params.observation_total)
       && Number(params.processed) >= 0 && Number(params.observation_total) > 0) {
