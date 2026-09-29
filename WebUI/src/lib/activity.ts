@@ -77,8 +77,8 @@ export function scopeCollectionProgress(status: ScopeActivityStatus | undefined,
   return events.reduce((progress, event) => Math.max(progress, milestones[event.message_code ?? ''] ?? 0), 0);
 }
 
-export function initialEstimatedProgress(actual: number, status: string, saved = 0): number {
-  return status === 'running' ? saved : Math.max(actual, saved);
+export function initialEstimatedProgress(actual: number, status: string): number {
+  return status === 'completed' ? 100 : actual;
 }
 
 export function currentStageProgressStatus(scanStatus: string | undefined, stageStatus: string | undefined): string {
@@ -91,9 +91,9 @@ export function advanceEstimatedProgress(value: number, mode: 'running' | 'pause
 }
 
 export function estimatedProgressDelay(shown: number, actual: number, mode: 'running' | 'paused' | 'completed'): number | null {
+  if (mode === 'paused' || (mode === 'running' && shown >= actual)) return null;
   if (advanceEstimatedProgress(shown, mode) === shown) return null;
-  if (mode === 'completed' || shown < actual) return 30;
-  return shown >= 95 ? 10_000 : 1_500;
+  return 30;
 }
 
 export function scopePollingAfterJobResponse(status: ScopeActivityStatus | undefined): boolean {

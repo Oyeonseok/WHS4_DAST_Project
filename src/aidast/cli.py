@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import getpass
 import json
+import os
 import re
 import shutil
 import sqlite3
@@ -930,7 +931,46 @@ def _run_recon(
             "--execute requires an explicit --target (repeatable) or --all-targets"
         )
 
+    scan_id = (
+        getattr(args, "scan_id", None) or f"scan_{uuid4().hex}"
+        if args.execute else None
+    )
+    projector = None
+    if scan_id and os.environ.get("AIDAST_RESULT_ROOT"):
+        from aidast.web.projection import DashboardProjector
+        projector = DashboardProjector(Path(os.environ["AIDAST_RESULT_ROOT"]))
+
+    def work(agent: str, step: str, state: str) -> None:
+        if projector is None or scan_id is None:
+            return
+        stage = "Recon" if agent in {"main", "recon"} else agent.title()
+        params: dict[str, str | int] = {"agent": agent, "step": step, "state": state}
+        if stage == "Recon":
+            progress = {
+                ("scope", "started"): 1, ("scope", "finished"): 2,
+                ("targets", "started"): 3, ("targets", "finished"): 4,
+                ("session", "started"): 19, ("session", "finished"): 20,
+                ("recon_plan", "started"): 7, ("recon_plan", "finished"): 12,
+                ("policy", "started"): 13, ("policy", "finished"): 18,
+                ("execute", "started"): 21, ("execute", "finished"): 75,
+                ("tagging", "started"): 76, ("tagging", "finished"): 88,
+                ("review", "started"): 89, ("review", "finished"): 94,
+                ("export", "started"): 95, ("export", "finished"): 98,
+            }.get((step, state))
+            if progress is not None:
+                params["progress"] = progress
+        projector.record_event(
+            scan_id, source_key=f"work:{uuid4().hex}",
+            event_type="log.appended",
+            payload={
+                "stage": stage, "level": "success" if state == "finished" else "info",
+                "message": "Agent work", "message_code": "agent.work",
+                "message_params": params,
+            },
+        )
+
     program_url = args.program_url
+    work("main", "scope", "started")
     revision = getattr(args, "scope_revision", None)
     program_dir = (scope_revision_directory(program_url, Path(args.output_dir).expanduser().resolve(), revision)
                    if revision is not None else resolve_scope_directory(program_url, args.output_dir))
@@ -962,6 +1002,7 @@ def _run_recon(
             return 1
         scope_document, scope_markdown = scope_coordinator.load_approved_scope()
         print(f"Approved Scope saved: {program_dir / 'Scope.md'}")
+    work("main", "scope", "finished")
 
     header_values = {}
     for raw in getattr(args, "header_input", []) or []:
@@ -997,6 +1038,7 @@ def _run_recon(
         raise ReconCoordinatorError(str(exc)) from exc
     request_headers = dict(required_identity_headers)
 
+    work("main", "targets", "started")
     selected_targets = _select_recon_targets(
         scope_document,
         requested_targets=args.target,
@@ -1037,11 +1079,7 @@ def _run_recon(
         for target in selected_targets:
             print(f"- {target.asset_type.value}: {target.asset}")
 
-    scan_id = (
-        getattr(args, "scan_id", None) or f"scan_{uuid4().hex}"
-        if args.execute
-        else None
-    )
+    work("main", "targets", "finished")
     run_output = attack_output = None
     if prepare_attack and scan_id is not None:
         program_path = identify_program(program_url)
@@ -1101,11 +1139,14 @@ def _run_recon(
         )
     except ValueError as exc:
         raise ReconCoordinatorError(str(exc)) from exc
+
+    work("main", "recon_plan", "started")
     plan = main_agent.create_recon_plan(
         scope_id=scope_document.scope_id,
         scope_markdown=planner_scope,
         allowed_targets=selected_targets,
     )
+    work("main", "recon_plan", "finished")
     if args.all_targets:
         # --all-targets is an operator choice. Do not let the planning model
         # omit targets or reduce exact web targets to probe-only tasks.
@@ -1169,6 +1210,7 @@ def _run_recon(
         print(f"- {task.task_type.value}: {task.target.asset}")
     if args.execute or args.policy_only:
         print("Main Agent가 승인된 Scope에서 타깃별 실행 정책을 생성합니다.")
+        work("main", "policy", "started")
         policies = main_agent.create_target_policies(
             scope_id=scope_document.scope_id,
             scope_markdown=scope_markdown,
@@ -1220,6 +1262,7 @@ def _run_recon(
         print(f"TargetPolicy 생성 및 Python 검증 완료: {policy_path}")
         _print_policy_preview(policies)
         print("Exclusion preparation: " + json.dumps(preparation.public(), ensure_ascii=False))
+        work("main", "policy", "finished")
         if args.policy_only:
             print("Policy-only 모드: 네트워크 Recon 도구는 실행하지 않았습니다.")
             return 0
@@ -1229,6 +1272,7 @@ def _run_recon(
         except ValueError as exc:
             raise ReconCoordinatorError(str(exc)) from exc
         target_sessions = None
+        work("recon", "session", "started")
         if args.execute and (
             args.session_bundle is not None or args.login_mode == "system-browser"
         ):
@@ -1260,6 +1304,8 @@ def _run_recon(
                 "인증 탐색이 필요하면 --login-mode runtime-browser 또는 "
                 "--session-bundle을 사용하세요."
             )
+
+        work("recon", "session", "finished")
 
         if prepare_attack:
             run_dir = run_output.resolve()
@@ -1309,10 +1355,13 @@ def _run_recon(
         )
         recon_failures = 0
         try:
+            work("recon", "execute", "started")
             recon_failures = executor.run(tasks)
+            work("recon", "execute", "finished")
             if getattr(args, "tag_after", False):
                 from aidast.recon.annotations import tag_pending_observations
                 print("Recon 완료: 저장된 관측 태깅을 시작합니다.")
+                work("recon", "tagging", "started")
                 _, failed_tags = tag_pending_observations(
                     executor.conn,
                     scan_id=scan_id,
@@ -1333,6 +1382,8 @@ def _run_recon(
                 )
                 if registered:
                     print(f"Attack 인증 세션 참조 {len(registered)}개 등록 완료")
+                work("recon", "tagging", "finished")
+            work("main", "review", "started")
             recon_review = OfflineReconReview(
                 planner=main_agent,
                 conn=executor.conn,
@@ -1341,6 +1392,7 @@ def _run_recon(
                 approved_assets=selected_targets,
                 target_policies=policies,
             ).review()
+            work("main", "review", "finished")
             review_path = (
                 (run_dir / "ReconReview.json") if run_dir is not None
                 else args.surface_path.with_name("ReconReview.json")
@@ -1349,6 +1401,7 @@ def _run_recon(
             review_path.write_text(
                 recon_review.model_dump_json(indent=2), encoding="utf-8"
             )
+            work("recon", "export", "started")
             executor.conn.execute(
                 "UPDATE scans SET status=?, finished_at=CURRENT_TIMESTAMP "
                 "WHERE scan_id=?",
@@ -1358,6 +1411,7 @@ def _run_recon(
             export_surface(
                 executor.conn, scan_id=scan_id, output_path=surface_path
             )
+            work("recon", "export", "finished")
             finish_stage_run(executor.conn, stage_run_id, status="completed")
         # KeyboardInterrupt/SystemExit must also finalize the durable scan and
         # stage records; they are re-raised after cleanup below.
@@ -1380,6 +1434,7 @@ def _run_recon(
         try:
             #NOTE: recon에서 attack과 validation을 이어서 진행하는 작업이 필요할까?
             if prepare_attack and run_dir is not None and not recon_failures:
+                work("main", "handoff", "started")
                 handoff_path = _write_recon_handoff(
                     executor=executor,
                     run_dir=run_dir,
@@ -1395,18 +1450,23 @@ def _run_recon(
                 )
                 pipeline_path = attack_output / "Pipeline.db"
                 materialize_pipeline(handoff_path, pipeline_path)
+                work("main", "handoff", "finished")
+                work("attack", "execute", "started")
                 attack_result = AttackCoordinator(
                     agent=main_agent,
                     db_path=pipeline_path,
                     scope_path=run_dir / "Scope.md",
                     policy_path=run_dir / "TargetPolicy.json",
                 ).run(scan_id)
+                work("attack", "execute", "finished")
+                work("chaining", "execute", "started")
                 chaining_result = ChainingCoordinator(
                     agent=main_agent,
                     db_path=pipeline_path,
                     scope_path=run_dir / "Scope.md",
                     policy_path=run_dir / "TargetPolicy.json",
                 ).run(scan_id)
+                work("chaining", "execute", "finished")
                 from aidast.validation import build_native_validation_coordinator
 
                 coordinator = validation_coordinator
@@ -1415,10 +1475,13 @@ def _run_recon(
                         db_path=pipeline_path,
                         policy_path=run_dir / "TargetPolicy.json",
                     )
+                work("validation", "execute", "started")
                 validation_result = coordinator.run(scan_id)
+                work("validation", "execute", "finished")
                 report_results: list[dict] = []
                 report_platform = report_platform_for_program_url(program_url)
                 if validation_result.status == "completed" and report_platform is not None:
+                    work("report", "draft", "started")
                     report_results = generate_scan_reports(
                         pipeline_path,
                         args.run_root.parent / "ReportRun" / scan_id,
@@ -1426,6 +1489,7 @@ def _run_recon(
                         platform=report_platform,
                         writer=report_writer,
                     )
+                    work("report", "draft", "finished")
                     print(f"Report drafts generated: {len(report_results)}")
                 elif validation_result.status == "completed":
                     print("Automatic reports unavailable for this program platform.")

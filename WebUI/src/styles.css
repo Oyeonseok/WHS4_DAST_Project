@@ -256,6 +256,21 @@ input[type=checkbox],input[type=radio]{min-height:19px}
 .scan-progress-failed{padding:11px 13px;border:1px solid #8b424b;border-radius:6px;color:#f0b3ba;background:rgba(139,66,75,.12);font-size:13px;line-height:1.5}
 .scan-stop-status{padding:11px 13px;border:1px solid #8f7651;border-radius:6px;color:var(--text);background:rgba(143,118,81,.14);font-size:13px;line-height:1.5}
 .scan-stop-status.is-done{border-color:#4b8067;background:rgba(75,128,103,.14)}
+.scan-summary-panel .scan-current-activity{padding:0 20px;margin:16px 0;line-height:1.5;font-size:14px}
+.scan-summary-panel .scan-current-activity strong{font-size:14px!important}
+.scan-agent-board{padding:16px 20px;border-block:1px solid var(--line);min-width:0}
+.scan-agent-board h3{font-size:15px;margin-bottom:12px}
+.scan-agent-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+.scan-agent-grid article{padding:12px 14px;min-width:0;border:1px solid var(--line);border-radius:6px;background:var(--panel)}
+.scan-agent-grid article.is-active{background:var(--soft)}
+.scan-agent-grid article>div{display:flex;justify-content:space-between;align-items:baseline;flex-wrap:wrap;gap:4px 10px}
+.scan-agent-grid strong{font-size:14px}
+.scan-agent-grid small{font-size:12px;color:var(--muted)}
+.scan-agent-grid article.is-active small{color:var(--accent)}
+.scan-agent-grid p{margin-top:6px;font-size:14px;line-height:1.5;color:var(--muted);overflow-wrap:anywhere}
+.scan-agent-grid article.is-active p{color:var(--text)}
+.scan-progress-dialog .scan-agent-board{padding:14px 0}
+@media(max-width:660px){.scan-agent-grid{grid-template-columns:minmax(0,1fr)}.scan-summary-panel .scan-current-activity{padding-inline:16px}.scan-agent-board{padding-inline:16px}}
 .pipeline .skipped .stage-number{border-color:#746849;color:#dfcfaa;background:#3a3529}.pipeline .skipped strong,.pipeline .skipped small{color:#dfcfaa}
 .scan-attack-tasks{border:1px solid var(--line);border-radius:7px;overflow:hidden;background:var(--panel)}.scan-attack-tasks-heading{padding:12px 14px;border-bottom:1px solid var(--line)}.scan-attack-tasks-heading h3{font-size:14px}.scan-attack-tasks-heading small{font-size:12px;font-weight:400;color:var(--muted);margin-left:8px}.scan-attack-tasks-note{padding:11px 14px;color:var(--muted);font-size:12px;line-height:1.55;border-bottom:1px solid var(--line)}.scan-attack-task{display:grid;gap:9px;padding:14px;border-bottom:1px solid var(--line);font-size:12px;line-height:1.5}.scan-attack-task:last-child{border-bottom:0}.scan-attack-task-title{display:flex;align-items:center;justify-content:space-between;gap:12px}.scan-attack-task-title strong{font-size:14px}.scan-attack-task>small{color:var(--muted);overflow-wrap:anywhere}.scan-attack-task b{font-weight:600}.scan-attack-task ul{display:grid;gap:6px;margin:6px 0 0;padding:0;list-style:none}.scan-attack-task li{display:flex;justify-content:space-between;gap:10px;align-items:flex-start;padding:7px 9px;border:1px solid var(--line);border-radius:5px;background:var(--soft)}.scan-attack-task li code{color:var(--text);overflow-wrap:anywhere;word-break:break-all}.scan-attack-task li span{flex:none;color:var(--muted)}.scan-attack-task>div>p{color:var(--muted);margin-top:6px}@media(max-width:660px){.scan-attack-task li{display:grid}.scan-attack-task li span{white-space:normal}}
 @media(max-width:660px){.execution-requirements-heading{display:grid}.stage-badges{justify-content:flex-start}.requirements-summary{grid-template-columns:1fr}}
@@ -521,10 +536,11 @@ html[lang=ko] .eyebrow{font-size:13px;font-weight:600;color:var(--accent)}
 .scan-progress-stats small{font-size:12px;line-height:1.4;color:var(--muted)}
 .scan-summary-panel .panel-heading>div:first-child{min-width:0}
 .scan-summary-panel .panel-heading h2,.scan-summary-panel .panel-heading p{overflow-wrap:anywhere}
-@container (max-width:520px){
+@container (max-width:720px){
   .scan-summary-panel .panel-heading{display:grid;grid-template-columns:minmax(0,1fr)}
-  .scan-summary-panel .scan-panel-actions{justify-content:flex-start}
+  .scan-summary-panel .scan-panel-actions{justify-content:flex-start;flex-wrap:wrap}
 }
+.scan-summary-panel .scan-panel-actions button{white-space:nowrap}
 .finding-filters{flex-wrap:wrap;justify-content:flex-start}
 .finding-filters .search-field{flex:1 1 220px}
 .finding-filters select{flex:1 1 150px;min-height:40px}

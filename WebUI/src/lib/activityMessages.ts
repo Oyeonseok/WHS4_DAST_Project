@@ -6,6 +6,58 @@ export type ActivityMessage = {
   message_params?: Record<string, string | number>;
 };
 
+export const agentNames = {
+  main: '메인 에이전트', recon: '정찰 에이전트', attack: '공격 에이전트',
+  chaining: '연계 분석 에이전트', validation: '검증 에이전트', report: '보고서 에이전트',
+} as const;
+export type AgentName = keyof typeof agentNames;
+export const agentOrder: readonly AgentName[] = ['main', 'recon', 'attack', 'chaining', 'validation', 'report'];
+export const agentNamesEn: Record<AgentName, string> = {
+  main: 'Main Agent', recon: 'Recon Agent', attack: 'Attack Agent',
+  chaining: 'Chaining Agent', validation: 'Validation Agent', report: 'Report Agent',
+};
+const agentStepsKo: Record<string, string> = {
+  'main:scope': '승인 스코프와 원문 정책 확인',
+  'main:targets': '허용 대상과 시작 주소 검증',
+  'recon:session': '대상 로그인 방식과 세션 준비',
+  'main:recon_plan': '정찰 계획 생성과 작업 순서 결정',
+  'main:policy': '대상별 요청 제한과 도구 정책 생성·검증',
+  'recon:execute': 'DNS·HTTP·브라우저 등 정찰 작업 실행',
+  'recon:tagging': '수집한 관측의 페이지 맥락·기능 분류',
+  'main:review': '정찰 결과 요약과 추가 작업 검토',
+  'recon:export': '정찰 결과와 서비스 주소 내보내기',
+  'main:handoff': '정찰 산출물 검증과 공격 작업 전달',
+  'attack:execute': '공격 작업 선택·실행과 후보 근거 기록',
+  'chaining:execute': '확인된 후보 간 연계 경로 분석',
+  'validation:execute': '후보 재현과 대조 결과 검증',
+  'report:draft': '확인된 사례의 보고서 초안 생성',
+};
+const agentStepsEn: Record<string, string> = {
+  'main:scope': 'checking approved scope and source policy',
+  'main:targets': 'validating allowed targets and start URLs',
+  'recon:session': 'preparing target login mode and sessions',
+  'main:recon_plan': 'building the recon plan and task order',
+  'main:policy': 'generating and checking per-target tool limits',
+  'recon:execute': 'running DNS, HTTP, and browser recon tasks',
+  'recon:tagging': 'classifying the context and function of observations',
+  'main:review': 'summarizing recon results and reviewing next tasks',
+  'recon:export': 'exporting recon results and service URLs',
+  'main:handoff': 'verifying recon artifacts and preparing attack work',
+  'attack:execute': 'selecting attack tasks and recording evidence',
+  'chaining:execute': 'analyzing paths between confirmed candidates',
+  'validation:execute': 'reproducing candidates and checking controls',
+  'report:draft': 'generating drafts for confirmed cases',
+};
+export function agentWorkLabel(language: Language, params: Record<string, string | number>): string {
+  const agent = agentOrder.find(name => name === params.agent);
+  if (!agent) return language === 'ko' ? '에이전트 작업 상태 변경' : 'Agent work changed';
+  const name = language === 'ko' ? agentNames[agent] : agentNamesEn[agent];
+  const description = (language === 'ko' ? agentStepsKo : agentStepsEn)[`${agent}:${params.step}`];
+  if (!description) return language === 'ko' ? `${name} 작업 상태 변경` : `${name} work changed`;
+  if (language === 'ko') return `${name} · ${description} ${params.state === 'finished' ? '완료' : '중'}`;
+  return `${name} · ${description} ${params.state === 'finished' ? 'completed' : 'in progress'}`;
+}
+
 const auditLabels: Record<string, string> = {
   'stage.started': '단계 시작',
   'stage.resumed': '단계 재개',
@@ -317,6 +369,7 @@ const demoMessagesKo: Record<string, string> = {
 
 export function localizeActivityMessage(language: Language, event: ActivityMessage): string {
   const code = event.message_code || legacyCodes[event.message];
+  if (code === 'agent.work') return agentWorkLabel(language, event.message_params || {});
   if (language === 'en') {
     if (code === 'recon.activity') return reconActivityLabelEn(event.message_params || {});
     if (code === 'scope.browser_progress' && /[가-힣]/.test(event.message)) return scopeBrowserProgressEn(event.message);

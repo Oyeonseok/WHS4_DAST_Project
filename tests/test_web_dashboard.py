@@ -472,7 +472,7 @@ def test_report_progress_tracks_prepared_and_drafted_cases(tmp_path: Path) -> No
     )
     with sqlite3.connect(output / "Report.db") as conn:
         conn.execute("INSERT INTO report_drafts VALUES ('report-pending')")
-    assert projector.snapshot(SCAN_ID)["progress"] == 99
+    assert projector.snapshot(SCAN_ID)["progress"] == 95
     with sqlite3.connect(database) as conn:
         conn.execute("UPDATE stage_runs SET status='completed' WHERE stage_run_id='stage'")
     assert projector.snapshot(SCAN_ID)["progress"] == 100
@@ -532,11 +532,22 @@ def test_recon_progress_advances_when_planned_tasks_finish(tmp_path: Path) -> No
             ("finished-1", SCAN_ID, "task-1", "DNS_RESOLUTION", "success"),
         )
     after = projector.snapshot(SCAN_ID)
-    assert after["progress"] == 50
+    assert after["progress"] == 38
     assert any(
-        event["type"] == "task.progress.updated" and event["payload"]["progress"] == 50
+        event["type"] == "task.progress.updated" and event["payload"]["progress"] == 38
         for event in projector.events_after(SCAN_ID, before["last_event_id"])
     )
+
+    projector.record_event(
+        SCAN_ID, source_key="work:review", event_type="log.appended",
+        payload={"stage": "Recon", "level": "info", "message": "Agent work",
+                 "message_code": "agent.work",
+                 "message_params": {"agent": "main", "step": "review",
+                                    "state": "started", "progress": 89}},
+    )
+    underway = projector.snapshot(SCAN_ID)
+    assert underway["progress"] == 89
+    assert underway["logs"][-1]["message_params"]["step"] == "review"
 
 
 def test_validation_progress_advances_with_case_phases_and_decisions(tmp_path: Path) -> None:
@@ -575,7 +586,7 @@ def test_validation_progress_advances_with_case_phases_and_decisions(tmp_path: P
             "UPDATE validation_cases SET processing_phase='completed',decision_stage_run_id='stage' "
             "WHERE case_id='case-2'"
         )
-    assert projector.snapshot(SCAN_ID)["progress"] == 99
+    assert projector.snapshot(SCAN_ID)["progress"] == 95
     with sqlite3.connect(database) as conn:
         conn.execute("UPDATE stage_runs SET status='completed' WHERE stage_run_id='stage'")
     assert projector.snapshot(SCAN_ID)["progress"] == 100
@@ -597,7 +608,7 @@ def test_task_stages_show_partial_progress_before_completion(tmp_path: Path, sta
     assert projector.snapshot(SCAN_ID)["progress"] == 50
     with sqlite3.connect(database) as conn:
         conn.execute("UPDATE attack_tasks SET status='skipped' WHERE task_id='task-two'")
-    assert projector.snapshot(SCAN_ID)["progress"] == 99
+    assert projector.snapshot(SCAN_ID)["progress"] == 95
     with sqlite3.connect(database) as conn:
         conn.execute("UPDATE stage_runs SET status='completed' WHERE stage_run_id='stage'")
     assert projector.snapshot(SCAN_ID)["progress"] == 100
@@ -1112,6 +1123,19 @@ def test_scan_launcher_builds_fixed_argv_and_streams_pre_database_logs(tmp_path:
     assert manager.snapshot(launched["scan_id"])["logs"][-1]["message"] == "AI DAST pipeline process started."
     assert manager.snapshot(launched["scan_id"])["logs"][-1]["message_code"] == "pipeline.started"
     assert projector.stored_events_after(launched["scan_id"], 0)[0]["event_id"] == 1
+    app = create_app(result_root=tmp_path, launch_manager=manager)
+
+    async def before_recon_database() -> None:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            response = await client.get(f"/api/v1/scans/{launched['scan_id']}/recon-activity")
+            assert response.status_code == 200
+            assert response.json() == {"events": [], "next_before": None}
+            unknown = await client.get("/api/v1/scans/scan_missing/recon-activity")
+            assert unknown.status_code == 404
+
+    asyncio.run(before_recon_database())
 
     with pytest.raises(ValueError, match="not in the approved Scope"):
         manager.launch(request.model_copy(update={"targets": ["outside.example"]}))
