@@ -48,7 +48,7 @@ uvx --from playwright playwright install chromium
 
 cd WebUI
 npm ci
-npm run build
+VITE_TRANSPORT=live npm run build
 cd ..
 
 aidast login
@@ -57,9 +57,9 @@ aidast dashboard --ui-dir WebUI/dist
 
 브라우저에서 <http://127.0.0.1:8000>을 열고 다음 순서로 진행합니다.
 
-1. **Scope / Programs**에서 프로그램 URL과 Public/Private 여부를 등록합니다.
+1. **스코프 / 프로그램**에서 프로그램 URL과 공개/비공개 여부를 등록합니다.
 2. Scope를 수집하고 인스코프·아웃오브스코프 항목을 검토합니다.
-3. **Yes**로 승인한 Scope만 **New Scan**에서 실행합니다.
+3. **승인 · 스코프 확정**으로 승인한 Scope만 **새 스캔**에서 실행합니다.
 4. 스캔 진행 상태와 로그를 대시보드에서 확인합니다.
 
 자세한 화면 설명은 [WebUI 사용 설명서](WebUI/README.md)를 참고하세요.
@@ -75,6 +75,9 @@ aidast dashboard --ui-dir WebUI/dist
 | Chaining | 검증 가능한 finding 간 연결 분석 | chain candidate |
 | Validation | 재현·대조군·증거 기반 최종 판정 | validation case |
 | Report | 검증된 case의 플랫폼별 로컬 초안 생성 | `Report.md`, `Report.json` |
+
+Handoff는 Recon 종료 후 산출물을 다음 단계로 전달하기 위한 준비 작업입니다.
+대시보드에서는 별도 단계가 아니라 Recon 단계에 포함해 표시합니다.
 
 Attack은 Recon 신호로 선택된 Hunt Skill을 사용합니다. 템플릿이 지원되는
 프로브는 Agent가 payload를 직접 생성하지 않고, 버전과 해시가 고정된 YAML
@@ -100,6 +103,7 @@ Attack은 Recon 신호로 선택된 Hunt Skill을 사용합니다. 템플릿이 
 - [uv](https://docs.astral.sh/uv/)
 - [Codex CLI](https://github.com/openai/codex)
 - Playwright Chromium
+- WebUI 빌드를 위한 Node.js 22.18 이상과 npm
 
 ### GitHub에서 설치
 
@@ -188,7 +192,7 @@ WebUI를 live 모드로 빌드한 뒤 로컬 운영자 대시보드를 실행합
 ```bash
 cd WebUI
 npm ci
-npm run build
+VITE_TRANSPORT=live npm run build
 
 cd ..
 aidast dashboard --ui-dir WebUI/dist
@@ -202,12 +206,13 @@ aidast dashboard --ui-dir WebUI/dist
 수정하지 않습니다.
 
 현재 서버에는 원격 인증이 없으므로 loopback 주소에만 바인딩할 수 있습니다.
-`Scopes / Programs`에서 프로그램 URL과 Public/Private 구분을 먼저 등록합니다.
-등록 항목은 Scope 수집 대기열일 뿐 실행 권한이 아닙니다. 대시보드에서 Public
-headless 수집 또는 로그인/MFA용 interactive browser 수집을 시작하고, 진행 로그와
-추출된 인/아웃 스코프 및 정책을 검토한 뒤 반드시 **Yes(승인)** 또는 **No(거절)** 를
-선택합니다. Yes만 해시로 묶인 승인 파일을 게시하며 No는 초안을 삭제합니다.
-`New scan`은 무결성이 확인된 승인 Scope만 선택할 수 있고,
+**스코프 / 프로그램**에서 프로그램 URL과 공개/비공개 구분을 먼저 등록합니다.
+등록 항목은 Scope 수집 대기열일 뿐 실행 권한이 아닙니다. 대시보드의 **스코프 수집**은
+전용 브라우저를 사용합니다. 로그인/MFA가 필요하면 브라우저에서 완료하고,
+진행 로그와 추출된 인/아웃 스코프 및 정책을 검토한 뒤 **승인 · 스코프 확정** 또는
+**거절 · 초안 삭제**를 선택합니다. 승인만 해시로 묶인 승인 파일을 게시하며
+거절은 초안을 삭제합니다.
+**새 스캔**은 무결성이 확인된 승인 Scope만 선택할 수 있고,
 그 Scope의 정확한 타깃과 그 안에 포함되는 시작 URL만 기존 `aidast run`으로
 전달합니다. 승인되지 않은 프로그램·Scope 밖 URL·임의 명령은 거부하며 CLI의
 정책·승인·예산 게이트를 그대로 통과합니다. 프론트엔드 빌드 변수와 전체 이벤트 계약은
@@ -235,10 +240,6 @@ aidast scope "<INTIGRITI_RESEARCHER_PROGRAM_URL>" \
 브라우저에서 정확한 프로그램 상세 페이지로 돌아와 Scope 화면을 연 다음
 터미널에서 Enter를 누릅니다. 브라우저 프로필에는 인증정보가 포함되므로
 공유하거나 Git에 추가하면 안 됩니다.
-
-Adobe Public 프로그램을 `aidast`로만 운영하는 명령 허용 목록과 단계별 게이트는
-[Intigriti Adobe Public aidast-only 가이드](docs/guides/INTIGRITI_ADOBE_PUBLIC_AIDAST_ONLY.md)를
-참고하세요.
 
 모든 기본 산출물을 저장소 밖의 한 디렉터리에 모으려면
 `AIDAST_RESULT_ROOT`를 지정합니다.
@@ -437,10 +438,12 @@ Report는 해당 Validation case가 허용한 evidence만 인용합니다. 생�
 | --- | --- |
 | `aidast login` | Codex CLI 로그인 및 상태 확인 |
 | `aidast update` | 설치 방식에 맞춰 AI DAST를 제자리에서 업데이트 |
+| `aidast dashboard` | 로컬 운영 대시보드와 WebUI 제공 |
 | `aidast scope` | 프로그램 Scope 수집 또는 상태 확인 |
 | `aidast recon` | Recon 계획, 정책 확인, 선택적 실행 |
 | `aidast tag` | 저장된 Recon 관측 태깅 재개 |
 | `aidast run` | Recon부터 Validation 및 확정 case의 로컬 Report 초안까지 통합 실행 |
+| `aidast resume` | 저장된 스캔을 첫 미완료 단계부터 재개 |
 | `aidast attack` | 오프라인 계획·상태 관리와 주입된 신뢰 워크플로 실행 경계 |
 | `aidast validate` | Shared 또는 Legacy Validation 실행·재개·조회 |
 | `aidast report` | 로컬 Report 초안 생성 및 상태 확인 |
