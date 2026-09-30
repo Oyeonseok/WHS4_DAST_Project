@@ -32,6 +32,19 @@ def test_shared_stages_targets_and_failures_remain_charged(tmp_path):
         governor(binding(tmp_path), clock).reserve('https://b.example')
 
 
+def test_remaining_scan_requests_reads_shared_ledger_without_charging(tmp_path):
+    clock = Clock()
+    value = binding(tmp_path, scan_max_requests=4)
+    g = governor(value, clock)
+    assert g.remaining_scan_requests() == 4
+    permit = g.reserve('https://a.example', units=2)
+    assert governor(value, clock).remaining_scan_requests() == 2
+    permit.wait(); permit.complete()
+    assert g.remaining_scan_requests() == 2
+    with sqlite3.connect(value['ledger_path']) as conn:
+        assert conn.execute('SELECT sum(units) FROM governor_requests').fetchone()[0] == 2
+
+
 def test_program_window_persists_across_scans(tmp_path):
     clock = Clock()
     rules = [dict(maximum=1, period_seconds=60, scope='program', source_quote='one/minute')]
