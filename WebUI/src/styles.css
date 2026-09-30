@@ -633,6 +633,22 @@ dialog:has(.scan-form,.scope-intake-form,.scope-workflow){
 .model-call-facts div{min-width:0}
 .model-call-facts dt{color:var(--muted);font-size:14px}
 .model-call-facts dd{margin:2px 0 0;font-size:15px;overflow-wrap:anywhere}
+.model-call-input{display:flex;align-items:baseline;flex-wrap:wrap;gap:8px 12px;margin:16px 0;font-size:14px}
+.model-call-input>dt{color:var(--muted)}
+.model-call-input>dd{display:flex;flex-wrap:wrap;gap:8px 16px;margin:0;min-width:0}
+.model-call-input-stat{display:inline-flex;align-items:baseline;flex-wrap:wrap;gap:6px}
+.model-call-input-stat strong{font-size:19px;font-weight:600;font-variant-numeric:tabular-nums}
+.model-call-result-body{padding:16px}
+.model-call-result-primary{display:flex;align-items:flex-start;flex-wrap:wrap;gap:16px 24px;margin:0}
+.model-call-result-primary>div{min-width:0}
+.model-call-result-primary dt{font-size:14px;font-weight:600}
+.model-call-result-primary dd{margin:4px 0 0;font-size:19px;font-weight:600;line-height:1.35;font-variant-numeric:tabular-nums;white-space:nowrap}
+.model-call-result-primary dd span{margin-left:4px;font-size:14px;font-weight:400;color:var(--muted)}
+.model-call-result-primary+.model-call-result-supporting{margin-top:16px;padding-top:16px;border-top:1px solid var(--line)}
+.model-call-result-supporting dd{font-variant-numeric:tabular-nums}
+.model-call-summary-empty{margin:0;font-size:14px;color:var(--muted)}
+.model-call-technical{margin:16px 0;padding-top:16px;border-top:1px solid var(--line)}
+.model-call-technical dd{color:var(--muted);font-size:14px}
 .model-call-list .model-call-usage{margin:14px 0 8px;font-size:14px;line-height:1.6;overflow-wrap:anywhere}
 .model-call-id{color:var(--muted);font-size:13px;overflow-wrap:anywhere}
 .model-call-pagination{display:flex;justify-content:center;margin-top:16px}
@@ -641,4 +657,6 @@ dialog:has(.scan-form,.scope-intake-form,.scope-workflow){
   .model-call-panel .panel-heading button{width:100%;margin-top:12px}
   .model-call-toolbar select{width:100%}
   .model-call-facts{grid-template-columns:1fr}
+  .model-call-result-body{padding:12px}
+  .model-call-result-primary{gap:12px 20px}
 }

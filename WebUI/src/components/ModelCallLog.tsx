@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
-import { parseModelCallPage, type ModelCallEvent, type ModelCallPage } from '../lib/modelCalls';
+import { formatActivityElapsed } from '../lib/activity';
+import { groupModelCalls, mergeModelCallEvents, parseModelCallPage, tokenStages, type ModelCallEvent, type ModelCallPage } from '../lib/modelCalls';
 import { translate, type Language } from '../lib/i18n';
 
 const callStateLabels: Record<ModelCallEvent['state'], string> = {
@@ -15,6 +16,9 @@ const operationLabels: Record<string, string> = {
   recon_review: 'Review reconnaissance evidence',
   scope_interpretation: 'Interpret captured scope',
   scope_grounding: 'Correct scope interpretation',
+  scope_execution_interpretation: 'Interpret approved Scope requirements',
+  scope_header_interpretation: 'Interpret approved Scope headers',
+  scope_references: 'Select Scope policy references',
   finding_validation: 'Validate a finding',
   report_draft: 'Draft a report',
   legacy_report_draft: 'Draft a legacy report',
@@ -29,6 +33,28 @@ const operationLabels: Record<string, string> = {
   attack_orchestrator: 'Run attack agents',
   chaining_orchestrator: 'Run chaining agents',
   structured_other: 'Other Codex operation',
+};
+const summaryLabels: Record<string, string> = {
+  prompt_characters: 'Prompt characters', task_count: 'Task count', field_count: 'Result fields',
+  captured_characters: 'Captured characters', in_scope_count: 'In-Scope items',
+  out_of_scope_count: 'Out-of-Scope items', header_count: 'Required headers',
+  rule_count: 'Policy requirements', endpoint_count: 'Endpoint count',
+  observation_count: 'Observation count', finding_count: 'Finding count', evidence_count: 'Evidence count',
+  capture_selected: 'Current page capture', navigation_selected: 'Navigate to another page',
+};
+const primaryResultKeys = [
+  'in_scope_count', 'out_of_scope_count', 'header_count', 'finding_count',
+  'endpoint_count', 'observation_count', 'capture_selected', 'navigation_selected',
+] as const;
+const supportingResultKeys = [
+  'rule_count', 'evidence_count', 'field_count', 'captured_characters', 'prompt_characters', 'task_count',
+] as const;
+const primaryResultLabels: Record<string, string> = {
+  in_scope_count: 'Allowed items', out_of_scope_count: 'Excluded items', header_count: 'Header requirements',
+};
+const errorLabels: Record<string, string> = {
+  timeout: 'LLM response timed out', tool_unavailable: 'Codex executable unavailable',
+  io_error: 'LLM execution input/output error', agent_error: 'Agent execution failed',
 };
 
 async function fetchModelCalls(before: number | null, signal: AbortSignal): Promise<ModelCallPage> {
@@ -51,7 +77,15 @@ export function ModelCallLog({ language, demo }: { language: Language; demo: boo
   const [revision, setRevision] = useState(0);
   const [search, setSearch] = useState('');
   const [stateFilter, setStateFilter] = useState('all');
+  const [stageFilter, setStageFilter] = useState('all');
   const pageAbort = useRef<AbortController | null>(null);
+  const olderLoaded = useRef(false);
+
+  useEffect(() => {
+    if (demo) return;
+    const timer = window.setInterval(() => setRevision(value => value + 1), 5000);
+    return () => window.clearInterval(timer);
+  }, [demo]);
 
   useEffect(() => {
     if (demo) return;
@@ -61,8 +95,8 @@ export function ModelCallLog({ language, demo }: { language: Language; demo: boo
     setError(false);
     void fetchModelCalls(null, controller.signal).then(page => {
       if (!controller.signal.aborted) {
-        setEvents(page.events);
-        setNextBefore(page.next_before);
+        setEvents(current => mergeModelCallEvents(current, page.events));
+        if (!olderLoaded.current) setNextBefore(page.next_before);
       }
     }).catch(() => {
       if (!controller.signal.aborted) setError(true);
@@ -81,10 +115,8 @@ export function ModelCallLog({ language, demo }: { language: Language; demo: boo
     try {
       const page = await fetchModelCalls(nextBefore, controller.signal);
       if (controller.signal.aborted) return;
-      setEvents(current => {
-        const seen = new Set(current.map(event => event.event_id));
-        return [...current, ...page.events.filter(event => !seen.has(event.event_id))];
-      });
+      olderLoaded.current = true;
+      setEvents(current => mergeModelCallEvents(current, page.events));
       setNextBefore(page.next_before);
     } catch {
       if (!controller.signal.aborted) setError(true);
@@ -95,13 +127,18 @@ export function ModelCallLog({ language, demo }: { language: Language; demo: boo
   };
 
   const term = search.trim().toLowerCase();
-  const shown = events.filter(event =>
+  const calls = groupModelCalls(events).map(event => ({
+    ...event, stage: event.stage || (event.operation_code.startsWith('scope_') ? 'Scope' : null),
+  }));
+  const shown = calls.filter(event =>
     (stateFilter === 'all' || event.state === stateFilter)
-    && (!term || [event.operation_code, event.requested_model, event.scan_id, event.stage, event.task_id, event.case_id, event.scope_job_id]
+    && (stageFilter === 'all' || event.stage === stageFilter)
+    && (!term || [event.operation_code, tr(operationLabels[event.operation_code] || 'Other Codex operation'),
+      event.requested_model, event.scan_id, event.stage, event.task_id, event.case_id, event.scope_job_id]
       .some(value => value?.toLowerCase().includes(term))));
   return <section className="panel model-call-panel" aria-labelledby="model-call-title">
     <div className="panel-heading"><div><h2 id="model-call-title">{tr('Codex calls')}</h2>
-      <p>{tr('Only execution metadata is shown. Prompts and results are not displayed.')}</p></div>
+      <p>{tr('Review each call’s purpose, input size and final result summary. Raw contents remain hidden.')}</p></div>
       {!demo && <button className="secondary-button" onClick={() => setRevision(value => value + 1)}>{tr('Refresh LLM log')}</button>}
     </div>
     {demo ? <p className="table-empty">{tr('No LLM calls in synthetic preview.')}</p> : <>
@@ -115,32 +152,69 @@ export function ModelCallLog({ language, demo }: { language: Language; demo: boo
           <option value="success">{tr('LLM call succeeded')}</option>
           <option value="error">{tr('LLM call failed')}</option>
         </select>
+        <select aria-label={tr('Filter LLM stage')} value={stageFilter} onChange={event => setStageFilter(event.target.value)}>
+          <option value="all">{tr('All LLM stages')}</option>
+          {['Scope', ...tokenStages].map(stage => <option key={stage} value={stage}>{tr(stage)}</option>)}
+        </select>
       </div>
       {error && <div className="error-banner" role="alert"><span>{tr('LLM log unavailable.')}</span>
         <button onClick={() => setRevision(value => value + 1)}>{tr('Retry LLM log')}</button></div>}
       <p className="model-call-count" role="status">{shown.length} {tr('LLM calls shown')}</p>
       <div className="model-call-list">
-        {shown.map(event => <article key={event.event_id} className={`model-call-entry ${event.state}`}>
+        {shown.map(event => {
+          const resultEntries = Object.entries(event.result_summary);
+          const primaryResults = resultEntries.filter(([key]) => primaryResultKeys.some(item => item === key))
+            .sort(([a], [b]) => primaryResultKeys.findIndex(key => key === a) - primaryResultKeys.findIndex(key => key === b));
+          const supportingResults = resultEntries.filter(([key]) => !primaryResultKeys.some(item => item === key))
+            .sort(([a], [b]) => supportingResultKeys.findIndex(key => key === a) - supportingResultKeys.findIndex(key => key === b));
+          return <article key={event.event_id} className={`model-call-entry ${event.state}`}>
           <div className="model-call-head"><span className={`badge ${event.state === 'success' ? 'success' : event.state === 'error' ? 'critical' : 'warning'}`}>{tr(callStateLabels[event.state])}</span>
             <time dateTime={event.occurred_at}>{new Date(event.occurred_at).toLocaleString(language === 'ko' ? 'ko-KR' : 'en-GB', { hour12: false })}</time>
           </div>
           <h3>{tr(operationLabels[event.operation_code] || 'Other Codex operation')}</h3>
           <code className="model-call-code">{event.operation_code}</code>
           <dl className="model-call-facts">
-            <div><dt>{tr('LLM model')}</dt><dd>{event.requested_model || tr('CLI default model unknown')}</dd></div>
-            <div><dt>{tr('Scan ID')}</dt><dd>{event.scan_id || tr('Not linked to a scan')}</dd></div>
+            <div><dt>{tr('Requested LLM model')}</dt><dd>{event.requested_model || tr('Model was not recorded for this call')}</dd></div>
             {event.stage && <div><dt>{tr('LLM stage')}</dt><dd>{tr(event.stage)}</dd></div>}
-            {event.scope_job_id && <div><dt>{tr('Scope job ID')}</dt><dd>{event.scope_job_id}</dd></div>}
-            {event.task_id && <div><dt>{tr('Task ID')}</dt><dd>{event.task_id}</dd></div>}
-            {event.case_id && <div><dt>{tr('LLM case ID')}</dt><dd>{event.case_id}</dd></div>}
-            {event.elapsed_ms !== null && <div><dt>{tr('LLM duration')}</dt><dd>{event.elapsed_ms} ms</dd></div>}
-            {event.error_code && <div><dt>{tr('LLM error code')}</dt><dd>{event.error_code}</dd></div>}
+            {event.elapsed_ms !== null && <div><dt>{tr('LLM duration')}</dt><dd>{formatActivityElapsed(event.elapsed_ms / 1000, language)}</dd></div>}
+            {event.error_code && <div><dt>{tr('LLM error cause')}</dt><dd>{tr(errorLabels[event.error_code] || 'Agent execution failed')} · <code>{event.error_code}</code></dd></div>}
           </dl>
+          <dl className="model-call-input">
+            <dt>{tr('Input summary')}</dt>
+            <dd>{Object.keys(event.input_summary).length ? Object.entries(event.input_summary).map(([key, value]) =>
+              <span className="model-call-input-stat" key={key}>
+                {key !== 'prompt_characters' && <span>{tr(summaryLabels[key])}</span>}
+                <strong>{key === 'capture_selected' || key === 'navigation_selected' ? tr('Selected')
+                  : <>{value.toLocaleString(language === 'ko' ? 'ko-KR' : 'en-GB')}
+                    {(key === 'prompt_characters' || key === 'captured_characters') && tr('characters')}</>}</strong>
+              </span>) : <span className="model-call-summary-empty">{tr('No summary recorded')}</span>}</dd>
+          </dl>
+          <details className="scope-rule-item model-call-result" open>
+            <summary>{tr('Result summary')}</summary>
+            <div className="model-call-result-body">
+              {primaryResults.length > 0 && <dl className="model-call-result-primary">{primaryResults.map(([key, value]) =>
+                <div key={key}><dt>{tr(primaryResultLabels[key] || summaryLabels[key])}</dt>
+                  <dd>{key === 'capture_selected' || key === 'navigation_selected' ? tr('Selected')
+                    : <>{value.toLocaleString(language === 'ko' ? 'ko-KR' : 'en-GB')}<span>{tr('items')}</span></>}</dd>
+                </div>)}</dl>}
+              {supportingResults.length > 0 && <dl className="model-call-facts model-call-result-supporting">{supportingResults.map(([key, value]) =>
+                <div key={key}><dt>{tr(summaryLabels[key])}</dt><dd>{value.toLocaleString(language === 'ko' ? 'ko-KR' : 'en-GB')}</dd></div>)}</dl>}
+              {resultEntries.length === 0 && <p className="model-call-summary-empty">{event.state === 'started' ? tr('Awaiting final response') : tr('No summary recorded')}</p>}
+            </div>
+          </details>
           <p className="model-call-usage">{event.input_tokens !== null || event.output_tokens !== null || event.cached_input_tokens !== null
             ? `${tr('Input tokens')} ${event.input_tokens ?? tr('Unavailable')} · ${tr('Output tokens')} ${event.output_tokens ?? tr('Unavailable')} · ${tr('Cached input tokens')} ${event.cached_input_tokens ?? tr('Unavailable')}`
             : tr('Token usage unavailable')}</p>
+          <dl className="model-call-facts model-call-technical">
+            {event.stage !== 'Scope' && <div><dt>{tr('Scan ID')}</dt><dd>{event.scan_id || tr('Not linked to a scan')}</dd></div>}
+            {event.scope_job_id && <div><dt>{tr('Scope job ID')}</dt><dd>{event.scope_job_id}</dd></div>}
+            {event.task_id && <div><dt>{tr('Task ID')}</dt><dd>{event.task_id}</dd></div>}
+            {event.case_id && <div><dt>{tr('LLM case ID')}</dt><dd>{event.case_id}</dd></div>}
+            {event.started_at && <div><dt>{tr('LLM started at')}</dt><dd>{new Date(event.started_at).toLocaleString(language === 'ko' ? 'ko-KR' : 'en-GB', { hour12: false })}</dd></div>}
+          </dl>
           <small className="model-call-id">{tr('LLM call ID')} · <code>{event.call_id}</code></small>
-        </article>)}
+        </article>;
+        })}
       </div>
       {!loading && !error && shown.length === 0 && <p className="table-empty">{events.length ? tr('No matching LLM calls.') : tr('No LLM calls recorded yet.')}</p>}
       {loading && <p className="table-empty" role="status">{tr('Loading LLM calls')}</p>}

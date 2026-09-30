@@ -434,6 +434,7 @@ class CodexMainAgentTests(unittest.TestCase):
         self.assertIn("https://bugcrowd.com/engagements/example", prompt)
 
     def test_codex_native_skill_collects_and_interprets_scope(self) -> None:
+        from aidast.core.model_calls import SQLiteModelCallSink, read_model_call_events, using_model_call_sink
         collection = ScopeCollectionResult(
             final_url="https://bugcrowd.com/engagements/example",
             title="Example Program",
@@ -461,10 +462,15 @@ class CodexMainAgentTests(unittest.TestCase):
             )
             executable.chmod(executable.stat().st_mode | 0o111)
 
-            page, analysis = CodexMainAgent(
-                executable=str(executable), timeout_seconds=10,
-                main_model="gpt-6-luna",
-            ).collect_scope("https://bugcrowd.com/engagements/example")
+            with using_model_call_sink(SQLiteModelCallSink(Path(temporary_dir))):
+                page, analysis = CodexMainAgent(
+                    executable=str(executable), timeout_seconds=10,
+                    main_model="gpt-6-luna",
+                ).collect_scope("https://bugcrowd.com/engagements/example")
+            events, _ = read_model_call_events(Path(temporary_dir))
+            self.assertEqual(events[0]["requested_model"], "gpt-6-luna")
+            self.assertEqual(events[0]["stage"], "Scope")
+            self.assertEqual(events[0]["result_summary"]["in_scope_count"], 1)
 
             self.assertEqual(page.title, "Example Program")
             self.assertEqual(analysis.program_name, "Example <Program>")

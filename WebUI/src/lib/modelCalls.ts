@@ -18,7 +18,44 @@ export type ModelCallEvent = {
   cached_input_tokens: number | null;
   output_tokens: number | null;
   usage_status: 'not_captured' | 'absent' | 'reported' | 'partial' | 'invalid' | 'ambiguous';
+  input_summary: Record<string, number>;
+  result_summary: Record<string, number>;
 };
+export const summaryKeys = [
+  'prompt_characters', 'task_count', 'field_count', 'captured_characters',
+  'in_scope_count', 'out_of_scope_count', 'header_count', 'rule_count',
+  'endpoint_count', 'observation_count', 'finding_count', 'evidence_count',
+  'capture_selected', 'navigation_selected',
+] as const;
+
+export function mergeModelCallEvents(previous: readonly ModelCallEvent[], incoming: readonly ModelCallEvent[]): ModelCallEvent[] {
+  return Array.from(new Map([...previous, ...incoming].map(event => [event.event_id, event])).values())
+    .sort((a, b) => b.event_id - a.event_id);
+}
+
+export function groupModelCalls(events: readonly ModelCallEvent[]): (ModelCallEvent & { started_at: string | null })[] {
+  const calls = new Map<string, ModelCallEvent & { started_at: string | null }>();
+  for (const event of events) {
+    const previous = calls.get(event.call_id);
+    calls.set(event.call_id, {
+      ...(previous && previous.event_id > event.event_id ? previous : event),
+      started_at: event.state === 'started' ? event.occurred_at : previous?.started_at ?? null,
+    });
+  }
+  return Array.from(calls.values()).sort((a, b) => b.event_id - a.event_id);
+}
+
+function parseSummary(value: unknown): Record<string, number> | null {
+  if (value === undefined) return {};
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const summary: Record<string, number> = {};
+  for (const [key, amount] of Object.entries(value)) {
+    if (!summaryKeys.some(allowed => allowed === key) || !count(amount) || amount > 100_000_000) return null;
+    if (['capture_selected', 'navigation_selected'].includes(key) && amount !== 1) return null;
+    summary[key] = amount;
+  }
+  return summary;
+}
 
 export type ModelCallPage = { events: ModelCallEvent[]; next_before: number | null };
 export const tokenStages = ['Recon', 'Attack', 'Chaining', 'Validation', 'Report'] as const;
@@ -90,6 +127,9 @@ export function parseScanTokenUsage(value: unknown, scanId: string): ScanTokenUs
 function parseEvent(value: unknown): ModelCallEvent | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
   const row = value as Record<string, unknown>;
+  const input = parseSummary(row.input_summary);
+  const result = parseSummary(row.result_summary);
+  if (!input || !result) return null;
   if (!count(row.event_id) || row.event_id === 0 || !text(row.call_id)
     || !text(row.state) || !['started', 'success', 'error'].includes(row.state)
     || !text(row.occurred_at) || !Number.isFinite(Date.parse(row.occurred_at))
@@ -121,6 +161,7 @@ function parseEvent(value: unknown): ModelCallEvent | null {
     cached_input_tokens: row.cached_input_tokens,
     output_tokens: row.output_tokens,
     usage_status: row.usage_status as ModelCallEvent['usage_status'],
+    input_summary: input, result_summary: result,
   };
 }
 

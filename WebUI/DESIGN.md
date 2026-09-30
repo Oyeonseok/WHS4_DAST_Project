@@ -200,6 +200,27 @@ Spacing follows a 4px base with practical steps of 4, 8, 12, 16, 20, 24,
   technology, and wrapping for unbroken data.
 - **Layout**: chronological vertical stack.
 
+### LLM execution record
+
+- Group start and terminal events by call ID; retain older loaded calls on refresh.
+- Show Scope as a distinct filterable stage, with its collection job ID rather
+  than an empty scan-link warning. Show the explicitly requested model;
+  historical missing models remain unrecorded, never inferred.
+- Purpose, input-size counts, final-result counts, error category, timing and
+  token usage use the existing facts grid and open disclosure primitives.
+  Raw prompts, response bodies and credentials are not rendered.
+- Input size is a compact inline fact rather than a height-matched empty card.
+  Results use one open disclosure: decision counts are prominent section-size
+  values, followed by policy, evidence and response-field counts in that order.
+  Missing fields are omitted; recorded zero counts remain visible.
+- Model, stage and duration stay above the summaries; technical IDs and start
+  time follow them. Summary labels and numbers wrap together on narrow screens.
+- Scope collection and re-collection reuse the scan model selector, including
+  custom IDs and validation. Active jobs show their recorded model as read-only.
+- Live records refresh while this view is mounted; event IDs preserve history.
+- Labels use the Korean translation dictionary; supporting facts use one column
+  on mobile while primary metrics wrap as whole items.
+
 ### Operator next action
 
 - **Structure**: concise state summary, ordered workflow steps, one primary next

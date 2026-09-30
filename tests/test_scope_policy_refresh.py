@@ -346,3 +346,60 @@ def test_verified_revision_with_foreign_program_identity_is_not_catalogued_or_ru
     with patch('aidast.cli.CodexMainAgent', side_effect=AssertionError('no collection/model')):
         assert cli.main(['run',URL,'--target','*.example.com','--output-dir',str(root/'Scope'),
             '--scope-revision',job_id]) == 1
+
+
+@pytest.mark.parametrize('model', ['gpt-6-astra', 'provider/custom-model'])
+def test_scope_collection_accepts_selected_model(model):
+    assert ScopeCollectionRequest.model_validate({'model': model}).model == model
+
+
+def test_existing_approval_without_execution_does_not_inherit_failed_job_model(setup):
+    _, _, program_id, _, _, manager = setup
+    job = start(manager, program_id)
+    manager._update(job['scope_job_id'], status='failed')
+    replacement = manager.start(program_id, ScopeCollectionRequest())
+    assert replacement['scope_status'] == 'approved'
+    assert replacement['scope_job_id'] != job['scope_job_id']
+    assert replacement['scope_model'] is None
+
+
+@pytest.mark.parametrize('model', ['', 'https://example.test/model', 'gpt model', 'gpt\nmodel', 'gpt-6\n', 'x' * 129])
+def test_scope_collection_rejects_invalid_model(model):
+    with pytest.raises(ValueError):
+        ScopeCollectionRequest.model_validate({'model': model})
+
+
+def test_selected_scope_model_reaches_agent_and_survives_restart(setup):
+    root, registry, program_id, _, _, manager = setup
+    manager._agent_factory = None
+    with patch('aidast.web.scope_workflow.CodexMainAgent', return_value=RevisedAgent()) as factory, \
+         patch('aidast.web.scope_workflow.threading.Thread.start', lambda thread: thread.run()):
+        job = manager.start(program_id, ScopeCollectionRequest(model='gpt-6-astra', refresh=True))
+    factory.assert_called_once_with(timeout_seconds=300, main_model='gpt-6-astra')
+    assert job['scope_status'] == 'review_required'
+    restarted = ScopeWorkflowManager(root, registry, agent_factory=RevisedAgent, worker_mode=True)
+    assert restarted.get_job(program_id)['scope_model'] == 'gpt-6-astra'
+
+
+def test_scope_model_passes_through_http_request(setup):
+    from threading import Event
+    from fastapi.testclient import TestClient
+    from aidast.web.server import create_app
+    root, _, program_id, _, _, manager = setup
+    manager._agent_factory = None
+    completed = Event()
+    collect = manager._collect
+    def collect_and_signal(*args):
+        try:
+            collect(*args)
+        finally:
+            completed.set()
+    with patch('aidast.web.scope_workflow.CodexMainAgent', return_value=RevisedAgent()) as factory, \
+         patch.object(manager, '_collect', side_effect=collect_and_signal), \
+         TestClient(create_app(result_root=root, scope_workflow=manager), base_url='http://test') as client:
+        response = client.post(f'/api/v1/programs/{program_id}/scope-collection',
+            headers={'Origin': 'http://test'}, json={'model': 'gpt-6-luna', 'refresh': True})
+        assert completed.wait(timeout=10)
+    assert response.status_code == 202
+    assert response.json()['job']['scope_model'] == 'gpt-6-luna'
+    factory.assert_called_once_with(timeout_seconds=300, main_model='gpt-6-luna')

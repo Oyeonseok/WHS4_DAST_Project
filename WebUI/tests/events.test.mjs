@@ -298,6 +298,14 @@ test('active Scope collection elapsed time uses a TUI-style clock', () => {
   assert.equal(formatActivityElapsed(62), '1분 2초');
   assert.equal(formatActivityElapsed(62, 'en'), '1m 2s');
 });
+test('elapsed milliseconds convert to whole seconds across minute boundaries', () => {
+  for (const [milliseconds, expected] of [
+    [0, '0초'], [999, '0초'], [1000, '1초'], [15255, '15초'],
+    [59999, '59초'], [60000, '1분 0초'], [75255, '1분 15초'],
+  ]) {
+    assert.equal(formatActivityElapsed(milliseconds / 1000), expected);
+  }
+});
 test('Scope collection progress follows persisted phase events across a pause', () => {
   const phases = [
     'scope.page_read_started', 'scope.page_read_completed', 'scope.analysis_started',
