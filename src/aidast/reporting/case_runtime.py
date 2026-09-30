@@ -20,7 +20,7 @@ from .models import ReportDraft, validate_draft
 from .render import render_report
 
 
-def _case_markdown(draft: ReportDraft, context: dict | None = None) -> str:
+def _case_markdown(draft: ReportDraft, context: dict | None = None, *, legacy_generic: bool = False) -> str:
     """Render a local reader copy without changing the immutable source draft."""
     from .submission import _Masker, _writer_seed
     from .report_sections import enrich_report
@@ -49,7 +49,10 @@ def _case_markdown(draft: ReportDraft, context: dict | None = None) -> str:
     })
     steps = "\n".join(f"{i}. {item.text}" for i, item in enumerate(safe.steps_to_reproduce, 1))
     masked = "\n".join(masker.text(value) for value in prose)
-    return enrich_report(render_report(safe), platform=safe.platform, steps=steps,
+    from ._render import render_markdown
+    rendered = (render_markdown(safe, source=f"Validation case: `{safe.case_id}`", legacy_generic=True)
+                if legacy_generic and safe.platform == "generic" else render_report(safe))
+    return enrich_report(rendered, platform=safe.platform, steps=steps,
                          prerequisites="\n".join(item.text for item in safe.prerequisites),
                          expected=safe.expected_behavior.text, observed=safe.actual_behavior.text,
                          masked_text=masked, platform_shown=True)
@@ -248,8 +251,13 @@ def _load(path: Path, *, verify_source: bool = True) -> tuple[dict, dict, dict |
         if _sha(stored["draft_json"]) != stored["draft_sha256"] or _sha(stored["markdown"]) != stored["markdown_sha256"]:
             raise ReportError("stored report draft hash mismatch")
         draft = validate_draft(json.loads(stored["draft_json"]), context)
-        if (stored["markdown"] != render_report(draft)
-                and stored["markdown"] != _case_markdown(draft, context)):
+        from ._render import render_markdown
+        old_generic = (render_markdown(draft, source=f"Validation case: `{draft.case_id}`", legacy_generic=True)
+                       if draft.platform == "generic" else None)
+        valid_renderings = {render_report(draft), _case_markdown(draft, context)}
+        if old_generic is not None:
+            valid_renderings.update({old_generic, _case_markdown(draft, context, legacy_generic=True)})
+        if stored["markdown"] not in valid_renderings:
             raise ReportError("stored report content does not match draft")
     return run, context, stored, stale
 

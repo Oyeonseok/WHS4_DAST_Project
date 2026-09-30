@@ -2,6 +2,7 @@
 import asyncio
 import io
 import json
+import sqlite3
 import zipfile
 from pathlib import Path
 
@@ -15,6 +16,7 @@ from aidast.reporting.auto import generate_scan_reports, report_platform_for_pro
 from aidast.reporting.runtime import ReportAgent, ReportError
 from aidast.reporting.models import ReportDraft
 from aidast.reporting.submission import ProgramRequirements, inspect_report, save_requirements
+from aidast.web.reports import ReportCatalog
 from aidast.validation.models import canonical_json
 from aidast.web.server import create_app
 import test_shared_validation_reporting as shared
@@ -46,17 +48,48 @@ def generate(case, **kwargs):
 
     root = case.path.parent.parent
     result, = generate_scan_reports(case.path, root / "ReportRun" / "scan",
-        scan_id="scan", writer=Writer(), **kwargs)
+        scan_id="scan", writer=Writer(), language="ko", **kwargs)
     return root, result
+
+
+def test_generic_auto_generates_korean_and_english_reports(case):
+    evidence = case.complete()
+    languages = []
+
+    class Writer:
+        def write(self, context):
+            language = context["language"]
+            languages.append(language)
+            draft = case.draft(context, evidence)
+            draft["title"]["text"] = "상품 검색 취약점" if language == "ko" else "Product search vulnerability"
+            return draft
+
+    root = case.path.parent.parent
+    output = root / "ReportRun" / "scan"
+    reports = generate_scan_reports(case.path, output, scan_id="scan", writer=Writer())
+
+    assert languages == ["ko", "en"]
+    assert len(reports) == 2
+    assert Path(reports[0]["report_path"]) == (output / "case" / "Report.md").resolve()
+    assert Path(reports[1]["report_path"]) == (output / "en" / "case" / "Report.md").resolve()
+    assert [inspect_report(Path(item["report_db"]))["language"] for item in reports] == ["ko", "en"]
+    assert {item["title"] for item in ReportCatalog(root).list(scan_id="scan")} == {
+        "상품 검색 취약점", "Product search vulnerability"}
+    assert {item["language"] for item in ReportCatalog(root).list(scan_id="scan")} == {"ko", "en"}
+    assert [item["report_id"] for item in generate_scan_reports(
+        case.path, output, scan_id="scan", writer=Writer())] == [item["report_id"] for item in reports]
+    assert languages == ["ko", "en"]
 
 
 def test_default_report_is_listed_and_exported_by_dashboard_without_program_rules(case):
     root, result = generate(case)
     assert result["status"] == "drafted"
     markdown = Path(result["report_path"]).read_text()
-    for heading in ["## Asset", "## Weakness", "## Summary", "## Steps to Reproduce", "## Impact"]:
+    for heading in ["#### Asset", "#### Weakness", "## Executive Summary", "#### Steps to Reproduce", "#### Impact"]:
         assert heading in markdown
     assert "Platform: generic" in markdown
+    assert "Format: PTES-style technical finding" in markdown
+    assert "## Technical Report" in markdown
 
     async def scenario():
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=create_app(result_root=root)),
@@ -87,6 +120,27 @@ def test_generic_report_still_blocks_stale_validation(case):
     view = inspect_report(Path(result["report_db"]))
     assert not view["ready"]
     assert any(c["code"] == "source_integrity" for c in view["checks"])
+
+
+@pytest.mark.parametrize("enriched", [False, True])
+def test_pre_ptes_generic_draft_remains_readable(case, enriched):
+    from aidast.reporting.case_runtime import _case_markdown, case_report_status
+    from aidast.reporting._render import render_markdown
+    from aidast.reporting.runtime import _sha
+
+    _, result = generate(case, platform="generic")
+    report_db = Path(result["report_db"])
+    with sqlite3.connect(report_db) as conn:
+        draft_json, context_json = conn.execute(
+            "SELECT d.draft_json, r.context_json FROM report_drafts d JOIN report_runs r ON d.report_id=r.report_id"
+        ).fetchone()
+        draft = ReportDraft.model_validate_json(draft_json)
+        old_markdown = (_case_markdown(draft, json.loads(context_json), legacy_generic=True)
+                        if enriched else render_markdown(
+                            draft, source=f"Validation case: `{draft.case_id}`", legacy_generic=True))
+        conn.execute("UPDATE report_drafts SET markdown=?, markdown_sha256=?",
+                     (old_markdown, _sha(old_markdown)))
+    assert case_report_status(report_db)["status"] == "drafted"
 
 
 def test_generic_report_honors_explicit_required_fields(case):
@@ -173,3 +227,22 @@ def test_generic_writer_routes_and_stages_general_report_skill(case, writer_clas
     result = writer_class(Agent()).write(context)
     assert result["platform"] == "generic"
     assert result["source_context_sha256"] == context["context_sha256"]
+
+
+@pytest.mark.parametrize("writer_class", [CodexReportWriter, NativeReportWriter])
+@pytest.mark.parametrize("platform", ["generic", "hackerone"])
+def test_writer_requests_evidence_bound_feature_cause_weakness_title(case, writer_class, platform):
+    evidence = case.complete()
+    prepared = ReportAgent().run(case.path, case.output, platform=platform, case_id="case")
+    context = json.loads(Path(prepared["context_path"]).read_text())
+
+    class Agent:
+        def _run_structured(self, **options):
+            prompt = options["prompt"]
+            assert "affected feature" in prompt
+            assert "verified cause" in prompt
+            assert "weakness type" in prompt
+            assert "Do not invent a cause" in prompt
+            return ReportDraft.model_validate(case.draft(context, evidence))
+
+    assert writer_class(Agent()).write(context)["platform"] == platform

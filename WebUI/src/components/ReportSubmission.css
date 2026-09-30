@@ -1,10 +1,41 @@
-dialog:has(.report-submission){width:min(860px,calc(100% - 32px))}
+dialog:has(.report-submission){width:min(1040px,calc(100% - 32px))}
 .report-submission{font-size:13px;min-width:0}
-.report-submission-status{padding:16px;background:var(--soft);border:1px solid var(--line);border-radius:6px}
-.report-submission-status strong{color:var(--accent)}
-.report-submission-status p{margin-top:8px}
-.report-submission-status small{display:block;margin-top:8px;color:var(--muted);overflow-wrap:anywhere}
-.report-submission-actions{flex-wrap:wrap;margin:16px 0}
+.report-export-hero{padding:25px 28px;background:linear-gradient(130deg,var(--soft),var(--panel));border:1px solid var(--line);border-radius:12px}
+.report-export-hero-top,.report-export-meta,.report-export-bar,.report-preview-heading{display:flex;align-items:center;justify-content:space-between;gap:12px}
+.report-export-eyebrow,.report-export-option>small,.report-preview-heading small{color:var(--accent);font-size:11px;font-weight:700;letter-spacing:.1em;text-transform:uppercase}
+.report-export-state{padding:6px 10px;border:1px solid var(--line);border-radius:999px;background:var(--panel);color:var(--muted);font-size:12px;font-weight:700;white-space:nowrap}
+.report-export-hero.is-ready .report-export-state{border-color:var(--accent);color:var(--accent)}
+.report-export-hero h3{font-size:22px;line-height:1.35;margin:19px 0 7px;overflow-wrap:anywhere}
+.report-export-hero p{color:var(--muted);line-height:1.6;margin:0}
+.report-export-meta{justify-content:flex-start;flex-wrap:wrap;margin-top:19px;color:var(--muted);font-size:12px}
+.report-export-meta span{padding:5px 9px;border:1px solid var(--line);border-radius:5px;background:var(--panel)}
+.report-export-meta code{margin-left:auto;overflow-wrap:anywhere;font-size:11px}
+.report-export-options{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;margin:18px 0}
+.report-export-options.is-single{grid-template-columns:1fr}
+.report-export-option{min-width:0;padding:20px;border:1px solid var(--line);border-radius:10px;background:var(--panel)}
+.report-language-select{display:flex;flex-direction:column;gap:10px;font-weight:600}
+.report-language-select select{width:100%;background:var(--bg);color:var(--text);border:1px solid var(--line);border-radius:6px;padding:11px 12px;font:inherit}
+.report-language-select select:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
+.report-language-select em{color:var(--muted);font-size:12px;font-style:normal;font-weight:400;line-height:1.55}
+.report-video-option h3{font-size:15px;margin:9px 0 16px}
+.report-video-option .report-rule-check{display:flex;align-items:center;gap:9px;font-weight:600}
+.report-video-option p{font-size:12px;line-height:1.6;margin:12px 0}
+.report-submission-actions{flex-wrap:wrap;margin:12px 0 0}
+.report-submission-actions button{font-size:12px}
+.report-export-bar{padding:18px 20px;background:var(--soft);border:1px solid var(--line);border-radius:10px}
+.report-export-bar>div{display:grid;gap:5px;line-height:1.4}
+.report-export-bar strong{font-size:14px}
+.report-export-bar span{color:var(--muted);font-size:12px}
+.report-export-bar button{flex-shrink:0}
+.report-export-bar button span{color:inherit;font-size:16px;margin-left:6px}
+.report-export-secondary{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0 24px}
+.report-export-secondary button{font-size:12px}
+.report-preview-panel{border:1px solid var(--line);border-radius:10px;overflow:hidden;background:var(--panel)}
+.report-preview-heading{padding:17px 22px;border-bottom:1px solid var(--line)}
+.report-preview-heading h3{font-size:16px;margin:4px 0 0}
+.report-preview-heading>span{color:var(--muted);font-size:12px;text-transform:uppercase}
+.report-preview-panel .report-document{border:0;border-radius:0;margin:0;max-height:620px;overflow-y:auto}
+.report-preview-panel .report-preview{border:0;border-radius:0;margin:0;max-height:620px;overflow:auto}
 .report-submission-section{border-top:1px solid var(--line);padding:22px 0 4px}
 .report-submission-section h3{font-size:15px;margin-bottom:12px}
 .report-rules-form{border:0;padding:0;margin:16px 0;display:grid;gap:15px;min-width:0}
@@ -37,7 +68,8 @@ dialog:has(.report-submission){width:min(860px,calc(100% - 32px))}
 .report-evidence pre{white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.6}
 .report-evidence dl{font-size:11px;color:var(--muted);margin-bottom:0}
 .report-evidence dd{margin:4px 0 10px;overflow-wrap:anywhere;font-family:Consolas,monospace}
-.report-submission .report-preview{padding:14px;background:var(--bg);border:1px solid var(--line);border-radius:5px;font-size:12px}
+.report-submission .report-preview{padding:20px 24px;background:var(--bg);border:1px solid var(--line);border-radius:5px;font-size:12px;white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.65}
+.report-submission .report-preview-panel .report-preview{border:0;border-radius:0}
 .report-poc-video{display:block;width:100%;max-width:1280px;border:1px solid var(--line);border-radius:5px;background:var(--bg)}
 .report-document{padding:28px;background:var(--bg);border:1px solid var(--line);border-radius:8px;margin:24px 0;font-size:14px;line-height:1.85}
 .report-document-kicker{color:var(--accent);font-size:12px;font-weight:600}
@@ -54,4 +86,4 @@ dialog:has(.report-submission){width:min(860px,calc(100% - 32px))}
 .report-document-note{font-size:12px;margin-top:16px!important}
 .report-submission-section>summary{cursor:pointer;font-weight:600;font-size:14px}
 @media(max-width:660px){.report-document{padding:18px}.report-document-facts,.report-document-comparison{grid-template-columns:1fr}.report-document h2{font-size:21px}}
-@media(max-width:660px){.report-submission-actions button{width:100%}.report-checks li{display:block}.report-checks span,.report-checks a{display:block;margin-top:5px}}
+@media(max-width:660px){.report-export-hero{padding:20px}.report-export-hero h3{font-size:19px}.report-export-meta code{width:100%;margin:0}.report-export-options{grid-template-columns:1fr}.report-export-bar{align-items:stretch;flex-direction:column}.report-export-bar button{width:100%}.report-export-secondary{display:grid}.report-submission-actions button{width:100%}.report-checks li{display:block}.report-checks span,.report-checks a{display:block;margin-top:5px}}
