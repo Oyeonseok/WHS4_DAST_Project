@@ -169,6 +169,13 @@ Spacing follows a 4px base with practical steps of 4, 8, 12, 16, 20, 24,
   `작업 중 · N초` row and status badge update once per second. Persisted backend
   events remain the authoritative phase history; the timer only fills quiet
   intervals so the operator can see that work is still running.
+- **Progress**: Scope browser activity and Recon task/tool activity advance
+  estimated progress within their current phase. Running values move in 1%
+  steps every 200ms; confirmed completion catches up every 80ms. Quiet
+  intervals do not invent work, pause freezes the value, and replaying a
+  shorter event window never moves the same job backwards. Recon discovery
+  reserves progress above 75% for tagging, review, and export; only a recorded
+  completed stage reaches 100%.
 
 ### Agent work board
 

@@ -13,6 +13,7 @@ import {
   mergeActivityLogs,
   reduceScopeActivity,
   scopeCollectionProgress,
+  reconCollectionProgress,
   startScopeElapsedClock,
   startScopeJobPolling,
   shouldPollScopeJob,
@@ -215,10 +216,6 @@ function useEstimatedProgress(identity: string, actual: number, status: string):
       return;
     }
     const mode = status === 'running' ? 'running' : status === 'completed' ? 'completed' : 'paused';
-    if (shown > baseline || (mode === 'paused' && shown !== baseline)) {
-      setState({ identity, value: baseline, status });
-      return;
-    }
     const delay = estimatedProgressDelay(shown, actual, mode);
     if (delay === null) {
       if (state.status !== status) setState({ identity, value: shown, status });
@@ -421,7 +418,9 @@ export default function App() {
     : 'loading';
   const currentStageStatus = snapshot?.stage_statuses?.[snapshot.stage];
   const scanProgressStatus = currentStageProgressStatus(snapshot?.status, currentStageStatus);
-  const estimatedScanProgress = useEstimatedProgress(snapshot ? `${snapshot.scan_id}:${snapshot.stage}` : scanId, snapshot?.progress ?? 0, scanProgressStatus);
+  const scanProgressTarget = snapshot?.stage === 'Recon'
+    ? reconCollectionProgress(snapshot.progress, snapshot.logs) : snapshot?.progress ?? 0;
+  const estimatedScanProgress = useEstimatedProgress(snapshot ? `${snapshot.scan_id}:${snapshot.stage}` : scanId, scanProgressTarget, scanProgressStatus);
   const retryAction = snapshot ? scanRetryAction(snapshot) : null;
   const cancelling = cancelRequest?.scanId === scanId;
   const cancelPhase = cancelling ? cancelRequest.phase : null;

@@ -43,6 +43,7 @@ import {
   startScopeJobPolling,
   shouldPollScopeJob,
   scopeCollectionProgress,
+  reconCollectionProgress,
 } from '../src/lib/activity.ts';
 
 const event = (id = 8, overrides = {}) => ({ version: 1, event_id: id, scan_id: DEMO_SCAN, occurred_at: '2026-09-20T06:00:00Z', type: 'log.appended', payload: { stage: 'Attack', level: 'info', message: 'Redacted fixture event' }, ...overrides });
@@ -313,6 +314,36 @@ test('Scope collection progress follows persisted phase events across a pause', 
   assert.equal(scopeCollectionProgress('collecting', events.slice(0, 6)), 80);
   assert.equal(scopeCollectionProgress('review_required', events), 100);
 });
+test('Scope browser activity advances within the page-reading milestone', () => {
+  const events = [
+    { job_id: 'scopejob_fixture', event_id: 1, message_code: 'scope.page_read_started' },
+    ...Array.from({ length: 30 }, (_, index) => ({
+      job_id: 'scopejob_fixture', event_id: index + 2, message_code: 'scope.browser_progress',
+    })),
+  ];
+  const first = scopeCollectionProgress('collecting', events.slice(0, 2));
+  assert.ok(first > 10 && first < 25);
+  assert.ok(scopeCollectionProgress('collecting', events.slice(0, 4)) > first);
+  assert.ok(scopeCollectionProgress('collecting', events) < 25);
+  assert.equal(scopeCollectionProgress('collecting', [...events,
+    { message_code: 'scope.analysis_started' }]), 40);
+});
+test('Recon tool activity advances before its task finishes without claiming final completion', () => {
+  const activity = (id, phase, state) => ({
+    id, stage: 'Recon', message_code: 'recon.activity', message_params: { phase, state },
+  });
+  const started = [activity(1, 'dns_resolution', 'started')];
+  const working = [...started, activity(2, 'dnsx', 'started')];
+  assert.ok(reconCollectionProgress(0, started) > 0);
+  assert.ok(reconCollectionProgress(0, working) > reconCollectionProgress(0, started));
+  const discovery = Array.from({ length: 100 }, (_, index) => ({
+    ...activity(index + 3, 'endpoint_discovery', 'found'),
+    message_params: { phase: 'endpoint_discovery', state: 'found', method: 'GET', url: `https://example.test/${index}` },
+  }));
+  assert.ok(reconCollectionProgress(0, discovery) < 75);
+  assert.equal(reconCollectionProgress(93, discovery), 93);
+  assert.equal(reconCollectionProgress(0, [activity(1, 'dnsx', 'failed')]), 0);
+});
 test('estimated progress advances one percent per tick and stops at real completion', () => {
   let shown = 0;
   for (let expected = 1; expected <= 40; expected += 1) {
@@ -327,10 +358,10 @@ test('estimated progress advances one percent per tick and stops at real complet
   assert.equal(advanceEstimatedProgress(shown, 'running'), 99);
   assert.equal(advanceEstimatedProgress(shown, 'completed'), 100);
   assert.equal(advanceEstimatedProgress(100, 'completed'), 100);
-  assert.equal(estimatedProgressDelay(10, 40, 'running'), 30);
+  assert.equal(estimatedProgressDelay(10, 40, 'running'), 200);
   assert.equal(estimatedProgressDelay(40, 40, 'running'), null);
   assert.equal(estimatedProgressDelay(96, 40, 'running'), null);
-  assert.equal(estimatedProgressDelay(40, 100, 'completed'), 30);
+  assert.equal(estimatedProgressDelay(40, 100, 'completed'), 80);
   assert.equal(estimatedProgressDelay(40, 40, 'paused'), null);
   assert.equal(estimatedProgressDelay(99, 40, 'running'), null);
 });
@@ -342,13 +373,13 @@ test('persisted idle progress survives reload and a completed stage reaches 100 
   assert.equal(currentStageProgressStatus('running', 'completed'), 'completed');
   assert.equal(currentStageProgressStatus('running', 'skipped'), 'completed');
   assert.equal(currentStageProgressStatus('paused', 'running'), 'paused');
-  assert.equal(estimatedProgressDelay(99, 100, currentStageProgressStatus('running', 'completed')), 30);
+  assert.equal(estimatedProgressDelay(99, 100, currentStageProgressStatus('running', 'completed')), 80);
   assert.equal(advanceEstimatedProgress(99, currentStageProgressStatus('running', 'completed')), 100);
 });
 test('progress never outruns the most recently observed task milestone', () => {
   assert.equal(initialEstimatedProgress(0, 'running'), 0);
   assert.equal(initialEstimatedProgress(0, 'paused'), 0);
-  assert.equal(estimatedProgressDelay(74, 75, 'running'), 30);
+  assert.equal(estimatedProgressDelay(74, 75, 'running'), 200);
   assert.equal(estimatedProgressDelay(75, 75, 'running'), null);
   assert.equal(initialEstimatedProgress(50, 'failed'), 50);
 });

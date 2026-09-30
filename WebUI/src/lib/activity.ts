@@ -63,6 +63,7 @@ export function isScopeActivityActive(status: ScopeActivityStatus | undefined): 
 export function scopeCollectionProgress(status: ScopeActivityStatus | undefined, events: readonly ScopeActivityEvent[]): number {
   if (status === 'review_required' || status === 'approved' || status === 'rejected') return 100;
   const milestones: Record<string, number> = {
+    'scope.started': 2,
     'scope.page_read_started': 10,
     'scope.collection_started': 10,
     'scope.page_read_completed': 25,
@@ -74,7 +75,45 @@ export function scopeCollectionProgress(status: ScopeActivityStatus | undefined,
     'scope.draft_started': 90,
     'scope.draft_completed': 95,
   };
-  return events.reduce((progress, event) => Math.max(progress, milestones[event.message_code ?? ''] ?? 0), 0);
+  return events.reduce((progress, event) => {
+    if (event.message_code === 'scope.browser_progress' && progress < 25) {
+      return Math.min(24, Math.max(10, progress) + 1);
+    }
+    return Math.max(progress, milestones[event.message_code ?? ''] ?? 0);
+  }, 0);
+}
+
+export function reconCollectionProgress(actual: number, logs: readonly Log[]): number {
+  const groups = [
+    { start: 0, end: 12, phases: ['asset_discovery', 'subfinder'] },
+    { start: 12, end: 24, phases: ['dns_resolution', 'dnsx'] },
+    { start: 24, end: 36, phases: ['host_port_discovery', 'naabu', 'nmap'] },
+    { start: 36, end: 48, phases: ['http_probe'] },
+    { start: 48, end: 55, phases: ['origin_discovery'] },
+    { start: 55, end: 75, phases: ['endpoint_discovery', 'playwright_bootstrap', 'playwright_priority',
+      'katana_standard', 'katana_headless', 'playwright_interaction', 'ffuf', 'api_secondary',
+      'openapi_detection', 'graphql_detection', 'zap_openapi', 'zap_graphql', 'mitm_capture'] },
+    { start: 75, end: 90, phases: ['observation_tagging'] },
+  ] as const;
+  const activity = new Map<number, Set<string>>();
+  return logs.reduce((progress, log) => {
+    const params = log.message_params;
+    if (log.stage !== 'Recon') return progress;
+    if (log.message_code === 'agent.work' && typeof params?.progress === 'number') {
+      return Math.max(progress, Math.min(98, params.progress));
+    }
+    if (log.message_code !== 'recon.activity' || !params
+      || (params.state !== 'started' && params.state !== 'finished'
+        && params.state !== 'skipped' && params.state !== 'found')) return progress;
+    const group = groups.find(item => item.phases.some(phase => phase === params.phase));
+    if (!group) return progress;
+    const recorded = activity.get(group.start) ?? new Set<string>();
+    recorded.add(`${params.phase}:${params.state}:${params.method ?? ''}:${params.url ?? ''}`);
+    activity.set(group.start, recorded);
+    const finished = params.phase === group.phases[0]
+      && (params.state === 'finished' || params.state === 'skipped');
+    return Math.max(progress, finished ? group.end : Math.min(group.end - 1, group.start + recorded.size));
+  }, actual);
 }
 
 export function initialEstimatedProgress(actual: number, status: string): number {
@@ -93,7 +132,7 @@ export function advanceEstimatedProgress(value: number, mode: 'running' | 'pause
 export function estimatedProgressDelay(shown: number, actual: number, mode: 'running' | 'paused' | 'completed'): number | null {
   if (mode === 'paused' || (mode === 'running' && shown >= actual)) return null;
   if (advanceEstimatedProgress(shown, mode) === shown) return null;
-  return 30;
+  return mode === 'completed' ? 80 : 200;
 }
 
 export function scopePollingAfterJobResponse(status: ScopeActivityStatus | undefined): boolean {
