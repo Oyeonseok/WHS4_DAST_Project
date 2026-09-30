@@ -25,6 +25,30 @@ class ValidationReportCliTests(unittest.TestCase):
             code = main(arguments, **kwargs)
         return code, stdout.getvalue(), stderr.getvalue()
 
+    def test_codex_time_limit_override_is_preserved_for_each_command(self):
+        commands = [
+            ["scope", "https://example.com"],
+            ["recon", "https://example.com", "--target", "example.com"],
+            ["run", "https://example.com", "--target", "example.com"],
+            ["tag", "Recon.db"],
+            ["resume", "scan_" + "a" * 32],
+        ]
+        for command in commands:
+            with self.subTest(command=command[0]):
+                args = _parser().parse_args(command + ["--codex-timeout", "2451"])
+                self.assertEqual(args.codex_timeout, 2451)
+
+    def test_codex_time_limit_rejects_nonpositive_values(self):
+        for command in [
+            ["scope", "https://example.com"],
+            ["tag", "Recon.db"],
+            ["resume", "scan_" + "a" * 32],
+        ]:
+            for value in ["0", "-1"]:
+                with self.subTest(command=command[0], value=value):
+                    with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                        _parser().parse_args(command + ["--codex-timeout", value])
+
     def test_validation_alias_status_uses_shared_database(self):
         expected = {"database": "Pipeline.db", "cases": []}
         with patch("aidast.cli.shared_validation_status", return_value=expected) as status:
@@ -162,6 +186,7 @@ class ValidationReportCliTests(unittest.TestCase):
 
         def fake_run(command, **kwargs):
             commands.append(command)
+            self.assertEqual(kwargs["timeout"], 2222)
             Path(command[command.index("--output-last-message") + 1]).write_text(
                 '{"value":"drafted"}', encoding="utf-8",
             )
@@ -170,9 +195,11 @@ class ValidationReportCliTests(unittest.TestCase):
         with (
             patch("aidast.agents.main.shutil.which", return_value="codex"),
             patch.object(CodexMainAgent, "_require_login"),
-            patch("aidast.agents.main.subprocess.run", side_effect=fake_run),
+            patch("aidast.agents.main.codex_process.run_codex", side_effect=fake_run),
         ):
-            draft = CodexMainAgent(main_model="gpt-5.6-sol")._run_structured(
+            draft = CodexMainAgent(
+                main_model="gpt-5.6-sol", timeout_seconds=2222,
+            )._run_structured(
                 prompt="report", model_type=Draft,
                 artifact_name="report-model-check", operation="report",
             )

@@ -375,7 +375,7 @@ def test_selected_scope_model_reaches_agent_and_survives_restart(setup):
     with patch('aidast.web.scope_workflow.CodexMainAgent', return_value=RevisedAgent()) as factory, \
          patch('aidast.web.scope_workflow.threading.Thread.start', lambda thread: thread.run()):
         job = manager.start(program_id, ScopeCollectionRequest(model='gpt-6-astra', refresh=True))
-    factory.assert_called_once_with(timeout_seconds=300, main_model='gpt-6-astra')
+    factory.assert_called_once_with(main_model='gpt-6-astra')
     assert job['scope_status'] == 'review_required'
     restarted = ScopeWorkflowManager(root, registry, agent_factory=RevisedAgent, worker_mode=True)
     assert restarted.get_job(program_id)['scope_model'] == 'gpt-6-astra'
@@ -402,4 +402,4 @@ def test_scope_model_passes_through_http_request(setup):
         assert completed.wait(timeout=10)
     assert response.status_code == 202
     assert response.json()['job']['scope_model'] == 'gpt-6-luna'
-    factory.assert_called_once_with(timeout_seconds=300, main_model='gpt-6-luna')
+    factory.assert_called_once_with(main_model='gpt-6-luna')

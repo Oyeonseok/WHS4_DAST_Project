@@ -560,7 +560,7 @@ class ScopeWorkflowManager:
             if self._job_output_directory(job, program) != output_dir:
                 raise ValueError("Scope collection destination path changed")
             agent = (self._agent_factory() if self._agent_factory
-                     else CodexMainAgent(timeout_seconds=300, main_model=request.model))
+                     else CodexMainAgent(main_model=request.model))
             primary_reader = None
             fallback_reader = PlaywrightProgramPageReader(timeout_seconds=45)
             if request.login_mode == "headless" and self._public_reader_factory:

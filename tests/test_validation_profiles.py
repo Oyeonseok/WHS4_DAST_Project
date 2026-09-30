@@ -422,6 +422,7 @@ class ValidationProfileTests(unittest.TestCase):
 
         def fake_run(command, **kwargs):
             commands.append(command)
+            self.assertEqual(kwargs["timeout"], 2711)
             result_path = Path(command[command.index("--output-last-message") + 1])
             result_path.write_text(assessment.model_dump_json(), encoding="utf-8")
             return SimpleNamespace(
@@ -433,9 +434,11 @@ class ValidationProfileTests(unittest.TestCase):
             tempfile.TemporaryDirectory() as temporary,
             patch("aidast.agents.main.shutil.which", return_value="codex.exe"),
             patch.object(CodexMainAgent, "_require_login"),
-            patch("aidast.agents.main.subprocess.run", side_effect=fake_run),
+            patch("aidast.agents.main.codex_process.run_codex", side_effect=fake_run),
         ):
-            agent = CodexMainAgent(validation_model="gpt-5.6-terra")
+            agent = CodexMainAgent(
+                validation_model="gpt-5.6-terra", timeout_seconds=2711,
+            )
             first, session_id = agent._run_structured_session(
                 prompt="blind", model_type=BlindAssessment,
                 artifact_name="blind", operation="blind", work_dir=Path(temporary),

@@ -12,6 +12,8 @@ import time
 from pathlib import Path
 from uuid import uuid4
 
+from aidast.core.posix_processes import signal_session
+
 from .process_identity import process_args, process_cwd, process_stat
 from .process_control import control_process
 
@@ -94,7 +96,7 @@ class ScopeProcessController:
                 if _windows_host():
                     process.kill()
                 else:
-                    os.killpg(process.pid, signal.SIGTERM)
+                    signal_session(process.pid, signal.SIGTERM)
             except ProcessLookupError:
                 pass
             self.forget(job_id)
@@ -135,7 +137,7 @@ class ScopeProcessController:
         pid = self.pid(job_id)
         if pid is None:
             raise ValueError("Scope job has no isolated active worker")
-        os.killpg(pid, signum)
+        signal_session(pid, signum)
         return pid
 
     def _control(self, job_id: str, action: str, signum: int | None = None) -> int:
@@ -149,7 +151,7 @@ class ScopeProcessController:
             control_process(pid, marker["started"], action)
         else:
             assert signum is not None
-            os.killpg(pid, signum)
+            signal_session(pid, signum)
         return pid
 
     def pause(self, job_id: str) -> int:

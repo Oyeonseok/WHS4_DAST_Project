@@ -60,7 +60,7 @@ def structured_output_cli(outputs):
 
     with patch("aidast.agents.main.shutil.which", return_value="fixture-codex"), \
             patch.object(CodexMainAgent, "_require_login"), \
-            patch("aidast.agents.main.subprocess.run", side_effect=run):
+            patch("aidast.agents.main.codex_process.run_codex", side_effect=run):
         yield prompts
 
 

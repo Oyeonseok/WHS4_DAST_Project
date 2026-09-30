@@ -178,6 +178,44 @@ class ModelCallLogTests(unittest.TestCase):
         self.assertIsNone(events[0]["requested_model"])
         self.assertNotIn("private exception text", self.database.read_bytes().decode("utf-8", errors="ignore"))
 
+    def test_structured_adapters_preserve_deadline_reason_as_error_cause(self) -> None:
+        from aidast.agents.main import CodexMainAgent, MainAgentError
+        from aidast.agents.native_pipeline import (
+            CodexMainAgent as NativeAgent,
+            MainAgentError as NativeAgentError,
+        )
+        from aidast.core.codex_process import CodexProcessTimeout, TimeoutReason
+
+        class Artifact(BaseModel):
+            ok: bool
+
+        reasons: tuple[TimeoutReason, ...] = ("total", "idle", "tool")
+        for adapter, error_type in [
+            (CodexMainAgent, MainAgentError),
+            (NativeAgent, NativeAgentError),
+        ]:
+            for reason in reasons:
+                with self.subTest(adapter=adapter.__module__, reason=reason):
+                    expired = CodexProcessTimeout(
+                        ["codex"], 900, reason=reason,
+                        tool_id="item_stuck" if reason == "tool" else None,
+                        tool_name="command_execution" if reason == "tool" else None,
+                    )
+                    with (
+                        patch("aidast.agents.main.shutil.which", return_value="codex"),
+                        patch.object(adapter, "_require_login"),
+                        patch(
+                            "aidast.agents.main.codex_process.run_codex",
+                            side_effect=expired,
+                        ),
+                        self.assertRaises(error_type) as caught,
+                    ):
+                        adapter()._run_structured(
+                            prompt="fixture", model_type=Artifact,
+                            artifact_name="deadline", operation="Recon Plan generation",
+                        )
+                    self.assertIs(caught.exception.__cause__, expired)
+
     def test_newer_events_page_before_older_events_without_creating_missing_store(self) -> None:
         self.assertEqual(read_model_call_events(self.root), ([], None))
         self.assertFalse(self.database.exists())
@@ -373,7 +411,7 @@ class ModelCallLogTests(unittest.TestCase):
             model_call_context(scan_id="scan-a", stage="Recon"),
             patch("aidast.agents.main.shutil.which", return_value="codex"),
             patch.object(CodexMainAgent, "_require_login"),
-            patch("aidast.agents.main.subprocess.run", side_effect=run),
+            patch("aidast.agents.main.codex_process.run_codex", side_effect=run),
         ):
             result = CodexMainAgent(main_model="gpt-6-sol")._run_structured(
                 prompt="private prompt", model_type=Artifact,
