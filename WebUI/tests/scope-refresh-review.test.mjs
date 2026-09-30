@@ -7,9 +7,17 @@ import * as scope from '../src/lib/scope.ts';
 // A broken request builder would turn Collect again into an idempotent lookup.
 test('initial collection is ordinary and Collect again explicitly requests refresh', () => {
   assert.equal(typeof scope.scopeRequestForStatus, 'function');
-  assert.deepEqual(scope.scopeRequestForStatus('scope_required'), {login_mode:'runtime-browser',identity:'primary',refresh:false});
+  assert.deepEqual(scope.scopeRequestForStatus('scope_required'), {login_mode:'runtime-browser',identity:'primary',refresh:false,model:'gpt-5.6-sol'});
   for (const status of ['approved','failed','rejected','cancelled']) {
     assert.equal(scope.scopeRequestForStatus(status).refresh, true);
+  }
+});
+
+test('Scope request preserves a selected model distinct from the default', () => {
+  assert.equal(scope.scopeRequestForStatus('approved', 'gpt-6-astra').model, 'gpt-6-astra');
+  for (const model of ['gpt-6-astra', 'provider/custom']) assert.equal(scope.isValidScopeModel(model), true);
+  for (const model of ['', 'https://example.test/model', 'gpt model', 'gpt\nmodel', 'gpt-6\n', 'x'.repeat(129)]) {
+    assert.equal(scope.isValidScopeModel(model), false);
   }
 });
 

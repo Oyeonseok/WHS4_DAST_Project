@@ -3,10 +3,12 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Final
 from uuid import uuid4
 from aidast.scope.models import ScopeAnalysis, ScopeDocument, ScopeExecutionInterpretation, ScopeExecutionRules, MAX_POLICY_REFERENCE_EDGES
 from aidast.core.http_safety import validate_platform_username
+
+DEFAULT_SCOPE_MODEL: Final = "gpt-5.6-sol"
 
 
 def validate_policy_prerequisites(rules: ScopeExecutionRules | None, selected_assets: list[str],
@@ -171,7 +173,7 @@ class ScopeExecutionResolver:
             interpreter = self.interpreter
             if interpreter is None:
                 from aidast.agents.main import CodexMainAgent
-                interpreter = CodexMainAgent().interpret_scope_execution_requirements
+                interpreter = CodexMainAgent(main_model=DEFAULT_SCOPE_MODEL).interpret_scope_execution_requirements
             analysis = self._validate(document, interpreter(document.source), fresh=True)
         except Exception as exc:
             raise ValueError('Scope execution requirements AI interpretation failed; resolve requirements before launch') from exc

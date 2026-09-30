@@ -13,6 +13,7 @@ import {
   mergeActivityLogs,
   reduceScopeActivity,
   scopeCollectionProgress,
+  reconCollectionProgress,
   startScopeElapsedClock,
   startScopeJobPolling,
   shouldPollScopeJob,
@@ -42,7 +43,7 @@ import {
   type RequiredRequestHeader,
   type ScopeExecutionRequirements,
 } from './lib/scan';
-import { programRegistrationUrlError, scopeRequestForStatus, selectApprovedScope } from './lib/scope';
+import { isValidScopeModel, programRegistrationUrlError, scopeRequestForStatus, selectApprovedScope } from './lib/scope';
 import type { PolicyReferenceSummary } from './lib/scope';
 import { ScopePolicyReferences } from './components/ScopePolicyReferences';
 import { apiErrorMessage } from './lib/transport';
@@ -66,7 +67,7 @@ type AttackTaskSnapshot = { coverage?: AttackCoverage | null; total_attempt_coun
 type ScopeTarget = { asset_type: string; asset: string; description: string; maximum_severity: string };
 type ApprovedScope = { scope_id: string; program_id: string; program_name: string; platform: string; targets: ScopeTarget[]; identity_header: 'hackerone' | 'intigriti' | null; approved_by: string; execution_requirements: ScopeExecutionRequirements };
 type ScopeStatus = 'scope_required' | 'collecting' | 'awaiting_browser' | 'paused' | 'cancelling' | 'cancelled' | 'review_required' | 'approved' | 'rejected' | 'failed';
-type RegisteredProgram = { id: string; platform: string; program: string; visibility: 'public' | 'private'; scope_status: ScopeStatus; scope_job_id?: string; scope_error?: string | null; scope_updated_at?: string; created_at: string };
+type RegisteredProgram = { id: string; platform: string; program: string; visibility: 'public' | 'private'; scope_status: ScopeStatus; scope_job_id?: string; scope_model?: string | null; scope_error?: string | null; scope_updated_at?: string; created_at: string };
 type ScopeDraftAsset = ScopeTarget & { eligibility: string };
 type ScopeDraft = { scope_id: string; created_at: string; source_url: string; program_name: string; program_description: string; in_scope_assets: ScopeDraftAsset[]; out_of_scope_assets: ScopeDraftAsset[]; allowed_activities: string[]; prohibited_activities: string[]; submission_requirements: string[]; operational_constraints: string[]; safe_harbor: string; ambiguities: string[]; source_evidence: { section: string; quote: string }[]; required_request_headers?: RequiredRequestHeader[] | null; execution_rules?: ScopeExecutionRules | null; policy_references?: PolicyReferenceSummary[] };
 type ScopeApproval = { approved_by: string; approved_at: string };
@@ -81,17 +82,17 @@ const codexModels = [
   'gpt-5.6-luna', 'gpt-5.6-terra', 'gpt-5.6-sol',
   'gpt-6-luna', 'gpt-6-sol', 'gpt-6-astra',
 ] as const;
-function ScanModelField({ label, value, onChange, customLabel }: {
-  label: string; value: string; onChange: (value: string) => void; customLabel: string;
+function ScanModelField({ label, value, onChange, customLabel, disabled = false }: {
+  label: string; value: string; onChange: (value: string) => void; customLabel: string; disabled?: boolean;
 }) {
   const selected = codexModels.some(model => model === value) ? value : '';
   return <div className="form-field">
     <span>{label}</span>
-    <select aria-label={label} value={selected} onChange={event => onChange(event.target.value)}>
+    <select aria-label={label} disabled={disabled} value={selected} onChange={event => onChange(event.target.value)}>
       {codexModels.map(model => <option key={model} value={model}>{model}</option>)}
       <option value="">{customLabel}</option>
     </select>
-    {!selected && <input aria-label={`${label} · ${customLabel}`} value={value} onChange={event => onChange(event.target.value)} maxLength={128} autoComplete="off" spellCheck={false}/>}
+    {!selected && <input aria-label={`${label} · ${customLabel}`} disabled={disabled} value={value} onChange={event => onChange(event.target.value)} maxLength={128} autoComplete="off" spellCheck={false}/>}
   </div>;
 }
 const attackSkillLabels: Record<string, string> = {
@@ -216,10 +217,6 @@ function useEstimatedProgress(identity: string, actual: number, status: string):
       return;
     }
     const mode = status === 'running' ? 'running' : status === 'completed' ? 'completed' : 'paused';
-    if (shown > baseline || (mode === 'paused' && shown !== baseline)) {
-      setState({ identity, value: baseline, status });
-      return;
-    }
     const delay = estimatedProgressDelay(shown, actual, mode);
     if (delay === null) {
       if (state.status !== status) setState({ identity, value: shown, status });
@@ -340,6 +337,7 @@ export default function App() {
   const [scopeConfirmed, setScopeConfirmed] = useState(false);
   const [scopeActionBusy, setScopeActionBusy] = useState(false);
   const [scopeWorkflowError, setScopeWorkflowError] = useState('');
+  const [scopeModel, setScopeModel] = useState('gpt-5.6-sol');
   const [scopeId, setScopeId] = useState('');
   const [selectedTargets, setSelectedTargets] = useState<string[]>([]);
   const [scanProfile, setScanProfile] = useState<ExecutionProfileId>('safe-recon');
@@ -422,7 +420,9 @@ export default function App() {
     : 'loading';
   const currentStageStatus = snapshot?.stage_statuses?.[snapshot.stage];
   const scanProgressStatus = currentStageProgressStatus(snapshot?.status, currentStageStatus);
-  const estimatedScanProgress = useEstimatedProgress(snapshot ? `${snapshot.scan_id}:${snapshot.stage}` : scanId, snapshot?.progress ?? 0, scanProgressStatus);
+  const scanProgressTarget = snapshot?.stage === 'Recon'
+    ? reconCollectionProgress(snapshot.progress, snapshot.logs) : snapshot?.progress ?? 0;
+  const estimatedScanProgress = useEstimatedProgress(snapshot ? `${snapshot.scan_id}:${snapshot.stage}` : scanId, scanProgressTarget, scanProgressStatus);
   const retryAction = snapshot ? scanRetryAction(snapshot) : null;
   const cancelling = cancelRequest?.scanId === scanId;
   const cancelPhase = cancelling ? cancelRequest.phase : null;
@@ -926,16 +926,17 @@ export default function App() {
     finally { setScopeSubmitting(false); }
   };
   const openScopeWorkflow = (item: RegisteredProgram) => {
+    setScopeModel(item.scope_model || 'gpt-5.6-sol');
     setWorkflowProgram(item); dispatchScopeActivity({ type: 'job-selected', status: item.scope_status }); setScopeDraft(null); setScopeApproval(null); setScopeReviewer(''); setScopeConfirmed(false); setScopeWorkflowError(''); setModal('scope-workflow');
   };
   const startScopeCollection = async () => {
-    if (!workflowProgram) return;
+    if (!workflowProgram || scopeActionBusy || !isValidScopeModel(scopeModel)) return;
     setScopeActionBusy(true); setScopeWorkflowError(''); dispatchScopeActivity({ type: 'reset' }); setScopeDraft(null); setScopeApproval(null);
     try {
       const base = import.meta.env.VITE_API_BASE_URL || location.origin;
       const response = await fetch(new URL(`/api/v1/programs/${encodeURIComponent(workflowProgram.id)}/scope-collection`, base), {
         method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(scopeRequestForStatus(workflowProgram.scope_status)),
+        body: JSON.stringify(scopeRequestForStatus(workflowProgram.scope_status, scopeModel)),
       });
       const body = await response.json() as { job?: Partial<RegisteredProgram>; detail?: unknown };
       if (!response.ok || !body.job) throw new Error(tr(apiErrorMessage(body.detail, `Scope collection returned ${response.status}`)));
@@ -1425,12 +1426,17 @@ export default function App() {
   </div>;
   const scopeWorkflowContent = workflowProgram && <div className="scope-workflow">
     <div className="workflow-summary"><div><span>{workflowProgram.platform}</span><strong>{workflowProgram.visibility === 'private' && !privateVisible ? tr('Private program') : workflowProgram.program}</strong></div><Badge tone={scopeStatusTone(workflowProgram.scope_status)}>{tr(scopeStatusLabel[workflowProgram.scope_status])}</Badge></div>
+    {['scope_required', 'approved', 'rejected', 'failed', 'cancelled'].includes(workflowProgram.scope_status) ? <div>
+      <ScanModelField label={tr('Scope model')} value={scopeModel} onChange={setScopeModel} customLabel={tr('Custom model ID')} disabled={scopeActionBusy}/>
+      <p className="form-hint">{tr('The selected model handles Scope navigation, collection and policy analysis.')}</p>
+      {!isValidScopeModel(scopeModel) && <p className="form-error" role="alert">{tr('Enter a valid model ID before collecting Scope.')}</p>}
+    </div> : <p className="form-hint">{tr('Scope model')}: {workflowProgram.scope_model || tr('Model was not recorded for this call')}</p>}
     {(workflowProgram.scope_status === 'scope_required' || workflowProgram.scope_status === 'rejected' || workflowProgram.scope_status === 'failed' || workflowProgram.scope_status === 'cancelled') && <>
       <div className="notice"><Icon name="scope"/><div><strong>{tr('Collect a policy snapshot')}</strong><p>{tr('AI DAST opens its own browser. Log in to the bug bounty platform, then continue here. AI DAST will open the registered program page and collect its scope. The result remains an unapproved draft until you review it.')}</p></div></div>
       {workflowProgram.scope_error && <p className="form-error">{tr('Previous attempt:')} {workflowProgram.scope_error}</p>}
       {workflowProgram.scope_status === 'cancelled' && <p role="status">{tr('Scope collection was cancelled. You can start a new collection.')}</p>}
       {(workflowProgram.scope_status === 'failed' || workflowProgram.scope_status === 'cancelled') && displayedScopeProgress > 0 && scopeProgressBar}
-      <div className="button-row"><button className="secondary-button" onClick={closeDialog}>{tr('Cancel')}</button><button className="primary-button" disabled={scopeActionBusy} onClick={() => void startScopeCollection()}>{tr(scopeActionBusy ? 'Starting…' : workflowProgram.scope_status === 'scope_required' ? 'Collect Scope' : 'Collect again')} <Icon name="arrow" size={14}/></button></div>
+      <div className="button-row"><button className="secondary-button" onClick={closeDialog}>{tr('Cancel')}</button><button className="primary-button" disabled={scopeActionBusy || !isValidScopeModel(scopeModel)} onClick={() => void startScopeCollection()}>{tr(scopeActionBusy ? 'Starting…' : workflowProgram.scope_status === 'scope_required' ? 'Collect Scope' : 'Collect again')} <Icon name="arrow" size={14}/></button></div>
     </>}
     {(workflowProgram.scope_status === 'collecting' || workflowProgram.scope_status === 'awaiting_browser' || workflowProgram.scope_status === 'paused' || workflowProgram.scope_status === 'cancelling') && <>
       <div className="notice"><Icon name="terminal"/><div><strong>{tr(workflowProgram.scope_status === 'awaiting_browser' ? 'Browser input required' : workflowProgram.scope_status === 'paused' ? 'Scope collection paused' : workflowProgram.scope_status === 'cancelling' ? 'Scope cancellation in progress' : 'Scope collection is running')} <span className="scope-elapsed" role="timer">· {scopeElapsedLabel}</span></strong><p>{tr(workflowProgram.scope_status === 'awaiting_browser' ? 'Check access in the opened local browser, then continue here. Log in only if the site requires it.' : workflowProgram.scope_status === 'paused' ? 'The Scope worker and its browser are paused. Continue to resume the same collection.' : workflowProgram.scope_status === 'cancelling' ? 'The Scope worker is shutting down. The result will show Cancelled after it exits.' : 'The dashboard is collecting and interpreting the program policy. Keep this dialog open to follow progress.')}</p></div></div>
@@ -1459,7 +1465,7 @@ export default function App() {
       <details className="scope-evidence"><summary>{tr('Source evidence and safe harbor')} <span>{scopeDraft.source_evidence.length}</span></summary><div className="scope-evidence-section"><strong>{tr('Safe harbor')}</strong><p>{tr('Program protections for policy-compliant research; approved Scope still defines permitted targets.')}</p><p>{scopeDraft.safe_harbor || tr('No safe-harbor text was extracted.')}</p></div><div className="scope-evidence-section"><strong>{tr('Source evidence')}</strong><p>{tr('Exact excerpts from the program page supporting the collected assets and rules.')}</p>{scopeDraft.source_evidence.map((item, index) => <blockquote key={index}><strong>{item.section}</strong>{item.quote}</blockquote>)}</div></details>
       {workflowProgram.scope_status === 'review_required' && <div className="scope-decision"><h3>{tr('Is this Scope accurate and authorized?')}</h3><p>{language === 'ko' ? <><strong>Yes</strong>는 무결성이 결합된 Scope 산출물을 게시하고 스캔을 활성화합니다. <strong>No</strong>는 새 초안을 삭제합니다. 기존 승인된 Scope는 계속 사용할 수 있습니다.</> : <><strong>Yes</strong> publishes integrity-bound Scope artifacts and enables scanning. <strong>No</strong> deletes this draft. Previously approved Scopes remain available.</>}</p><label className="form-field"><span>{tr('Reviewer name')} <small>{tr('required for Yes')}</small></span><input value={scopeReviewer} onChange={event => setScopeReviewer(event.target.value)} maxLength={160} autoComplete="off" placeholder={tr('Local operator or team identity')}/></label><label className="confirm-field"><input type="checkbox" checked={scopeConfirmed} onChange={event => setScopeConfirmed(event.target.checked)}/><span>{tr('I reviewed the listed assets and rules against the source policy and confirm this Scope is authorized.')}</span></label><div className="decision-buttons"><button className="reject-button" disabled={scopeActionBusy} onClick={() => void decideScope('no')}>{tr('No · Reject draft')}</button><button className="primary-button" disabled={scopeActionBusy || !scopeReviewer.trim() || !scopeConfirmed} onClick={() => void decideScope('yes')}>{tr('Yes · Approve Scope')} <Icon name="check" size={14}/></button></div></div>}
     </>}
-    {workflowProgram.scope_status === 'approved' && <div className="button-row"><button className="secondary-button" disabled={scopeActionBusy} onClick={() => void startScopeCollection()}>{tr(scopeActionBusy ? 'Starting…' : 'Collect again')}</button>{scopeDraft && <button className="primary-button" onClick={() => scanFromScope(scopeDraft.scope_id)}>{tk('이 Scope로 새 스캔', 'New scan with this Scope')}</button>}</div>}
+    {workflowProgram.scope_status === 'approved' && <div className="button-row"><button className="secondary-button" disabled={scopeActionBusy || !isValidScopeModel(scopeModel)} onClick={() => void startScopeCollection()}>{tr(scopeActionBusy ? 'Starting…' : 'Collect again')}</button>{scopeDraft && <button className="primary-button" onClick={() => scanFromScope(scopeDraft.scope_id)}>{tk('이 Scope로 새 스캔', 'New scan with this Scope')}</button>}</div>}
     {((workflowProgram.scope_status === 'approved' && scopeDraft && scopeApproval) || workflowProgram.scope_status === 'rejected') && <div className={`workflow-result ${workflowProgram.scope_status}`}><Icon name={workflowProgram.scope_status === 'approved' ? 'check' : 'shield'} size={24}/><div><h3>{tr(workflowProgram.scope_status === 'approved' ? 'Scope approved' : 'Draft rejected')}</h3><p>{workflowProgram.scope_status === 'approved' ? tr('Integrity-bound artifacts were published. The verified targets are now available in New Scan.') : tk('새 초안은 삭제되었습니다. 기존 승인된 Scope는 계속 사용할 수 있습니다.', 'The new draft was discarded. Previously approved Scopes remain available.')}</p></div><button className="secondary-button" onClick={() => setModal(null)}>{tr('Done')}</button></div>}
     {scopeWorkflowError && <p className="form-error" role="alert">{scopeWorkflowError}</p>}
   </div>;

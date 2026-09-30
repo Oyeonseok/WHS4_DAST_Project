@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseModelCallPage, parseScanTokenUsage, tokenStages } from '../src/lib/modelCalls.ts';
+import { groupModelCalls, mergeModelCallEvents, parseModelCallPage, parseScanTokenUsage, tokenStages } from '../src/lib/modelCalls.ts';
 
 const event = {
   event_id: 12,
@@ -22,7 +22,31 @@ const event = {
   cached_input_tokens: null,
   output_tokens: null,
   usage_status: 'not_captured',
+  input_summary: {}, result_summary: {},
 };
+
+test('call records group terminal and started pages without losing older loaded history', () => {
+  const start = {...event,event_id:11,state:'started',occurred_at:'2026-09-26T23:59:00Z'};
+  const older = {...event,event_id:3,call_id:'older'};
+  const merged = mergeModelCallEvents([older,start], [event,start]);
+  const calls = groupModelCalls(merged);
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0].state, 'success');
+  assert.equal(calls[0].started_at, start.occurred_at);
+  assert.equal(calls[1].call_id, 'older');
+  assert.deepEqual(groupModelCalls([event,start]), groupModelCalls([start,event]));
+});
+
+test('safe summaries parse legacy records but reject content and invalid counts', () => {
+  const {input_summary,result_summary,...legacy} = event;
+  assert.deepEqual(parseModelCallPage({events:[legacy],next_before:null}).events[0], event);
+  const valid = {...event,stage:'Scope',input_summary:{prompt_characters:42},result_summary:{in_scope_count:3}};
+  assert.deepEqual(parseModelCallPage({events:[valid],next_before:null}).events[0], valid);
+  for(const summary of [{prompt:'secret'}, {header_count:'3'}, {header_count:-1}, {header_count:true},
+    {capture_selected:0}, {navigation_selected:2}]) {
+    assert.deepEqual(parseModelCallPage({events:[{...event,result_summary:summary}],next_before:null}).events, []);
+  }
+});
 
 test('model call pages keep only typed metadata and pagination', () => {
   const page = parseModelCallPage({

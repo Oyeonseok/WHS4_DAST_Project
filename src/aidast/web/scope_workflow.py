@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any, Callable, Literal
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from aidast.agents.main import CodexMainAgent
 from aidast.core.model_calls import (
@@ -26,6 +26,7 @@ from aidast.core.model_calls import (
 )
 from aidast.orchestration.scope import CoordinatorError, ScopeCoordinator
 from aidast.scope.models import ScopeDocument
+from aidast.scope.execution_rules import DEFAULT_SCOPE_MODEL
 from aidast.scope.paths import identify_program, scope_archive_directories, scope_revision_directory
 from aidast.scope.reader import PlaywrightProgramPageReader, RuntimeBrowserProgramPageReader
 
@@ -60,6 +61,15 @@ class ScopeCollectionRequest(BaseModel):
     login_mode: Literal["headless", "runtime-browser"] = "headless"
     identity: str | None = Field(default=None, max_length=64)
     refresh: bool = False
+    model: str = Field(default=DEFAULT_SCOPE_MODEL, min_length=1, max_length=128,
+                       pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:/-]*$")
+
+    @field_validator("model")
+    @classmethod
+    def valid_model_name(cls, value: str) -> str:
+        if "://" in value or value != value.strip():
+            raise ValueError("model must be an identifier, not a URL")
+        return value
 
     @model_validator(mode="after")
     def require_runtime_identity(self) -> "ScopeCollectionRequest":
@@ -106,7 +116,7 @@ class ScopeWorkflowManager:
         self.draft_root.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
         self._browser_events: dict[str, threading.Event] = {}
-        self._agent_factory = agent_factory or (lambda: CodexMainAgent(timeout_seconds=300))
+        self._agent_factory = agent_factory
         self._public_reader_factory = public_reader_factory
         self._runtime_reader_factory = runtime_reader_factory
         self._worker_mode = worker_mode
@@ -158,6 +168,8 @@ class ScopeWorkflowManager:
                 conn.execute("ALTER TABLE scope_jobs ADD COLUMN paused_from TEXT")
             if "output_path" not in job_columns:
                 conn.execute("ALTER TABLE scope_jobs ADD COLUMN output_path TEXT")
+            if "model" not in job_columns:
+                conn.execute("ALTER TABLE scope_jobs ADD COLUMN model TEXT")
             interrupted = conn.execute(
                 "SELECT job_id,status FROM scope_jobs WHERE status IN ('collecting','awaiting_browser','paused','cancelling')"
             ).fetchall()
@@ -224,13 +236,13 @@ class ScopeWorkflowManager:
             now = _now()
             conn.execute(
                 """INSERT INTO scope_jobs
-                (job_id,program_key,status,login_mode,draft_path,error,created_at,updated_at,output_path)
-                VALUES (?,?, 'collecting', ?,NULL,NULL,?,?,?)
+                (job_id,program_key,status,login_mode,draft_path,error,created_at,updated_at,output_path,model)
+                VALUES (?,?, 'collecting', ?,NULL,NULL,?,?,?,?)
                 ON CONFLICT(program_key) DO UPDATE SET
                 job_id=excluded.job_id,status='collecting',login_mode=excluded.login_mode,
                 draft_path=NULL,error=NULL,paused_from=NULL,output_path=excluded.output_path,
-                created_at=excluded.created_at,updated_at=excluded.updated_at""",
-                (job_id, program["program_key"], request.login_mode, now, now, str(output_dir)),
+                created_at=excluded.created_at,updated_at=excluded.updated_at,model=excluded.model""",
+                (job_id, program["program_key"], request.login_mode, now, now, str(output_dir), request.model),
             )
             self._append_event(conn, job_id, "info", "스코프 수집을 시작했습니다.", message_code="scope.started")
         if self._process_controller is not None:
@@ -547,7 +559,8 @@ class ScopeWorkflowManager:
                 raise ValueError("Scope collection no longer owns this job")
             if self._job_output_directory(job, program) != output_dir:
                 raise ValueError("Scope collection destination path changed")
-            agent = self._agent_factory()
+            agent = (self._agent_factory() if self._agent_factory
+                     else CodexMainAgent(timeout_seconds=300, main_model=request.model))
             primary_reader = None
             fallback_reader = PlaywrightProgramPageReader(timeout_seconds=45)
             if request.login_mode == "headless" and self._public_reader_factory:
@@ -653,7 +666,7 @@ class ScopeWorkflowManager:
             VALUES (?,?,?,'headless',NULL,NULL,?,?,NULL,?)
             ON CONFLICT(program_key) DO UPDATE SET job_id=excluded.job_id,status=excluded.status,
             login_mode=excluded.login_mode,draft_path=NULL,error=NULL,paused_from=NULL,output_path=excluded.output_path,
-            created_at=excluded.created_at,updated_at=excluded.updated_at""",
+            created_at=excluded.created_at,updated_at=excluded.updated_at,model=NULL""",
             (job_id, program["program_key"], status, now, now, str(output_path)),
         )
         self._append_event(conn, job_id, "success", message, message_code="scope.already_approved")
@@ -721,6 +734,7 @@ class ScopeWorkflowManager:
             "scope_job_id": str(row["job_id"]),
             "scope_error": str(row["error"]) if row["error"] else None,
             "scope_updated_at": str(row["updated_at"]),
+            "scope_model": str(row["model"]) if row["model"] else None,
         }
 
     def _validated_draft_path(self, path: Path) -> Path:

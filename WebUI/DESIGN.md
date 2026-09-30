@@ -169,6 +169,13 @@ Spacing follows a 4px base with practical steps of 4, 8, 12, 16, 20, 24,
   `작업 중 · N초` row and status badge update once per second. Persisted backend
   events remain the authoritative phase history; the timer only fills quiet
   intervals so the operator can see that work is still running.
+- **Progress**: Scope browser activity and Recon task/tool activity advance
+  estimated progress within their current phase. Running values move in 1%
+  steps every 200ms; confirmed completion catches up every 80ms. Quiet
+  intervals do not invent work, pause freezes the value, and replaying a
+  shorter event window never moves the same job backwards. Recon discovery
+  reserves progress above 75% for tagging, review, and export; only a recorded
+  completed stage reaches 100%.
 
 ### Agent work board
 
@@ -192,6 +199,27 @@ Spacing follows a 4px base with practical steps of 4, 8, 12, 16, 20, 24,
 - **Accessibility**: readable contrast, text level available to assistive
   technology, and wrapping for unbroken data.
 - **Layout**: chronological vertical stack.
+
+### LLM execution record
+
+- Group start and terminal events by call ID; retain older loaded calls on refresh.
+- Show Scope as a distinct filterable stage, with its collection job ID rather
+  than an empty scan-link warning. Show the explicitly requested model;
+  historical missing models remain unrecorded, never inferred.
+- Purpose, input-size counts, final-result counts, error category, timing and
+  token usage use the existing facts grid and open disclosure primitives.
+  Raw prompts, response bodies and credentials are not rendered.
+- Input size is a compact inline fact rather than a height-matched empty card.
+  Results use one open disclosure: decision counts are prominent section-size
+  values, followed by policy, evidence and response-field counts in that order.
+  Missing fields are omitted; recorded zero counts remain visible.
+- Model, stage and duration stay above the summaries; technical IDs and start
+  time follow them. Summary labels and numbers wrap together on narrow screens.
+- Scope collection and re-collection reuse the scan model selector, including
+  custom IDs and validation. Active jobs show their recorded model as read-only.
+- Live records refresh while this view is mounted; event IDs preserve history.
+- Labels use the Korean translation dictionary; supporting facts use one column
+  on mobile while primary metrics wrap as whole items.
 
 ### Operator next action
 

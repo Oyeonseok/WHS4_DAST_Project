@@ -34,6 +34,101 @@ class ModelCallLogTests(unittest.TestCase):
         self.root = Path(self.temporary.name)
         self.database = self.root / "logs" / "CodexCalls.db"
 
+    def test_scope_policy_call_records_safe_work_summary_and_clears_scan_linkage(self) -> None:
+        class Result(BaseModel):
+            required_request_headers: list[str]
+            execution_rules: dict[str, list[str]]
+
+        class Agent:
+            _main_model = "gpt-5.6-sol"
+
+            @logged_model_call("structured", model_attribute="_main_model")
+            def run(self, *, operation: str, prompt: str) -> Result:
+                return Result(required_request_headers=["private-header"],
+                              execution_rules={"required_inputs": ["private-input"]})
+
+        with (
+            using_model_call_sink(SQLiteModelCallSink(self.root)),
+            model_call_context(scan_id="other-scan", stage="Recon", task_id="old-task"),
+        ):
+            Agent().run(operation="approved Scope execution interpretation", prompt="private-prompt")
+        events, _ = read_model_call_events(self.root)
+        completed = events[0]
+        self.assertEqual(completed["operation_code"], "scope_execution_interpretation")
+        self.assertEqual(completed["stage"], "Scope")
+        self.assertIsNone(completed["scan_id"])
+        self.assertIsNone(completed["task_id"])
+        self.assertEqual(completed["input_summary"], {"prompt_characters": 14})
+        self.assertEqual(completed["result_summary"]["header_count"], 1)
+        self.assertEqual(completed["result_summary"]["rule_count"], 1)
+        stored = self.database.read_bytes().decode("utf-8", errors="ignore")
+        for secret in ["private-header", "private-input", "private-prompt"]:
+            self.assertNotIn(secret, stored)
+
+    def test_old_metadata_database_reads_without_migration_and_new_calls_add_details(self) -> None:
+        class Agent:
+            _main_model = "gpt-test"
+
+            @logged_model_call("structured", model_attribute="_main_model")
+            def run(self, *, operation: str, prompt: str) -> None:
+                return None
+
+        with using_model_call_sink(SQLiteModelCallSink(self.root)):
+            Agent().run(operation="Scope collection", prompt="old")
+        with sqlite3.connect(self.database) as conn:
+            conn.execute("ALTER TABLE codex_call_events DROP COLUMN input_summary")
+            conn.execute("ALTER TABLE codex_call_events DROP COLUMN result_summary")
+        original = self.database.read_bytes()
+        events, _ = read_model_call_events(self.root)
+        self.assertEqual(events[0]["input_summary"], {})
+        self.assertEqual(events[0]["result_summary"], {})
+        self.assertEqual(self.database.read_bytes(), original)
+        with using_model_call_sink(SQLiteModelCallSink(self.root)):
+            Agent().run(operation="Scope collection", prompt="new prompt")
+        events, _ = read_model_call_events(self.root)
+        self.assertEqual(events[0]["input_summary"], {"prompt_characters": 10})
+        self.assertEqual(events[-1]["input_summary"], {})
+
+    def test_corrupt_summary_is_rejected_without_exposing_contents(self) -> None:
+        class Agent:
+            _main_model = "gpt-test"
+
+            @logged_model_call("structured", model_attribute="_main_model")
+            def run(self, *, operation: str) -> None:
+                return None
+
+        with using_model_call_sink(SQLiteModelCallSink(self.root)):
+            Agent().run(operation="Scope collection")
+        with sqlite3.connect(self.database) as conn:
+            conn.execute("DROP TRIGGER codex_call_no_update")
+            conn.execute("UPDATE codex_call_events SET result_summary=?",
+                         (json.dumps({"private-output": "secret-response"}),))
+        with TestClient(create_app(result_root=self.root)) as client:
+            response = client.get("/api/v1/model-calls")
+        self.assertEqual(response.status_code, 503)
+        self.assertNotIn("secret-response", response.text)
+
+    def test_scope_navigation_records_only_the_chosen_safe_action(self) -> None:
+        class Result(BaseModel):
+            action: str
+            candidate_id: int | None = None
+
+        class Agent:
+            _main_model = "gpt-test"
+
+            @logged_model_call("structured", model_attribute="_main_model")
+            def run(self, *, operation: str, action: str) -> Result:
+                return Result(action=action, candidate_id=37)
+
+        with using_model_call_sink(SQLiteModelCallSink(self.root)):
+            Agent().run(operation="Scope page navigation", action="open")
+            Agent().run(operation="Scope page navigation", action="capture")
+        events, _ = read_model_call_events(self.root)
+        completed = [event["result_summary"] for event in events if event["state"] == "success"]
+        self.assertEqual(completed, [{"field_count": 2, "capture_selected": 1},
+                                    {"field_count": 2, "navigation_selected": 1}])
+        self.assertNotIn("candidate_id", self.database.read_bytes().decode("utf-8", errors="ignore"))
+
     def test_disabled_calls_create_no_files_and_enabled_calls_record_metadata_only(self) -> None:
         class Agent:
             _main_model = "gpt-test"
