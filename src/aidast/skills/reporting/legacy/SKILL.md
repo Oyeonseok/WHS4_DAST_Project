@@ -6,8 +6,8 @@ description: Draft evidence-bound HackerOne, Bugcrowd, or Intigriti reports from
 # Local report writing
 
 Use the supplied report context and JSON schema. Read the matching platform
-reference: [HackerOne](references/hackerone.md),
-[Bugcrowd](references/bugcrowd.md), or [Intigriti](references/intigriti.md).
+reference: [HackerOne](../references/hackerone.md),
+[Bugcrowd](../references/bugcrowd.md), or [Intigriti](../references/intigriti.md).
 These are local writing templates; program-specific fields may still be missing.
 
 Return one JSON object matching the schema. Copy `validation_id`, `platform`,

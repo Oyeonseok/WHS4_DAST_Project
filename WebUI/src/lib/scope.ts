@@ -9,8 +9,12 @@ export function programRegistrationUrlError(programUrl: string): string | null {
     : null;
 }
 
-export function scopeRequestForStatus(status: string) {
-  return { ...scopeCollectionRequest, refresh: status !== 'scope_required' };
+export function isValidScopeModel(model: string): boolean {
+  return model === model.trim() && /^[A-Za-z0-9][A-Za-z0-9_.:/-]{0,127}$/.test(model) && !model.includes('://');
+}
+
+export function scopeRequestForStatus(status: string, model = 'gpt-5.6-sol') {
+  return { ...scopeCollectionRequest, refresh: status !== 'scope_required', model };
 }
 
 export function selectApprovedScope(scopes: readonly { scope_id: string }[], current: string): string {
