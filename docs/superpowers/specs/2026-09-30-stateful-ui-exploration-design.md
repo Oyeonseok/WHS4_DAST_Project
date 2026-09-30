@@ -16,7 +16,13 @@ The current initial AI pass and post-Katana follow-up each allow four model deci
 | One post-Katana explorer with a persistent frontier | Tracks screens and workflows, spends one budget on useful actions | Needs bounded screen identity, backtracking and guarded form actions. |
 | Unrestricted browser agent | Broad freedom | Cannot rely on the existing Scope boundary or reproduce decisions. |
 
-Use the persistent frontier. Keep PlaywrightDriver as the sole browser executor and the existing request governor as the authority for every actual request. The model selects from host-generated action candidates; it cannot supply arbitrary URLs, scripts, selectors or HTTP requests.
+Use the persistent frontier. Keep PlaywrightDriver as the sole browser executor and the existing egress policy and request governor as the authority for every actual request. The model selects from host-generated action candidates; it cannot supply arbitrary URLs, scripts, selectors or HTTP requests.
+
+## Where Scope is enforced
+
+The approved Scope is interpreted into a `TargetPolicy` for each execution target; Recon passes its `mitm_rules()` snapshot to mitmproxy. There is no AI call or reread of Scope.md for each request. Before a browser action, the explorer filters candidates using that policy so it avoids predictable blocks. PlaywrightDriver also checks each browser request at its route boundary. For proxied traffic, the mitmproxy addon is the final egress gate: it checks the physical request's destination, path, method, exclusions, browser workflow evidence and shared request allowance before forwarding it. Katana and ffuf use this same proxy. For a direct browser transport, which does not pass through the addon, PlaywrightDriver performs request admission and reserves the shared governor allowance itself. Each forwarded request consumes the allowance at its active egress gate, not once per check.
+
+Thus the explorer does not add another independent Scope interpretation. Its candidate check prevents waste and unsafe UI choices; the existing transport gate decides whether the actual HTTP request can leave. A click can cause several requests, and a redirect can target a different URL, so checking only the chosen button would be insufficient.
 
 ## Recon sequence
 
