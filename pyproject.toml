@@ -34,7 +34,7 @@ pythonpath = ["src", "."]
 cache_dir = "result/.pytest_cache"
 
 [project.scripts]
-aidast = "aidast.cli:main"
+aidast = "aidast.cli:entrypoint"
 
 [tool.setuptools.packages.find]
 where = ["src"]

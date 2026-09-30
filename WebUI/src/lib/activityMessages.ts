@@ -112,6 +112,7 @@ const reconPhaseLabels: Record<string, string> = {
   graphql_detection: 'GraphQL 엔드포인트 확인', zap_openapi: 'ZAP OpenAPI 탐색',
   zap_graphql: 'ZAP GraphQL 탐색', mitm_capture: 'mitmproxy 요청 캡처',
   adaptive_js: 'JS 근거 분석', adaptive_js_followup: '새 문서·JS 추가 분석', observed_json_recovery: '관측 JSON 경로 검증',
+  observation_tagging: '관측 태깅',
 };
 const reconStateLabels: Record<string, string> = {
   started: '시작', finished: '종료', skipped: '건너뜀', failed: '실패', planned: '작업 범위 결정',
@@ -134,6 +135,7 @@ const reconPurpose: Record<string, string> = {
   playwright_interaction: '화면을 조작하면서 새 페이지와 네트워크 요청을 관찰합니다.',
   ffuf: '허용된 웹 주소에서 경로 후보의 HTTP 응답을 확인합니다.',
   api_secondary: 'API 명세와 GraphQL 경로를 추가로 확인합니다.',
+  observation_tagging: '관측마다 페이지 맥락·기능·데이터 역할을 분류하고 근거를 기록합니다.',
   openapi_detection: 'OpenAPI 명세가 공개되어 있는지 확인합니다.',
   graphql_detection: 'GraphQL 요청 경로가 있는지 확인합니다.',
   zap_openapi: '발견한 OpenAPI 명세에서 API 경로를 수집합니다.',
@@ -146,6 +148,16 @@ export function reconActivityPurpose(language: Language, phase: unknown): string
 }
 
 export function reconActivityLabel(params: Record<string, string | number>): string {
+  if (params.phase === 'observation_tagging') {
+    const batch = typeof params.index === 'number' && typeof params.total === 'number'
+      ? `${params.index}/${params.total} 배치` : '태깅 배치';
+    const count = typeof params.count === 'number' ? ` · 관측 ${params.count}건` : '';
+    const outcome = typeof params.processed_count === 'number' && typeof params.failed_count === 'number'
+      ? ` · 처리 ${params.processed_count}건, 실패 ${params.failed_count}건` : '';
+    const state = params.state === 'started' ? '페이지 맥락·기능·데이터 역할 분류 중'
+      : params.state === 'finished' ? '분류 완료' : '분류 실패';
+    return `관측 태깅 · ${batch} · ${state}${count}${outcome}`;
+  }
   if (params.phase === 'endpoint_discovery' && params.state === 'found') {
     const status = typeof params.response_status === 'number' ? params.response_status : null;
     const evidence = status === null ? 'HTTP 응답 미확인 · 후보'
@@ -246,6 +258,7 @@ const reconPhaseLabelsEn: Record<string, string> = {
   graphql_detection: 'GraphQL endpoint detection', zap_openapi: 'ZAP OpenAPI discovery',
   zap_graphql: 'ZAP GraphQL discovery', mitm_capture: 'mitmproxy request capture',
   adaptive_js: 'JS evidence analysis', adaptive_js_followup: 'New document and JS analysis', observed_json_recovery: 'Observed JSON verification',
+  observation_tagging: 'Observation tagging',
 };
 const reconStateLabelsEn: Record<string, string> = {
   started: 'started', finished: 'finished', skipped: 'skipped', failed: 'failed', planned: 'work scope planned',
@@ -268,6 +281,7 @@ const reconPurposeEn: Record<string, string> = {
   playwright_interaction: 'Interact with pages to observe new screens and requests.',
   ffuf: 'Check HTTP responses for path candidates at allowed web addresses.',
   api_secondary: 'Check API specifications and GraphQL routes.',
+  observation_tagging: 'Classify each observation by page context, function, and data role, then record the evidence.',
   openapi_detection: 'Check whether an OpenAPI specification is available.',
   graphql_detection: 'Check for a GraphQL request route.',
   zap_openapi: 'Collect API routes from a discovered OpenAPI specification.',
@@ -275,6 +289,16 @@ const reconPurposeEn: Record<string, string> = {
   mitm_capture: 'Record browser requests that pass the allowed-scope filter.',
 };
 function reconActivityLabelEn(params: Record<string, string | number>): string {
+  if (params.phase === 'observation_tagging') {
+    const batch = typeof params.index === 'number' && typeof params.total === 'number'
+      ? `batch ${params.index}/${params.total}` : 'tagging batch';
+    const count = typeof params.count === 'number' ? ` · ${params.count} observations` : '';
+    const outcome = typeof params.processed_count === 'number' && typeof params.failed_count === 'number'
+      ? ` · ${params.processed_count} processed, ${params.failed_count} failed` : '';
+    const state = params.state === 'started' ? 'classifying page context, function, and data role'
+      : params.state === 'finished' ? 'classification complete' : 'classification failed';
+    return `Observation tagging · ${batch} · ${state}${count}${outcome}`;
+  }
   if (params.phase === 'endpoint_discovery' && params.state === 'found') {
     const status = typeof params.response_status === 'number' ? params.response_status : null;
     const evidence = status === null ? 'candidate · no HTTP response observed'

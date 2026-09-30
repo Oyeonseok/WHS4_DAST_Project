@@ -9,6 +9,7 @@ from uuid import uuid4
 
 from aidast.agents.main import CodexMainAgent
 from aidast.agents.policy_guidance import policy_guidance_context, policy_skill_text, stage_policy_skill
+from aidast.core.model_calls import model_call_context
 
 from ..contracts.models import BlindAssessment, ClaimComparison, canonical_sha256
 from ..core.profiles import SkillProfileResolver
@@ -133,15 +134,16 @@ Return only ClaimComparison and never return a final Validation status.
             self._policy_guidance = self._pending_policy_guidance
             self._pending_policy_guidance = None
         kwargs["prompt"] = "$aidast-policy\n\n" + policy_skill_text() + "\n\n" + self._policy_guidance + "\n\n" + kwargs["prompt"]
-        session_method = getattr(type(self._agent), "_run_structured_session", None)
-        if callable(session_method):
-            if self._work_dir is None:
-                raise ValueError("Validation case session has not been initialized")
-            result, self._session_id = self._agent._run_structured_session(
-                **kwargs, work_dir=self._work_dir, session_id=self._session_id,
-            )
-            return result
-        return self._agent._run_structured(**kwargs)
+        with model_call_context(stage="Validation", case_id=self._active_case_id):
+            session_method = getattr(type(self._agent), "_run_structured_session", None)
+            if callable(session_method):
+                if self._work_dir is None:
+                    raise ValueError("Validation case session has not been initialized")
+                result, self._session_id = self._agent._run_structured_session(
+                    **kwargs, work_dir=self._work_dir, session_id=self._session_id,
+                )
+                return result
+            return self._agent._run_structured(**kwargs)
 
     def _begin_case(self, case_id: str) -> None:
         """Drop disclosure context before the next case enters its blind pass."""

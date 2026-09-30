@@ -409,7 +409,7 @@ class ValidationProfileTests(unittest.TestCase):
         self.assertIn("claimed_impact", agent.calls[0]["prompt"])
         self.assertIn(resolved.validation_skill_text, agent.calls[0]["prompt"])
 
-    def test_native_structured_session_uses_sol_and_exact_thread_resume(self):
+    def test_native_structured_session_uses_selected_model_and_exact_thread_resume(self):
         axis = {"score": 1, "evidence_ids": ("evidence",), "reason": "Evidence-bound score."}
         assessment = BlindAssessment(
             case_id="case", blind_case_sha256="a" * 64, reproduced=True,
@@ -435,7 +435,7 @@ class ValidationProfileTests(unittest.TestCase):
             patch.object(CodexMainAgent, "_require_login"),
             patch("aidast.agents.main.subprocess.run", side_effect=fake_run),
         ):
-            agent = CodexMainAgent()
+            agent = CodexMainAgent(validation_model="gpt-5.6-terra")
             first, session_id = agent._run_structured_session(
                 prompt="blind", model_type=BlindAssessment,
                 artifact_name="blind", operation="blind", work_dir=Path(temporary),
@@ -449,7 +449,7 @@ class ValidationProfileTests(unittest.TestCase):
         self.assertEqual((first, second), (assessment, assessment))
         self.assertEqual((session_id, resumed_id),
                          ("thread-validation", "thread-validation"))
-        self.assertEqual(commands[0][commands[0].index("--model") + 1], "gpt-6-sol")
+        self.assertEqual(commands[0][commands[0].index("--model") + 1], "gpt-5.6-terra")
         self.assertNotIn("resume", commands[0])
         self.assertEqual(commands[1][-3:], ["resume", "thread-validation", "-"])
 

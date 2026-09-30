@@ -20,10 +20,12 @@ TOOL_PHASES = frozenset({
     "api_secondary", "openapi_detection", "graphql_detection",
     "zap_openapi", "zap_graphql", "mitm_capture",
     "adaptive_js", "adaptive_js_followup", "observed_json_recovery",
+    "observation_tagging",
 })
 ACTIVITY_COUNTS = ("count", "root_count", "index", "total", "allowed_count", "blocked_count", "duplicate_count",
                    "planned_requests", "request_budget", "max_time_seconds", "coverage_may_be_limited",
-                   "detail_probe_limit", "detail_deferred_candidates", "detail_route_templates")
+                   "detail_probe_limit", "detail_deferred_candidates", "detail_route_templates",
+                   "processed_count", "failed_count")
 PHASES = TASK_PHASES | TOOL_PHASES
 STATES = frozenset({"started", "finished", "skipped", "failed", "planned", "found"})
 STOP_REASONS = frozenset({"time_limit", "action_limit", "page_limit", "completed"})

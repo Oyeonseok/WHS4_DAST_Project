@@ -4,6 +4,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from aidast.pipeline.lifecycle import start_stage_run
 from aidast.pipeline.live_schema import migrate_live_pipeline_schema
@@ -395,6 +396,20 @@ class SharedValidationReportingTests(unittest.TestCase):
         self.assertEqual(generate_scan_reports(self.path, output_root, scan_id="scan", platform="hackerone"), [])
         self.assertFalse(output_root.exists())
         self.assertEqual(self.conn.execute("SELECT count(*) FROM stage_runs WHERE stage='report'").fetchone()[0], 0)
+
+    def test_auto_reports_use_selected_report_model(self):
+        evidence = self.complete()
+        self.conn.commit()
+        with patch("aidast.reporting.auto.CodexReportWriter") as factory:
+            factory.return_value.write.side_effect = (
+                lambda context: self.draft(context, evidence)
+            )
+            results = generate_scan_reports(
+                self.path, self.path.parent.parent / "ReportRun" / "scan",
+                scan_id="scan", platform="hackerone", model="gpt-6-astra",
+            )
+        self.assertEqual(results[0]["status"], "drafted")
+        self.assertEqual(factory.call_args.args[0]._main_model, "gpt-6-astra")
 
     def test_auto_report_failure_marks_report_stage_failed(self):
         self.complete()

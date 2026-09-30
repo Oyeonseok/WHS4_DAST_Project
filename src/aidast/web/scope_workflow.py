@@ -19,6 +19,11 @@ from uuid import uuid4
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from aidast.agents.main import CodexMainAgent
+from aidast.core.model_calls import (
+    ModelCallSink,
+    model_call_context,
+    using_model_call_sink,
+)
 from aidast.orchestration.scope import CoordinatorError, ScopeCoordinator
 from aidast.scope.models import ScopeDocument
 from aidast.scope.paths import identify_program, scope_archive_directories, scope_revision_directory
@@ -26,7 +31,6 @@ from aidast.scope.reader import PlaywrightProgramPageReader, RuntimeBrowserProgr
 
 from .programs import ProgramRegistry
 from .scope_process import ScopeProcessController
-
 
 _JOB_ID = re.compile(r"^scopejob_[0-9a-f]{32}$")
 _ACTIVE = {"collecting", "awaiting_browser", "paused", "cancelling"}
@@ -92,6 +96,7 @@ class ScopeWorkflowManager:
         runtime_reader_factory: Callable[..., Any] | None = None,
         process_controller: ScopeProcessController | None = None,
         worker_mode: bool = False,
+        model_call_sink: ModelCallSink | None = None,
     ) -> None:
         self.result_root = result_root.expanduser().resolve()
         self.registry = registry
@@ -105,6 +110,7 @@ class ScopeWorkflowManager:
         self._public_reader_factory = public_reader_factory
         self._runtime_reader_factory = runtime_reader_factory
         self._worker_mode = worker_mode
+        self._model_call_sink = model_call_sink
         self._process_controller = (
             None if worker_mode else process_controller or (
                 ScopeProcessController(self.result_root)
@@ -515,6 +521,19 @@ class ScopeWorkflowManager:
         return 0 if self.get_job(program_id)["scope_status"] == "review_required" else 1
 
     def _collect(
+        self,
+        job_id: str,
+        program: dict[str, Any],
+        request: ScopeCollectionRequest,
+        output_dir: Path,
+    ) -> None:
+        with (
+            using_model_call_sink(self._model_call_sink),
+            model_call_context(stage="Scope", scope_job_id=job_id),
+        ):
+            self._collect_with_model_log(job_id, program, request, output_dir)
+
+    def _collect_with_model_log(
         self,
         job_id: str,
         program: dict[str, Any],

@@ -78,6 +78,10 @@ class ScanLaunchRequest(BaseModel):
     max_depth: int | None = Field(default=None, ge=0, le=10)
     ffuf_max_time_seconds: int = Field(default=150, ge=0, le=86400)
     tag_batch_size: int = Field(default=25, ge=1, le=200)
+    recon_model: str | None = Field(default=None, min_length=1, max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:/-]*$")
+    attack_model: str | None = Field(default=None, min_length=1, max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:/-]*$")
+    validation_model: str | None = Field(default=None, min_length=1, max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:/-]*$")
+    report_model: str | None = Field(default=None, min_length=1, max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:/-]*$")
     login_mode: str = "none"
     start_url: str | None = Field(default=None, max_length=2048)
     policy_values: dict[str, str] = Field(default_factory=dict, max_length=64)
@@ -99,6 +103,13 @@ class ScanLaunchRequest(BaseModel):
     def valid_login_mode(cls, value: str) -> str:
         if value not in {"none", "runtime-browser"}:
             raise ValueError("unsupported login mode")
+        return value
+
+    @field_validator("recon_model", "attack_model", "validation_model", "report_model")
+    @classmethod
+    def valid_model_name(cls, value: str | None) -> str | None:
+        if value is not None and "://" in value:
+            raise ValueError("model must be an identifier, not a URL")
         return value
 
     @field_validator("hackerone_username", "intigriti_username")
@@ -422,6 +433,14 @@ class ScanLaunchManager:
             argv.extend(("--target", target))
         if request.start_url:
             argv.extend(("--start-url", request.start_url))
+        if request.recon_model is not None:
+            argv.extend(("--recon-model", request.recon_model))
+        if request.attack_model is not None:
+            argv.extend(("--attack-model", request.attack_model))
+        if request.validation_model is not None:
+            argv.extend(("--validation-model", request.validation_model))
+        if request.report_model is not None:
+            argv.extend(("--report-model", request.report_model))
         argv.extend(
             (
                 "--profile",

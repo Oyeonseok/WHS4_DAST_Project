@@ -6,6 +6,7 @@ import json
 import sys
 from pathlib import Path
 
+from aidast.core.model_calls import SQLiteModelCallSink
 from .programs import ProgramRegistry
 from .scope_workflow import ScopeCollectionRequest, ScopeWorkflowManager
 
@@ -17,7 +18,10 @@ def main() -> int:
     program_id, job_id = sys.argv[2:]
     request = ScopeCollectionRequest.model_validate(json.load(sys.stdin))
     registry = ProgramRegistry(result_root)
-    manager = ScopeWorkflowManager(result_root, registry, worker_mode=True)
+    manager = ScopeWorkflowManager(
+        result_root, registry, worker_mode=True,
+        model_call_sink=SQLiteModelCallSink(result_root),
+    )
     return manager.run_worker(program_id, job_id, request)
 
 
