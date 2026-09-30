@@ -22,6 +22,10 @@ class AttackCoordinatorError(RuntimeError):
     """The shared DB or native Attack stage violated its handoff contract."""
 
 
+class AttackBatchFailure(AttackCoordinatorError):
+    """An identified native batch reported failure; durable tasks decide continuation."""
+
+
 class AttackCoordinator:
     """Bridge completed Recon state to a native Codex Attack sub-agent."""
 
@@ -240,9 +244,6 @@ class AttackCoordinator:
         self, result: AttackStageResult, *, scan_id: str, stage_run_id: str,
         existing_findings: set[str], existing_attempts: set[str],
     ) -> None:
-        if result.status == "FAILED":
-            reason = result.summary.strip() or "no failure summary"
-            raise AttackCoordinatorError(f"native Attack Agent returned FAILED: {reason}")
         mismatches = []
         if result.stage != "ATTACK":
             mismatches.append("stage")
@@ -260,6 +261,10 @@ class AttackCoordinator:
             raise AttackCoordinatorError(
                 "native Attack completion envelope mismatch: " + ",".join(mismatches)
             )
+
+        if result.status == "FAILED":
+            reason = result.summary.strip() or "no failure summary"
+            raise AttackBatchFailure(f"native Attack Agent returned FAILED: {reason}")
 
         with closing(sqlite3.connect(self._db_path)) as conn:
             rows = conn.execute(

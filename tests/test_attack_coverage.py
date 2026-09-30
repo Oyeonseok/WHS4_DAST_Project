@@ -546,3 +546,92 @@ def test_unreplayable_candidate_is_requeued_and_not_readopted(tmp_path: Path) ->
             "SELECT status FROM attack_coverage_items WHERE coverage_id=?",
             (coverage["coverage_id"],),
         ).fetchone() == ("pending",)
+
+
+class StoppedProbeAgent(UnsupportedCoverageAgent):
+    def __init__(self, *, status='outcome_unknown', finished=True, method='GET', risk='http_probe', foreign=False):
+        super().__init__()
+        self.status, self.finished, self.method, self.risk, self.foreign = status, finished, method, risk, foreign
+
+    def run_attack_orchestrator(self, **kwargs):
+        if self.calls:
+            return super().run_attack_orchestrator(**kwargs)
+        self.calls.append(kwargs)
+        failed = kwargs['attack_tasks'][0]
+        transition_task(kwargs['db_path'], kwargs['scan_id'], kwargs['stage_run_id'], failed['task_id'], 'running')
+        transition_task(kwargs['db_path'], kwargs['scan_id'], kwargs['stage_run_id'], failed['task_id'], 'failed', 'Guarded probe timed out; response outcome remains unknown.')
+        for task in kwargs['attack_tasks'][1:]:
+            transition_task(kwargs['db_path'], kwargs['scan_id'], kwargs['stage_run_id'], task['task_id'], 'skipped', 'unsupported fixture test')
+        with sqlite3.connect(kwargs['db_path']) as conn:
+            conn.execute('''INSERT INTO attack_http_requests
+                (request_id,scan_id,stage_run_id,task_id,policy_id,method,url,request_fingerprint,status,risk_class,error_message,scheduled_at,finished_at)
+                VALUES ('stopped-probe',?,?,?,'fixture-policy',?,'https://lab.example/api/users/1',?,?,?,'TimeoutError',0,?)''',
+                (kwargs['scan_id'],kwargs['stage_run_id'],failed['task_id'],self.method,'e'*64,self.status,self.risk,1 if self.finished else None))
+        return AttackStageResult(status='FAILED', scan_id='foreign-scan' if self.foreign else kwargs['scan_id'],
+            db_path=str(kwargs['db_path']),stage_run_id=kwargs['stage_run_id'],attack_agent_ids=['coverage-agent'],
+            summary='One stopped HTTP probe has an unknown response.')
+
+
+def test_stopped_unknown_probe_is_kept_as_failed_while_other_coverage_continues(tmp_path):
+    imported = imported_pipeline(tmp_path)
+    agent = StoppedProbeAgent()
+    result = ExhaustiveAttackCoordinator(agent=agent, db_path=imported.pipeline_database,
+        scope_path=imported.recon_database.parent/'Scope.md', policy_path=imported.recon_database.parent/'TargetPolicy.json',
+        batch_size=2).run(imported.scan_id)
+    assert len(agent.calls) == 2
+    assert result.coverage['unfinished'] == 0
+    assert result.coverage['by_status'] == {'error_terminal':1,'unsupported':3}
+    with sqlite3.connect(imported.pipeline_database) as conn:
+        assert conn.execute("SELECT status,error_message FROM stage_runs WHERE stage_run_id=?", (result.stage_run_ids[0],)).fetchone() == ('failed','native Attack Agent returned FAILED: One stopped HTTP probe has an unknown response.')
+        assert conn.execute("SELECT status,error_message,response_status FROM attack_http_requests WHERE request_id='stopped-probe'").fetchone() == ('outcome_unknown','TimeoutError',None)
+        status,reason,attempts = conn.execute("SELECT status,disposition_reason,attempt_count FROM attack_coverage_items WHERE last_task_id=?", (agent.calls[0]['attack_tasks'][0]['task_id'],)).fetchone()
+        assert status == 'error_terminal' and attempts == 1
+        assert 'stopped-probe' in reason and 'TimeoutError' in reason
+        assert conn.execute('SELECT count(*) FROM findings').fetchone()[0] == 0
+        assert conn.execute("SELECT count(*) FROM attack_coverage_items WHERE status='tested_negative'").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize('status,finished,method,risk', [
+    ('reserved', False, 'GET', 'http_probe'),
+    ('running', False, 'GET', 'http_probe'),
+    ('outcome_unknown', False, 'GET', 'http_probe'),
+    ('outcome_unknown', True, 'POST', 'application_mutation'),
+    ('outcome_unknown', True, 'GET', None),
+])
+def test_active_or_mutating_unknown_request_still_blocks_continuation(tmp_path,status,finished,method,risk):
+    from aidast.orchestration.attack import AttackCoordinatorError
+    imported = imported_pipeline(tmp_path)
+    agent = StoppedProbeAgent(status=status,finished=finished,method=method,risk=risk)
+    with pytest.raises(AttackCoordinatorError):
+        ExhaustiveAttackCoordinator(agent=agent, db_path=imported.pipeline_database,
+            scope_path=imported.recon_database.parent/'Scope.md', policy_path=imported.recon_database.parent/'TargetPolicy.json',
+            batch_size=2, retry_limit=1).run(imported.scan_id)
+    assert len(agent.calls) == 1
+
+
+def test_failed_result_with_foreign_envelope_still_stops_the_stage(tmp_path):
+    from aidast.orchestration.attack import AttackCoordinatorError
+    imported = imported_pipeline(tmp_path)
+    agent = StoppedProbeAgent(foreign=True)
+    with pytest.raises(AttackCoordinatorError, match='envelope mismatch'):
+        ExhaustiveAttackCoordinator(agent=agent, db_path=imported.pipeline_database,
+            scope_path=imported.recon_database.parent/'Scope.md', policy_path=imported.recon_database.parent/'TargetPolicy.json',
+            batch_size=2).run(imported.scan_id)
+    assert len(agent.calls) == 1
+
+
+def test_last_failed_batch_does_not_leave_normal_attack_failed(tmp_path):
+    from aidast.orchestration.attack import AttackCoordinator
+    imported = imported_pipeline(tmp_path)
+    agent = StoppedProbeAgent()
+    result = AttackCoordinator(agent=agent, db_path=imported.pipeline_database,
+        scope_path=imported.recon_database.parent/'Scope.md', policy_path=imported.recon_database.parent/'TargetPolicy.json').run(imported.scan_id)
+    assert result.status == 'COMPLETED'
+    assert len(agent.calls) == 1
+    with sqlite3.connect(imported.pipeline_database) as conn:
+        assert conn.execute("SELECT status FROM stage_runs WHERE stage_run_id=?", (result.stage_run_id,)).fetchone() == ('completed',)
+        assert conn.execute("SELECT count(*) FROM stage_runs WHERE stage='attack' AND status='failed'").fetchone()[0] == 1
+        assert conn.execute("SELECT count(*) FROM attack_http_requests WHERE status='outcome_unknown'").fetchone()[0] == 1
+    status = coverage_status(imported.pipeline_database, imported.scan_id)
+    assert status.unfinished == 0
+    assert status.by_status == {'error_terminal':1,'unsupported':3}

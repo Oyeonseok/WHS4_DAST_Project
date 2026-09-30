@@ -14,9 +14,10 @@ from aidast.attack.coverage import (
     ensure_coverage_manifest,
     reconcile_coverage_batch,
     resolve_abandoned_attack_leads,
+    transition_coverage,
 )
 from aidast.attack.template_loader import template_ids_for_skill
-from aidast.orchestration.attack import AttackCoordinator, AttackCoordinatorError
+from aidast.orchestration.attack import AttackBatchFailure, AttackCoordinator, AttackCoordinatorError
 from aidast.pipeline.lifecycle import finish_stage_run, start_stage_run
 
 
@@ -121,10 +122,12 @@ class ExhaustiveAttackCoordinator:
             # every task has already persisted a terminal or retryable
             # disposition (for example, an OOB proof prohibited by policy).
             # Reconcile that batch and continue with unrelated coverage.  A
-            # user/process interruption and unexpected implementation errors
-            # still propagate after leases are recovered.
+            # stopped read-only probes remain unknown in the HTTP ledger and
+            # terminal errors in coverage. User/process interruptions and
+            # completion integrity errors still propagate after lease recovery.
             except AttackCoordinatorError as exc:
-                if self._recover_failed_batch(stage_run_id, exc):
+                can_continue = self._recover_failed_batch(stage_run_id, exc)
+                if isinstance(exc, AttackBatchFailure) and can_continue:
                     continue
                 raise
             except BaseException as exc:
@@ -162,18 +165,42 @@ class ExhaustiveAttackCoordinator:
                      AND a.finding_id IS NULL AND a.resolved_at IS NULL""",
                 (stage_run_id,),
             ).fetchone()[0]
-            unknown_requests = conn.execute(
-                """SELECT COUNT(*) FROM attack_http_requests
-                   WHERE stage_run_id=?
-                     AND status IN ('reserved','running','outcome_unknown')""",
+            stopped_probes = self._record_stopped_probes(conn, stage_run_id) if isinstance(exc, AttackBatchFailure) else set()
+            unknown_requests = sum(row[0] not in stopped_probes for row in conn.execute(
+                """SELECT request_id FROM attack_http_requests
+                   WHERE stage_run_id=? AND status IN ('reserved','running','outcome_unknown')""",
                 (stage_run_id,),
-            ).fetchone()[0]
+            ))
             incomplete_tasks = conn.execute(
                 """SELECT COUNT(*) FROM attack_tasks
                    WHERE stage_run_id=? AND status IN ('pending','running')""",
                 (stage_run_id,),
             ).fetchone()[0]
             return not (open_leads or unknown_requests or incomplete_tasks)
+
+    @staticmethod
+    def _record_stopped_probes(conn: sqlite3.Connection, stage_run_id: str) -> set[str]:
+        """Close failed read-only coverage without relabeling unknown HTTP evidence."""
+        rows = conn.execute("""SELECT c.coverage_id,c.status,r.request_id,r.error_message,r.task_id
+            FROM attack_http_requests r JOIN attack_tasks t
+              ON t.task_id=r.task_id AND t.stage_run_id=r.stage_run_id AND t.scan_id=r.scan_id
+            JOIN attack_coverage_items c ON c.last_task_id=t.task_id
+              AND c.last_stage_run_id=t.stage_run_id AND c.scan_id=t.scan_id
+            WHERE r.stage_run_id=? AND r.status='outcome_unknown'
+              AND r.finished_at IS NOT NULL AND t.status='failed'
+              AND r.risk_class='http_probe' AND r.method IN ('GET','HEAD','OPTIONS')
+              AND c.status IN ('error_retryable','error_terminal')
+            ORDER BY r.rowid""", (stage_run_id,)).fetchall()
+        for row in rows:
+            reason = f"Stopped HTTP probe {row['request_id']} has an unknown response ({row['error_message'] or 'transport failure'}); not tested, automatic retry disabled."
+            current = conn.execute('SELECT status FROM attack_coverage_items WHERE coverage_id=?', (row['coverage_id'],)).fetchone()[0]
+            if current == 'error_retryable':
+                transition_coverage(conn, row['coverage_id'], 'error_terminal', reason,
+                    stage_run_id=stage_run_id, task_id=row['task_id'])
+            elif current == 'error_terminal':
+                conn.execute('UPDATE attack_coverage_items SET disposition_reason=?,updated_at=CURRENT_TIMESTAMP WHERE coverage_id=?',
+                    (reason, row['coverage_id']))
+        return {row['request_id'] for row in rows}
 
     def _finish_result(
         self, scan_id: str, stages: list[str],
