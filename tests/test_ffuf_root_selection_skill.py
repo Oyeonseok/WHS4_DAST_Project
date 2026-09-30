@@ -108,6 +108,19 @@ class FfufRootSelectionSkillTests(unittest.TestCase):
         self.assertEqual(roots, ["/api"])
         self.assertEqual(agent.call_args.kwargs["main_model"], "gpt-6-luna")
 
+    def test_selector_uses_selected_recon_model(self) -> None:
+        result = FfufRootSelection(
+            base_url="", roots=["/api"], count=1,
+            selection_reason="Observed API path.",
+        )
+        with mock.patch("aidast.recon.tools.ffuf_root_selector.CodexMainAgent") as agent:
+            agent.return_value._run_structured.return_value = result
+            roots = select_ffuf_roots_from_endpoints([
+                {"path": "/api/users", "method": "GET", "source": "katana"},
+            ], model="gpt-6-sol")
+        self.assertEqual(roots, ["/api"])
+        self.assertEqual(agent.call_args.kwargs["main_model"], "gpt-6-sol")
+
     def test_ffuf_selects_roots_before_running(self) -> None:
         with tempfile.NamedTemporaryFile() as wordlist:
             with (

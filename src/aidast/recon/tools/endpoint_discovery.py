@@ -1591,6 +1591,7 @@ def discover_endpoints(
     ffuf_wordlist: str | None = None,
     mitm_capture_path: Path | None = None,
     ffuf_max_time_seconds: int = 150,
+    recon_model: str | None = None,
     request_headers: dict[str, str] | None = None,
 
     # None이면 base_url을 Browser에 표시
@@ -2314,6 +2315,12 @@ def discover_endpoints(
             base_url,
             wordlist=ffuf_wordlist,
             seed_endpoints=ffuf_seed_results,
+            root_selector=(
+                (lambda endpoints: select_ffuf_roots_from_endpoints(
+                    endpoints, model=recon_model, target_policy=target_policy,
+                ))
+                if recon_model is not None else None
+            ),
             auth_headers=auth_headers,
             proxy_url=mitm_proxy_url,
             target_policy=target_policy,

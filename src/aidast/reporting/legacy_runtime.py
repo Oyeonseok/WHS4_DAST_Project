@@ -19,6 +19,8 @@ from importlib.resources import files
 from pathlib import Path
 from typing import Protocol
 
+from aidast.core.model_calls import model_call_context
+
 from .legacy_models import ReportDraft, validate_draft
 from .legacy_render import render_report
 
@@ -300,5 +302,6 @@ class ReportAgent:
         _, context, _ = _load(Path(result["report_db"]))
         writer_context = json.loads(_json(context))
         writer_context["output_schema"] = ReportDraft.model_json_schema()
-        draft = self.writer.write(writer_context)
+        with model_call_context(scan_id=writer_context["source"]["scan_id"], stage="Report"):
+            draft = self.writer.write(writer_context)
         return record_report(Path(result["report_db"]), draft)

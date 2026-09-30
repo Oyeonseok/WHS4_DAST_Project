@@ -24,6 +24,7 @@ from aidast.auth.codex import CodexAuth, CodexAuthError
 from aidast.agents.policy_guidance import policy_skill_text, stage_policy_skill
 from aidast.scope.exclusions import ResourceClassification
 from aidast.scope.exclusion_binding import classify_with_agent, SCOPE_EXCLUSION_INSTRUCTIONS
+from aidast.core.model_calls import logged_model_call, record_jsonl_usage, record_session_usage
 from aidast.attack.skill_selector import available_attack_skill_names
 from aidast.attack.template_loader import template_descriptors
 from aidast.chaining.selector import select_chaining_skills
@@ -627,6 +628,7 @@ Reuse compatible input keys; never invent operator values or confirmations.
             self._verify_grounding(page, analysis)
         return analysis
 
+    @logged_model_call("structured", model_attribute="_main_model")
     def _run_structured(
         self,
         *,
@@ -664,6 +666,7 @@ Reuse compatible input keys; never invent operator values or confirmations.
                 "--skip-git-repo-check",
                 "--ephemeral",
                 "--ignore-user-config",
+                "--json",
                 "--model",
                 self._main_model,
                 "--disable",
@@ -702,20 +705,23 @@ Reuse compatible input keys; never invent operator values or confirmations.
                     "--disable",
                     "in_app_browser",
                 ]
-            try:
-                completed = subprocess.run(
-                    command,
-                    input="$aidast-policy\n\n" + policy_skill_text() + "\n\n" + prompt,
-                    text=True,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.PIPE,
-                    timeout=self._timeout_seconds,
-                    check=False,
-                )
-            except subprocess.TimeoutExpired as exc:
-                raise MainAgentError(
-                    f"Codex {operation} timed out after {self._timeout_seconds}s"
-                ) from exc
+            with tempfile.TemporaryFile(mode="w+t", encoding="utf-8") as events:
+                try:
+                    completed = subprocess.run(
+                        command,
+                        input="$aidast-policy\n\n" + policy_skill_text() + "\n\n" + prompt,
+                        text=True,
+                        stdout=events,
+                        stderr=subprocess.PIPE,
+                        timeout=self._timeout_seconds,
+                        check=False,
+                    )
+                except subprocess.TimeoutExpired as exc:
+                    raise MainAgentError(
+                        f"Codex {operation} timed out after {self._timeout_seconds}s"
+                    ) from exc
+                events.seek(0)
+                record_jsonl_usage(events)
 
             if completed.returncode != 0:
                 diagnostic = completed.stderr.strip()[-2_000:]
@@ -741,6 +747,7 @@ Reuse compatible input keys; never invent operator values or confirmations.
                     f"Codex returned an invalid {artifact_name} result: {exc}"
                 ) from exc
 
+    @logged_model_call("session", model_attribute="_validation_model")
     def _run_structured_session(
         self, *, prompt: str, model_type: type[ModelT], artifact_name: str,
         operation: str, work_dir: Path, session_id: str | None = None,
@@ -793,13 +800,18 @@ Reuse compatible input keys; never invent operator values or confirmations.
         if len(completed.stdout.encode("utf-8")) > self._max_result_bytes:
             raise MainAgentError("Codex session event stream exceeds the result budget")
         observed_ids = set()
+        usage_events = []
         for line in completed.stdout.splitlines():
             try:
                 event = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            if isinstance(event, dict) and isinstance(event.get("thread_id"), str):
-                observed_ids.add(event["thread_id"])
+            if isinstance(event, dict):
+                if isinstance(event.get("thread_id"), str):
+                    observed_ids.add(event["thread_id"])
+                if event.get("type") == "turn.completed":
+                    usage_events.append({"type": "turn.completed", "usage": event.get("usage")})
+        record_session_usage(usage_events, resumed=session_id is not None)
         if session_id is None:
             if len(observed_ids) != 1:
                 raise MainAgentError("Codex session did not return one thread ID")
@@ -1056,6 +1068,7 @@ Reuse compatible input keys; never invent operator values or confirmations.
         except BaseException as exc:
             errors.append(exc)
 
+    @logged_model_call("attack_orchestrator", model_attribute="_attack_model")
     def run_attack_orchestrator(
         self,
         *,
@@ -1187,13 +1200,14 @@ another codex exec process. Return only the required structured result.
                 "exec",
                 "--skip-git-repo-check",
                 "--ignore-user-config",
+                "--json",
                 *self._custom_agent_cli_config(
                     work_dir=work_dir,
                     name="aidast_attack",
                     description="Run one policy-bound Attack stage.",
                 ),
                 "--model",
-                self._main_model,
+                self._attack_model,
                 "--enable",
                 "multi_agent",
                 "--enable",
@@ -1233,16 +1247,19 @@ another codex exec process. Return only the required structured result.
             helper_broker.start()
             broker.start()
             try:
-                completed = subprocess.run(
-                    command,
-                    input="$aidast-policy\n\n" + policy_skill_text() + "\n\n" + prompt,
-                    text=True,
-                    encoding="utf-8",
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.PIPE,
-                    timeout=self._timeout_seconds * 4,
-                    check=False,
-                )
+                with tempfile.TemporaryFile(mode="w+t", encoding="utf-8") as events:
+                    completed = subprocess.run(
+                        command,
+                        input="$aidast-policy\n\n" + policy_skill_text() + "\n\n" + prompt,
+                        text=True,
+                        encoding="utf-8",
+                        stdout=events,
+                        stderr=subprocess.PIPE,
+                        timeout=self._timeout_seconds * 4,
+                        check=False,
+                    )
+                    events.seek(0)
+                    record_jsonl_usage(events)
             except subprocess.TimeoutExpired as exc:
                 raise MainAgentError("native Attack Agent timed out") from exc
             finally:
@@ -1270,6 +1287,7 @@ another codex exec process. Return only the required structured result.
             except (OSError, ValidationError, ValueError) as exc:
                 raise MainAgentError(f"native Attack Agent returned invalid JSON: {exc}") from exc
 
+    @logged_model_call("chaining_orchestrator", model_attribute="_chaining_model")
     def run_chaining_orchestrator(
         self,
         *,
@@ -1391,13 +1409,14 @@ another codex exec process. Return only the required structured result.
                 "exec",
                 "--skip-git-repo-check",
                 "--ignore-user-config",
+                "--json",
                 *self._custom_agent_cli_config(
                     work_dir=work_dir,
                     name="aidast_chaining",
                     description="Analyze Attack findings and persist bounded chains.",
                 ),
                 "--model",
-                self._main_model,
+                self._chaining_model,
                 "--enable",
                 "multi_agent",
                 "--enable",
@@ -1428,16 +1447,19 @@ another codex exec process. Return only the required structured result.
             ]
             helper_broker.start()
             try:
-                completed = subprocess.run(
-                    command,
-                    input="$aidast-policy\n\n" + policy_skill_text() + "\n\n" + prompt,
-                    text=True,
-                    encoding="utf-8",
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.PIPE,
-                    timeout=self._timeout_seconds * 4,
-                    check=False,
-                )
+                with tempfile.TemporaryFile(mode="w+t", encoding="utf-8") as events:
+                    completed = subprocess.run(
+                        command,
+                        input="$aidast-policy\n\n" + policy_skill_text() + "\n\n" + prompt,
+                        text=True,
+                        encoding="utf-8",
+                        stdout=events,
+                        stderr=subprocess.PIPE,
+                        timeout=self._timeout_seconds * 4,
+                        check=False,
+                    )
+                    events.seek(0)
+                    record_jsonl_usage(events)
             except subprocess.TimeoutExpired as exc:
                 raise MainAgentError("native Chaining Agent timed out") from exc
             finally:

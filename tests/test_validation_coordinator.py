@@ -1428,6 +1428,30 @@ class ValidationCoordinatorTests(unittest.TestCase):
         self.assertEqual(result.validation_agent_ids, ("eligibility_agent_fixture", "validation_agent_fixture"))
         self.assertEqual(len(port.calls), 5)
 
+    def test_selected_validation_model_reaches_lazy_codex_agents(self):
+        with (
+            patch(
+                "aidast.validation.codex_runner.CodexBlindValidationRunner",
+                return_value=FakeAgent(),
+            ) as blind_factory,
+            patch(
+                "aidast.validation.orchestration.eligibility_runner.CodexEligibilityRunner",
+                return_value=self.eligibility,
+            ) as eligibility_factory,
+        ):
+            ValidationCoordinator(
+                db_path=self.path, agent=None, reproduction=FakePort(),
+                policy_provider=lambda endpoint, method: self.policy,
+                validation_model="gpt-5.6-terra",
+            ).run("scan")
+
+        for factory in (blind_factory, eligibility_factory):
+            agent = factory.call_args.args[0]
+            self.assertEqual(agent._main_model, "gpt-5.6-terra")
+            self.assertEqual(
+                agent._native_pipeline_agent()._validation_model, "gpt-5.6-terra",
+            )
+
     def test_integrity_failure_sends_no_requests_and_finishes_inconclusive(self):
         with db.connect(self.path) as conn:
             conn.execute("""INSERT INTO findings

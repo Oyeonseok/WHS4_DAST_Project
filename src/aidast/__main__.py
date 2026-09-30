@@ -1,4 +1,4 @@
-from aidast.cli import main
+from aidast.cli import entrypoint
 
 
-raise SystemExit(main())
+raise SystemExit(entrypoint())

@@ -166,12 +166,24 @@ def test_deferred_tagging_preserves_successful_batches_and_retries_pending() -> 
             run_statuses = connection.execute(
                 "SELECT status, COUNT(*) FROM annotation_runs GROUP BY status"
             ).fetchall()
+            batch_events = [
+                json.loads(row[0])
+                for row in connection.execute(
+                    "SELECT details_json FROM audit_events WHERE event_type='recon.activity' ORDER BY rowid"
+                )
+            ]
 
     assert (first_completed, first_failed) == (1, 2)
     assert annotations_after_failure == 1
     assert (retry_completed, retry_failed) == (2, 0)
     assert final_annotations == 3
     assert dict(run_statuses) == {"completed": 2, "failed": 1}
+    assert [(item["state"], item["index"], item["total"], item["count"])
+            for item in batch_events] == [
+        ("started", 1, 2, 2), ("failed", 1, 2, 2),
+        ("started", 2, 2, 1), ("finished", 2, 2, 1),
+        ("started", 1, 1, 2), ("finished", 1, 1, 2),
+    ]
 
 
 def test_deferred_tagging_splits_batch_after_incomplete_model_result() -> None:

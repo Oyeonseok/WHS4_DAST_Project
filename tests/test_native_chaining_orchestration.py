@@ -297,7 +297,10 @@ class NativeChainingMainAgentTests(unittest.TestCase):
                 ).model_dump_json(), encoding="utf-8")
                 return SimpleNamespace(returncode=0, stderr="")
 
-            agent = CodexMainAgent(python_executable=str(Path(__file__).resolve()))
+            agent = CodexMainAgent(
+                main_model="gpt-6-luna",
+                python_executable=str(Path(__file__).resolve()),
+            )
             with (
                 patch("aidast.agents.main.shutil.which", return_value="codex.exe"),
                 patch.object(CodexMainAgent, "_require_login"),

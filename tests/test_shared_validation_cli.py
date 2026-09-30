@@ -7,9 +7,12 @@ import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from aidast.agents.main import CodexReportWriter
+from pydantic import BaseModel
+
+from aidast.agents.main import CodexMainAgent, CodexReportWriter
 from aidast.cli import _parser, main
 from aidast.validation.orchestration.native import build_native_validation_coordinator
 from aidast.reporting import CaseReportDraft as ReportDraft
@@ -114,6 +117,69 @@ class ValidationReportCliTests(unittest.TestCase):
         factory.assert_called_once_with(
             db_path=Path("Pipeline.db"), policy_path=Path("TargetPolicy.json"),
             scope_path=Path("Scope.md"),
+        )
+
+    def test_shared_validation_run_model_reaches_native_builder(self):
+        coordinator = Mock()
+        coordinator.run.return_value = {"status": "completed"}
+        with patch("aidast.validation.build_native_validation_coordinator",
+                   return_value=coordinator) as factory:
+            code, _, stderr = self.invoke([
+                "validate", "run", "Pipeline.db", "--scan-id", "scan",
+                "--validation-model", "gpt-5.6-terra",
+            ])
+        self.assertEqual(code, 0, stderr)
+        self.assertEqual(factory.call_args.kwargs["validation_model"], "gpt-5.6-terra")
+
+    def test_shared_validation_resume_model_reaches_native_builder(self):
+        coordinator = Mock()
+        coordinator.resume.return_value = {"status": "completed"}
+        with patch("aidast.validation.build_native_validation_coordinator",
+                   return_value=coordinator) as factory:
+            code, _, stderr = self.invoke([
+                "validate", "resume", "Pipeline.db", "--stage-run-id", "stage",
+                "--validation-model", "gpt-6-astra",
+            ])
+        self.assertEqual(code, 0, stderr)
+        self.assertEqual(factory.call_args.kwargs["validation_model"], "gpt-6-astra")
+
+    def test_report_model_reaches_case_report_writer(self):
+        report_agent = Mock()
+        report_agent.run.return_value = {"status": "drafted"}
+        with patch("aidast.cli.CaseReportAgent", return_value=report_agent) as factory:
+            code, _, stderr = self.invoke([
+                "report", "run", "Pipeline.db", "--platform", "hackerone",
+                "--case-id", "case", "--report-model", "gpt-5.6-sol",
+            ])
+        self.assertEqual(code, 0, stderr)
+        self.assertEqual(factory.call_args.args[0]._agent._main_model, "gpt-5.6-sol")
+
+    def test_report_writer_model_reaches_codex_exec_command(self):
+        class Draft(BaseModel):
+            value: str
+
+        commands = []
+
+        def fake_run(command, **kwargs):
+            commands.append(command)
+            Path(command[command.index("--output-last-message") + 1]).write_text(
+                '{"value":"drafted"}', encoding="utf-8",
+            )
+            return SimpleNamespace(returncode=0, stderr="")
+
+        with (
+            patch("aidast.agents.main.shutil.which", return_value="codex"),
+            patch.object(CodexMainAgent, "_require_login"),
+            patch("aidast.agents.main.subprocess.run", side_effect=fake_run),
+        ):
+            draft = CodexMainAgent(main_model="gpt-5.6-sol")._run_structured(
+                prompt="report", model_type=Draft,
+                artifact_name="report-model-check", operation="report",
+            )
+
+        self.assertEqual(draft.value, "drafted")
+        self.assertEqual(
+            commands[0][commands[0].index("--model") + 1], "gpt-5.6-sol",
         )
 
     def test_shared_validation_resume_has_no_replacement_scope_option(self):

@@ -37,6 +37,7 @@ def _optional_adapter(module_name: str, class_name: str, *,
 
 def build_native_validation_coordinator(
     *, db_path: Path, policy_path: Path, scope_path: Path | None = None,
+    validation_model: str | None = None,
     credential_resolver: Callable[[str], Mapping[str, str]] | None = None,
     credential_backends: Mapping[str, Callable[[str], object]] | None = None,
     browser_executor: BrowserExecutor | None = None,
@@ -109,6 +110,8 @@ def build_native_validation_coordinator(
         {"scope_source": ScopePolicySource.from_path(scope_path)}
         if scope_path is not None else {}
     )
+    if validation_model is not None:
+        coordinator_options["validation_model"] = validation_model
     return ValidationCoordinator(
         db_path=db_path,
         agent=None,

@@ -98,6 +98,22 @@ class ReconDiagnosticsTests(unittest.TestCase):
             "method": "GET", "url": "https://name:secret@example.com/account",
         }))
 
+    def test_tagging_activity_exposes_only_bounded_batch_counts(self) -> None:
+        activity = activity_from_diagnostic("phase_started", {
+            "phase": "observation_tagging", "index": 2, "total": 3, "count": 200,
+            "url": "https://example.com/?token=secret",
+        })
+        self.assertEqual(activity, {
+            "phase": "observation_tagging", "state": "started",
+            "index": 2, "total": 3, "count": 200,
+        })
+        self.assertEqual(validated_activity({
+            **activity, "state": "finished", "processed_count": 199,
+            "failed_count": 1, "url": "secret",
+        }), {
+            **activity, "state": "finished", "processed_count": 199, "failed_count": 1,
+        })
+
     def test_recon_logs_candidate_and_observed_urls_without_network_requests(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_dir:
             conn = db.init_db(Path(temporary_dir) / "Recon.db")

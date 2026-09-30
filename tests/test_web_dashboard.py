@@ -17,6 +17,7 @@ import httpx
 import pytest
 
 from aidast.agents.main import MainAgentError
+from aidast.core.model_calls import ModelCallEvent, SQLiteModelCallSink
 from aidast.cli import EXECUTION_PROFILES as CLI_EXECUTION_PROFILES
 from aidast.cli import _parser, _run_dashboard
 from aidast.recon.profiles import EXECUTION_PROFILES
@@ -296,6 +297,32 @@ def test_projection_exposes_only_allowlisted_recon_activity(tmp_path: Path) -> N
     assert "secret" not in json.dumps(snapshot)
 
 
+def test_tagging_batches_reach_snapshot_replay_and_history_without_secrets(tmp_path: Path) -> None:
+    database = _fixture(tmp_path)
+    with sqlite3.connect(database) as conn:
+        for index, state in enumerate(("started", "finished"), 1):
+            conn.execute(
+                "INSERT INTO audit_events VALUES (?,?,?,?,?,?,?)",
+                (f"tag-batch-{index}", SCAN_ID, "stage", None, "recon.activity",
+                 json.dumps({"phase": "observation_tagging", "state": state,
+                             "index": 1, "total": 2, "count": 200,
+                             "processed_count": 200 if state == "finished" else 0,
+                             "failed_count": 0, "url": "https://example.com/?token=secret"}),
+                 f"2026-09-20 01:00:0{index}"),
+            )
+    projector = DashboardProjector(tmp_path)
+    snapshot = projector.snapshot(SCAN_ID)
+    batches = [log for log in snapshot["logs"] if log.get("message_code") == "recon.activity"]
+    assert [item["message_params"]["state"] for item in batches] == ["started", "finished"]
+    assert batches[-1]["message_params"]["processed_count"] == 200
+    assert [item["payload"]["message_params"]["state"] for item in projector.events_after(SCAN_ID, 0)
+            if item["type"] == "log.appended" and item["payload"].get("message_code") == "recon.activity"
+            ] == ["started", "finished"]
+    assert [item["payload"]["message_params"]["state"] for item in projector.recon_activity(SCAN_ID)["events"]
+            ] == ["finished", "started"]
+    assert "secret" not in json.dumps(snapshot)
+
+
 def test_projection_shows_discovered_url_with_response_evidence(tmp_path: Path) -> None:
     database = _fixture(tmp_path)
     with sqlite3.connect(database) as conn:
@@ -549,7 +576,6 @@ def test_recon_progress_advances_when_planned_tasks_finish(tmp_path: Path) -> No
     assert underway["progress"] == 89
     assert underway["logs"][-1]["message_params"]["step"] == "review"
 
-
 def test_tagging_progress_recovers_running_worker_counts_without_duplicate_logs(tmp_path: Path) -> None:
     database = _fixture(tmp_path)
     with sqlite3.connect(database) as conn:
@@ -594,7 +620,6 @@ def test_tagging_progress_recovers_running_worker_counts_without_duplicate_logs(
     review = projector.snapshot(SCAN_ID)
     assert review["progress"] == 89
     assert review["logs"][-1]["message_params"]["step"] == "review"
-
 
 def test_validation_progress_advances_with_case_phases_and_decisions(tmp_path: Path) -> None:
     database = _fixture(tmp_path)
@@ -1150,6 +1175,10 @@ def test_scan_launcher_builds_fixed_argv_and_streams_pre_database_logs(tmp_path:
         timeout_seconds=10,
         ffuf_max_time_seconds=0,
         tag_batch_size=17,
+        recon_model="gpt-6-sol",
+        attack_model="gpt-6-luna",
+        validation_model="gpt-5.6-terra",
+        report_model="gpt-6-astra",
         login_mode="none",
         start_url="https://prismlife.com/app",
         hackerone_username="web_operator",
@@ -1171,6 +1200,10 @@ def test_scan_launcher_builds_fixed_argv_and_streams_pre_database_logs(tmp_path:
     assert argv[argv.index("--max-concurrency") + 1] == "1"
     assert argv[argv.index("--timeout-seconds") + 1] == "10"
     assert argv[argv.index("--tag-batch-size") + 1] == "17"
+    assert argv[argv.index("--recon-model") + 1] == "gpt-6-sol"
+    assert argv[argv.index("--attack-model") + 1] == "gpt-6-luna"
+    assert argv[argv.index("--validation-model") + 1] == "gpt-5.6-terra"
+    assert argv[argv.index("--report-model") + 1] == "gpt-6-astra"
     assert argv[argv.index("--scan-id") + 1] == launched["scan_id"]
     assert argv[argv.index("--start-url") + 1] == "https://prismlife.com/app"
     assert manager.snapshot(launched["scan_id"])["logs"][-1]["message"] == "AI DAST pipeline process started."
@@ -1448,6 +1481,15 @@ def test_scan_request_rejects_unconfirmed_or_excessive_budget() -> None:
     for invalid_batch in (0, 201, 1.5):
         with pytest.raises(ValueError):
             ScanLaunchRequest(**base, tag_batch_size=invalid_batch, authorization_confirmed=True)
+    for invalid_model in ("", "https://example.test/model", "model with spaces", "x" * 129):
+        with pytest.raises(ValueError):
+            ScanLaunchRequest(**base, recon_model=invalid_model, authorization_confirmed=True)
+        with pytest.raises(ValueError):
+            ScanLaunchRequest(**base, attack_model=invalid_model, authorization_confirmed=True)
+        with pytest.raises(ValueError):
+            ScanLaunchRequest(**base, validation_model=invalid_model, authorization_confirmed=True)
+        with pytest.raises(ValueError):
+            ScanLaunchRequest(**base, report_model=invalid_model, authorization_confirmed=True)
     with pytest.raises(ValueError, match="concurrency exceeds"):
         ScanLaunchRequest(
             **base,
@@ -1463,6 +1505,76 @@ def test_scan_request_rejects_unconfirmed_or_excessive_budget() -> None:
         })
     with pytest.raises(ValueError, match="absolute HTTPS"):
         ProgramResolveRequest(program_url="http://hackerone.com/program")
+
+
+def test_scan_api_receives_distinct_recon_and_attack_models(tmp_path: Path) -> None:
+    captured: list[ScanLaunchRequest] = []
+
+    class Launcher:
+        def launch(self, request: ScanLaunchRequest) -> dict[str, str]:
+            captured.append(request)
+            return {"scan_id": "scan_" + "a" * 32, "status": "running"}
+
+    app = create_app(result_root=tmp_path, launch_manager=Launcher())
+    async def exercise_api() -> httpx.Response:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test",
+        ) as client:
+            return await client.post(
+                "/api/v1/scans",
+                headers={"Origin": "http://test"},
+                json={
+                    "scope_id": "scope_verified",
+                    "targets": ["prismlife.com"],
+                    "authorization_confirmed": True,
+                    "recon_model": "gpt-6-sol",
+                    "attack_model": "gpt-6-luna",
+                    "validation_model": "gpt-5.6-terra",
+                    "report_model": "gpt-6-astra",
+                },
+            )
+
+    response = asyncio.run(exercise_api())
+    assert response.status_code == 202
+    assert (captured[0].recon_model, captured[0].attack_model) == (
+        "gpt-6-sol", "gpt-6-luna",
+    )
+    assert (captured[0].validation_model, captured[0].report_model) == (
+        "gpt-5.6-terra", "gpt-6-astra",
+    )
+
+
+def test_scan_token_usage_api_returns_scan_total_and_rejects_unknown_scan(tmp_path: Path) -> None:
+    _fixture(tmp_path)
+    SQLiteModelCallSink(tmp_path).append(ModelCallEvent(
+        call_id="a" * 32, state="success", occurred_at="2026-09-27T00:00:00Z",
+        scan_id=SCAN_ID, stage="Recon", stage_run_id=None, task_id=None,
+        case_id=None, scope_job_id=None, operation_code="recon_plan",
+        invocation_kind="structured", requested_model="gpt-6-sol",
+        elapsed_ms=120, error_code=None,
+        input_tokens=8, cached_input_tokens=3, output_tokens=2,
+        usage_status="reported",
+    ))
+    app = create_app(result_root=tmp_path)
+
+    async def request_usage() -> tuple[httpx.Response, httpx.Response]:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test",
+        ) as client:
+            return (
+                await client.get(f"/api/v1/scans/{SCAN_ID}/token-usage"),
+                await client.get("/api/v1/scans/scan_" + "b" * 32 + "/token-usage"),
+            )
+
+    usage, unknown = asyncio.run(request_usage())
+    assert usage.status_code == 200
+    assert usage.json()["total"] == {
+        "input_tokens": 8, "output_tokens": 2, "total_tokens": 10,
+        "measured_calls": 1, "unreported_calls": 0,
+    }
+    assert usage.json()["stages"]["Recon"]["total_tokens"] == 10
+    assert usage.json()["stages"]["Validation"]["measured_calls"] == 0
+    assert unknown.status_code == 404
 
 
 def test_run_parser_accepts_only_generated_scan_identifiers() -> None:

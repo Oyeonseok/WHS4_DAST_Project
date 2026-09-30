@@ -54,8 +54,10 @@ import { ScopeExecutionRules as ScopeExecutionRulesView, ScopeExclusionStatus, S
 import { ScopeHeaderRequirements } from './components/ScopeHeaderRequirements';
 import { ReportSubmission } from './components/ReportSubmission';
 import { useManualLogin } from './hooks/useManualLogin';
+import { parseScanTokenUsage, type ScanTokenUsage, type TokenBucket } from './lib/modelCalls';
+import { ModelCallLog } from './components/ModelCallLog';
 
-const pages = ['Overview', 'Scopes / Programs', 'Scans', 'Findings', 'Validation', 'Reports', 'Audit log', 'Settings'] as const;
+const pages = ['Overview', 'Scopes / Programs', 'Scans', 'Findings', 'Validation', 'Reports', 'Audit log', 'LLM log', 'Settings'] as const;
 type Page = typeof pages[number];
 type ScanSummary = { scan_id: string; status: Snapshot['status']; started_at: string; finished_at: string | null; targets?: string[] };
 type AttackTask = { coverage?: HypothesisCoverage | null; task_id: string; skill_name: string; status: string; selection_reasons: string[]; observed_urls: { method: string; url: string; hint: string }[]; attempt_count: number; recent_attempts: { method: string; url: string | null; outcome: string }[] };
@@ -69,9 +71,28 @@ type ScopeDraft = { scope_id: string; created_at: string; source_url: string; pr
 type ScopeApproval = { approved_by: string; approved_at: string };
 type ReportSummary = { report_id: string; scan_id: string; case_id: string; platform: string; title: string; created_at: string };
 type ThemeChoice = 'system' | 'dark' | 'light';
+type TokenUsageState = { scanId: string; data: ScanTokenUsage | null; error: boolean };
 const scopeStatusLabel: Record<ScopeStatus, string> = { scope_required: 'Scope required', collecting: 'Collecting', awaiting_browser: 'Login required', paused: 'Paused', cancelling: 'Cancelling', cancelled: 'Cancelled', review_required: 'Review Yes / No', approved: 'Approved', rejected: 'Rejected', failed: 'Failed' };
 const scopeStatusTone = (status: ScopeStatus) => status === 'approved' ? 'success' : status === 'failed' || status === 'rejected' ? 'critical' : status === 'cancelled' ? '' : 'warning';
 const THEME_KEY = 'aidast-theme';
+const modelNamePattern = /^[A-Za-z0-9][A-Za-z0-9_.:/-]{0,127}$/;
+const codexModels = [
+  'gpt-5.6-luna', 'gpt-5.6-terra', 'gpt-5.6-sol',
+  'gpt-6-luna', 'gpt-6-sol', 'gpt-6-astra',
+] as const;
+function ScanModelField({ label, value, onChange, customLabel }: {
+  label: string; value: string; onChange: (value: string) => void; customLabel: string;
+}) {
+  const selected = codexModels.some(model => model === value) ? value : '';
+  return <div className="form-field">
+    <span>{label}</span>
+    <select aria-label={label} value={selected} onChange={event => onChange(event.target.value)}>
+      {codexModels.map(model => <option key={model} value={model}>{model}</option>)}
+      <option value="">{customLabel}</option>
+    </select>
+    {!selected && <input aria-label={`${label} · ${customLabel}`} value={value} onChange={event => onChange(event.target.value)} maxLength={128} autoComplete="off" spellCheck={false}/>}
+  </div>;
+}
 const attackSkillLabels: Record<string, string> = {
   'hunt-auth-bypass': '인증 우회 점검',
   'hunt-cors': 'CORS 설정 점검',
@@ -107,8 +128,8 @@ function savedTheme(): ThemeChoice {
   const value = localStorage.getItem(THEME_KEY);
   return value === 'dark' || value === 'light' || value === 'system' ? value : 'system';
 }
-const slugs = ['overview', 'scopes', 'scans', 'findings', 'validation', 'reports', 'audit', 'settings'];
-const symbols = ['overview', 'scope', 'scan', 'shield', 'check', 'report', 'logs', 'settings'];
+const slugs = ['overview', 'scopes', 'scans', 'findings', 'validation', 'reports', 'audit', 'llm', 'settings'];
+const symbols = ['overview', 'scope', 'scan', 'shield', 'check', 'report', 'logs', 'terminal', 'settings'];
 function Icon({ name, size = 18 }: { name: string; size?: number }) {
   const paths: Record<string, ReactNode> = {
     overview: <><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></>,
@@ -131,6 +152,15 @@ function Icon({ name, size = 18 }: { name: string; size?: number }) {
   return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.65" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{paths[name] || paths.shield}</svg>;
 }
 function Badge({ children, tone = '' }: { children: ReactNode; tone?: string }) { return <span className={`badge ${tone}`}>{children}</span>; }
+function tokenUsageLabel(language: Language, bucket: TokenBucket | undefined, state: 'loading' | 'ready' | 'error'): string {
+  const tr = (key: string) => translate(language, key);
+  if (state === 'loading') return tr('Loading token usage');
+  if (state === 'error') return tr('Token usage could not load');
+  if (!bucket || bucket.measured_calls + bucket.unreported_calls === 0) return tr('No token records');
+  const tokens = bucket.measured_calls ? `${bucket.total_tokens.toLocaleString(language === 'ko' ? 'ko-KR' : 'en-US')} ${tr('tokens')}` : '';
+  const missing = bucket.unreported_calls ? tr('{count} calls unmeasured').replace('{count}', String(bucket.unreported_calls)) : '';
+  return [tokens, missing].filter(Boolean).join(' · ');
+}
 function Panel({ title, subtitle, action, children, className = '' }: { title: string; subtitle?: string; action?: ReactNode; children: ReactNode; className?: string }) {
   return <section className={`panel ${className}`}><div className="panel-heading"><div><h2>{title}</h2>{subtitle && <p>{subtitle}</p>}</div>{action}</div>{children}</section>;
 }
@@ -154,7 +184,10 @@ function VerifiedScopeDetails({ draft, approval, language, onScan }: { draft: Sc
   </div>;
 }
 function Empty({ title, children }: { title: string; children: ReactNode }) { return <div className="empty"><Icon name="lock" size={26}/><h3>{title}</h3><p>{children}</p></div>; }
-function Pipeline({ snapshot, language, reportDraft }: { snapshot: Snapshot; language: Language; reportDraft: ReportDraftStatus }) {
+function Pipeline({ snapshot, language, reportDraft, tokenUsage, tokenStatus }: {
+  snapshot: Snapshot; language: Language; reportDraft: ReportDraftStatus;
+  tokenUsage?: ScanTokenUsage | null; tokenStatus: 'loading' | 'ready' | 'error';
+}) {
   const labels: Record<string, string> = language === 'ko'
     ? { completed: '완료', skipped: '건너뜀', failed: '실패', blocked: '차단', pending: '대기', running: '진행 중', paused: '일시정지', cancelled: '취소됨', not_created: '미작성', unknown: '확인 중' }
     : { completed: 'Completed', skipped: 'Skipped', failed: 'Failed', blocked: 'Blocked', pending: 'Pending', running: 'Running', paused: 'Paused', cancelled: 'Cancelled', not_created: 'Not drafted', unknown: 'Checking' };
@@ -165,6 +198,10 @@ function Pipeline({ snapshot, language, reportDraft }: { snapshot: Snapshot; lan
       <span className="stage-number">{done ? <Icon name="check" size={13}/> : String(index + 1).padStart(2,'0')}</span>
       <strong>{translate(language, stage)}</strong>
       <small>{status === 'running' && stage === snapshot.stage ? `${snapshot.progress}% · ${labels[status]}` : labels[status] || status}</small>
+      {tokenUsage !== undefined && (done || status === 'running' || !!tokenUsage?.stages[stage]?.measured_calls || !!tokenUsage?.stages[stage]?.unreported_calls)
+        && <small className="stage-token-usage">{stage === 'Scope'
+          ? translate(language, 'Scope tokens separate from scan')
+          : tokenUsageLabel(language, tokenUsage?.stages[stage], tokenStatus)}</small>}
     </li>;
   })}</ol>;
 }
@@ -305,6 +342,10 @@ export default function App() {
   const [scopeId, setScopeId] = useState('');
   const [selectedTargets, setSelectedTargets] = useState<string[]>([]);
   const [scanProfile, setScanProfile] = useState<ExecutionProfileId>('safe-recon');
+  const [reconModel, setReconModel] = useState('gpt-6-luna');
+  const [attackModel, setAttackModel] = useState('gpt-6-sol');
+  const [validationModel, setValidationModel] = useState('gpt-6-sol');
+  const [reportModel, setReportModel] = useState('gpt-6-sol');
   const [maxRequests, setMaxRequests] = useState(500);
   const [maxRps, setMaxRps] = useState(0.5);
   const [maxConcurrency, setMaxConcurrency] = useState(2);
@@ -349,6 +390,7 @@ export default function App() {
   const [attackTaskSnapshot, setAttackTaskSnapshot] = useState<AttackTaskSnapshot | null>(null);
   const [attackTaskError, setAttackTaskError] = useState('');
   const [attackTaskRevision, setAttackTaskRevision] = useState(0);
+  const [tokenUsageState, setTokenUsageState] = useState<TokenUsageState | null>(null);
   const [reconHistory, setReconHistory] = useState<{ scanId: string; logs: Log[]; nextBefore: number | null } | null>(null);
   const [reconLoading, setReconLoading] = useState(false);
   const [reconError, setReconError] = useState('');
@@ -373,6 +415,10 @@ export default function App() {
   const [resultRoot, setResultRoot] = useState(demo ? 'Synthetic demo data (memory)' : '');
   const { snapshot, state, error, refresh } = useScanSocket(scanId);
   const manualLogin = useManualLogin(scanId, snapshot?.status || '', !demo && !!scanId);
+  const tokenUsage = tokenUsageState?.scanId === scanId ? tokenUsageState.data : null;
+  const tokenStatus = tokenUsageState?.scanId === scanId
+    ? tokenUsageState.error ? 'error' : tokenUsage ? 'ready' : 'loading'
+    : 'loading';
   const currentStageStatus = snapshot?.stage_statuses?.[snapshot.stage];
   const scanProgressStatus = currentStageProgressStatus(snapshot?.status, currentStageStatus);
   const estimatedScanProgress = useEstimatedProgress(snapshot ? `${snapshot.scan_id}:${snapshot.stage}` : scanId, snapshot?.progress ?? 0, scanProgressStatus);
@@ -518,6 +564,33 @@ export default function App() {
     })();
     return () => abort.abort();
   }, [demo]);
+  useEffect(() => {
+    if (demo || !scanId || (modal !== 'scan-progress' && page !== 'Scans')) return;
+    const abort = new AbortController();
+    let fetching = false;
+    const load = async () => {
+      if (fetching) return;
+      fetching = true;
+      try {
+        const base = import.meta.env.VITE_API_BASE_URL || location.origin;
+        const response = await fetch(new URL(`/api/v1/scans/${encodeURIComponent(scanId)}/token-usage`, base), {
+          signal: abort.signal, credentials: 'same-origin', cache: 'no-store',
+        });
+        if (!response.ok) throw new Error('Token usage request failed');
+        const data = parseScanTokenUsage(await response.json(), scanId);
+        if (!data) throw new Error('Invalid token usage response');
+        if (!abort.signal.aborted) setTokenUsageState({ scanId, data, error: false });
+      } catch {
+        if (!abort.signal.aborted) setTokenUsageState({ scanId, data: null, error: true });
+      } finally {
+        fetching = false;
+      }
+    };
+    void load();
+    const timer = snapshot?.status === 'running' || snapshot?.status === 'paused'
+      ? window.setInterval(() => void load(), 4000) : undefined;
+    return () => { abort.abort(); if (timer !== undefined) window.clearInterval(timer); };
+  }, [demo, scanId, page, modal, snapshot?.status]);
   useEffect(() => {
     if (demo || !scanId || (modal !== 'scan-progress' && page !== 'Scans')) return;
     if (!snapshot || snapshot.scan_id !== scanId) return;
@@ -949,6 +1022,8 @@ export default function App() {
         method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           scope_id: selectedScope.scope_id, targets: selectedTargets, profile: scanProfile,
+          recon_model: reconModel, attack_model: attackModel,
+          validation_model: validationModel, report_model: reportModel,
           max_requests: maxRequests, max_rps: maxRps, max_concurrency: maxConcurrency,
           timeout_seconds: timeoutSeconds, max_depth: maxDepth, tag_batch_size: tagBatchSize,
           ffuf_max_time_seconds: ffufMaxTimeSeconds,
@@ -1070,6 +1145,8 @@ export default function App() {
     setSelectedTargets([]);
     setIdentityValues({});
     setPolicyValues({});
+    setReconModel('gpt-6-luna');
+    setAttackModel('gpt-6-sol');
     setAuthorizationConfirmed(false);
     setLaunchError('');
     setModal('new');
@@ -1083,6 +1160,8 @@ export default function App() {
     setSelectedTargets(approved ? source.targets.filter(target => approved.targets.some(item => item.asset === target)) : []);
     setIdentityValues({});
     setPolicyValues({});
+    setReconModel('gpt-6-luna');
+    setAttackModel('gpt-6-sol');
     setAuthorizationConfirmed(false);
     setLaunchError('');
     setModal('new');
@@ -1167,7 +1246,27 @@ export default function App() {
     <button className="secondary-button" onClick={() => void cancelScan()} disabled={cancelling || !!pauseBusy}>{cancelPhase === 'requesting' ? tk("취소 요청 전달 중…", "Sending cancellation request…") : cancelling ? tk("취소 확인 중…", "Confirming cancellation…") : tk("스캔 취소", "Cancel scan")}</button>
   </> : null;
   const scanPanel = <Panel className="scan-summary-panel" title={demo ? tr('Local lab · API assessment') : scanTargetLabel} subtitle={demo ? tr('Synthetic fixture · isolated from program inventory') : `${snapshot?.program_name ? `${snapshot.program_name} · ` : ''}${scanId}`} action={<div className="scan-panel-actions"><Badge tone={snapshot?.status === 'failed' ? 'critical' : snapshot?.status === 'completed' ? 'success' : 'warning'}><span className="dot"/>{cancelling ? tk("취소 처리 중", "Cancelling") : tr(snapshot?.status || state)}</Badge>{scanControls}{!demo && retryAction === 'resume' && <button className="secondary-button" onClick={resumeScan} disabled={resuming}>{resuming ? tk("재실행 요청 중…", "Requesting rerun…") : tk("실패 단계부터 재실행", "Rerun from failed stage")}</button>}{!demo && retryAction === 'rescan' && <button className="secondary-button" onClick={openRepeatScan}>{tk("정찰부터 다시 스캔", "Rescan from recon")}</button>}{!demo && scanId && <button className="secondary-button" onClick={() => setModal('scan-progress')}>{snapshot?.stage === 'Recon' ? tk("도구 작업·발견 URL 보기", "View tools and URLs") : tk("진행 창 열기", "Open progress window")}</button>}</div>}>
-    {snapshot ? <>{manualLoginNotice}<Pipeline snapshot={{ ...snapshot, progress: scanProgress }} language={language} reportDraft={reportDraftStatus}/>{!demo && <><p className="scan-current-activity" role="status"><strong>{tk("현재 작업", "Current work")}</strong> {currentWork ? localizeActivityMessage(language, currentWork) : tk("스캔 프로세스를 시작하고 승인된 스코프를 확인하고 있습니다.", "Starting the scan process and checking the approved scope.")}</p>{agentBoard}</>}{cancelling && <p className="scan-stop-status" role="status">{cancelPhase === 'requesting' ? tk("취소 요청을 서버에 전달하고 있습니다.", "Sending the cancellation request to the server.") : tk("취소 요청을 접수했습니다. 실행 프로세스 종료와 저장된 상태 갱신을 확인하고 있습니다.", "Cancellation requested. Checking the process exit and saved status.")}</p>}{snapshot.status === 'paused' && !cancelling && <p className="scan-stop-status" role="status">{tk("스캔 일시정지 중 · 같은 실행을 이어가려면 ‘계속’을 누르세요.", "Scan paused. Select Continue to resume the same run.")}</p>}{snapshot.status === 'cancelled' && <p className="scan-stop-status is-done" role="status">{tk("스캔 취소 완료 · 실행 프로세스가 종료됐고 스캔 상태가 취소됨으로 저장됐습니다.", "Scan cancelled. The process exited and the cancelled status was saved.")}</p>}<div className="scan-stats"><div><span>{tr('Scan ID')}</span><strong className="mono">{snapshot.scan_id}</strong></div><div><span>{tr('Endpoints')}</span><strong>{snapshot.endpoints}</strong></div><div><span>{tk('기록된 HTTP 요청', 'Recorded HTTP requests')}</span><strong>{snapshot.requests.toLocaleString()}</strong>{snapshot.per_target_budget != null && <small>{tk('대상별 상한', 'Per-target limit')} {snapshot.per_target_budget.toLocaleString()}</small>}</div><div className="progress-stat"><span>{tr(snapshot.stage)} {tr('Estimated progress')} <b>{scanProgress}%</b></span><progress max="100" value={scanProgress} aria-label={`${tr(snapshot.stage)} ${tr('Estimated progress')}`}/></div></div>{snapshot.service_endpoints !== undefined && <p className="scan-recon-summary"><strong>{tk("서비스 URL 후보", "Candidate service URLs")}</strong> {tk(`${snapshot.service_endpoints}개`, `${snapshot.service_endpoints} candidates`)} <span>{tk(`· 실제 HTTP 응답 관측 ${snapshot.live_endpoints ?? 0}개`, `· ${snapshot.live_endpoints ?? 0} observed HTTP responses`)}</span></p>}{snapshot.stage === 'Recon' && <p className="scan-recon-summary"><strong>{tk("최근 정찰 작업", "Latest recon task")}</strong> {latestReconActivity ? localizeActivityMessage(language, latestReconActivity) : tk('이 실행에는 도구별 정찰 기록이 아직 없습니다.', 'This run has no tool-level recon records yet.')}</p>}{resumeError && <p className="form-error" role="alert">{resumeError}</p>}{pauseError && <p className="form-error" role="alert">{pauseError}</p>}{cancelError && <p className="form-error" role="alert">{cancelError}</p>}</> : <Empty title={tr(state === 'offline' ? 'Backend unavailable' : state === 'idle' ? 'No scan selected' : 'Loading scan snapshot')}>{tr(state === 'idle' ? 'Start a scan from an approved Scope to show its snapshot and activity here.' : 'Connect the REST snapshot endpoint to display scan state. Demo data is never substituted in live mode.')}</Empty>}
+    {snapshot ? <>
+      {manualLoginNotice}
+      <Pipeline snapshot={{ ...snapshot, progress: scanProgress }} language={language} reportDraft={reportDraftStatus}
+        tokenUsage={demo ? undefined : tokenUsage} tokenStatus={tokenStatus}/>
+      {!demo && <><p className="scan-current-activity" role="status"><strong>{tk("현재 작업", "Current work")}</strong> {currentWork ? localizeActivityMessage(language, currentWork) : tk("스캔 프로세스를 시작하고 승인된 스코프를 확인하고 있습니다.", "Starting the scan process and checking the approved scope.")}</p>{agentBoard}</>}
+      {cancelling && <p className="scan-stop-status" role="status">{cancelPhase === 'requesting' ? tk("취소 요청을 서버에 전달하고 있습니다.", "Sending the cancellation request to the server.") : tk("취소 요청을 접수했습니다. 실행 프로세스 종료와 저장된 상태 갱신을 확인하고 있습니다.", "Cancellation requested. Checking the process exit and saved status.")}</p>}
+      {snapshot.status === 'paused' && !cancelling && <p className="scan-stop-status" role="status">{tk("스캔 일시정지 중 · 같은 실행을 이어가려면 ‘계속’을 누르세요.", "Scan paused. Select Continue to resume the same run.")}</p>}
+      {snapshot.status === 'cancelled' && <p className="scan-stop-status is-done" role="status">{tk("스캔 취소 완료 · 실행 프로세스가 종료됐고 스캔 상태가 취소됨으로 저장됐습니다.", "Scan cancelled. The process exited and the cancelled status was saved.")}</p>}
+      <div className="scan-stats"><div><span>{tr('Scan ID')}</span><strong className="mono">{snapshot.scan_id}</strong></div><div><span>{tr('Endpoints')}</span><strong>{snapshot.endpoints}</strong></div><div><span>{tk('기록된 HTTP 요청', 'Recorded HTTP requests')}</span><strong>{snapshot.requests.toLocaleString()}</strong>{snapshot.per_target_budget != null && <small>{tk('대상별 상한', 'Per-target limit')} {snapshot.per_target_budget.toLocaleString()}</small>}</div><div className="progress-stat"><span>{tr(snapshot.stage)} {tr('Estimated progress')} <b>{scanProgress}%</b></span><progress max="100" value={scanProgress} aria-label={`${tr(snapshot.stage)} ${tr('Estimated progress')}`}/></div></div>
+      {snapshot.service_endpoints !== undefined && <p className="scan-recon-summary">
+        <strong>{tk("서비스 URL 후보", "Candidate service URLs")}</strong> {tk(`${snapshot.service_endpoints}개`, `${snapshot.service_endpoints} candidates`)}
+        <span>{tk(`· 실제 HTTP 응답 관측 ${snapshot.live_endpoints ?? 0}개`, `· ${snapshot.live_endpoints ?? 0} observed HTTP responses`)}</span>
+        {!demo && <span className="scan-token-inline">· <strong>{tr('Accumulated LLM tokens (measured)')}</strong> {tokenUsageLabel(language, tokenUsage?.total, tokenStatus)}
+          {tokenUsage && tokenUsage.unattributed.measured_calls + tokenUsage.unattributed.unreported_calls > 0 && <> · {tr('Unclassified LLM calls')} {tokenUsage.unattributed.measured_calls + tokenUsage.unattributed.unreported_calls}</>}
+        </span>}
+      </p>}
+      {snapshot.stage === 'Recon' && <p className="scan-recon-summary"><strong>{tk("최근 정찰 작업", "Latest recon task")}</strong> {latestReconActivity ? localizeActivityMessage(language, latestReconActivity) : tk('DNS와 도구 작업 전 단계는 위의 에이전트별 작업에서 확인하세요.', 'Check agent work above for the steps before DNS and tools.')}</p>}
+      {resumeError && <p className="form-error" role="alert">{resumeError}</p>}
+      {pauseError && <p className="form-error" role="alert">{pauseError}</p>}
+      {cancelError && <p className="form-error" role="alert">{cancelError}</p>}
+    </> : <Empty title={tr(state === 'offline' ? 'Backend unavailable' : state === 'idle' ? 'No scan selected' : 'Loading scan snapshot')}>{tr(state === 'idle' ? 'Start a scan from an approved Scope to show its snapshot and activity here.' : 'Connect the REST snapshot endpoint to display scan state. Demo data is never substituted in live mode.')}</Empty>}
   </Panel>;
   const scanProgressContent = <div className="scan-progress-dialog">
     {manualLoginNotice}
@@ -1178,6 +1277,7 @@ export default function App() {
       <Badge tone={snapshot?.status === 'failed' ? 'critical' : snapshot?.status === 'completed' ? 'success' : 'warning'}>{cancelling ? tk("취소 처리 중", "Cancelling") : tr(snapshot?.status || state)}</Badge>
     </div>
     <div className="scan-progress-stats"><div><span>{tk("현재 단계", "Current stage")}</span><strong>{tr(snapshot?.stage || 'Waiting')}</strong></div><div><span>{tr("Estimated stage progress")}</span><strong>{scanProgress}%</strong></div><div><span>{tk("경과 시간", "Elapsed time")}</span><strong role="timer">{formatActivityElapsed(scanElapsedSeconds, language)}</strong></div><div><span>{tk("기록된 HTTP 요청", "Recorded HTTP requests")}</span><strong>{snapshot?.requests.toLocaleString() ?? 0}</strong>{snapshot?.per_target_budget != null && <small>{tk("대상별 상한", "Per-target limit")} {snapshot.per_target_budget.toLocaleString()}</small>}</div></div>
+    {!demo && <p className="scan-token-progress"><strong>{tr('Accumulated LLM tokens (measured)')}</strong> {tokenUsageLabel(language, tokenUsage?.total, tokenStatus)} <span>· {tr('Current stage')} {snapshot?.stage === 'Scope' ? tr('Scope tokens separate from scan') : tokenUsageLabel(language, snapshot?.stage ? tokenUsage?.stages[snapshot.stage] : undefined, tokenStatus)}</span></p>}
     {snapshot?.service_endpoints !== undefined && <p className="scan-recon-summary"><strong>{tk("정찰 URL", "Recon URLs")}</strong> {tk(`전체 ${snapshot.endpoints}개 · 서비스 후보 ${snapshot.service_endpoints}개 · HTTP 응답 관측 ${snapshot.live_endpoints ?? 0}개 (404 포함 가능)`, `${snapshot.endpoints} total · ${snapshot.service_endpoints} service candidates · ${snapshot.live_endpoints ?? 0} HTTP responses observed (may include 404)`)}</p>}
     <progress aria-label={tr("Estimated stage progress")} max="100" value={scanProgress}/>
     {cancelling && <p className="scan-stop-status" role="status">{cancelPhase === 'requesting' ? tk("취소 요청을 서버에 전달하고 있습니다.", "Sending the cancellation request to the server.") : tk("취소 요청 접수됨 · 실행 프로세스 종료와 저장된 상태 갱신을 확인하는 중입니다.", "Cancellation requested. Checking that the process exited and the saved status updated.")}</p>}
@@ -1249,9 +1349,12 @@ export default function App() {
     && maxDepth >= 0 && maxDepth <= selectedLimits.max_depth
     && Number.isInteger(ffufMaxTimeSeconds) && ffufMaxTimeSeconds >= 0 && ffufMaxTimeSeconds <= 86400
     && isValidTagBatchSize(tagBatchSize);
+  const modelsValid = [reconModel, attackModel, validationModel, reportModel].every(
+    model => modelNamePattern.test(model) && !model.includes('://'),
+  );
   const canLaunch = !demo && !!selectedScope && selectedTargets.length > 0
     && selectedTargets.every(target => selectedScope.targets.some(item => item.asset === target))
-    && authorizationConfirmed && limitsValid
+    && authorizationConfirmed && limitsValid && modelsValid
     && canLaunchWithHeaderInputs(selectedScope.execution_requirements, identityValues)
     && canLaunchWithPolicyInputs(selectedScope.execution_requirements, selectedTargets, policyValues, policyConfirmations, identityValues) && !launching;
   const journeySteps = [
@@ -1281,6 +1384,14 @@ export default function App() {
         {!headerRequirementsReady && (headerResolutionError
           ? <p className="form-error" role="alert">{tk('실행 요구 사항을 확인하지 못해 스캔을 시작할 수 없습니다.', 'The scan cannot start until execution requirements are resolved.')} {headerResolutionError}</p>
           : <p className="requirements-note" role="status">{tk('승인된 정책에서 실행 요구 사항을 확인하는 중입니다…', 'Resolving execution requirements from the approved policy…')}</p>)}
+        <div className="form-grid">
+          <ScanModelField label={tr('Recon model')} value={reconModel} onChange={setReconModel} customLabel={tr('Custom model ID')}/>
+          <ScanModelField label={tr('Attack model')} value={attackModel} onChange={setAttackModel} customLabel={tr('Custom model ID')}/>
+          <ScanModelField label={tr('Validation model')} value={validationModel} onChange={setValidationModel} customLabel={tr('Custom model ID')}/>
+          <ScanModelField label={tr('Report model')} value={reportModel} onChange={setReportModel} customLabel={tr('Custom model ID')}/>
+        </div>
+        <p className="form-hint">{tr('Select Codex models from GPT-5.6 onward, or enter a custom model ID.')}</p>
+        {!modelsValid && <p className="form-error" role="alert">{tr('Enter valid model IDs before starting the scan.')}</p>}
         <fieldset className="target-fieldset"><legend>{tr('Targets')} <small>{selectedTargets.length}{tr('selected')}</small></legend><div className="target-actions"><button type="button" className="text-button" onClick={() => setSelectedTargets(selectedScope.targets.map(item => item.asset))}>{tr('Select all')}</button><button type="button" className="text-button" onClick={() => setSelectedTargets([])}>{tr('Clear')}</button></div><div className="target-list">{selectedScope.targets.map(target => <label key={`${target.asset_type}:${target.asset}`}><input type="checkbox" checked={selectedTargets.includes(target.asset)} onChange={() => setSelectedTargets(current => current.includes(target.asset) ? current.filter(item => item !== target.asset) : [...current, target.asset])}/><span><strong>{target.asset}</strong><small>{target.asset_type} · {tk("최대", "maximum")} {tr(target.maximum_severity || 'program policy')}</small></span></label>)}</div></fieldset>
         {selectedTargets.length > 0 && selectedLimits && <section className="execution-requirements"><div className="execution-requirements-heading"><div><h3>{tr('Execution requirements')}</h3></div><div className="stage-badges"><Badge>{tr('Recon')}</Badge><Badge>{tr('Attack')}</Badge><Badge>{tr('Validation')}</Badge></div></div><div className="requirements-summary"><div><span>{tr('Policy request-rate ceiling')}</span><strong>{selectedScope.execution_requirements.scope_max_requests_per_second ? `${selectedScope.execution_requirements.scope_max_requests_per_second} ${tr('requests per second unit')}` : tr('Not specified by policy')}</strong></div><div><span>{tr('Required request header')}</span><strong className="mono">{headerRequirementsReady ? (selectedScope.execution_requirements.required_headers.length ? selectedScope.execution_requirements.required_headers.map(header => <span key={header.name} title={header.source_quote}>{header.name}: {header.value_template}<br/></span>) : tr('None')) : tk('확인 중', 'Pending')}</strong></div></div></section>}
         <div className="form-grid"><label className="form-field"><span>{tr('Execution profile')}</span><select value={scanProfile} onChange={event => setScanProfile(event.target.value as ExecutionProfileId)}><option value="safe-recon">{tr('Safe recon')}</option><option value="focused-discovery">{tr('Focused discovery')}</option></select></label><label className="form-field"><span>{tk('공유 스캔 요청 예산', 'Shared scan request budget')} <small>≤ {selectedLimits?.max_requests.toLocaleString()}</small></span><input type="number" min="1" max={selectedLimits?.max_requests} value={maxRequests} onChange={event => setMaxRequests(Number(event.target.value))}/></label></div>
@@ -1361,7 +1472,7 @@ export default function App() {
       <div className="main-shell" style={viewportWidth > 820 ? { marginLeft: navigationWidth } : undefined}><header className="topbar"><div className="breadcrumb">{tr('Workspace')} <span>/</span> <strong>{pageLabel(page)}</strong></div><div className="top-actions"><label className="language-select"><span className="sr-only">{tr('Language')}</span><select aria-label={tr('Language')} value={language} onChange={event => setLanguage(event.target.value as Language)}><option value="ko">한국어</option><option value="en">English</option></select></label><button className="icon-button theme-toggle" title={tr(`Switch to ${resolvedTheme === 'dark' ? 'light' : 'dark'} mode`)} aria-label={tr(`Switch to ${resolvedTheme === 'dark' ? 'light' : 'dark'} mode`)} onClick={() => setTheme(resolvedTheme === 'dark' ? 'light' : 'dark')}><Icon name={resolvedTheme === 'dark' ? 'sun' : 'moon'} size={16}/></button></div></header>
       {demo && <div className={`demo-strip ${samplePreview ? 'sample-preview' : ''}`}><Icon name="terminal" size={14}/><span>{tr('DEMO DATA')}<b>·</b>{tr('A synthetic workflow. No network scans or program activity.')}</span><button onClick={samplePreview ? () => location.assign(liveUrl.href) : () => go('Settings')}>{samplePreview ? tk('실제 데이터로 돌아가기', 'Return to live data') : tr('Connection details')} <Icon name="arrow" size={13}/></button></div>}
       <div className={`workspace-grid ${collapsed ? 'activity-collapsed' : ''}`} style={viewportWidth > 1100 && !collapsed ? { gridTemplateColumns: `minmax(0,1fr) ${activityWidth}px` } : undefined}><main id="main-content" tabIndex={-1} className="content-column">
-        <div className="page-heading"><div><p className="eyebrow">{tr(page === 'Overview' ? 'YOUR OPERATIONS, AT A GLANCE' : 'AI DAST / WORKSPACE')}</p><h1>{tr(page === 'Overview' ? 'Security overview' : page)}</h1><p>{tr(page === 'Overview' ? 'From approved scope to evidence you can stand behind.' : page === 'Scopes / Programs' ? 'Program inventory is a starting point. Approved scope defines execution.' : page === 'Scans' ? 'One deterministic pipeline. Traceable decisions at every stage.' : page === 'Findings' ? 'Signals become findings. Validation establishes the verdict.' : page === 'Validation' ? 'Reproduction, controls, and evidence before confirmation.' : page === 'Reports' ? 'Reviewable local drafts. Nothing is submitted automatically.' : page === 'Audit log' ? 'Trace the decisions and provenance behind each run.' : 'Connection, privacy, and display preferences.')}</p></div><span className="heading-tag">{demo ? tk("데모 / 042", "Demo / 042") : tk("라이브 / V1", "Live / V1")}</span></div>
+        <div className="page-heading"><div><p className="eyebrow">{tr(page === 'Overview' ? 'YOUR OPERATIONS, AT A GLANCE' : 'AI DAST / WORKSPACE')}</p><h1>{tr(page === 'Overview' ? 'Security overview' : page)}</h1><p>{tr(page === 'Overview' ? 'From approved scope to evidence you can stand behind.' : page === 'Scopes / Programs' ? 'Program inventory is a starting point. Approved scope defines execution.' : page === 'Scans' ? 'One deterministic pipeline. Traceable decisions at every stage.' : page === 'Findings' ? 'Signals become findings. Validation establishes the verdict.' : page === 'Validation' ? 'Reproduction, controls, and evidence before confirmation.' : page === 'Reports' ? 'Reviewable local drafts. Nothing is submitted automatically.' : page === 'Audit log' ? 'Trace the decisions and provenance behind each run.' : page === 'LLM log' ? 'Review Codex execution metadata without prompts or results.' : 'Connection, privacy, and display preferences.')}</p></div><span className="heading-tag">{demo ? tk("데모 / 042", "Demo / 042") : tk("라이브 / V1", "Live / V1")}</span></div>
         {!demo && (page === 'Findings' || page === 'Validation' || page === 'Reports') && <div className="scope-page-actions"><div><strong>{tk('예시 데이터', 'Example data')}</strong><p>{tk('취약점 · 검증 · 보고서 예시를 실제 스캔 결과와 분리해 살펴봅니다.', 'Explore synthetic findings, validations, and reports separately from live scans.')}</p></div><a className="secondary-button" href={sampleUrl.href}>{tk('예시 보기', 'View examples')}</a></div>}
         {page === 'Scopes / Programs' && <div className="scope-page-actions"><div><strong>{tr('Scope intake')}</strong><p>{tr('Register a bug bounty program before collecting and approving its executable Scope.')}</p></div><button className="primary-button" onClick={() => { setScopeError(''); setModal('scope'); }}><Icon name="plus" size={15}/>{tr('Add program')}</button></div>}
         {page === 'Scans' && <div className="scope-page-actions"><div><strong>{tr('Start scan')}</strong><p>{tr('Choose a verified approved Scope and configure a new scan.')}</p></div><button className="primary-button" onClick={openNewScan}><Icon name="plus" size={15}/>{tr('New scan')}</button></div>}
@@ -1476,6 +1587,7 @@ export default function App() {
           </Panel>
           <p className="audit-note">{tk('체크한 기록은 이 브라우저의 기본 목록에서 숨겨집니다. 원본 감사 기록은 삭제되지 않으며 ‘확인 완료 보기’에서 복원할 수 있습니다.', 'Checked records are hidden from this browser’s default list. Source audit records remain intact and can be restored from Show acknowledged.')}</p>
         </>}
+        {page === 'LLM log' && <ModelCallLog language={language} demo={demo}/>}
         {page === 'Settings' && <><Panel title={tr('Connection')} subtitle={tr('Configured at build time; no secrets in browser settings')}><dl className="detail-grid"><div><dt>{tr('Transport')}</dt><dd><Badge tone={demo ? 'warning' : 'success'}>{tr(demo ? 'Demo / local fixture' : 'Live / read-only')}</Badge></dd></div><div><dt>{tr('Connection state')}</dt><dd>{tr(state)}</dd></div><div><dt>{tr('Result storage')}</dt><dd className="mono">{tr(resultRoot || 'Unavailable')}</dd></div><div><dt>{tr('Snapshot endpoint')}</dt><dd className="mono">GET /api/v1/scans/:id</dd></div><div><dt>{tr('Delta stream')}</dt><dd className="mono">/ws/scans/:id?after=:event_id</dd></div><div><dt>{tr('Protocol')}</dt><dd>{tr('Version 1 · contiguous event IDs')}</dd></div><div><dt>{tr('Activity retention')}</dt><dd>{tr('Latest 500 events in memory')}</dd></div></dl><div className="panel-bottom"><p>{tr('Set VITE_TRANSPORT=live and VITE_SCAN_ID to connect an implemented backend. Live mode never falls back to demo data.')}</p><button className="secondary-button" onClick={refresh}>{tr(demo ? 'Restart demo' : 'Reload snapshot')}</button></div></Panel><Panel title={tr('Workspace preferences')} subtitle={tr('Theme is saved locally; operational data is never uploaded')}><div className="setting-row"><div><h3>{tr('Appearance')}</h3><p>{tr('Follow the system theme or keep this workspace light or dark.')}</p></div><select aria-label={tr('Color theme')} value={theme} onChange={event => setTheme(event.target.value as ThemeChoice)}><option value="system">{tr('System')}</option><option value="dark">{tr('Dark')}</option><option value="light">{tr('Light')}</option></select></div><div className="setting-row"><div><h3>{tr('Language')}</h3><p>{tr('Choose the dashboard display language.')}</p></div><select aria-label={tr('Language')} value={language} onChange={event => setLanguage(event.target.value as Language)}><option value="ko">한국어</option><option value="en">English</option></select></div><div className="setting-row"><div><h3>{tr('Compact density')}</h3><p>{tr('Reduce spacing in data tables and activity.')}</p></div><input aria-label={tr('Compact density')} type="checkbox" checked={compact} onChange={e => setCompact(e.target.checked)}/></div><div className="setting-row"><div><h3>{tr('Reveal private program name')}</h3><p>{tr('Hidden by default. Resets when the page reloads.')}</p></div><input aria-label={tr('Reveal private program name')} type="checkbox" checked={privateVisible} onChange={e => setPrivateVisible(e.target.checked)}/></div></Panel><Panel title={tr('Backend integration remaining')} subtitle={tr('Implemented boundaries stay separate from future operator workflows')}><ul className="integration-list"><li>{tr('Authentication and authorization for any deployment beyond the loopback-only local operator.')}</li><li>{tr('Evidence-backed Validation case decisions and review actions.')}</li><li>{tr('Report generation and platform submission remain explicit CLI/operator actions.')}</li></ul></Panel></>}
       </main>
       <aside id="activity-panel" className={`activity-panel ${collapsed ? 'collapsed' : ''}`} aria-label={tr('Persistent live activity')} style={viewportWidth > 820 && viewportWidth <= 900 ? { left: navigationWidth, ...(!collapsed ? { height: activityHeight } : {}) } : viewportWidth <= 1100 && !collapsed ? { height: activityHeight } : undefined}>

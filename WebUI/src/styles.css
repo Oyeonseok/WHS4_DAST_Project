@@ -510,6 +510,10 @@ html[lang=ko] .eyebrow{font-size:13px;font-weight:600;color:var(--accent)}
 .scan-recon-timeline article small{display:block;margin-top:4px;color:var(--muted);font-size:13px}
 :root[data-theme=light] .scan-recon-pagination [role="alert"]{color:#8a3e25}
 .scan-recon-summary{padding:11px 13px;border-top:1px solid var(--line);color:var(--text);font-size:13px;line-height:1.5}.scan-recon-summary strong{color:var(--muted);margin-right:8px}
+.pipeline .stage-token-usage{display:block;margin-top:5px;color:var(--muted);font-size:13px;line-height:1.45;overflow-wrap:anywhere}
+.scan-recon-summary>span:not(.scan-token-inline){margin-inline-start:8px}
+.scan-token-inline{margin-inline-start:12px;overflow-wrap:anywhere}.scan-token-inline strong{color:var(--text);margin-right:4px}
+.scan-token-progress{margin:0;padding:11px 13px;border:1px solid var(--line);border-radius:7px;background:var(--soft);font-size:14px;line-height:1.5;color:var(--text)}.scan-token-progress strong{font-weight:600}.scan-token-progress span{color:var(--muted)}
 .audit-toolbar{flex-wrap:wrap;justify-content:flex-start}.audit-toolbar .search-field{flex:1 1 230px;max-width:none}.audit-toolbar select,.audit-toolbar button{min-height:40px}.audit-entry{align-items:flex-start!important}.audit-entry .audit-point{flex:0 0 8px;height:8px;margin-top:9px}.audit-entry.error .audit-point{background:#e997a3;border-color:#e997a3}.audit-entry.warning .audit-point{background:#dfbe7f;border-color:#dfbe7f}.audit-entry.success .audit-point{background:#a9d7bb;border-color:#a9d7bb}.audit-entry-body{min-width:0}.audit-entry-meta{display:flex;align-items:center;gap:9px;flex-wrap:wrap;margin-bottom:8px}.audit-entry-meta span:last-child{font-size:12px;color:var(--muted)}.audit-entry strong{display:block;line-height:1.5}.audit-entry .audit-problem{color:#e9a5ae;font-size:13px;line-height:1.5}.audit-entry .audit-task-id{font-size:12px;overflow-wrap:anywhere}.audit-entry code,.audit-event-id{font-family:Consolas,'Liberation Mono',monospace}.audit-event-id{display:block;color:var(--muted);font-size:11px;margin-top:8px;overflow-wrap:anywhere}.audit-check{flex:0 0 auto;min-width:38px;min-height:38px;padding:7px 9px;border:1px solid var(--line);border-radius:6px;background:var(--soft);color:var(--text);font-size:12px}.audit-check:hover{border-color:var(--accent);color:var(--accent)}.audit-note{font-size:12px;color:var(--muted);margin:0 0 20px;line-height:1.6}
 @media(max-width:660px){.audit-toolbar select,.audit-toolbar button{flex:1 1 auto}.audit-entry-meta{gap:6px}.audit-entry .audit-check{margin-left:auto}}
 
@@ -611,4 +615,30 @@ dialog:has(.scan-form,.scope-intake-form,.scope-workflow){
   min-height:min(280px,calc(100dvh - 32px));
   max-width:calc(100vw - 32px);
   max-height:calc(100dvh - 32px);
+}
+
+.model-call-panel{padding:0 20px 20px}
+.model-call-panel .panel-heading{padding-inline:0}
+.model-call-toolbar{flex-wrap:wrap;justify-content:flex-start}
+.model-call-toolbar .search-field{flex:1 1 240px;max-width:none}
+.model-call-toolbar select,.model-call-panel button{min-height:40px}
+.model-call-count{margin:0 0 14px;color:var(--muted);font-size:14px}
+.model-call-list{display:grid;gap:12px}
+.model-call-entry{min-width:0;padding:16px;border:1px solid var(--line);border-radius:8px;background:var(--panel)}
+.model-call-head{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px}
+.model-call-head time{color:var(--muted);font-size:14px}
+.model-call-entry h3{margin:12px 0;font-size:17px;overflow-wrap:anywhere}
+.model-call-code{display:block;margin:-6px 0 12px;color:var(--muted);font-size:13px;overflow-wrap:anywhere}
+.model-call-facts{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px 16px;margin:0}
+.model-call-facts div{min-width:0}
+.model-call-facts dt{color:var(--muted);font-size:14px}
+.model-call-facts dd{margin:2px 0 0;font-size:15px;overflow-wrap:anywhere}
+.model-call-list .model-call-usage{margin:14px 0 8px;font-size:14px;line-height:1.6;overflow-wrap:anywhere}
+.model-call-id{color:var(--muted);font-size:13px;overflow-wrap:anywhere}
+.model-call-pagination{display:flex;justify-content:center;margin-top:16px}
+@media(max-width:660px){
+  .model-call-panel .panel-heading{display:block}
+  .model-call-panel .panel-heading button{width:100%;margin-top:12px}
+  .model-call-toolbar select{width:100%}
+  .model-call-facts{grid-template-columns:1fr}
 }

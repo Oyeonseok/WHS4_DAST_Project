@@ -11,18 +11,18 @@ import hashlib
 import json
 import re
 import sqlite3
-from urllib.parse import urlsplit, urlunsplit
 import threading
 from contextlib import closing
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
+from aidast.core.model_calls import read_model_call_events, read_scan_token_usage
 from aidast.pipeline.locations import iter_run_directories, scan_run_directory
 from aidast.recon.activity import validated_activity
 from aidast.recon.tagging_progress import tagging_counts, tagging_progress_params
-
 
 STAGES = ("Scope", "Recon", "Attack", "Chaining", "Validation", "Report")
 _RECON_ACTIVITY = {
@@ -630,6 +630,18 @@ class DashboardProjector:
                 and {"endpoint_observations", "endpoint_annotations"} <= tables):
             state["_tagging_counts"] = tagging_counts(conn, scan_id)
         return state, audits
+
+    def model_call_events(
+        self, *, before: int | None = None, limit: int = 100,
+    ) -> dict[str, Any]:
+        events, next_before = read_model_call_events(
+            self.result_root, before=before, limit=limit,
+        )
+        return {"events": events, "next_before": next_before}
+
+    def scan_token_usage(self, scan_id: str) -> dict[str, Any]:
+        self.validate_scan_id(scan_id)
+        return read_scan_token_usage(self.result_root, scan_id)
 
     def audit_log(self, scan_id: str) -> list[dict[str, Any]]:
         """Return audit metadata with only validated activity and error categories."""

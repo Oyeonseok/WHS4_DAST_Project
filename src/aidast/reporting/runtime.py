@@ -9,6 +9,8 @@ import tempfile
 from pathlib import Path
 from typing import Protocol
 
+from aidast.core.model_calls import model_call_context
+
 from .models import ReportDraft
 
 PLATFORMS = ("hackerone", "bugcrowd", "intigriti", "generic")
@@ -139,6 +141,10 @@ class ReportAgent:
         writer_context = sanitize_writer_context(context)
         writer_context["language"] = report_language(Path(result["report_db"]), platform=platform)
         writer_context["output_schema"] = ReportDraft.model_json_schema()
-        return record_case_report(
-            Path(result["report_db"]), self.writer.write(writer_context),
-        )
+        with model_call_context(
+            scan_id=writer_context["source"]["scan_id"],
+            stage="Report",
+            case_id=case_id,
+        ):
+            draft = self.writer.write(writer_context)
+        return record_case_report(Path(result["report_db"]), draft)

@@ -9,7 +9,7 @@ from contextlib import closing
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from aidast.agents.main import CodexReportWriter
+from aidast.agents.main import CodexMainAgent, CodexReportWriter
 from aidast.pipeline.lifecycle import finish_stage_run, start_stage_run
 
 from .runtime import PLATFORMS, ReportAgent, ReportError, ReportWriter
@@ -42,6 +42,7 @@ def generate_scan_reports(
     platform: str = "generic",
     writer: ReportWriter | None = None,
     language: str | None = None,
+    model: str | None = None,
 ) -> list[dict]:
     """Generate one local draft per current confirmed case for this scan."""
     if platform not in PLATFORMS:
@@ -59,7 +60,11 @@ def generate_scan_reports(
             return []
         stage_run_id = start_stage_run(conn, scan_id=scan_id, stage="report")
 
-    agent = ReportAgent(writer or CodexReportWriter())
+    agent = ReportAgent(
+        writer or CodexReportWriter(
+            CodexMainAgent(main_model=model or "gpt-6-sol")
+        )
+    )
     results: list[dict] = []
     try:
         for case_id in cases:

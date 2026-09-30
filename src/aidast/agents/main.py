@@ -19,6 +19,7 @@ from aidast.auth.codex import CodexAuth, CodexAuthError
 from aidast.agents.policy_guidance import policy_skill_text, stage_policy_skill
 from aidast.scope.exclusions import ResourceClassification
 from aidast.scope.exclusion_binding import classify_with_agent, SCOPE_EXCLUSION_INSTRUCTIONS
+from aidast.core.model_calls import logged_model_call, record_jsonl_usage
 from aidast.recon.models import (
     ReconPlan,
     ReconPlanSelectionProposal,
@@ -742,6 +743,7 @@ Reuse compatible input keys; never invent operator values or confirmations.
             self._verify_grounding(page, analysis)
         return analysis
 
+    @logged_model_call("structured", model_attribute="_main_model")
     def _run_structured(
         self,
         *,
@@ -779,6 +781,7 @@ Reuse compatible input keys; never invent operator values or confirmations.
                 "--skip-git-repo-check",
                 "--ephemeral",
                 "--ignore-user-config",
+                "--json",
                 "--disable",
                 "shell_tool",
                 "--disable",
@@ -817,20 +820,23 @@ Reuse compatible input keys; never invent operator values or confirmations.
                     "--disable",
                     "in_app_browser",
                 ]
-            try:
-                completed = subprocess.run(
-                    command,
-                    input="$aidast-policy\n\n" + policy_skill_text() + "\n\n" + prompt,
-                    text=True,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.PIPE,
-                    timeout=self._timeout_seconds,
-                    check=False,
-                )
-            except subprocess.TimeoutExpired as exc:
-                raise MainAgentError(
-                    f"Codex {operation} timed out after {self._timeout_seconds}s"
-                ) from exc
+            with tempfile.TemporaryFile(mode="w+t", encoding="utf-8") as events:
+                try:
+                    completed = subprocess.run(
+                        command,
+                        input="$aidast-policy\n\n" + policy_skill_text() + "\n\n" + prompt,
+                        text=True,
+                        stdout=events,
+                        stderr=subprocess.PIPE,
+                        timeout=self._timeout_seconds,
+                        check=False,
+                    )
+                except subprocess.TimeoutExpired as exc:
+                    raise MainAgentError(
+                        f"Codex {operation} timed out after {self._timeout_seconds}s"
+                    ) from exc
+                events.seek(0)
+                record_jsonl_usage(events)
 
             if completed.returncode != 0:
                 diagnostic = completed.stderr.strip()[-2_000:]
