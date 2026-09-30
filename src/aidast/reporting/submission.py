@@ -454,12 +454,21 @@ def _masked_template(template: str | None, masker: _Masker) -> str | None:
 
 
 def _markdown(fields: dict[str, str], values: dict[str, str], requirements: dict, evidence: list[dict], attachment_ids: list[str], *, platform: str = "", language: str = "ko") -> str:
+    from .report_sections import enrich_report
+    def enriched(body: str) -> str:
+        return enrich_report(body, platform=platform, steps=values.get("steps_to_reproduce", ""),
+                             prerequisites=values.get("prerequisites", ""),
+                             expected=values.get("expected_behavior", ""),
+                             observed=values.get("actual_behavior", ""),
+                             masked_text=body + canonical_json({"fields": fields, "evidence": evidence}),
+                             language=language)
     if platform == "generic":
         from .presentation import generic_markdown
         body = _template(requirements["report_template"], values) if requirements["report_template"] is not None else None
         result = generic_markdown(fields, evidence, body, language=language)
         if requirements["impact_template"] is not None:
             result += "\n## " + ("Additional impact statement" if language == "en" else "추가 영향 설명") + "\n\n" + _template(requirements["impact_template"], values) + "\n"
+        result = enriched(result)
         if len(result.encode()) > MAX_MARKDOWN_BYTES:
             raise ReportError('report exceeds the rendered byte budget')
         return result
@@ -475,7 +484,7 @@ def _markdown(fields: dict[str, str], values: dict[str, str], requirements: dict
         for i, item in enumerate(evidence, 1):
             label = " (requested attachment; metadata only)" if item["evidence_id"] in attachment_ids else ""
             result += f"\n- Evidence/evidence-{i:03d}.json{label}"
-    result += '\n'
+    result = enriched(result)
     if len(result.encode()) > MAX_MARKDOWN_BYTES:
         raise ReportError('report exceeds the rendered byte budget')
     return result

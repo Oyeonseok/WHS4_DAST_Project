@@ -527,3 +527,83 @@ def test_edited_rules_strings_are_saved_as_edits_instead_of_restoring_old_templa
     private = json.loads((report_db.parent / "ProgramRequirements.json").read_text())["requirements"]
     assert private["source"] == "Edited program rules"
     assert private["report_template"] == "{summary}\nChanged contact: carol@example.com"
+
+
+def test_local_report_presents_masked_poc_walkthrough_and_platform(case):
+    secret = 'local-poc-secret'
+    cited = {'text': 'GET /api/items/7 with Authorization: Bearer ' + secret,
+             'evidence_ids': ['evidence_case']}
+    report_db = prepare(case, platform='hackerone', changes={'steps_to_reproduce': [cited]})
+    markdown = (report_db.parent / 'Report.md').read_text()
+    assert 'Platform: hackerone' in markdown
+    assert '## PoC' in markdown
+    assert 'GET /api/items/7' in markdown
+    assert '## Masking' in markdown
+    assert '[TOKEN_1]' in markdown
+    assert secret not in markdown
+    assert service()[1](report_db)['ready'] is False  # Program rules are still pending.
+
+
+@pytest.mark.parametrize('platform', ['hackerone', 'bugcrowd', 'intigriti', 'generic'])
+def test_submission_report_shows_platform_poc_and_redaction_examples(case, platform):
+    secret = 'export-poc-secret'
+    changes = {'steps_to_reproduce': [
+        {'text': 'GET /api/items/7 with Authorization: Bearer ' + secret,
+         'evidence_ids': ['evidence_case']}]}
+    if platform == 'bugcrowd':
+        changes['vrt_category'] = {'text': 'Broken Access Control > IDOR', 'evidence_ids': ['evidence_case']}
+        changes['severity'] = {'text': 'Low', 'evidence_ids': ['evidence_case']}
+    report_db = prepare(case, platform=platform, changes=changes)
+    view = verified(report_db, severity_required=False)
+    assert view['ready']
+    with zipfile.ZipFile(io.BytesIO(service()[3](report_db))) as archive:
+        markdown = archive.read('Report.md').decode()
+    assert platform.lower() in markdown.lower()
+    assert 'PoC' in markdown
+    assert '/api/items/7' in markdown
+    assert '[TOKEN_1]' in markdown
+    assert secret not in markdown
+
+
+def test_existing_report_markdown_format_remains_immutable_and_readable(case):
+    import hashlib
+    from aidast.reporting import case_report_status
+    from aidast.reporting.models import ReportDraft
+    from aidast.reporting.render import render_report
+
+    report_db = prepare(case)
+    context = json.loads((report_db.parent / 'Report.context.json').read_text())
+    previous = render_report(ReportDraft.model_validate(case.draft(context, 'evidence_case')))
+    with sqlite3.connect(report_db) as conn:
+        conn.execute('UPDATE report_drafts SET markdown=?, markdown_sha256=?',
+                     (previous, hashlib.sha256(previous.encode()).hexdigest()))
+    (report_db.parent / 'Report.md').write_text(previous)
+    assert case_report_status(report_db)['status'] == 'drafted'
+    record_case_report(report_db, case.draft(context, 'evidence_case'))
+    assert (report_db.parent / 'Report.md').read_text() == previous
+
+
+def test_custom_template_cannot_hide_target_platform_header(case):
+    report_db = prepare(case)
+    view = verified(report_db, report_template='Note: Platform: hackerone\n{summary}')
+    assert view['ready']
+    assert view['markdown'].startswith('# Fixture report\n\nTarget platform: HackerOne\n')
+
+
+def test_local_report_masks_secrets_known_only_from_validation_evidence(case):
+    secret = 'FixtureCredential987'
+    report_db = prepare(case, details={'authorization': 'Bearer ' + secret},
+        changes={'summary': {'text': 'Reproduction uses value ' + secret,
+                             'evidence_ids': ['evidence_case']}})
+    markdown = (report_db.parent / 'Report.md').read_text()
+    assert secret not in markdown
+    assert 'Markers replacing sensitive values: `[TOKEN_' in markdown
+    assert '## Masking applied' in markdown
+
+
+def test_submission_report_lists_structured_redacted_marker(case):
+    report_db = prepare(case, details={'account_id': 42})
+    view = verified(report_db)
+    assert view['ready']
+    assert view['evidence'][0]['details']['account_id'] == '[REDACTED]'
+    assert '`[REDACTED]`' in view['markdown']

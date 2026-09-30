@@ -20,6 +20,41 @@ from .models import ReportDraft, validate_draft
 from .render import render_report
 
 
+def _case_markdown(draft: ReportDraft, context: dict | None = None) -> str:
+    """Render a local reader copy without changing the immutable source draft."""
+    from .submission import _Masker, _writer_seed
+    from .report_sections import enrich_report
+
+    prose = [item.text for name in (
+        "title", "asset", "weakness", "summary", "expected_behavior", "actual_behavior",
+        "impact", "severity", "cvss_vector", "vrt_category",
+    ) if (item := getattr(draft, name)) is not None]
+    prose.extend(item.text for item in draft.prerequisites)
+    prose.extend(item.text for item in draft.steps_to_reproduce)
+    if draft.remediation:
+        prose.append(draft.remediation)
+    masker = _Masker(prose, seed=_writer_seed(context) if context is not None else None)
+
+    def cited(item):
+        return item.model_copy(update={"text": masker.text(item.text)}) if item is not None else None
+
+    safe = draft.model_copy(update={
+        **{name: cited(getattr(draft, name)) for name in (
+            "title", "asset", "weakness", "summary", "expected_behavior", "actual_behavior",
+            "impact", "severity", "cvss_vector", "vrt_category",
+        )},
+        "prerequisites": [cited(item) for item in draft.prerequisites],
+        "steps_to_reproduce": [cited(item) for item in draft.steps_to_reproduce],
+        "remediation": masker.text(draft.remediation) if draft.remediation else None,
+    })
+    steps = "\n".join(f"{i}. {item.text}" for i, item in enumerate(safe.steps_to_reproduce, 1))
+    masked = "\n".join(masker.text(value) for value in prose)
+    return enrich_report(render_report(safe), platform=safe.platform, steps=steps,
+                         prerequisites="\n".join(item.text for item in safe.prerequisites),
+                         expected=safe.expected_behavior.text, observed=safe.actual_behavior.text,
+                         masked_text=masked, platform_shown=True)
+
+
 _VALIDATION_EVIDENCE_REFERENCE_KEYS = frozenset({
     "evidence_ids",
     "validation_evidence_ids",
@@ -213,7 +248,8 @@ def _load(path: Path, *, verify_source: bool = True) -> tuple[dict, dict, dict |
         if _sha(stored["draft_json"]) != stored["draft_sha256"] or _sha(stored["markdown"]) != stored["markdown_sha256"]:
             raise ReportError("stored report draft hash mismatch")
         draft = validate_draft(json.loads(stored["draft_json"]), context)
-        if render_report(draft) != stored["markdown"]:
+        if (stored["markdown"] != render_report(draft)
+                and stored["markdown"] != _case_markdown(draft, context)):
             raise ReportError("stored report content does not match draft")
     return run, context, stored, stale
 
@@ -275,10 +311,12 @@ def record_case_report(report_db: Path, document: dict) -> dict:
         raise ReportError("current Validation decision or scope eligibility differs from prepared report source")
     draft = validate_draft(document, context)
     encoded = canonical_json(draft.model_dump())
-    markdown = render_report(draft)
     if stored and stored["draft_json"] != encoded:
         raise ReportError("report already contains a different immutable draft")
-    if stored is None:
+    if stored is not None:
+        markdown = stored["markdown"]
+    else:
+        markdown = _case_markdown(draft, context)
         with closing(sqlite3.connect(path)) as conn:
             conn.execute("INSERT INTO report_drafts VALUES (?,?,?,?,?,?)", (
                 run["report_id"], _sha(encoded), encoded, _sha(markdown), markdown,
