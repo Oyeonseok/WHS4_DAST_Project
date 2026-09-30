@@ -96,14 +96,40 @@ def test_observed_html_get_adds_a_new_page_to_the_same_frontier(tmp_path):
     assert result.new_endpoints == 1
 
 
-def test_failed_candidate_does_not_abort_other_candidates(tmp_path):
+def test_explorer_returns_to_parent_get_page_for_second_navigation_branch(tmp_path):
     driver, planner = Driver(tmp_path), Planner()
-    original = driver.execute_explorer_candidate
-    driver.execute_explorer_candidate = lambda **kwargs: (
-        False if kwargs['key'] == 'open-panel' else original(**kwargs))
+    def controls():
+        if driver.page.url.endswith('/work'):
+            return [{'index': 1000 + i, 'key': f'nav-{i}', 'kind': 'navigation',
+                     'label': f'Branch {i}', 'path': f'/work/branch-{i}'} for i in (1, 2)]
+        return [{'index': 0, 'key': 'leaf-action', 'kind': 'click', 'label': 'View details'}]
+    driver.list_explorer_candidates = controls
+    def execute(*, key, **_kwargs):
+        driver.executed.append((driver.page.url, key))
+        if key.startswith('nav-'):
+            driver.page.url = 'https://example.test/work/branch-' + key[-1]
+        return True
+    driver.execute_explorer_candidate = execute
     result = StatefulUIExplorer(planner).run(driver, seed_urls=[], after_step=lambda: [])
     assert result.stop_reason == 'frontier_exhausted'
-    assert result.actions == 0
+    assert result.pages == 3
+    assert ('https://example.test/work/branch-1', 'leaf-action') in driver.executed
+    assert ('https://example.test/work/branch-2', 'leaf-action') in driver.executed
+
+
+def test_failed_candidate_does_not_abort_other_candidates(tmp_path):
+    driver, planner = Driver(tmp_path), Planner()
+    driver.list_explorer_candidates = lambda: [
+        {'index': 0, 'key': 'fails', 'kind': 'click', 'label': 'Unavailable'},
+        {'index': 1, 'key': 'works', 'kind': 'click', 'label': 'Open details'},
+    ]
+    original = driver.execute_explorer_candidate
+    driver.execute_explorer_candidate = lambda **kwargs: (
+        False if kwargs['key'] == 'fails' else original(**kwargs))
+    result = StatefulUIExplorer(planner).run(driver, seed_urls=[], after_step=lambda: [])
+    assert result.stop_reason == 'frontier_exhausted'
+    assert result.actions == 1
+    assert driver.executed == [('https://example.test/work', 'works')]
 
 
 def test_default_fifty_choices_is_one_shared_ceiling(tmp_path):

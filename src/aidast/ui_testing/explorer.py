@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from collections import deque
 from dataclasses import dataclass
 from urllib.parse import urljoin, urlparse
 from typing import Callable
@@ -55,6 +56,8 @@ class StatefulUIExplorer:
         deadline = time.monotonic() + max_seconds
         governor = RequestGovernor(policy.request_governor)
         frontier = ExplorerFrontier(max_pages=driver.interaction_config.max_pages)
+        return_routes: deque[str] = deque()
+        return_pending: set[str] = set()
         screens: set[str] = set()
         endpoints: set[tuple[str, str]] = set()
         pages = actions = decisions = completed_forms = 0
@@ -91,7 +94,7 @@ class StatefulUIExplorer:
 
         def result(reason: str, offered: list[dict] | None = None) -> ExplorerResult:
             eligible, blocked = driver.explorer_form_counts()
-            remaining = frontier.queued_count + len(offered or [])
+            remaining = frontier.queued_count + len(return_routes) + len(offered or [])
             if reason != 'frontier_exhausted':
                 remaining = max(1, remaining)
             return ExplorerResult(pages, len(screens), actions, decisions,
@@ -194,6 +197,16 @@ class StatefulUIExplorer:
                         and 200 <= row['evidence']['response_status'] < 300
                         for row in observed_rows if isinstance(row, dict)))
                 new_url = driver._ensure_page().url
+                if succeeded and selected['kind'] in {'click', 'navigation'}:
+                    remaining_old = frontier.untried(current_screen, inventory)
+                    new_inventory = driver.list_explorer_candidates()
+                    changed = (canonical_visit_key(new_url) != canonical_visit_key(current)
+                               or screen_key(new_url, new_inventory) != current_screen)
+                    return_key = canonical_visit_key(current)
+                    if (changed and remaining_old and allowed_page(current)
+                            and return_key not in return_pending):
+                        return_routes.append(current)
+                        return_pending.add(return_key)
                 if canonical_visit_key(new_url) not in driver._interaction_visited:
                     if driver._interaction_page_count >= driver.interaction_config.max_pages:
                         return result('page_limit')
@@ -202,16 +215,23 @@ class StatefulUIExplorer:
                     pages += 1
                 continue
 
-            next_url = frontier.next_page()
-            while next_url is not None and canonical_visit_key(next_url) in driver._interaction_visited:
+            if return_routes:
+                next_url = return_routes.popleft()
+                return_pending.discard(canonical_visit_key(next_url))
+            else:
                 next_url = frontier.next_page()
+                while next_url is not None and canonical_visit_key(next_url) in driver._interaction_visited:
+                    next_url = frontier.next_page()
             if next_url is None:
                 return result('frontier_exhausted')
-            if driver._interaction_page_count >= driver.interaction_config.max_pages:
+            if (canonical_visit_key(next_url) not in driver._interaction_visited
+                    and driver._interaction_page_count >= driver.interaction_config.max_pages):
                 return result('page_limit')
             path = urlparse(next_url).path or '/'
             if urlparse(next_url).query:
                 path += '?' + urlparse(next_url).query
+            if urlparse(next_url).fragment:
+                path += '#' + urlparse(next_url).fragment
             try:
                 visited = driver.visit_path(path, timeout_ms=max(1, int((deadline - time.monotonic()) * 1000)))
             except Exception:
