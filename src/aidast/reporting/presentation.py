@@ -33,10 +33,19 @@ def _plain(value: str) -> str:
 
 
 def writing_guidance(platform: str, language: str = "ko") -> str:
+    title = (
+        "Structure the title as affected feature -> verified cause -> weakness type "
+        '(for example, "기능 A에서 원인 B로 인해 발생하는 취약점 C" in Korean). '
+        "Do not invent a cause: when the root cause is not verified, use the observed "
+        "condition instead and avoid asserting an internal mechanism. Keep the title concise "
+        "and cite evidence for every factual element."
+    )
     if platform != "generic":
-        return ""
+        return title
     locale = "English" if language == "en" else "Korean"
-    return f"Write the title and all reader-facing report content in {locale}.\n\n" + files("aidast.skills.reporting.generic").joinpath("references", "writing.md").read_text(encoding="utf-8")
+    return (f"Write the title and all reader-facing report content in {locale}.\n\n"
+            + title + "\n\n"
+            + files("aidast.skills.reporting.generic").joinpath("references", "writing.md").read_text(encoding="utf-8"))
 
 
 def evidence_display(item: dict, attempt_kind: str | None = None, *, language: str = "ko") -> dict[str, str]:
@@ -79,27 +88,40 @@ def evidence_display(item: dict, attempt_kind: str | None = None, *, language: s
 
 
 def generic_markdown(fields: dict[str, str], evidence: list[dict], body: str | None = None, *, language: str = "ko") -> str:
-    headings = {"핵심 요약": "Summary", "영향과 범위": "Impact and scope", "영향받는 대상": "Affected asset",
-                "엔드포인트": "Endpoint", "취약점 분류": "Weakness", "심각도": "Severity", "재현 조건": "Prerequisites",
-                "기대 결과": "Expected behavior", "실제 관측 결과": "Observed behavior", "개선 권고": "Recommended remediation"}
+    headings = {"경영진 요약": "Executive summary", "기술 보고서": "Technical report",
+                "진단 범위": "Assessment scope", "취약점 평가": "Vulnerability assessment",
+                "취약점 재현 및 확인": "Exploitation and confirmation", "확인된 영향": "Demonstrated impact",
+                "조치 권고": "Remediation recommendations", "핵심 요약": "Summary",
+                "영향받는 대상": "Affected asset", "엔드포인트": "Endpoint", "취약점 분류": "Weakness",
+                "심각도": "Severity", "재현 조건": "Prerequisites", "기대 결과": "Expected behavior",
+                "실제 관측 결과": "Observed behavior", "개선 권고": "Recommended remediation"}
     tk = lambda ko, en: en if language == "en" else ko
     blocks = ["# " + _plain(fields["title"])]
-    def section(title: str, key: str) -> None:
+    if body is None:
+        blocks.append(tk("보고서 형식: PTES 기반 개별 취약점 보고서", "Format: PTES-style technical finding"))
+    def heading(title: str, level: int = 2) -> None:
+        blocks.append("#" * level + " " + (headings.get(title, title) if language == "en" else title))
+    def section(title: str, key: str, level: int = 4) -> None:
         if fields.get(key):
-            blocks.extend(["## " + (headings.get(title, title) if language == "en" else title), _plain(fields[key])])
+            heading(title, level)
+            blocks.append(_plain(fields[key]))
     if body is not None:
         blocks.append(body)
     else:
-        section("핵심 요약", "summary")
-        section("영향과 범위", "impact")
+        heading("경영진 요약")
+        section("핵심 요약", "summary", 3)
+        heading("기술 보고서")
+        heading("진단 범위", 3)
         section("영향받는 대상", "asset")
         section("엔드포인트", "endpoint")
+        heading("취약점 평가", 3)
         section("취약점 분류", "weakness")
         section("심각도", "severity")
         section("CVSS", "cvss_vector")
+        heading("취약점 재현 및 확인", 3)
         section("재현 조건", "prerequisites")
         if fields.get("steps_to_reproduce"):
-            blocks.extend(["## " + tk("재현 절차", "Reproduction steps"), "\n".join(
+            blocks.extend(["#### " + tk("재현 절차", "Reproduction steps"), "\n".join(
                 # Retain Markdown numbering, while treating captured text as plain text.
                 line.split(". ", 1)[0] + ". " + _plain(line.split(". ", 1)[1])
                 if line.split(". ", 1)[0].isdigit() and ". " in line else _plain(line)
@@ -107,13 +129,16 @@ def generic_markdown(fields: dict[str, str], evidence: list[dict], body: str | N
         section("기대 결과", "expected_behavior")
         section("실제 관측 결과", "actual_behavior")
     if evidence:
-        blocks.extend(["## " + tk("검증 근거", "Validation evidence"), tk("| 확인 항목 | 응답 | 관측 결과 |", "| Check | Response | Observation |") + "\n| --- | --- | --- |"])
+        blocks.extend([("## " if body is not None else "#### ") + tk("검증 근거", "Validation evidence"), tk("| 확인 항목 | 응답 | 관측 결과 |", "| Check | Response | Observation |") + "\n| --- | --- | --- |"])
         rows = []
         for item in evidence:
             display = item.get("display") or evidence_display(item, language=language)
             rows.append("| " + " | ".join(_plain(display[key] or "—") for key in ("label", "response", "result")) + " |")
         blocks[-1] += "\n" + "\n".join(rows)
     if body is None:
+        heading("확인된 영향", 3)
+        section("영향", "impact")
+        heading("조치 권고", 3)
         section("개선 권고", "remediation")
         known = {"title", "summary", "impact", "asset", "weakness", "severity", "cvss_vector", "prerequisites",
                  "steps_to_reproduce", "expected_behavior", "actual_behavior", "remediation", "endpoint"}

@@ -104,7 +104,9 @@ class ReportCatalog:
                 return None
             context = json.loads(run[0]["context_json"])
             platform = str(context.get("platform") or "unknown")[:64]
+            from aidast.reporting.presentation import report_language
             from aidast.reporting.submission import sanitize_preview
+            language = report_language(resolved, platform=platform)
 
             source_path = str(run[0]['source_path'])
             markdown = sanitize_preview(markdown, paths=(str(resolved), str(resolved.parent), source_path,
@@ -118,6 +120,7 @@ class ReportCatalog:
                 "scan_id": str(run[0]["scan_id"])[:128],
                 "case_id": str(run[0]["case_id"])[:256],
                 "platform": platform,
+                "language": language,
                 "title": title,
                 "created_at": str(draft["created_at"] or run[0]["created_at"]),
                 "markdown": markdown,

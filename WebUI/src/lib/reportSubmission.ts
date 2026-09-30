@@ -16,6 +16,39 @@ export type ReportSubmissionView = {
   redactions: { kind: string; count: number }[];
 };
 
+export type ReportLanguageChoice = {
+  report_id: string; scan_id: string; case_id: string; platform: string; language?: 'ko' | 'en';
+};
+
+export function reportLanguageChoices(reports: ReportLanguageChoice[], selected: ReportLanguageChoice): Partial<Record<'ko' | 'en', string>> {
+  if (selected.platform !== 'generic') return {};
+  const choices: Partial<Record<'ko' | 'en', string>> = {};
+  for (const report of reports) {
+    if (report.platform === 'generic' && report.scan_id === selected.scan_id && report.case_id === selected.case_id
+      && (report.language === 'ko' || report.language === 'en') && !choices[report.language]) {
+      choices[report.language] = report.report_id;
+    }
+  }
+  if (selected.language === 'ko' || selected.language === 'en') choices[selected.language] = selected.report_id;
+  return choices;
+}
+
+export function pocStatusMessage(info: Pick<PocInfo, 'status'> | null, reportReady: boolean, language: 'ko' | 'en'): string | null {
+  if (!info || info.status === 'ready') return null;
+  const ko = language === 'ko';
+  if (info.status === 'missing') return ko
+    ? 'PoC 영상은 아직 생성되지 않았습니다. 영상 포함을 선택하지 않으면 ZIP은 영상 없이 내보내집니다.'
+    : 'The PoC video has not been generated. The ZIP will omit it unless you select video inclusion.';
+  if (info.status === 'stale') return ko
+    ? '보고서가 변경되어 이전 PoC 영상은 사용할 수 없습니다. 영상을 포함하려면 다시 생성하세요.'
+    : 'The report changed, so the previous PoC video cannot be used. Generate it again to include it.';
+  return reportReady
+    ? (ko ? 'PoC 영상 파일 상태 또는 무결성 검사를 확인할 수 없습니다. 영상 없이 보고서를 내보낼 수 있습니다.'
+      : 'The PoC video file status or integrity check could not be verified. You can export the report without video.')
+    : (ko ? '보고서 검사가 통과하지 않아 PoC 영상을 생성할 수 없습니다. 차단 항목을 확인하세요.'
+      : 'The report checks did not pass, so the PoC video cannot be generated. Review the blockers.');
+}
+
 const digest = /^[a-f0-9]{64}$/;
 const identifier = /^[A-Za-z0-9_.:-]{1,256}$/;
 const record = (value: unknown): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value);

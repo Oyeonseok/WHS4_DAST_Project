@@ -44,7 +44,7 @@ def generate_scan_reports(
     language: str | None = None,
     model: str | None = None,
 ) -> list[dict]:
-    """Generate one local draft per current confirmed case for this scan."""
+    """Generate both locales for general reports, or one requested platform draft."""
     if platform not in PLATFORMS:
         raise ReportError("automatic reports require a supported program platform")
     with closing(sqlite3.connect(pipeline_db)) as conn:
@@ -66,27 +66,30 @@ def generate_scan_reports(
         )
     )
     results: list[dict] = []
+    languages = ("ko", "en") if platform == "generic" and language is None else (language,)
     try:
         for case_id in cases:
-            for attempt in range(3):
-                try:
-                    result = agent.run(
-                        pipeline_db,
-                        output_root / _case_directory(case_id),
-                        platform=platform,
-                        case_id=case_id,
-                        language=language,
-                    )
-                    break
-                except ValueError as exc:
-                    if (
-                        str(exc) != "draft source context hash does not match prepared report"
-                        or attempt == 2
-                    ):
-                        raise
-            if result.get("status") != "drafted":
-                raise ReportError(f"report draft was not completed for case {case_id}")
-            results.append(result)
+            for locale in languages:
+                output_dir = output_root / ("en" if platform == "generic" and locale == "en" else "") / _case_directory(case_id)
+                for attempt in range(3):
+                    try:
+                        result = agent.run(
+                            pipeline_db,
+                            output_dir,
+                            platform=platform,
+                            case_id=case_id,
+                            language=locale,
+                        )
+                        break
+                    except ValueError as exc:
+                        if (
+                            str(exc) != "draft source context hash does not match prepared report"
+                            or attempt == 2
+                        ):
+                            raise
+                if result.get("status") != "drafted":
+                    raise ReportError(f"report draft was not completed for case {case_id} ({locale or platform})")
+                results.append(result)
     except Exception as exc:
         with closing(sqlite3.connect(pipeline_db)) as conn:
             finish_stage_run(conn, stage_run_id, status="failed", error_message=str(exc))

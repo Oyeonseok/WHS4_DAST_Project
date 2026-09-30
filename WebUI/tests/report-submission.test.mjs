@@ -77,6 +77,25 @@ test('generic reports export without platform rules and still respect source blo
   assert.equal(submission.parseReportSubmission({ ...generic, checks: blocked.checks }, reportId), null);
 });
 
+test('language choices use only the same scan and confirmed case', () => {
+  const selected = { report_id: reportId, scan_id: 'scan_a', case_id: 'case_a', platform: 'generic', language: 'ko' };
+  const english = { ...selected, report_id: 'report_' + 'b'.repeat(32), language: 'en' };
+  const foreign = { ...english, report_id: 'report_' + 'c'.repeat(32), scan_id: 'scan_b' };
+  assert.deepEqual(submission.reportLanguageChoices?.([selected, english, foreign], selected), {
+    ko: reportId, en: english.report_id,
+  });
+  assert.deepEqual(submission.reportLanguageChoices?.([selected], selected), { ko: reportId });
+});
+
+test('video status messages distinguish absent, outdated, blocked and current video', () => {
+  const empty = { status: 'missing', mode: 'evidence_replay' };
+  assert.match(submission.pocStatusMessage?.(empty, true, 'ko') || '', /생성되지 않았/);
+  assert.match(submission.pocStatusMessage?.({ ...empty, status: 'stale' }, true, 'ko') || '', /변경/);
+  assert.match(submission.pocStatusMessage?.({ ...empty, status: 'blocked' }, false, 'ko') || '', /보고서 검사/);
+  assert.match(submission.pocStatusMessage?.({ ...empty, status: 'blocked' }, true, 'ko') || '', /영상.*검사/);
+  assert.equal(submission.pocStatusMessage?.({ ...empty, status: 'ready' }, true, 'en'), null);
+});
+
 const form = { source: response.requirements.source, verified: true, severityRequired: false,
   requiredFields: '["researcher_ip"]', additionalFields: '{"researcher_ip":"192.0.2.1"}',
   reportTemplate: '', impactTemplate: 'Impact: {impact}' };

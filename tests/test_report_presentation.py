@@ -21,6 +21,20 @@ def test_generic_export_keeps_sentence_punctuation_and_endpoint_readable(case):
     assert view["fields"]["summary"].startswith("A recorded result.")
 
 
+def test_generic_report_has_ptes_case_report_structure(case):
+    db = prepare(case, platform="generic")
+    markdown = inspect_report(db)["markdown"]
+    headings = [
+        "## 경영진 요약", "## 기술 보고서", "### 진단 범위", "### 취약점 평가",
+        "### 취약점 재현 및 확인", "### 확인된 영향", "### 조치 권고",
+    ]
+    positions = [markdown.index(heading) for heading in headings]
+    assert positions == sorted(positions)
+    assert "보고서 형식: PTES 기반 개별 취약점 보고서" in markdown
+    assert "Fixture report" in markdown
+    assert "Boundary crossed" in markdown
+
+
 def test_english_report_preserves_language_from_writer_to_export_and_retry(case):
     from aidast.reporting.runtime import ReportAgent
     evidence = case.complete()
@@ -37,6 +51,8 @@ def test_english_report_preserves_language_from_writer_to_export_and_retry(case)
     view = inspect_report(db)
     assert view["language"] == "en" and view["ready"]
     assert "## Summary" in view["markdown"] and "## 핵심 요약" not in view["markdown"]
+    assert "## Executive summary" in view["markdown"]
+    assert "## Technical report" in view["markdown"]
     assert view["evidence"][0]["display"]["label"] == "Reproduction request"
     with zipfile.ZipFile(io.BytesIO(export_report(db))) as archive:
         assert json.loads(archive.read("Submission.json"))["language"] == "en"
@@ -95,7 +111,8 @@ def test_generic_report_explains_evidence_without_internal_identifiers(case):
     view = inspect_report(db)
     md = view["markdown"]
     assert md.startswith("# Fixture report\n")
-    assert md.index("## 핵심 요약") < md.index("## 영향과 범위") < md.index("## 재현 절차")
+    assert md.index("## 경영진 요약") < md.index("### 취약점 재현 및 확인") < md.index("### 확인된 영향")
+    assert "#### 재현 절차" in md
     assert "1. Send the recorded request" in md
     assert "1. 1." not in md
     assert "HTTP 200" in md and "184 bytes" in md and "판별 조건 충족" in md

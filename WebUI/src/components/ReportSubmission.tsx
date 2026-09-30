@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import type { Language } from '../lib/i18n';
-import { canExportSubmission, canPreviewPoc, parsePocInfo, parseReportSubmission, parseRequirementsForm, type PocInfo, type ProgramRequirements, type ReportSubmissionView, type RequirementsForm } from '../lib/reportSubmission';
+import { canExportSubmission, canPreviewPoc, parsePocInfo, parseReportSubmission, parseRequirementsForm, pocStatusMessage, type PocInfo, type ProgramRequirements, type ReportSubmissionView, type RequirementsForm } from '../lib/reportSubmission';
 import './ReportSubmission.css';
 import { ReportDocument } from './ReportDocument';
 
@@ -35,7 +35,10 @@ function downloadBlob(blob: Blob, filename: string) {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
-export function ReportSubmission({ reportId, language }: { reportId: string; language: Language }) {
+export function ReportSubmission({ reportId, language, availableLanguages = {}, onSelectLanguage }: {
+  reportId: string; language: Language; availableLanguages?: Partial<Record<Language, string>>;
+  onSelectLanguage?: (language: Language) => void;
+}) {
   const tk = (ko: string, en: string) => language === 'ko' ? ko : en;
   const [view, setView] = useState<ReportSubmissionView | null>(null);
   const [form, setForm] = useState<RequirementsForm | null>(null);
@@ -44,7 +47,7 @@ export function ReportSubmission({ reportId, language }: { reportId: string; lan
   const [error, setError] = useState('');
   const [pocInfo, setPocInfo] = useState<PocInfo | null>(null);
   const [pocError, setPocError] = useState('');
-  const [includePoc, setIncludePoc] = useState(true);
+  const [includePoc, setIncludePoc] = useState(false);
   const request = useRef<AbortController | null>(null);
   const mounted = useRef(false);
   const endpoint = (suffix: string) => new URL(`/api/v1/reports/${encodeURIComponent(reportId)}${suffix}`, import.meta.env.VITE_API_BASE_URL || location.origin);
@@ -62,7 +65,7 @@ export function ReportSubmission({ reportId, language }: { reportId: string; lan
     try {
       const response = await fetch(endpoint('/poc'), { signal, credentials: 'same-origin', cache: 'no-store' });
       if (signal.aborted || !mounted.current) return;
-      if (!response.ok) throw new Error();
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const info = parsePocInfo(await response.json());
       if (signal.aborted || !mounted.current) return;
       if (!info) throw new Error();
@@ -70,7 +73,7 @@ export function ReportSubmission({ reportId, language }: { reportId: string; lan
     } catch {
       if (signal.aborted || !mounted.current) return;
       setPocInfo(null);
-      setPocError(tk('PoC 영상 상태를 확인하지 못했습니다. 자동 생성을 다시 시도하세요.', 'Could not verify the PoC video status. Try automatic generation again.'));
+      setPocError(tk('PoC 영상 상태를 확인하지 못했습니다. 영상 포함을 해제하면 보고서를 영상 없이 내보낼 수 있습니다.', 'Could not verify the PoC video status. Turn off video inclusion to export the report without video.'));
     }
   }
   async function inspect(signal: AbortSignal) {
@@ -90,8 +93,9 @@ export function ReportSubmission({ reportId, language }: { reportId: string; lan
       if (!mounted.current || request.current !== controller || (controller.signal.aborted && !timedOut)) return;
       setPocInfo(null);
       if (action !== 'draft' && action !== 'poc') setView(null);
-      setError(timedOut ? tk('요청 시간이 초과됐습니다. 다시 시도하세요.', 'The request timed out. Try again.') : cause instanceof Error && cause.name !== 'TypeError' && cause.name !== 'SyntaxError'
-        ? cause.message : tk('서버에 연결하지 못했거나 응답이 올바르지 않습니다. 다시 시도하세요.', 'Could not connect to the server or verify its response. Try again.'));
+      const message = timedOut ? tk('요청 시간이 초과됐습니다. 다시 시도하세요.', 'The request timed out. Try again.') : cause instanceof Error && cause.name !== 'TypeError' && cause.name !== 'SyntaxError'
+        ? cause.message : tk('서버에 연결하지 못했거나 응답이 올바르지 않습니다. 다시 시도하세요.', 'Could not connect to the server or verify its response. Try again.');
+      if (action === 'poc') setPocError(message); else setError(message);
     } finally {
       clearTimeout(timer);
       if (mounted.current && request.current === controller) setBusy('');
@@ -99,7 +103,7 @@ export function ReportSubmission({ reportId, language }: { reportId: string; lan
   }
   useEffect(() => {
     mounted.current = true;
-    setForm(null); setDirty(false); setPocInfo(null); setPocError(''); setIncludePoc(true);
+    setForm(null); setDirty(false); setPocInfo(null); setPocError(''); setIncludePoc(false);
     void run('inspect', inspect);
     return () => { mounted.current = false; request.current?.abort(); };
     // The parent mounts each report under its own key; language changes preserve the form.
@@ -110,6 +114,9 @@ export function ReportSubmission({ reportId, language }: { reportId: string; lan
   const parsedRules = form ? parseRequirementsForm(form) : null;
   const ready = canExportSubmission(view, reportId, dirty, !!busy);
   const generic = view?.platform === 'generic';
+  const statusLabel = busy === 'export' ? tk('ZIP 생성 중', 'Building ZIP') : busy === 'poc' ? tk('영상 생성 중', 'Generating video')
+    : busy ? tk('검사 중', 'Checking') : dirty ? tk('변경사항 있음', 'Unsaved changes')
+      : view?.ready ? tk('내보내기 준비 완료', 'Ready to export') : tk('검사 필요', 'Checks required');
   const previewReady = canPreviewPoc(pocInfo, view, reportId, dirty, !!busy);
   const displayedFields = view ? { ...view.fields } : {};
   for (const check of view?.checks || []) {
@@ -133,12 +140,11 @@ export function ReportSubmission({ reportId, language }: { reportId: string; lan
       });
       if (signal.aborted || !mounted.current) return;
       if (response.status === 409) {
-        setError(tk('보고서 또는 영상 검사 상태를 다시 확인했습니다. 차단 항목을 확인하거나 생성을 다시 시도하세요.', 'The report or video check status has been refreshed. Review blockers or try generation again.'));
         await inspect(signal);
-        if (!signal.aborted && mounted.current) setPocInfo(null);
+        setPocError(tk('PoC 영상 생성 또는 무결성 검사가 완료되지 않았습니다. 아래 영상 상태와 보고서 차단 항목을 확인하세요.', 'PoC video generation or integrity checks did not complete. Review the video status and report blockers below.'));
         return;
       }
-      if (!response.ok) throw new Error(tk('PoC 영상을 생성하지 못했습니다. 다시 시도하세요.', 'Could not generate the PoC video. Try again.'));
+      if (!response.ok) throw new Error(tk(`PoC 영상 생성 요청이 실패했습니다 (HTTP ${response.status}). 영상 없이 ZIP을 내보낼 수 있습니다.`, `PoC video generation failed (HTTP ${response.status}). You can export the ZIP without video.`));
       const info = parsePocInfo(await response.json());
       if (signal.aborted || !mounted.current) return;
       if (!canPreviewPoc(info, view, reportId)) throw new Error(tk('현재 보고서의 PoC 영상 응답을 확인할 수 없습니다.', 'The PoC video response for the current report could not be verified.'));
@@ -153,7 +159,8 @@ export function ReportSubmission({ reportId, language }: { reportId: string; lan
       if (signal.aborted || !mounted.current) return;
       if (response.status === 409) {
         setView(null);
-        setError(tk('보고서 내용이나 검사 상태가 바뀌었습니다. 현재 상태를 다시 확인했습니다.', 'The report or check status changed. Its current state has been checked again.'));
+        setError(includePoc ? tk('영상 포함 ZIP을 만들지 못했습니다. 영상 생성·검사 상태를 확인하거나 영상 포함을 해제하고 다시 내보내세요.', 'Could not create the ZIP with video. Check video generation and validation, or turn off video inclusion and export again.')
+          : tk('보고서 내용이나 검사 상태가 바뀌었습니다. 현재 상태를 다시 확인했습니다.', 'The report or check status changed. Its current state has been checked again.'));
         await inspect(signal); return;
       }
       if (!response.ok || !response.headers.get('Content-Type')?.includes('application/zip')) throw new Error(tk(`ZIP을 내보내지 못했습니다 (${response.status}). 검사를 다시 실행하세요.`, `Could not export ZIP (${response.status}). Run checks again.`));
@@ -173,40 +180,58 @@ export function ReportSubmission({ reportId, language }: { reportId: string; lan
   });
 
   return <div className="report-submission" aria-busy={!!busy}>
-    <div className="report-submission-status" role="status">
-      <strong>{busy ? tk('보고서 처리 중…', 'Processing report…') : dirty ? tk('요구사항 변경사항을 저장하세요', 'Save the changed requirements') : view?.ready ? tk('자동 검사 통과 · ZIP 내보내기 가능', 'Automatic checks passed · ZIP export available') : tk('최종 내보내기 대기', 'Final export pending')}</strong>
-      <p>{generic ? tk('자동 검사 통과 후 기본 보고서와 마스킹된 증거를 ZIP으로 내려받습니다.', 'After automatic checks pass, download the general report and masked evidence as a ZIP.') : tk('자동 검사 통과 후 제출 필드, 마스킹된 보고서와 증거를 ZIP으로 내려받습니다.', 'After automatic checks pass, download submission fields, the masked report and evidence as a ZIP.')}</p>
-      {view && <small>{generic ? tk('일반 보고서', 'General report') : view.platform === 'hackerone' ? 'HackerOne' : view.platform === 'intigriti' ? 'Intigriti' : 'Bugcrowd'} · {reportId}</small>}
-    </div>
+    <header className={`report-export-hero ${view?.ready ? 'is-ready' : ''}`}>
+      <div className="report-export-hero-top"><span className="report-export-eyebrow">{tk('보안 보고서 · 산출', 'SECURITY REPORT · EXPORT')}</span>
+        <span className="report-export-state" role="status">{statusLabel}</span></div>
+      <h3>{view?.fields.title || (error ? tk('보고서를 확인할 수 없습니다', 'Could not check the report') : tk('보고서를 불러오는 중…', 'Loading report…'))}</h3>
+      <p>{generic ? tk('검증 근거가 연결된 기본 보고서를 확인하고 원하는 언어로 산출하세요.', 'Review the evidence-bound report and export it in your chosen language.') : tk('플랫폼 제출 형식과 자동 검사 결과를 확인한 뒤 보고서를 산출하세요.', 'Review the platform format and automatic checks before exporting.')}</p>
+      <div className="report-export-meta"><span>{generic ? tk('기본 보고서', 'General report') : view?.platform === 'hackerone' ? 'HackerOne' : view?.platform === 'intigriti' ? 'Intigriti' : view?.platform === 'bugcrowd' ? 'Bugcrowd' : '—'}</span><span>{view?.language?.toUpperCase() || '—'}</span><code>{reportId}</code></div>
+    </header>
     {error && <p className="form-error" role="alert">{error}</p>}
-    <div className="button-row report-submission-actions">
-      <button className="primary-button" disabled={!ready} onClick={exportZip}>{tk('최종 ZIP 내보내기', 'Export final ZIP')}</button>
-      <button className="secondary-button" disabled={!!busy || dirty} onClick={() => void run('inspect', inspect)}>{tk('자동 검사 다시 실행', 'Run automatic checks')}</button>
-      <button className="secondary-button" disabled={!!busy} onClick={downloadDraft}>{tk('로컬 초안 .md 내려받기', 'Download local draft .md')}</button>
-    </div>
-    {view && generic && !view.requirements.report_template && <ReportDocument view={view} language={language}/>}
-    <section className="report-submission-section" aria-labelledby="report-poc-title">
+    <div className={`report-export-options ${generic ? '' : 'is-single'}`}>
+    {generic && view && <label className="report-language-select report-export-option">
+      <small>{tk('01 · 언어', '01 · LANGUAGE')}</small>
+      <span>{tk('보고서 산출 언어', 'Report output language')}</span>
+      <select value={view.language || 'ko'} disabled={!!busy || dirty || !onSelectLanguage}
+        onChange={event => onSelectLanguage?.(event.target.value as Language)}>
+        <option value="ko" disabled={!availableLanguages.ko && view.language !== 'ko'}>{tk('한국어', 'Korean')}{!availableLanguages.ko && view.language !== 'ko' ? tk(' (미생성)', ' (unavailable)') : ''}</option>
+        <option value="en" disabled={!availableLanguages.en && view.language !== 'en'}>{tk('영어', 'English')}{!availableLanguages.en && view.language !== 'en' ? tk(' (미생성)', ' (unavailable)') : ''}</option>
+      </select>
+      <em>{tk('선택한 언어의 보고서와 검증 근거가 ZIP에 담깁니다.', 'The selected language report and validation evidence are included in the ZIP.')}</em>
+    </label>}
+    <section className="report-export-option report-video-option" aria-labelledby="report-poc-title">
+      <small>{generic ? tk('02 · 영상', '02 · VIDEO') : tk('01 · 영상', '01 · VIDEO')}</small>
       <h3 id="report-poc-title">{tk('PoC 설명 영상', 'PoC explanation video')}</h3>
       <label className="report-rule-check"><input type="checkbox" checked={includePoc} disabled={!!busy || dirty || !view?.ready}
         onChange={event => setIncludePoc(event.target.checked)}/><span>{tk('PoC 설명 영상 포함', 'Include PoC explanation video')}</span></label>
       <p className="muted">{tk('저장된 마스킹 증거를 설명하는 영상입니다. 실시간 재현이나 원본 화면 녹화가 아닙니다. 영상 포함 ZIP을 내보내면 자동으로 생성하고 검사합니다.', 'This video explains stored masked evidence. It is not live reproduction footage or an original screen recording. Exporting a ZIP with video automatically generates and checks it.')}</p>
       <div className="button-row report-submission-actions"><button className="secondary-button" disabled={!ready} onClick={generatePoc}>{tk('PoC 영상 자동 생성', 'Automatically generate PoC video')}</button></div>
       {pocError && <p className="form-error" role="alert">{pocError}</p>}
-      {pocInfo?.status === 'blocked' && <p className="muted">{tk('PoC 영상 자동 검사가 차단되었습니다. 보고서 검사 결과를 확인하세요.', 'PoC video automatic checks are blocked. Review the report checks.')}</p>}
+      {pocStatusMessage(pocInfo, !!view?.ready, language) && <p className="muted" role="status">{pocStatusMessage(pocInfo, !!view?.ready, language)}</p>}
       {previewReady && pocInfo && <video key={`${reportId}-${pocInfo.source_revision}`} className="report-poc-video" controls preload="metadata"
         aria-label={tk('저장된 마스킹 증거 설명 영상 미리보기', 'Stored masked evidence explanation video preview')}
         src={endpoint(`/poc/video?revision=${encodeURIComponent(pocInfo.source_revision!)}`).href}
-        onError={() => { setPocInfo(null); setPocError(tk('PoC 영상 미리보기를 불러오지 못했습니다. 자동 생성을 다시 시도하세요.', 'Could not load the PoC video preview. Try automatic generation again.')); }}/ >}
+        onError={() => { setPocInfo(null); setPocError(tk('PoC 영상 미리보기를 재생할 수 없습니다. 브라우저의 WebM 재생 지원과 영상 상태를 확인하세요.', 'Could not play the PoC video preview. Check browser WebM support and video status.')); }}/ >}
     </section>
-    {form && <section className="report-submission-section" aria-labelledby="report-rules-title">
-      <h3 id="report-rules-title">{generic ? tk('보고서 추가 설정 (선택)', 'Additional report settings (optional)') : tk('프로그램 제출 요구사항', 'Program submission requirements')}</h3>
-      <p className="muted">{generic ? tk('기본 형식으로 내려받을 수 있습니다. 필요한 경우 필수 항목과 보고서 양식을 추가하세요.', 'Download the report in the default format. Add required fields or a custom template if needed.') : tk('프로그램의 제출 안내나 양식을 기준으로 규칙을 설정하세요. 저장하면 자동 검사를 실행합니다.', 'Identify the rules from the program submission instructions or form. Saving runs the automatic checks.')}</p>
+    </div>
+    <div className="report-export-bar">
+      <div><strong>{tk('산출 파일', 'Export package')}</strong><span>{tk('보고서 Markdown + 마스킹된 검증 근거', 'Report Markdown + masked validation evidence')}{includePoc ? tk(' + PoC 설명 영상', ' + PoC explanation video') : ''}</span></div>
+      <button className="primary-button" disabled={!ready} onClick={exportZip}>{tk('최종 ZIP 내보내기', 'Export final ZIP')} <span aria-hidden="true">↗</span></button>
+    </div>
+    <div className="report-export-secondary"><button className="secondary-button" disabled={!!busy || dirty} onClick={() => void run('inspect', inspect)}>{tk('자동 검사 다시 실행', 'Run automatic checks')}</button>
+      <button className="secondary-button" disabled={!!busy} onClick={downloadDraft}>{tk('Markdown 초안 내려받기', 'Download Markdown draft')}</button></div>
+    {view && <section className="report-preview-panel" aria-labelledby="report-preview-title">
+      <div className="report-preview-heading"><div><small>{tk('미리보기', 'PREVIEW')}</small><h3 id="report-preview-title">{tk('보고서 내용', 'Report content')}</h3></div><span>{view.language?.toUpperCase() || '—'} · {generic ? 'PTES' : view.platform}</span></div>
+      {generic && !view.requirements.report_template ? <ReportDocument view={view} language={view.language || language}/>
+        : <pre className="report-preview">{view.markdown || tk('본문을 생성하려면 차단 항목을 해결하세요.', 'Resolve the blocking issues to generate the report text.')}</pre>}
+    </section>}
+    {form && !generic && <section className="report-submission-section" aria-labelledby="report-rules-title">
+      <h3 id="report-rules-title">{tk('프로그램 제출 요구사항', 'Program submission requirements')}</h3>
+      <p className="muted">{tk('프로그램의 제출 안내나 양식을 기준으로 규칙을 설정하세요. 저장하면 자동 검사를 실행합니다.', 'Identify the rules from the program submission instructions or form. Saving runs the automatic checks.')}</p>
       <fieldset disabled={!!busy} className="report-rules-form">
-        {!generic && <>
-          <label>{tk('요구사항 출처 (URL 또는 자료 설명)', 'Requirements source (URL or document description)')}<input value={form.source} maxLength={8192} onChange={event => edit({ source: event.target.value })}/></label>
-          <label className="report-rule-check"><input type="checkbox" checked={form.verified} onChange={event => edit({ verified: event.target.checked })}/><span>{tk('위 출처에서 프로그램의 제출 규칙을 확인했습니다', 'I identified the program submission rules from the source above')}</span></label>
-        </>}
-        <label className="report-rule-check"><input type="checkbox" checked={form.severityRequired} onChange={event => edit({ severityRequired: event.target.checked })}/><span>{generic ? tk('심각도를 필수 항목으로 설정', 'Require severity') : tk('프로그램에서 심각도 입력을 요구합니다', 'The program requires severity')}</span></label>
+        <label>{tk('요구사항 출처 (URL 또는 자료 설명)', 'Requirements source (URL or document description)')}<input value={form.source} maxLength={8192} onChange={event => edit({ source: event.target.value })}/></label>
+        <label className="report-rule-check"><input type="checkbox" checked={form.verified} onChange={event => edit({ verified: event.target.checked })}/><span>{tk('위 출처에서 프로그램의 제출 규칙을 확인했습니다', 'I identified the program submission rules from the source above')}</span></label>
+        <label className="report-rule-check"><input type="checkbox" checked={form.severityRequired} onChange={event => edit({ severityRequired: event.target.checked })}/><span>{tk('프로그램에서 심각도 입력을 요구합니다', 'The program requires severity')}</span></label>
         <label>{tk('필수 필드 이름 · JSON 배열', 'Required field names · JSON array')}<textarea rows={3} value={form.requiredFields} onChange={event => edit({ requiredFields: event.target.value })}/><small>{tk('예: ["title", "researcher_ip"] · 소문자와 밑줄을 사용하세요.', 'Example: ["title", "researcher_ip"] · Use lowercase names with underscores.')}</small></label>
         <label>{tk('추가 제출 필드 · JSON 객체', 'Additional submission fields · JSON object')}<textarea rows={3} value={form.additionalFields} onChange={event => edit({ additionalFields: event.target.value })}/><small>{tk('예: {"researcher_ip":"192.0.2.1"} · 기존 보고서 필드는 덮어쓸 수 없습니다.', 'Example: {"researcher_ip":"192.0.2.1"} · Existing report fields cannot be overwritten.')}</small></label>
         <label>{tk('보고서 템플릿 (선택)', 'Report template (optional)')}<textarea rows={3} maxLength={8192} value={form.reportTemplate} onChange={event => edit({ reportTemplate: event.target.value })}/></label>
@@ -231,7 +256,7 @@ export function ReportSubmission({ reportId, language }: { reportId: string; lan
           }}>{fieldLabel(check.field)}</a>}
         </li>)}</ul>
       </section>
-      <details className="report-submission-section" open={generic ? undefined : true}><summary id="report-fields-title">{generic ? tk('보고서 추가 항목 확인', 'Inspect additional report fields') : tk('플랫폼 제출 필드', 'Platform submission fields')}</summary>
+      <details className="report-submission-section" open={generic ? undefined : true}><summary id="report-fields-title">{generic ? tk('보고서 필드 상세', 'Report field details') : tk('플랫폼 제출 필드', 'Platform submission fields')}</summary>
         <dl className="report-submission-fields">{Object.entries(displayedFields).map(([key, value]) => <div key={key} id={`${generic ? 'report-extra' : 'report-field'}-${key}`} tabIndex={-1}><dt>{fieldLabel(key)}</dt><dd>{value || tk('비어 있음', 'Empty')}</dd></div>)}</dl>
       </details>
       <details className="report-submission-section"><summary id="report-evidence-title">{tk('상세 검증 기록 · 마스킹 정보', 'Detailed validation records · masking')}</summary>
@@ -241,7 +266,6 @@ export function ReportSubmission({ reportId, language }: { reportId: string; lan
         {view.evidence.map((item, index) => <details className="report-evidence" key={item.evidence_id}><summary>{item.display?.label || tk('검증 기록', 'Validation record')} {index + 1}</summary><pre>{JSON.stringify(item.details, null, 2)}</pre><dl><dt>{tk('원본 해시', 'Source digest')}</dt><dd>{item.content_sha256}</dd><dt>{tk('마스킹된 메타데이터 해시', 'Masked metadata digest')}</dt><dd>{item.sanitized_sha256}</dd></dl></details>)}
         {!view.evidence.length && <p className="muted">{tk('표시할 증거가 없습니다.', 'No evidence to display.')}</p>}
       </details>
-      {(!generic || view.requirements.report_template) && <section className="report-submission-section" aria-labelledby="report-text-title"><h3 id="report-text-title">{generic ? tk('보고서 본문', 'Report text') : tk('제출용 보고서 본문', 'Submission report text')}</h3><pre className="report-preview">{view.markdown || tk('본문을 생성하려면 차단 항목을 해결하세요.', 'Resolve the blocking issues to generate the report text.')}</pre></section>}
     </>}
   </div>;
 }
