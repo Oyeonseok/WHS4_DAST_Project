@@ -46,3 +46,12 @@ unfinished, so interruption between batches cannot advance directly to Chaining.
 
 The behavior applies to newly started scans and unfinished Attack retries. Completed
 historic scans are not automatically attacked again.
+
+Native batch failures keep their failed stage/task records. When a failed task's
+read-only HTTP probe has stopped with an unknown response, its coverage becomes a
+terminal error, the HTTP row stays `outcome_unknown`, and other hypotheses continue.
+This never counts as a negative test or triggers an automatic replay of that probe.
+Active requests, unclassified or state-changing unknown outcomes, open leads, and
+completion integrity errors still prevent automatic continuation. After all coverage
+has a disposition, the overall Attack stage completes so candidates can proceed to
+Chaining and independent Validation, even when its last batch has a failed record.
