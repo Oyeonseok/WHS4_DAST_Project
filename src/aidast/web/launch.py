@@ -24,6 +24,7 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from aidast.core.posix_processes import signal_session
 from aidast.orchestration.scope import CoordinatorError, ScopeCoordinator
 from aidast.recon.policy import validate_start_url_for_target
 from aidast.recon.profiles import EXECUTION_PROFILES, ProfileId, profile_request_rate
@@ -647,7 +648,7 @@ class ScanLaunchManager:
         pid = self._isolated_scan_pid(scan_id)
         if pid is None:
             raise ValueError("this scan has no isolated active process managed by this dashboard")
-        os.killpg(pid, signum)
+        signal_session(pid, signum)
         return pid
 
     def _control_scan(self, scan_id: str, action: str) -> int:
@@ -697,7 +698,7 @@ class ScanLaunchManager:
                 if _windows_host():
                     self._control_scan(scan_id, "resume")
                 else:
-                    os.killpg(pid, signal.SIGCONT)
+                    signal_session(pid, signal.SIGCONT)
                 raise
             if job is not None:
                 job.status = "paused"
@@ -720,7 +721,7 @@ class ScanLaunchManager:
                 if _windows_host():
                     self._control_scan(scan_id, "pause")
                 else:
-                    os.killpg(pid, signal.SIGSTOP)
+                    signal_session(pid, signal.SIGSTOP)
                 raise
             job = self._jobs.get(scan_id)
             if job is not None:
@@ -744,11 +745,11 @@ class ScanLaunchManager:
                     if _windows_host():
                         self._control_scan(scan_id, "resume")
                     else:
-                        os.killpg(pid, signal.SIGCONT)
+                        signal_session(pid, signal.SIGCONT)
                 if _windows_host():
                     self._control_scan(scan_id, "terminate")
                 else:
-                    os.killpg(pid, signal.SIGTERM)
+                    signal_session(pid, signal.SIGTERM)
                 threading.Thread(target=self._finish_adopted_cancel,
                                  args=(scan_id, pid), daemon=True).start()
                 self._log(scan_id, "cancel.requested", "Recon", "Scan cancellation requested.",
@@ -766,7 +767,7 @@ class ScanLaunchManager:
                     if _windows_host():
                         self._control_scan(scan_id, "resume")
                     elif os.name == "posix":
-                        os.killpg(job.process.pid, signal.SIGCONT)
+                        signal_session(job.process.pid, signal.SIGCONT)
                 if _windows_host() and isinstance(job.process, subprocess.Popen):
                     self._control_scan(scan_id, "terminate")
                 else:
@@ -792,7 +793,7 @@ class ScanLaunchManager:
                 if _windows_host():
                     self._control_scan(scan_id, "kill")
                 else:
-                    os.killpg(pid, signal.SIGKILL)
+                    signal_session(pid, signal.SIGKILL)
             except (OSError, ValueError):
                 pass
         try:
@@ -809,13 +810,13 @@ class ScanLaunchManager:
     @staticmethod
     def _terminate_process(process: Any) -> None:
         if isinstance(process, subprocess.Popen) and os.name == "posix":
-            os.killpg(process.pid, signal.SIGTERM)
+            signal_session(process.pid, signal.SIGTERM)
             def force_stop() -> None:
                 try:
                     process.wait(timeout=5)
                 except subprocess.TimeoutExpired:
                     if process.poll() is None:
-                        os.killpg(process.pid, signal.SIGKILL)
+                        signal_session(process.pid, signal.SIGKILL)
             threading.Thread(target=force_stop, daemon=True).start()
         else:
             process.terminate()

@@ -322,6 +322,7 @@ class NativeAttackMainAgentTests(unittest.TestCase):
             policy.write_text(json.dumps({"policies": [bound(root).model_dump(mode="json")]}), encoding="utf-8")
 
             def fake_run(command, **kwargs):
+                self.assertEqual(kwargs["timeout"], 6100)
                 work = Path(command[command.index("--cd") + 1])
                 self.assertNotIn("--ephemeral", command)
                 self.assertEqual(
@@ -397,12 +398,13 @@ class NativeAttackMainAgentTests(unittest.TestCase):
 
             agent = CodexMainAgent(
                 attack_model="gpt-6-luna",
+                timeout_seconds=6100,
                 python_executable=str(Path(__file__).resolve()),
             )
             with (
                 patch("aidast.agents.main.shutil.which", return_value="codex.exe"),
                 patch.object(CodexMainAgent, "_require_login"),
-                patch("aidast.agents.main.subprocess.run", side_effect=fake_run),
+                patch("aidast.agents.main.codex_process.run_codex", side_effect=fake_run),
             ):
                 result = agent.run_attack_orchestrator(
                     scan_id="scan_native", db_path=database, scope_path=scope,

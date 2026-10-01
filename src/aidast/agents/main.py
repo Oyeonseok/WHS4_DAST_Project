@@ -3,7 +3,6 @@ from __future__ import annotations
 import hashlib
 import json
 import shutil
-import subprocess
 import tempfile
 import unicodedata
 from datetime import datetime, timezone
@@ -16,6 +15,7 @@ from uuid import uuid4
 from pydantic import BaseModel, ValidationError
 
 from aidast.auth.codex import CodexAuth, CodexAuthError
+from aidast.core import codex_process
 from aidast.agents.policy_guidance import policy_skill_text, stage_policy_skill
 from aidast.scope.exclusions import ResourceClassification
 from aidast.scope.exclusion_binding import classify_with_agent, SCOPE_EXCLUSION_INSTRUCTIONS
@@ -211,7 +211,7 @@ class CodexMainAgent:
         self,
         *,
         executable: str = "codex",
-        timeout_seconds: int = 300,
+        timeout_seconds: int = codex_process.DEFAULT_CODEX_TIMEOUT_SECONDS,
         max_page_chars: int = 250_000,
         max_result_bytes: int = 1_000_000,
         main_model: str | None = None,
@@ -822,18 +822,15 @@ Reuse compatible input keys; never invent operator values or confirmations.
                 ]
             with tempfile.TemporaryFile(mode="w+t", encoding="utf-8") as events:
                 try:
-                    completed = subprocess.run(
+                    completed = codex_process.run_codex(
                         command,
                         input="$aidast-policy\n\n" + policy_skill_text() + "\n\n" + prompt,
-                        text=True,
                         stdout=events,
-                        stderr=subprocess.PIPE,
                         timeout=self._timeout_seconds,
-                        check=False,
                     )
-                except subprocess.TimeoutExpired as exc:
+                except codex_process.CodexProcessTimeout as exc:
                     raise MainAgentError(
-                        f"Codex {operation} timed out after {self._timeout_seconds}s"
+                        f"Codex {operation}: {exc}"
                     ) from exc
                 events.seek(0)
                 record_jsonl_usage(events)

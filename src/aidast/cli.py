@@ -24,6 +24,7 @@ from aidast.agents.main import (
 from aidast.agents.native_pipeline import RECON_MODEL
 from aidast.auth.codex import CodexAuth, CodexAuthError
 from aidast.auth.browser import BrowserLoginError, collect_target_sessions
+from aidast.core.codex_process import DEFAULT_CODEX_TIMEOUT_SECONDS
 from aidast.core.http_safety import validate_platform_username
 from aidast.attack.runtime import ReviewPreparationError, prepare_review
 from aidast.orchestration.attack import AttackCoordinator, AttackCoordinatorError
@@ -210,7 +211,10 @@ def _parser() -> argparse.ArgumentParser:
     tag.add_argument("database", type=Path)
     tag.add_argument("--scan-id")
     tag.add_argument("--batch-size", type=_positive_int, default=200)
-    tag.add_argument("--codex-timeout", type=int, default=300)
+    tag.add_argument(
+        "--codex-timeout", type=_positive_int,
+        default=DEFAULT_CODEX_TIMEOUT_SECONDS,
+    )
 
     # scope 명령어
     scope = commands.add_parser("scope", help="collect or inspect program scope")
@@ -476,8 +480,9 @@ def _parser() -> argparse.ArgumentParser:
     resume.add_argument("scan_id", type=_scan_identifier)
     resume.add_argument("--result-root", type=Path, default=RESULT_ROOT)
     resume.add_argument(
-        "--codex-timeout", type=_positive_int, default=300,
-        help="maximum Codex time per resumed agent call in seconds (default: 300)",
+        "--codex-timeout", type=_positive_int,
+        default=DEFAULT_CODEX_TIMEOUT_SECONDS,
+        help="absolute maximum Codex time per resumed call in seconds (default: 3600)",
     )
 
     # attack 명령어
@@ -746,9 +751,9 @@ def _add_workflow_options(command: argparse.ArgumentParser) -> None:
     )
     command.add_argument(
         "--codex-timeout",
-        type=int,
-        default=300,
-        help="maximum Codex interpretation time in seconds",
+        type=_positive_int,
+        default=DEFAULT_CODEX_TIMEOUT_SECONDS,
+        help="absolute maximum Codex time per call in seconds (default: 3600)",
     )
 
 

@@ -253,6 +253,7 @@ class NativeChainingMainAgentTests(unittest.TestCase):
             policy.write_text(json.dumps({"policies": [bound(root).model_dump(mode="json")]}), encoding="utf-8")
 
             def fake_run(command, **kwargs):
+                self.assertEqual(kwargs["timeout"], 6300)
                 work = Path(command[command.index("--cd") + 1])
                 self.assertEqual(
                     command[command.index("--sandbox") + 1],
@@ -299,12 +300,13 @@ class NativeChainingMainAgentTests(unittest.TestCase):
 
             agent = CodexMainAgent(
                 main_model="gpt-6-luna",
+                timeout_seconds=6300,
                 python_executable=str(Path(__file__).resolve()),
             )
             with (
                 patch("aidast.agents.main.shutil.which", return_value="codex.exe"),
                 patch.object(CodexMainAgent, "_require_login"),
-                patch("aidast.agents.main.subprocess.run", side_effect=fake_run),
+                patch("aidast.agents.main.codex_process.run_codex", side_effect=fake_run),
             ):
                 result = agent.run_chaining_orchestrator(
                     scan_id="scan_chain", db_path=database, scope_path=scope,

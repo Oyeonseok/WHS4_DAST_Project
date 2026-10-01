@@ -4,7 +4,6 @@ import hashlib
 import json
 import sqlite3
 import shutil
-import subprocess
 import sys
 import tempfile
 import threading
@@ -21,6 +20,7 @@ from uuid import uuid4
 from pydantic import BaseModel, ValidationError
 
 from aidast.auth.codex import CodexAuth, CodexAuthError
+from aidast.core import codex_process
 from aidast.agents.policy_guidance import policy_skill_text, stage_policy_skill
 from aidast.scope.exclusions import ResourceClassification
 from aidast.scope.exclusion_binding import classify_with_agent, SCOPE_EXCLUSION_INSTRUCTIONS
@@ -174,7 +174,7 @@ class CodexMainAgent:
         self,
         *,
         executable: str = "codex",
-        timeout_seconds: int = 300,
+        timeout_seconds: int = codex_process.DEFAULT_CODEX_TIMEOUT_SECONDS,
         max_page_chars: int = 250_000,
         max_result_bytes: int = 1_000_000,
         main_model: str | None = None,
@@ -707,18 +707,15 @@ Reuse compatible input keys; never invent operator values or confirmations.
                 ]
             with tempfile.TemporaryFile(mode="w+t", encoding="utf-8") as events:
                 try:
-                    completed = subprocess.run(
+                    completed = codex_process.run_codex(
                         command,
                         input="$aidast-policy\n\n" + policy_skill_text() + "\n\n" + prompt,
-                        text=True,
                         stdout=events,
-                        stderr=subprocess.PIPE,
                         timeout=self._timeout_seconds,
-                        check=False,
                     )
-                except subprocess.TimeoutExpired as exc:
+                except codex_process.CodexProcessTimeout as exc:
                     raise MainAgentError(
-                        f"Codex {operation} timed out after {self._timeout_seconds}s"
+                        f"Codex {operation}: {exc}"
                     ) from exc
                 events.seek(0)
                 record_jsonl_usage(events)
@@ -783,14 +780,12 @@ Reuse compatible input keys; never invent operator values or confirmations.
         else:
             command = [executable, "exec", *common, "resume", session_id, "-"]
         try:
-            completed = subprocess.run(
-                command, input=prompt, text=True, encoding="utf-8",
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                timeout=self._timeout_seconds, check=False,
+            completed = codex_process.run_codex(
+                command, input=prompt, timeout=self._timeout_seconds,
             )
-        except subprocess.TimeoutExpired as exc:
+        except codex_process.CodexProcessTimeout as exc:
             raise MainAgentError(
-                f"Codex {operation} timed out after {self._timeout_seconds}s"
+                f"Codex {operation}: {exc}"
             ) from exc
         if completed.returncode != 0:
             diagnostic = completed.stderr.strip()[-2_000:]
@@ -1248,20 +1243,16 @@ another codex exec process. Return only the required structured result.
             broker.start()
             try:
                 with tempfile.TemporaryFile(mode="w+t", encoding="utf-8") as events:
-                    completed = subprocess.run(
+                    completed = codex_process.run_codex(
                         command,
                         input="$aidast-policy\n\n" + policy_skill_text() + "\n\n" + prompt,
-                        text=True,
-                        encoding="utf-8",
                         stdout=events,
-                        stderr=subprocess.PIPE,
-                        timeout=self._timeout_seconds * 4,
-                        check=False,
+                        timeout=self._timeout_seconds,
                     )
                     events.seek(0)
                     record_jsonl_usage(events)
-            except subprocess.TimeoutExpired as exc:
-                raise MainAgentError("native Attack Agent timed out") from exc
+            except codex_process.CodexProcessTimeout as exc:
+                raise MainAgentError(f"native Attack Agent: {exc}") from exc
             finally:
                 broker_stop.set()
                 broker.join(timeout=1)
@@ -1448,20 +1439,16 @@ another codex exec process. Return only the required structured result.
             helper_broker.start()
             try:
                 with tempfile.TemporaryFile(mode="w+t", encoding="utf-8") as events:
-                    completed = subprocess.run(
+                    completed = codex_process.run_codex(
                         command,
                         input="$aidast-policy\n\n" + policy_skill_text() + "\n\n" + prompt,
-                        text=True,
-                        encoding="utf-8",
                         stdout=events,
-                        stderr=subprocess.PIPE,
-                        timeout=self._timeout_seconds * 4,
-                        check=False,
+                        timeout=self._timeout_seconds,
                     )
                     events.seek(0)
                     record_jsonl_usage(events)
-            except subprocess.TimeoutExpired as exc:
-                raise MainAgentError("native Chaining Agent timed out") from exc
+            except codex_process.CodexProcessTimeout as exc:
+                raise MainAgentError(f"native Chaining Agent: {exc}") from exc
             finally:
                 helper_broker.close()
             if completed.returncode != 0:
