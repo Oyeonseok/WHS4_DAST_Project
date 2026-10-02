@@ -290,7 +290,10 @@ def _load_sources(root: Path) -> list[dict[str, Any]]:
 def _route_keys(payload: dict[str, Any], *, include_excluded: bool) -> set[tuple[str, str]]:
     def coverage_path(value: object) -> str:
         path = str(value)
-        path = re.sub(r"\{[^/{}]+\}|<[^/<>]+>|:id(?=/|$)", ":id", path)
+        path = re.sub(
+            r"\{[^/{}]+\}|<[^/<>]+>|:[A-Za-z_][A-Za-z0-9_]*(?=/|$)",
+            ":id", path,
+        )
         return path
     return {
         (str(item["method"]).upper(), coverage_path(item["normalized_path"]))
@@ -313,8 +316,10 @@ def _route_evidence_classes(payload: dict[str, Any], *, include_excluded: bool) 
         if not (include_excluded or not item.get("is_excluded")
                 or item.get("exclude_reason") == "unverified_candidate"):
             continue
-        path = re.sub(r"\{[^/{}]+\}|<[^/<>]+>|:id(?=/|$)", ":id",
-                      str(item["normalized_path"]))
+        path = re.sub(
+            r"\{[^/{}]+\}|<[^/<>]+>|:[A-Za-z_][A-Za-z0-9_]*(?=/|$)",
+            ":id", str(item["normalized_path"]),
+        )
         key = str(item["method"]).upper(), path
         tools = {value.strip() for value in str(item.get("source_tools") or "").split(",")}
         if item.get("verification_status") != "candidate":

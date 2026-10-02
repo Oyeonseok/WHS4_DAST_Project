@@ -80,6 +80,17 @@ class ReconWikiCatalog:
                         if targets:
                             target = ", ".join(targets)
                 kind = "runtime"
+                display_label = f"{scan['scan_id']} · {target}"
+                if "recon_reference_metadata" in tables:
+                    reference = connection.execute(
+                        "SELECT target_name,version FROM recon_reference_metadata LIMIT 1"
+                    ).fetchone()
+                    if reference is not None:
+                        kind = "source"
+                        display_label = (
+                            f"{reference['target_name']} v{reference['version']} source routes · "
+                            f"{target}"
+                        )
                 if "benchmark_catalog_items" in tables and connection.execute(
                     "SELECT COUNT(*) FROM benchmark_catalog_items"
                 ).fetchone()[0]:
@@ -119,7 +130,7 @@ class ReconWikiCatalog:
             "target": target,
             "endpoint_count": endpoint_count,
             "method_counts": method_counts,
-            "label": f"{scan['scan_id']} · {target}",
+            "label": display_label,
             "_path": path.resolve(),
         }
 

@@ -39,6 +39,7 @@ from playwright.sync_api import (
     BrowserContext,
     Page,
     Playwright,
+    TimeoutError as PlaywrightTimeoutError,
     sync_playwright,
 )
 
@@ -1712,11 +1713,30 @@ class PlaywrightDriver:
         if restore_saved_session:
             self._restore_target_session()
         page = self._ensure_page()
-        response = page.goto(
-            self.base_url,
-            wait_until="domcontentloaded",
-            timeout=self.session_config.timeout_ms,
-        )
+        try:
+            response = page.goto(
+                self.base_url,
+                wait_until="domcontentloaded",
+                timeout=self.session_config.timeout_ms,
+            )
+        except PlaywrightTimeoutError:
+            # A SPA can commit its document quickly while rate-limited script
+            # and stylesheet requests keep DOMContentLoaded pending.  The page
+            # is still usable for capture and discovery once it has reached an
+            # approved HTTP(S) URL.  A timeout before navigation commits keeps
+            # about:blank (or another URL) and remains a hard failure.
+            current_url = str(getattr(page, "url", "") or "")
+            parsed = urlparse(current_url)
+            if (parsed.scheme not in {"http", "https"}
+                    or (self.target_policy is not None
+                        and not self.target_policy.allows_url(current_url))):
+                raise
+            response = None
+            print(
+                "  [Playwright] 문서는 열렸지만 일부 자원 로딩이 지연되어 "
+                "정찰을 계속합니다.",
+                flush=True,
+            )
         if self.target_policy is not None and not self.target_policy.allows_url(page.url):
             raise RuntimeError(
                 "unauthenticated browser left the approved start URL boundary"

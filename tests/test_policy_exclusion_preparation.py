@@ -28,6 +28,25 @@ def receipt_api():
     except ModuleNotFoundError:
         pytest.fail('stdlib full-wire capture receipt API is missing')
 
+
+def test_capture_database_discovery_uses_bounded_recent_window(tmp_path):
+    created = []
+    for index in range(70):
+        path = tmp_path / 'Runs' / f'scan_{index:02d}' / 'Recon.db'
+        path.parent.mkdir(parents=True)
+        path.write_bytes(b'')
+        timestamp = 1_700_000_000 + index
+        path.touch()
+        import os
+        os.utime(path, (timestamp, timestamp))
+        created.append(path.resolve())
+
+    found = api().capture_databases(tmp_path)
+
+    assert len(found) == 64
+    assert created[-1] == found[0]
+    assert set(created[:6]).isdisjoint(found)
+
 def rule(semantic=True):
     return ScopeExclusion(key='restricted', label='Restricted resource', source_quote=QUOTE,
         condition=dict(operator='predicate', predicate=dict(key='category', field='semantic' if semantic else 'path',

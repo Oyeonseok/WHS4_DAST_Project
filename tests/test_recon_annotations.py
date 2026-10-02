@@ -5,7 +5,12 @@ import unittest
 from pathlib import Path
 
 from aidast.recon import db
-from aidast.recon.annotations import ObservationRecorder, AnnotationBatch, safe_url
+from aidast.recon.annotations import (
+    AnnotationBatch,
+    ObservationRecorder,
+    safe_url,
+    tag_pending_observations,
+)
 from aidast.recon.surface import export_surface
 from aidast.recon.tools.mitm_proxy import ingest_mitm_capture
 
@@ -13,10 +18,12 @@ from aidast.recon.tools.mitm_proxy import ingest_mitm_capture
 class FakeAgent:
     def __init__(self, invalid=False):
         self.invalid = invalid
+        self.batch_sizes = []
 
     def _run_structured(self, **kwargs):
         self.prompt = kwargs['prompt']
         payload = json.loads(self.prompt.split('\n', 1)[1])
+        self.batch_sizes.append(len(payload['observations']))
         return AnnotationBatch(annotations=[{
             'observation_id': 'invented' if self.invalid else o['observation_id'],
             'category': 'function', 'tag': 'unknown',
@@ -225,6 +232,24 @@ class ObservationTests(unittest.TestCase):
             {'phase': 'observation_tagging', 'state': 'finished', 'index': 1, 'total': 1,
              'count': 2, 'processed_count': 2, 'failed_count': 0},
         ])
+
+    def test_deferred_tagging_caps_large_requested_batches(self):
+        recorder = ObservationRecorder(self.conn, origin_id=self.origin, scan_id='scan')
+        recorder.record('crawler', [
+            {'method': 'GET', 'path': f'/page/{index}', 'source': 'crawler'}
+            for index in range(30)
+        ])
+        agent = FakeAgent()
+        progress = []
+
+        result = tag_pending_observations(
+            self.conn, scan_id='scan', agent=agent, batch_size=200,
+            progress=lambda *args: progress.append(args),
+        )
+
+        self.assertEqual(result, (30, 0))
+        self.assertEqual(agent.batch_sizes, [25, 5])
+        self.assertEqual(progress[-1], (2, 2, 30, 0))
 
     def test_proxy_links_endpoint_and_scan_without_guessing_page(self):
         ObservationRecorder(self.conn, origin_id=self.origin, scan_id='scan').record('login', self.items())

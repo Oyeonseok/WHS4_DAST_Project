@@ -53,9 +53,16 @@ def capture_databases(result_root):
         if runs.exists():
             for path in runs.rglob(name):
                 paths.append(_safe_path(path))
-                if len(paths) > 64:
-                    raise ValueError('capture database count exceeds preparation budget')
-    return paths
+    # Long-lived dashboards naturally accumulate more than 64 completed runs.
+    # Preparation consumes a bounded recent window; history volume must not
+    # prevent a new scan from starting.  Scope and target association checks in
+    # load_capture_snapshot still decide whether each selected DB is usable.
+    unique = set(paths)
+    return sorted(
+        unique,
+        key=lambda path: (path.stat().st_mtime_ns, str(path)),
+        reverse=True,
+    )[:64]
 
 
 def _origin(url):

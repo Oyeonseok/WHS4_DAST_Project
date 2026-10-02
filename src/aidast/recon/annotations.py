@@ -334,9 +334,16 @@ class ObservationRecorder:
             return False
 
 
+MAX_SAFE_TAG_BATCH_SIZE = 25
+
+
 def tag_pending_observations(conn, *, scan_id: str, agent, batch_size: int = 200,
                              progress=None) -> tuple[int, int]:
     """Tag only observations without annotations, preserving stored context/time."""
+    # Large prompts can reach the agent deadline before a structured response is
+    # returned. Keep the public setting backward compatible while bounding every
+    # actual model call to the batch size proven stable in live scans.
+    effective_batch_size = min(max(1, batch_size), MAX_SAFE_TAG_BATCH_SIZE)
     rows = conn.execute('''
         SELECT o.observation_id, o.source_tool, o.discovery_kind, o.observed_url,
                o.association_method, o.observed_at, o.evidence_json, e.method, e.path,
@@ -365,11 +372,11 @@ def tag_pending_observations(conn, *, scan_id: str, agent, batch_size: int = 200
 
     total = 0
     failed = 0
-    batches = (len(rows) + batch_size - 1) // batch_size
-    for offset in range(0, len(rows), batch_size):
-        batch_number = offset // batch_size + 1
+    batches = (len(rows) + effective_batch_size - 1) // effective_batch_size
+    for offset in range(0, len(rows), effective_batch_size):
+        batch_number = offset // effective_batch_size + 1
         payload = []
-        for row in rows[offset:offset + batch_size]:
+        for row in rows[offset:offset + effective_batch_size]:
             try:
                 evidence = sanitize_evidence(json.loads(row[6] or "{}"))
             except (TypeError, json.JSONDecodeError):

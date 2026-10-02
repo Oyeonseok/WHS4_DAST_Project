@@ -1122,13 +1122,14 @@ def _active_proxy_budget_available(capture_path) -> bool:
 
 
 _FFUF_DISCOVERY_PRIORITY = (
-    ".env", ".env.bak", "healthz", "dashboard", "graphql", "debug/users",
-    ".git/config", "robots.txt", "sitemap.xml", "health", "status", "metrics",
+    "healthz", "metrics", ".well-known/security.txt", "security.txt",
+    ".env", ".env.bak", "dashboard", "graphql", "debug/users",
+    ".git/config", "robots.txt", "sitemap.xml", "health", "status",
     "api/health", "api/status", "debug", "internal", "config", "api",
     "openapi.json", "swagger.json",
     "login", "register", "forgot-password", "reset-password", "auth",
     "account", "profile", "users", "me", "admin", "transactions", "transfer", "upload",
-    "actuator/health", ".well-known/security.txt",
+    "actuator/health",
 )
 
 
@@ -1154,6 +1155,9 @@ _FFUF_COMPATIBLE_GUIDED_EXCLUSIONS = frozenset({
     "disruptive_testing",
     "prohibited_destinations",
     "prohibited_impact",
+    "prohibited_disruptive_testing",
+    "prohibited_external_access",
+    "prohibited_destructive_impact",
 })
 
 
@@ -1292,14 +1296,15 @@ def discover_with_ffuf(
         )
         roots = []
 
-    if not roots and policy_guided and _minimum_ffuf_root_allowed(
+    minimum_root_allowed = policy_guided and _minimum_ffuf_root_allowed(
         target_policy,
         ffuf_origin=ffuf_origin,
-    ):
+    )
+    if minimum_root_allowed and "/" not in roots:
         print(
             "  [보완] 알려진 정책 제한과 충돌하지 않는 최소 ffuf Root '/' 적용"
         )
-        roots = ["/"]
+        roots = ["/", *roots]
 
     if not roots:
         print(
@@ -1443,7 +1448,11 @@ def discover_with_ffuf(
             # forward. Exclude those responses before ffuf reports endpoints.
             command += ["-fr", "Blocked by AI-DAST TargetPolicy"]
 
-        effective_max_time = total_time_remaining
+        roots_remaining = len(roots) - index + 1
+        effective_max_time = (
+            max(1, total_time_remaining // roots_remaining)
+            if total_time_remaining > 0 else total_time_remaining
+        )
         if target_policy is not None and budget_remaining is not None:
             remaining = budget_remaining()
             if remaining is not None:

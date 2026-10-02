@@ -8,8 +8,9 @@ from aidast.recon.annotations import ObservationRecorder
 from aidast.recon.tools import api_secondary_discovery as secondary
 from aidast.recon.tools.passive_declarations import (
     declarations_from_captured_responses, declared_form_routes, declared_html_routes,
-    declared_index_routes, declared_js_routes,
-    declared_openapi_routes, inferred_openapi_routes,
+    declared_embedded_openapi_routes, declared_index_routes, declared_js_routes,
+    declared_openapi_routes, inferred_openapi_routes, inferred_rest_resource_routes,
+    inferred_runtime_configuration_routes,
 )
 from aidast.recon.policy import TargetPolicy
 from aidast.recon.surface import export_surface
@@ -63,6 +64,79 @@ def test_durable_capture_reconciliation_recovers_html_js_and_openapi():
         {"name": "amount", "location": "json", "data_type": "number"}]
 
 
+def test_swagger_ui_embedded_document_retains_server_and_write_method():
+    script = 'var options = ' + json.dumps({"swaggerDoc": {
+        "openapi": "3.0.0", "servers": [{"url": "/b2b/v2"}],
+        "paths": {"/orders": {"post": {}}},
+    }}) + '; window.ui = SwaggerUIBundle(options)'
+
+    rows = declared_embedded_openapi_routes(
+        script, document_url=BASE + "api-docs/swagger-ui-init.js", base_url=BASE,
+    )
+
+    assert keys(rows) == {("POST", "/b2b/v2/orders")}
+
+
+def test_rest_resource_family_is_passively_inferred_from_declared_js_route():
+    declared = js("client.put('/api/Products/' + product.id, payload)")
+
+    rows = inferred_rest_resource_routes(declared, base_url=BASE)
+
+    assert keys(rows) == {
+        ("GET", "/api/Products"), ("POST", "/api/Products"),
+        ("GET", "/api/Products/{id}"), ("PUT", "/api/Products/{id}"),
+        ("PATCH", "/api/Products/{id}"), ("DELETE", "/api/Products/{id}"),
+    }
+    assert all(row["source"] == "passive_route_inference" for row in rows)
+    assert all(row["verification_status"] == "candidate" for row in rows)
+    assert all(row["traffic_class"] == "passive" for row in rows)
+    assert all(row["evidence"]["derivation_rule"] == "rest_resource_family" for row in rows)
+
+
+def test_durable_reconciliation_adds_rest_family_after_real_declarations():
+    rows = [(BASE + "app.js", "application/javascript",
+             "fetch('/api/Items'); client.delete('/api/Items/' + item.id)")]
+
+    found = declarations_from_captured_responses(rows, base_url=BASE)
+
+    assert keys(found) >= {
+        ("GET", "/api/Items"), ("POST", "/api/Items"),
+        ("GET", "/api/Items/{id}"), ("PUT", "/api/Items/{id}"),
+        ("PATCH", "/api/Items/{id}"), ("DELETE", "/api/Items/{id}"),
+    }
+
+
+def test_rest_inference_rejects_nested_and_non_api_routes():
+    declared = js("fetch('/api/admin/users'); fetch('/catalog/Products')")
+
+    assert inferred_rest_resource_routes(declared, base_url=BASE) == []
+
+
+def test_runtime_configuration_infers_enabled_public_metadata_routes():
+    document = {"config": {"application": {
+        "customMetricsPrefix": "service",
+        "securityTxt": {"contact": "mailto:security@example.test"},
+    }}}
+
+    rows = inferred_runtime_configuration_routes(
+        document, document_url=BASE + "runtime-config", base_url=BASE,
+    )
+
+    assert keys(rows) == {
+        ("GET", "/metrics"), ("GET", "/security.txt"),
+        ("GET", "/.well-known/security.txt"),
+    }
+    assert all(row["source"] == "passive_route_inference" for row in rows)
+    assert all(row["verification_status"] == "candidate" for row in rows)
+
+
+def test_runtime_configuration_requires_explicit_feature_values():
+    assert inferred_runtime_configuration_routes(
+        {"config": {"application": {"customMetricsPrefix": ""}}},
+        document_url=BASE + "runtime-config", base_url=BASE,
+    ) == []
+
+
 def policy():
     return TargetPolicy(scope_id="scope", policy_id="policy", asset_type=AssetType.URL,
         asset=BASE, allowed_hosts=["example.test"], allowed_ports=[443],
@@ -102,6 +176,60 @@ def test_literal_concatenated_urls_keep_declared_methods_and_complete_templates(
     }
     assert all(row["verification_status"] == "candidate" and row["traffic_class"] == "passive"
                for row in rows)
+
+
+def test_application_origin_prefixes_anchor_same_origin_routes():
+    rows = js('''this.http.get(this.hostServer + '/rest/user/whoami' + query);
+        this.http.post(`${config.apiUrl}/rest/2fa/verify`, payload);
+        client.put(runtime.baseURL + '/api/Items/' + item.id, payload);''')
+
+    assert keys(rows) == {
+        ("GET", "/rest/user/whoami"), ("POST", "/rest/2fa/verify"),
+        ("PUT", "/api/Items/{id}"),
+    }
+
+
+def test_nearby_same_origin_class_field_is_resolved_for_http_calls():
+    rows = js('''class Wallet { hostServer = config.hostServer;
+        host = this.hostServer + '/rest/wallet/balance';
+        get() { return this.http.get(this.host); }
+        put(value) { return this.http.put(this.host, value); }
+        history() { return this.http.get(this.host + '/history'); } }''')
+
+    assert keys(rows) == {
+        ("GET", "/rest/wallet/balance"), ("PUT", "/rest/wallet/balance"),
+        ("GET", "/rest/wallet/balance/history"),
+    }
+
+
+def test_method_local_route_derived_from_class_field_is_resolved():
+    rows = js('''host = config.hostServer + '/rest/web3';
+        submit() { let route = this.host + '/submitKey';
+          return this.http.post(route, payload); }
+        verify() { let route = this.host + '/walletNFTVerify';
+          return this.http.post(route, payload); }''')
+
+    assert keys(rows) == {
+        ("POST", "/rest/web3/submitKey"),
+        ("POST", "/rest/web3/walletNFTVerify"),
+    }
+
+
+def test_navigation_compiled_href_and_upload_config_are_declarations():
+    rows = js('''window.location.replace(config.hostServer + '/profile');
+        const attrs = ['href', './redirect?to=external'];
+        uploader = new FileUploader({url: config.hostServer + '/file-upload',
+          allowedMimeType: ['application/pdf'], maxFileSize: 1000});''')
+
+    assert keys(rows) == {
+        ("GET", "/profile"), ("GET", "/redirect"), ("POST", "/file-upload"),
+    }
+
+
+def test_distant_or_unanchored_class_field_is_not_resolved():
+    distant = "host = config.hostServer + '/rest/old';" + "x" * 12_001
+    assert js(distant + "this.http.get(this.host)") == []
+    assert js("host = remoteServer + '/rest/private'; this.http.get(this.host)") == []
 
 
 def test_incomplete_or_computed_url_concatenations_do_not_create_prefix_routes():

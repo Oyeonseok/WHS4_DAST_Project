@@ -37,7 +37,8 @@ class FfufRootSelectionSkillTests(unittest.TestCase):
                 holder.cleanup()
 
         self.assertEqual(ordered[:6], [
-            ".env", ".env.bak", "healthz", "dashboard", "graphql", "debug/users",
+            "healthz", "metrics", ".well-known/security.txt", "security.txt",
+            ".env", ".env.bak",
         ])
         self.assertEqual(len(ordered), len(set(ordered)))
         self.assertEqual(preview[:6], ordered[:6])
@@ -177,10 +178,11 @@ class FfufRootSelectionSkillTests(unittest.TestCase):
                     auth_headers=None,
                 )
         self.assertEqual(captured["ordered"][:6], [
-            ".env", ".env.bak", "healthz", "dashboard", "graphql", "debug/users",
+            "healthz", "metrics", ".well-known/security.txt", "security.txt",
+            ".env", ".env.bak",
         ])
 
-    def test_ffuf_max_time_is_shared_across_all_selected_roots(self) -> None:
+    def test_ffuf_max_time_is_fairly_shared_across_selected_roots(self) -> None:
         completed = SimpleNamespace(returncode=0, stdout="", stderr="")
         with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8") as wordlist:
             wordlist.write("health\n")
@@ -192,7 +194,7 @@ class FfufRootSelectionSkillTests(unittest.TestCase):
                 mock.patch("aidast.recon.tools.endpoint_discovery.subprocess.run",
                            return_value=completed) as run,
                 mock.patch("aidast.recon.tools.endpoint_discovery.time.monotonic",
-                           side_effect=[0.0, 0.0, 61.0]),
+                           side_effect=[0.0, 0.0, 30.0]),
             ):
                 discover_with_ffuf(
                     "https://example.com/", wordlist=wordlist.name,
@@ -200,9 +202,10 @@ class FfufRootSelectionSkillTests(unittest.TestCase):
                     auth_headers=None, max_time_seconds=60,
                 )
 
-        self.assertEqual(run.call_count, 1)
-        command = run.call_args.args[0]
-        self.assertEqual(command[command.index("-maxtime") + 1], "60")
+        self.assertEqual(run.call_count, 2)
+        first, second = [call.args[0] for call in run.call_args_list]
+        self.assertEqual(first[first.index("-maxtime") + 1], "30")
+        self.assertEqual(second[second.index("-maxtime") + 1], "30")
 
     def test_ffuf_uses_origin_when_start_url_contains_a_path(self) -> None:
         policy = TargetPolicy(
@@ -325,6 +328,23 @@ def test_guided_ffuf_uses_minimum_root_for_known_compatible_exclusions(tmp_path)
             target_policy=bounded_discovery_policy(), proxy_url='http://127.0.0.1:8080')
         assert len(run.call_args_list) == 1
         assert 'https://example.com/FUZZ' in run.call_args.args[0]
+
+
+def test_guided_ffuf_keeps_minimum_root_alongside_compatible_selected_root(tmp_path):
+    wordlist = tmp_path / 'words.txt'; wordlist.write_text('probe\n')
+    with (mock.patch('aidast.recon.tools.endpoint_discovery.shutil.which', return_value='/fake/ffuf'),
+          mock.patch.object(CodexMainAgent, '_run_structured', return_value=FfufRootSelection(
+              base_url='', roots=['/api'], count=1, selection_reason='Observed API')),
+          mock.patch('aidast.recon.tools.endpoint_discovery.subprocess.run',
+              return_value=SimpleNamespace(returncode=0, stdout='', stderr='')) as run):
+        discover_with_ffuf('https://example.com/', wordlist=str(wordlist),
+            seed_endpoints=[dict(path='/api/items')], auth_headers=None,
+            target_policy=bounded_discovery_policy(), proxy_url='http://127.0.0.1:8080')
+
+    commands = [call.args[0] for call in run.call_args_list]
+    assert len(commands) == 2
+    assert 'https://example.com/FUZZ' in commands[0]
+    assert 'https://example.com/api/FUZZ' in commands[1]
 
 
 def test_guided_ffuf_minimum_root_respects_static_path_policy(tmp_path):

@@ -873,15 +873,46 @@ class ValidationCoordinator:
                     "phase": "claim_comparison"}, evidence_ids=evidence_ids,
                 )
                 return True
+            try:
+                self._validate_comparison_references(
+                    comparison, case_id=case["case_id"], assessment_sha=assessment_sha,
+                    attack_claim_sha=candidate.staged.attack_claim_sha256,
+                    validation_evidence_ids=evidence_ids,
+                    attack_evidence_ids=claim["attack_evidence_ids"],
+                )
+            except ValidationCoordinatorError:
+                correction = (
+                    "Use only the exact evidence identifiers supplied for this case. "
+                    f"validation_evidence_ids must be chosen from {sorted(evidence_ids)!r}; "
+                    "attack_evidence_ids must be chosen from "
+                    f"{sorted(claim['attack_evidence_ids'])!r}. Preserve the exact case and digests."
+                )
+                try:
+                    comparison = self._comparison(
+                        claim, assessment.model_dump(mode="json"), blind_view=blind_view,
+                        policy=policy, correction=correction,
+                    )
+                    self._validate_comparison_references(
+                        comparison, case_id=case["case_id"], assessment_sha=assessment_sha,
+                        attack_claim_sha=candidate.staged.attack_claim_sha256,
+                        validation_evidence_ids=evidence_ids,
+                        attack_evidence_ids=claim["attack_evidence_ids"],
+                    )
+                except ValidationCoordinatorError:
+                    repo.finalize(
+                        case["case_id"], stage_run_id=stage_run_id, expected_version=version,
+                        status="INCONCLUSIVE", decision={"reason": "agent_reference_invalid",
+                        "phase": "claim_comparison"}, evidence_ids=evidence_ids,
+                    )
+                    return True
         else:
             comparison, comparison_evidence = stored_comparison
-        if comparison.case_id != case["case_id"] or comparison.blind_assessment_sha256 != assessment_sha \
-                or comparison.attack_claim_sha256 != candidate.staged.attack_claim_sha256:
-            raise ValidationCoordinatorError("claim comparison digest or case mismatch")
-        if not set(comparison.validation_evidence_ids) <= set(evidence_ids):
-            raise ValidationCoordinatorError("claim comparison cites foreign Validation evidence")
-        if not set(comparison.attack_evidence_ids) <= set(claim["attack_evidence_ids"]):
-            raise ValidationCoordinatorError("claim comparison cites foreign Attack evidence")
+            self._validate_comparison_references(
+                comparison, case_id=case["case_id"], assessment_sha=assessment_sha,
+                attack_claim_sha=candidate.staged.attack_claim_sha256,
+                validation_evidence_ids=evidence_ids,
+                attack_evidence_ids=claim["attack_evidence_ids"],
+            )
         if stored_comparison is None:
             comparison_sha = canonical_sha256(comparison.model_dump(mode="json"))
             comparison_evidence = repo.add_evidence(
@@ -1968,7 +1999,7 @@ class ValidationCoordinator:
 
     def _comparison(
         self, claim: dict[str, Any], assessment: dict[str, Any], *,
-        blind_view: dict[str, Any], policy,
+        blind_view: dict[str, Any], policy, correction: str | None = None,
     ) -> ClaimComparison:
         if self.agent is None:
             from .codex_runner import CodexBlindValidationRunner
@@ -1980,9 +2011,27 @@ class ValidationCoordinator:
         prepare = getattr(self.agent, "prepare_comparison", None)
         if callable(prepare):
             prepare(blind_view)
-        return self._agent_call("compare", claim, assessment, model=ClaimComparison, policy=policy)
+        return self._agent_call(
+            "compare", claim, assessment, model=ClaimComparison, policy=policy,
+            initial_correction=correction,
+        )
 
-    def _agent_call(self, method: str, first: Any, second: Any, *, model, policy=None):
+    @staticmethod
+    def _validate_comparison_references(
+        comparison: ClaimComparison, *, case_id: str, assessment_sha: str,
+        attack_claim_sha: str, validation_evidence_ids, attack_evidence_ids,
+    ) -> None:
+        if (comparison.case_id != case_id
+                or comparison.blind_assessment_sha256 != assessment_sha
+                or comparison.attack_claim_sha256 != attack_claim_sha):
+            raise ValidationCoordinatorError("claim comparison digest or case mismatch")
+        if not set(comparison.validation_evidence_ids) <= set(validation_evidence_ids):
+            raise ValidationCoordinatorError("claim comparison cites foreign Validation evidence")
+        if not set(comparison.attack_evidence_ids) <= set(attack_evidence_ids):
+            raise ValidationCoordinatorError("claim comparison cites foreign Attack evidence")
+
+    def _agent_call(self, method: str, first: Any, second: Any, *, model, policy=None,
+                    initial_correction: str | None = None):
         if self.agent is None:
             from .codex_runner import CodexBlindValidationRunner
             self.agent = (
@@ -1996,7 +2045,7 @@ class ValidationCoordinator:
                 self.agent.set_policy_context(policy)
         if self.agent.agent_id not in self._used_agent_ids:
             self._used_agent_ids.append(self.agent.agent_id)
-        correction = None
+        correction = initial_correction
         for attempt in range(2):
             try:
                 raw = getattr(self.agent, method)(first, second, correction=correction)

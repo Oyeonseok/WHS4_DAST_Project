@@ -25,6 +25,9 @@ _SCRIPT_TYPES = frozenset({"", "module", "text/javascript", "application/javascr
                            "text/ecmascript", "application/ecmascript"})
 _NAME = re.compile(r"[A-Za-z_$][\w$.-]{0,127}\Z")
 _TEMPLATE = re.compile(r"\$\{([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\}")
+_APPLICATION_ORIGIN = re.compile(
+    r"(?:^|\.)(?:hostServer|baseUrl|baseURL|apiUrl|apiURL|origin)$"
+)
 
 
 def _route_url(reference, *, document_url, base_url, target_policy=None):
@@ -173,6 +176,7 @@ def _path_expression(script, span, tokens):
     """Read literal URL concatenations with named path segments, without evaluation."""
     cursor, end = _trim(script, span, tokens)
     parts = []
+    application_origin = False
     for _ in range(32):
         token = tokens.get(cursor)
         if token is not None and token.value is not None:
@@ -182,9 +186,25 @@ def _path_expression(script, span, tokens):
             # A literal prefix anchors the origin. Only simple member names
             # become placeholders; calls, indexing and computed values stop it.
             name = re.match(r"[A-Za-z_$][\w$]*(?:\s*\.\s*[A-Za-z_$][\w$]*)*", script[cursor:end])
-            if (not parts or name is None
+            if (name is None
                     or name[0] in {"true", "false", "null", "undefined", "NaN", "Infinity"}):
                 return None
+            symbolic = re.sub(r"\s+", "", name[0])
+            if not parts and _APPLICATION_ORIGIN.search(symbolic):
+                application_origin = True
+                cursor += name.end()
+                cursor, _ = _trim(script, (cursor, end), tokens)
+                if cursor == end or script[cursor] != "+":
+                    return None
+                cursor, _ = _trim(script, (cursor + 1, end), tokens)
+                continue
+            if not parts:
+                return None
+            # A dynamic value after a complete absolute path is commonly a
+            # query string assembled by the caller. The route itself remains
+            # declared; a trailing slash still denotes a path parameter.
+            if application_origin and parts[-1].startswith("/") and not parts[-1].endswith("/"):
+                return "".join(parts)
             parts.append("{" + re.split(r"\s*\.\s*", name[0])[-1] + "}")
             cursor += name.end()
         cursor, _ = _trim(script, (cursor, end), tokens)
@@ -194,6 +214,75 @@ def _path_expression(script, span, tokens):
             return None
         cursor, _ = _trim(script, (cursor + 1, end), tokens)
     return None
+
+
+def _same_origin_path_bindings(script: str) -> list[tuple[int, str, str]]:
+    """Collect bounded assignments derived from an explicit application origin."""
+    origin = r"(?:this\.)?(?:[A-Za-z_$][\w$]*\.)*(?:hostServer|baseUrl|baseURL|apiUrl|apiURL|origin)"
+    name = r"(?:this\.)?(?P<name>[A-Za-z_$][\w$]*)"
+    quoted = re.compile(
+        rf"{name}\s*=\s*{origin}\s*\+\s*(?:"
+        rf"'(?P<single>/[^'\r\n]{{1,2047}})'|"
+        rf"\"(?P<double>/[^\"\r\n]{{1,2047}})\"|"
+        rf"`(?P<tick>/[^`\r\n]{{1,2047}})`"
+        rf")"
+    )
+    templated = re.compile(
+        rf"{name}\s*=\s*`\$\{{{origin}\}}(?P<path>/[^`\r\n]{{1,2047}})`"
+    )
+    bindings = [
+        (match.end(), match["name"], match["single"] or match["double"] or match["tick"])
+        for match in quoted.finditer(script)
+    ]
+    bindings.extend(
+        (match.end(), match["name"], match["path"])
+        for match in templated.finditer(script)
+    )
+    # Minified clients often derive a method-local URL from a class field,
+    # then pass that local variable to HttpClient. Keep the link within the
+    # same bounded service body and retain every reassignment by position.
+    derived = re.compile(
+        r"(?:\b(?:let|const|var)\s+)?(?P<name>[A-Za-z_$][\w$]*)\s*=\s*"
+        r"this\s*\.\s*(?P<base>[A-Za-z_$][\w$]*)\s*\+\s*"
+        r"(?:(?:'(?P<single>/[^'\r\n]{1,1023})')|"
+        r"(?:\"(?P<double>/[^\"\r\n]{1,1023})\")|"
+        r"(?:`(?P<tick>/[^`\r\n]{1,1023})`))"
+    )
+    for match in derived.finditer(script):
+        parent = [item for item in bindings
+                  if item[1] == match["base"] and item[0] <= match.start()
+                  and match.start() - item[0] <= 12_000]
+        if parent:
+            suffix = match["single"] or match["double"] or match["tick"]
+            bindings.append((match.end(), match["name"], parent[-1][2] + suffix))
+    return sorted(bindings)[:1000]
+
+
+def _bound_path_expression(script, span, tokens, bindings, *, call_position):
+    """Resolve a nearby ``this.field`` route binding plus literal suffixes."""
+    begin, end = _trim(script, span, tokens)
+    member = re.match(r"(?:this\s*\.\s*)?([A-Za-z_$][\w$]*)", script[begin:end])
+    if member is None:
+        return None
+    name = member[1]
+    candidates = [item for item in bindings
+                  if item[1] == name and item[0] <= call_position
+                  and call_position - item[0] <= 12_000]
+    if not candidates:
+        return None
+    path = candidates[-1][2]
+    cursor = begin + member.end()
+    cursor, _ = _trim(script, (cursor, end), tokens)
+    while cursor < end:
+        if script[cursor] != "+":
+            return None
+        cursor, _ = _trim(script, (cursor + 1, end), tokens)
+        token = tokens.get(cursor)
+        if token is None or token.value is None or not token.value.startswith("/"):
+            return None
+        path += token.value
+        cursor, _ = _trim(script, (token.end, end), tokens)
+    return path
 
 
 def _object_fields(script, span, tokens):
@@ -229,6 +318,14 @@ def declared_js_routes(script: str, *, document_url: str, base_url: str,
     def add(path, method):
         if not isinstance(method, str) or method.upper() not in METHODS:
             return
+        if isinstance(path, str):
+            hosted = re.fullmatch(
+                r"\$\{(?P<origin>[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\}"
+                r"(?P<path>/.*)",
+                path,
+            )
+            if hosted is not None and _APPLICATION_ORIGIN.search(hosted["origin"]):
+                path = hosted["path"]
         # fetch/XHR relative URLs resolve against the embedding document, not
         # the external script URL. Keep only unambiguous references here.
         if not isinstance(path, str) or not (path.startswith("/") or re.match(r"^https?://", path, re.I)):
@@ -241,6 +338,27 @@ def declared_js_routes(script: str, *, document_url: str, base_url: str,
 
     literals = _literals(script)
     tokens = {token.start: token for token in literals}
+    bindings = _same_origin_path_bindings(script)
+    # Angular's compiled templates retain literal href pairs. They are passive
+    # navigation declarations; query values are discarded by _candidate.
+    for index, token in enumerate(literals[:-1]):
+        following = literals[index + 1]
+        between = script[token.end:following.start]
+        if (token.value == "href" and len(between) <= 80 and "," in between
+                and isinstance(following.value, str)
+                and following.value.startswith(("/", "./"))):
+            add(following.value.removeprefix("."), "GET")
+        # File uploader constructors imply an HTTP POST to their configured
+        # same-origin URL even when the library performs the request internally.
+        prefix = script[max(0, token.start - 180):token.start]
+        suffix = script[token.end:min(len(script), token.end + 800)]
+        if (isinstance(token.value, str) and token.value.startswith("/")
+                and re.search(r"\bnew\s+[A-Za-z_$][\w$]*\s*\(\s*\{\s*url\s*:\s*"
+                              r"(?:this\.)?(?:[A-Za-z_$][\w$]*\.)*"
+                              r"(?:hostServer|baseUrl|baseURL|apiUrl|apiURL|origin)\s*\+\s*$",
+                              prefix)
+                and "allowedMimeType" in suffix):
+            add(token.value, "POST")
     def direct(path, method, begin, end):
         cursor, _ = _trim(script, (end, len(script)), tokens)
         if (cursor < len(script) and script[cursor] in ",)"
@@ -255,7 +373,7 @@ def declared_js_routes(script: str, *, document_url: str, base_url: str,
     parts.append(script[cursor:])
     code = "".join(parts)
     xhr = set(re.findall(r"\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*new\s+XMLHttpRequest\s*\(\s*\)", code))
-    calls = re.compile(r"\b(?:(?P<request>new\s+Request)|(?P<axios>axios(?:\s*\.\s*request)?)|(?P<fetch>fetch)|(?P<xhr>[A-Za-z_$][\w$]*)\s*\.\s*open|[A-Za-z_$][\w$]*\s*\.\s*(?P<verb>get|post|put|patch|delete|head|options))\s*\(", re.I)
+    calls = re.compile(r"\b(?:(?P<request>new\s+Request)|(?P<axios>axios(?:\s*\.\s*request)?)|(?P<fetch>fetch)|(?P<navigate>(?:window\s*\.\s*)?location\s*\.\s*(?:replace|assign))|(?P<xhr>[A-Za-z_$][\w$]*)\s*\.\s*open|[A-Za-z_$][\w$]*\s*\.\s*(?P<verb>get|post|put|patch|delete|head|options))\s*\(", re.I)
     for call in islice(calls.finditer(code), 1000):
         arguments = _arguments(script, call.end() - 1, tokens)
         if not arguments:
@@ -264,11 +382,28 @@ def declared_js_routes(script: str, *, document_url: str, base_url: str,
             if call["xhr"] in xhr and len(arguments) >= 2:
                 add(_path_expression(script, arguments[1], tokens), _literal(script, arguments[0], tokens))
             continue
+        if call["navigate"]:
+            path = _path_expression(script, arguments[0], tokens)
+            if path is None:
+                path = _bound_path_expression(
+                    script, arguments[0], tokens, bindings, call_position=call.start(),
+                )
+            add(path, "GET")
+            continue
         if call["verb"]:
-            add(_path_expression(script, arguments[0], tokens), call["verb"].upper())
+            path = _path_expression(script, arguments[0], tokens)
+            if path is None:
+                path = _bound_path_expression(
+                    script, arguments[0], tokens, bindings, call_position=call.start(),
+                )
+            add(path, call["verb"].upper())
             continue
         fields = None
         path = _path_expression(script, arguments[0], tokens)
+        if path is None:
+            path = _bound_path_expression(
+                script, arguments[0], tokens, bindings, call_position=call.start(),
+            )
         if path is None and call["axios"]:
             fields = _object_fields(script, arguments[0], tokens)
             if fields is not None and "url" in fields:
@@ -417,6 +552,130 @@ def declared_html_routes(body: str, *, document_url: str, base_url: str,
     return _unique([*forms, *calls], limit)
 
 
+def declared_embedded_openapi_routes(script: str, *, document_url: str, base_url: str,
+                                     target_policy=None,
+                                     limit: int = MAX_DECLARATIONS) -> list[dict]:
+    """Read swagger-ui-express' JSON ``options.swaggerDoc`` declaration."""
+    match = re.search(r"\bvar\s+options\s*=\s*", script)
+    if match is None or limit <= 0:
+        return []
+    try:
+        options, _ = json.JSONDecoder().raw_decode(script[match.end():].lstrip())
+    except (json.JSONDecodeError, TypeError, RecursionError):
+        return []
+    document = options.get("swaggerDoc") if isinstance(options, dict) else None
+    return declared_openapi_routes(
+        document, document_url=document_url, base_url=base_url,
+        target_policy=target_policy, limit=limit,
+    )
+
+
+_REST_RESOURCE = re.compile(
+    r"^/api/(?P<resource>[A-Za-z][A-Za-z0-9_-]{0,127})"
+    r"(?:/\{[A-Za-z_$][\w$.-]{0,127}\})?/?$"
+)
+
+
+def inferred_rest_resource_routes(declarations, *, base_url: str, target_policy=None,
+                                  limit: int = MAX_DECLARATIONS) -> list[dict]:
+    """Infer passive CRUD candidates from API resource declarations.
+
+    This is an inventory hypothesis only: it never sends a request and it does
+    not upgrade a candidate to a verified endpoint.  The observed declarations
+    remain attached so reports can distinguish source evidence from convention.
+    """
+    cap = max(0, min(MAX_DECLARATIONS, int(limit)))
+    if cap == 0:
+        return []
+    resources: dict[str, dict] = {}
+    for declaration in declarations:
+        if not isinstance(declaration, dict):
+            continue
+        match = _REST_RESOURCE.fullmatch(str(declaration.get("path") or ""))
+        if match is None:
+            continue
+        resource = match["resource"]
+        evidence = resources.setdefault(resource, {"routes": [], "documents": []})
+        route = f"{str(declaration.get('method', 'GET')).upper()} {declaration['path']}"
+        if route not in evidence["routes"] and len(evidence["routes"]) < 20:
+            evidence["routes"].append(route)
+        source = declaration.get("evidence", {}).get("parent_url")
+        if isinstance(source, str) and source not in evidence["documents"]:
+            evidence["documents"].append(source)
+        for source in declaration.get("evidence", {}).get("source_scripts", []):
+            if isinstance(source, str) and source not in evidence["documents"]:
+                evidence["documents"].append(source)
+
+    rows = []
+    for resource, evidence in resources.items():
+        collection = f"/api/{resource}"
+        item = f"{collection}/{{id}}"
+        for method, path in (
+            ("GET", collection), ("POST", collection),
+            ("GET", item), ("PUT", item), ("PATCH", item), ("DELETE", item),
+        ):
+            row = _candidate(
+                path, method, document_url=base_url, base_url=base_url,
+                target_policy=target_policy, kind="rest_resource_family",
+                source="passive_route_inference",
+            )
+            if row is None:
+                continue
+            row["evidence"].update(
+                derivation_rule="rest_resource_family",
+                inferred_from=evidence["routes"],
+                source_scripts=evidence["documents"][:10],
+                verification_reason="inferred_route_unrequested",
+            )
+            row["context"].update(
+                action_type="passive_inference",
+                association_method="rest_resource_convention",
+            )
+            rows.append(row)
+    return _unique(rows, cap)
+
+
+def inferred_runtime_configuration_routes(document: object, *, document_url: str,
+                                           base_url: str, target_policy=None,
+                                           limit: int = MAX_DECLARATIONS) -> list[dict]:
+    """Infer standard public endpoints explicitly enabled by runtime config."""
+    if limit <= 0 or not isinstance(document, dict):
+        return []
+    config = document.get("config")
+    application = config.get("application") if isinstance(config, dict) else None
+    if not isinstance(application, dict):
+        return []
+    declarations = []
+    if isinstance(application.get("securityTxt"), dict):
+        declarations.extend((
+            ("GET", "/.well-known/security.txt", "runtime_config_security_txt"),
+            ("GET", "/security.txt", "runtime_config_security_txt"),
+        ))
+    metrics_prefix = application.get("customMetricsPrefix")
+    if isinstance(metrics_prefix, str) and metrics_prefix.strip():
+        declarations.append(("GET", "/metrics", "runtime_config_metrics"))
+    rows = []
+    for method, path, rule in declarations:
+        row = _candidate(
+            path, method, document_url=document_url, base_url=base_url,
+            target_policy=target_policy, kind="runtime_configuration_candidate",
+            source="passive_route_inference",
+        )
+        if row is None:
+            continue
+        row["evidence"].update(
+            derivation_rule=rule,
+            inferred_from=[document_url],
+            verification_reason="runtime_configuration_route_unrequested",
+        )
+        row["context"].update(
+            action_type="passive_inference",
+            association_method="runtime_configuration",
+        )
+        rows.append(row)
+    return _unique(rows, limit)
+
+
 def declarations_from_captured_responses(rows, *, base_url: str, target_policy=None,
                                          limit: int = MAX_DECLARATIONS) -> list[dict]:
     """Rebuild passive declarations from durable response rows."""
@@ -448,12 +707,19 @@ def declarations_from_captured_responses(rows, *, base_url: str, target_policy=N
         if media in {"text/html", "application/xhtml+xml"}:
             captured = declared_html_routes(text, **options)
         elif media in {"application/javascript", "text/javascript", "application/x-javascript"}:
-            captured = declared_js_routes(text, **options)
+            captured = _unique([
+                *declared_js_routes(text, **options),
+                *declared_embedded_openapi_routes(text, **options),
+            ], cap)
         elif media in {"application/json", "application/openapi+json"}:
             try:
                 document = json.loads(text)
                 captured = declared_openapi_routes(document, **options)
-                inferences = _unique([*inferences, *inferred_openapi_routes(document, **options)], cap)
+                inferences = _unique([
+                    *inferences,
+                    *inferred_openapi_routes(document, **options),
+                    *inferred_runtime_configuration_routes(document, **options),
+                ], cap)
             except (ValueError, TypeError, RecursionError):
                 pass
         elif media in {"text/plain", "application/xml", "text/xml", "application/sitemap+xml"}:
@@ -461,6 +727,12 @@ def declarations_from_captured_responses(rows, *, base_url: str, target_policy=N
         # Count unique method/URL pairs after every document. Repeated captures
         # must not consume the route cap or erase parameters declared later.
         declarations = _unique([*declarations, *captured], cap)
+    inferences = _unique([
+        *inferences,
+        *inferred_rest_resource_routes(
+            declarations, base_url=base_url, target_policy=target_policy, limit=cap,
+        ),
+    ], cap)
     # Guessed conventions cannot displace declarations from a later capture.
     return _unique([*declarations, *inferences], cap)
 

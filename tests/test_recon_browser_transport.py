@@ -710,6 +710,35 @@ class ReconBrowserTransportTests(unittest.TestCase):
         wait.assert_not_called()
         shutdown.assert_not_called()
 
+    def test_unauthenticated_start_continues_after_committed_dom_timeout(self):
+        from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+
+        page = Mock(url=self.policy.asset)
+        page.goto.side_effect = PlaywrightTimeoutError("DOMContentLoaded timed out")
+        with tempfile.TemporaryDirectory() as directory:
+            self.driver.session_config.session_file = str(Path(directory) / "session.json")
+            with patch.object(self.driver, "_launch_manual_browser"), patch.object(
+                self.driver, "_ensure_page", return_value=page
+            ), patch.object(self.driver, "save_session", return_value=True), patch.object(
+                self.driver, "_shutdown_runtime"
+            ) as shutdown:
+                self.driver.start_unauthenticated()
+
+        shutdown.assert_not_called()
+
+    def test_unauthenticated_start_keeps_uncommitted_timeout_fatal(self):
+        from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+
+        page = Mock(url="about:blank")
+        page.goto.side_effect = PlaywrightTimeoutError("navigation timed out")
+        with patch.object(self.driver, "_launch_manual_browser"), patch.object(
+            self.driver, "_ensure_page", return_value=page
+        ), patch.object(self.driver, "_shutdown_runtime") as shutdown:
+            with self.assertRaises(PlaywrightTimeoutError):
+                self.driver.start_unauthenticated()
+
+        shutdown.assert_called_once_with()
+
     def test_automatic_start_does_not_prompt_for_404(self):
         page = Mock(url=self.policy.asset)
         response = SimpleNamespace(status=404, headers={})

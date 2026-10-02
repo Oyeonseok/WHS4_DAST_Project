@@ -504,6 +504,54 @@ class ValidationCoordinatorTests(unittest.TestCase):
             self.assertEqual(conn.execute("SELECT assessment_id FROM validation_eligibility_assessments").fetchone()[0],
                              decision["eligibility_assessment_id"])
 
+    def test_foreign_comparison_reference_is_corrected_once(self):
+        class CorrectingAgent(FakeAgent):
+            def __init__(self):
+                self.corrections = []
+
+            def compare(self, claim, assessment, correction=None):
+                self.corrections.append(correction)
+                result = super().compare(claim, assessment, correction)
+                if correction is None:
+                    return result.model_copy(update={
+                        "attack_evidence_ids": ("foreign_attack_evidence",),
+                    })
+                return result
+
+        agent = CorrectingAgent()
+        result = ValidationCoordinator(
+            db_path=self.path, agent=agent, reproduction=FakePort(),
+            policy_provider=lambda endpoint, method: self.policy,
+        ).run("scan")
+
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(result.summary["statuses"], {"CONFIRMED": 1})
+        self.assertEqual(len(agent.corrections), 2)
+        self.assertIsNone(agent.corrections[0])
+        self.assertIn("attack_evidence", agent.corrections[1])
+
+    def test_repeated_foreign_comparison_reference_isolated_to_case(self):
+        class ForeignReferenceAgent(FakeAgent):
+            def compare(self, claim, assessment, correction=None):
+                result = super().compare(claim, assessment, correction)
+                return result.model_copy(update={
+                    "attack_evidence_ids": ("foreign_attack_evidence",),
+                })
+
+        result = ValidationCoordinator(
+            db_path=self.path, agent=ForeignReferenceAgent(), reproduction=FakePort(),
+            policy_provider=lambda endpoint, method: self.policy,
+        ).run("scan")
+
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(result.summary["statuses"], {"INCONCLUSIVE": 1})
+        with db.connect(self.path) as conn:
+            decision = json.loads(conn.execute(
+                "SELECT decision_json FROM validation_cases"
+            ).fetchone()[0])
+        self.assertEqual(decision["reason"], "agent_reference_invalid")
+        self.assertEqual(decision["phase"], "claim_comparison")
+
     def test_profile_evidence_audit_is_sealed_without_changing_decision(self):
         result = ValidationCoordinator(
             db_path=self.path, agent=FakeAgent(), reproduction=FakePort(),

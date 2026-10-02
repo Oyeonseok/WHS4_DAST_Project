@@ -69,6 +69,25 @@ def test_compare_is_method_aware_and_excludes_static_routes(tmp_path):
     assert "POST | 0 | 2 | 0.00%" in report
 
 
+def test_compare_normalizes_named_route_parameters(tmp_path):
+    observed = tmp_path / "observed.db"
+    baseline = tmp_path / "baseline.db"
+    _database(observed, [
+        ("PUT", "/basket/:id/coupon/:id", "observed", False, None, "katana"),
+    ])
+    _database(baseline, [
+        ("PUT", "/basket/:basket_id/coupon/:coupon", "observed", False, None,
+         "official_source_manifest"),
+    ])
+
+    result = compare_databases(
+        tmp_path / "knowledge", observed_database=observed, baseline_database=baseline,
+    )
+
+    assert result.matched_count == 1
+    assert result.exact_recall == 1.0
+
+
 def test_compare_counts_passive_route_candidates_but_not_static_assets(tmp_path):
     observed = tmp_path / "observed.db"
     baseline = tmp_path / "baseline.db"

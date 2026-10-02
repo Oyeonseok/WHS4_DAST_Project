@@ -47,6 +47,7 @@ from aidast.recon.tools.openapi_get import declared_get_candidates
 from aidast.recon.tools.passive_declarations import (
     MAX_DECLARATIONS, declared_form_routes, declared_html_routes, declared_index_routes,
     declared_js_routes, declared_openapi_routes, inferred_openapi_routes,
+    inferred_rest_resource_routes,
 )
 from .observed_parameters import bind_dom_gets, observed_named_values
 from .request_identity import authentication_key, has_authentication, credential_values
@@ -2155,6 +2156,10 @@ def discover_adaptive_js_api_candidates(
         except Exception as exc:
             if diagnostic_callback is not None:
                 diagnostic_callback('phase_error',component='ai_patterns',error_type=type(exc).__name__)
+    passive_declarations.extend(inferred_rest_resource_routes(
+        passive_declarations, base_url=base_url, target_policy=target_policy,
+        limit=MAX_DECLARATIONS - len(passive_declarations),
+    ))
     # Prefer an independently observed/verified GET over its declaration. The
     # remaining declarations stay candidates even when verification was deferred.
     results = _merge_passive_declarations(results, passive_declarations)
