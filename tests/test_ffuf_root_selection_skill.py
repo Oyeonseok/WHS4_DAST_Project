@@ -207,6 +207,33 @@ class FfufRootSelectionSkillTests(unittest.TestCase):
         self.assertEqual(first[first.index("-maxtime") + 1], "30")
         self.assertEqual(second[second.index("-maxtime") + 1], "30")
 
+    def test_guided_ffuf_prioritizes_and_reserves_time_for_origin_root(self) -> None:
+        completed = SimpleNamespace(returncode=0, stdout="", stderr="")
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8") as wordlist:
+            wordlist.write("health\n")
+            wordlist.flush()
+            with (
+                mock.patch("aidast.recon.tools.endpoint_discovery.shutil.which", return_value="/fake/ffuf"),
+                mock.patch("aidast.recon.tools.endpoint_discovery.select_ffuf_roots_from_endpoints",
+                           return_value=["/api", "/"]),
+                mock.patch("aidast.recon.tools.endpoint_discovery.subprocess.run",
+                           return_value=completed) as run,
+                mock.patch("aidast.recon.tools.endpoint_discovery.time.monotonic",
+                           side_effect=[0.0, 0.0, 60.0]),
+            ):
+                discover_with_ffuf(
+                    "https://example.com/", wordlist=wordlist.name,
+                    seed_endpoints=[{"path": "/api/items", "source": "katana"}],
+                    auth_headers=None, target_policy=bounded_discovery_policy(),
+                    proxy_url="http://127.0.0.1:8080", max_time_seconds=90,
+                )
+
+        first, second = [call.args[0] for call in run.call_args_list]
+        self.assertIn("https://example.com/FUZZ", first)
+        self.assertEqual(first[first.index("-maxtime") + 1], "60")
+        self.assertIn("https://example.com/api/FUZZ", second)
+        self.assertEqual(second[second.index("-maxtime") + 1], "30")
+
     def test_ffuf_uses_origin_when_start_url_contains_a_path(self) -> None:
         policy = TargetPolicy(
             scope_id="scope_test",

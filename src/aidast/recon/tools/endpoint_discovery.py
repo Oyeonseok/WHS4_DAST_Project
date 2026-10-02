@@ -1131,6 +1131,7 @@ _FFUF_DISCOVERY_PRIORITY = (
     "account", "profile", "users", "me", "admin", "transactions", "transfer", "upload",
     "actuator/health",
 )
+_FFUF_ROOT_PRIORITY_MIN_SECONDS = 60
 
 
 def _priority_ffuf_wordlist(wordlist: str) -> tuple[tempfile.TemporaryDirectory, str, list[str]]:
@@ -1321,6 +1322,11 @@ def discover_with_ffuf(
                 ffuf_origin + (root if root.startswith("/") else "/" + root)
             )
         ]
+    # The origin root carries generic deployment endpoints such as /healthz,
+    # /metrics, and security.txt.  AI-selected prefixes can already contain
+    # ``/`` in an arbitrary position, so make its priority deterministic.
+    if "/" in roots:
+        roots = ["/", *(root for root in roots if root != "/")]
 
     print(
         f"  ffuf Root : "
@@ -1453,6 +1459,16 @@ def discover_with_ffuf(
             max(1, total_time_remaining // roots_remaining)
             if total_time_remaining > 0 else total_time_remaining
         )
+        if (root == "/" and target_policy is not None
+                and total_time_remaining > roots_remaining):
+            # ffuf auto-calibration consumes part of each slice.  Reserve enough
+            # time for the root pass to reach the prefixed high-signal entries,
+            # while leaving at least one second for every selected child root.
+            root_reservation = min(
+                _FFUF_ROOT_PRIORITY_MIN_SECONDS,
+                total_time_remaining - (roots_remaining - 1),
+            )
+            effective_max_time = max(effective_max_time, root_reservation)
         if target_policy is not None and budget_remaining is not None:
             remaining = budget_remaining()
             if remaining is not None:
