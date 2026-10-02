@@ -261,11 +261,11 @@ class NativeChainingMainAgentTests(unittest.TestCase):
                 )
                 self.assertNotIn("danger-full-access", command)
                 self.assertNotIn("--add-dir", command)
-                self.assertEqual(command[command.index("--model") + 1], "gpt-6-sol")
+                self.assertEqual(command[command.index("--model") + 1], "gpt-5.6-sol")
                 agent_config = (work / ".codex/agents/aidast-chaining.toml").read_text(
                     encoding="utf-8"
                 )
-                self.assertIn('model = "gpt-6-sol"', agent_config)
+                self.assertIn('model = "gpt-5.6-sol"', agent_config)
                 self.assertIn("$aidast-policy", agent_config)
                 self.assertIn("$aidast-policy", kwargs["input"])
                 self.assertTrue((work / ".agents/skills/aidast-policy/SKILL.md").is_file())

@@ -96,6 +96,23 @@ def parameter_context(conn, endpoint_id: str) -> list[dict]:
             for name, location, data_type, role, is_identifier in rows]
 
 
+def persist_declared_parameters(conn, endpoint_id: str, parameters) -> None:
+    """Persist bounded schema/form field names while discarding all field values."""
+    if not isinstance(parameters, list):
+        return
+    for parameter in parameters[:100]:
+        if not isinstance(parameter, dict):
+            continue
+        name, location, data_type = (parameter.get(key) for key in ("name", "location", "data_type"))
+        if (not isinstance(name, str) or not re.fullmatch(r"[A-Za-z_$][\w$.-]{0,127}", name)
+                or not isinstance(location, str) or location not in {"path", "query", "json", "form", "header"}):
+            continue
+        role = _parameter_role(name)
+        db.upsert_parameter(conn, endpoint_id=endpoint_id, name=name, location=location,
+            data_type=data_type if isinstance(data_type, str) and data_type in {"string", "integer", "number", "boolean", "array", "object"} else "string",
+            role=role, is_identifier=role == "identifier")
+
+
 def sanitize_evidence(value) -> dict:
     """Allowlisted metadata only; never forward raw tool records or bodies."""
     if not isinstance(value, dict):
@@ -109,6 +126,15 @@ def sanitize_evidence(value) -> dict:
             result[key] = safe_text(value[key])[:200]
     if isinstance(value.get('verification_reason'), str):
         result['verification_reason'] = safe_text(value['verification_reason'])[:80]
+    if value.get('derivation_rule') in {
+        'api_prefix_alias', 'api_collection_alias',
+        'authentication_ui_companion', 'versionless_api_action',
+        'authenticated_resource_landing', 'authenticated_resource_dashboard',
+        'well_known_imds_family',
+    }:
+        result['derivation_rule'] = value['derivation_rule']
+    if isinstance(value.get('inferred_from'), str) and value['inferred_from'].startswith('/'):
+        result['inferred_from'] = safe_url(value['inferred_from'])
     if (isinstance(value.get('access_status'), str)
             and value['access_status'] in {'authentication_required', 'forbidden'}):
         result['access_status'] = value['access_status']
@@ -184,6 +210,7 @@ class ObservationRecorder:
                 verification_status=verification_status,
             )
             persist_url_parameters(self.conn, endpoint_id, item.get('url', path), path)
+            persist_declared_parameters(self.conn, endpoint_id, item.get('declared_parameters'))
             context = item.get('context') or {}
             key = str(context.get('context_key') or 'phase:' + phase)
             context_id = self.context_ids.get(key)
@@ -321,6 +348,7 @@ def tag_pending_observations(conn, *, scan_id: str, agent, batch_size: int = 200
         JOIN assets s ON s.asset_id=g.asset_id AND s.scan_id=?
         LEFT JOIN discovery_contexts c ON c.context_id=o.context_id
         WHERE NOT EXISTS (SELECT 1 FROM endpoint_annotations a WHERE a.observation_id=o.observation_id)
+          AND COALESCE(e.is_excluded,0)=0
         ORDER BY o.observed_at, o.observation_id
     ''', (scan_id,)).fetchall()
     recorder = ObservationRecorder(conn, origin_id='', scan_id=scan_id, agent=agent)

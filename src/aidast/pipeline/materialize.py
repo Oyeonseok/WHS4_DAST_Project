@@ -68,6 +68,17 @@ def materialize_pipeline(
             source.backup(destination)
             destination.execute("PRAGMA foreign_keys=ON")
             migrate_live_pipeline_schema(destination)
+            # First-party passive declarations remain candidates in immutable
+            # Recon output. In the writable attack database they become
+            # eligible for a bounded confirmation attempt while retaining the
+            # candidate verification status and provenance.
+            destination.execute(
+                """UPDATE endpoints SET is_excluded=0
+                   WHERE verification_status='candidate'
+                     AND exclude_reason='unverified_candidate'
+                     AND (instr(',' || coalesce(source_tools,'') || ',', ',adaptive_js,')>0
+                       OR instr(',' || coalesce(source_tools,'') || ',', ',passive_declaration,')>0)"""
+            )
             destination.execute(
                 """INSERT INTO pipeline_sources
                 (scan_id,source_manifest_path,source_manifest_sha256,

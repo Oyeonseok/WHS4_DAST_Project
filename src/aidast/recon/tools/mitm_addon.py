@@ -300,8 +300,17 @@ class ScopeAndCaptureAddon:
             self.pending_request_count += 1
             try:
                 timeout = self.rules.get("timeout_seconds", 30)
+                # A browser emits many concurrent subresource requests.  The
+                # response timeout is not an admission timeout: at a strict
+                # rate such as 0.5 rps, compliant requests may legitimately
+                # wait much longer before their turn.  Bound the queue by the
+                # remaining finite request budget while preserving the
+                # original timeout for the physical request.
+                rate = float(self.rules.get("requests_per_second", 1.0))
+                queue_units = max(1, budget_total - global_request_count + 1)
+                admission_timeout = max(float(timeout), min(3600.0, queue_units / rate + float(timeout)))
                 permit = await self.governor.acquire_async(flow.request.pretty_url,
-                                                          timeout_seconds=timeout)
+                    timeout_seconds=timeout, wait_timeout_seconds=admission_timeout)
                 admit()
                 flow.metadata["aidast_governor_permit"] = permit
             except (GovernorError, ValueError):

@@ -41,11 +41,21 @@ from aidast.recon.policy import TargetPolicy, validate_policy_for_target
 from aidast.recon.profiles import EXECUTION_PROFILES, grounded_scope_request_rate
 from aidast.recon.surface import export_surface
 from aidast.recon.source_import import SourceImportError, import_flask_source
+from aidast.recon.wiki import (
+    ReconWikiError,
+    compare_databases,
+    ingest_database,
+    init_wiki,
+    lint_wiki,
+)
 from aidast.pipeline.lifecycle import finish_stage_run, start_stage_run
 from aidast.pipeline.locations import scan_run_directory
 from aidast.pipeline.materialize import materialize_pipeline
 from aidast.pipeline.models import HandoffManifest, hash_artifact
 from aidast.pipeline.resume import execute_resume, inspect_resume
+from aidast.pipeline.model_settings import (
+    MODEL_SETTINGS_FILE, ScanModelChoices, scan_model_settings_path, write_scan_model_choices,
+)
 from aidast.paths import RESULT_ROOT
 from aidast.core.model_calls import SQLiteModelCallSink, model_call_context, using_model_call_sink
 from aidast.reporting import (
@@ -55,6 +65,7 @@ from aidast.reporting import (
     ReportError,
     case_report_status,
     report_status,
+    write_scan_summary,
 )
 from aidast.reporting.auto import generate_scan_reports, report_platform_for_program_url
 from aidast.scope.paths import ScopePathError, identify_program, resolve_scope_directory, scope_revision_directory
@@ -115,6 +126,8 @@ def main(
             return _run_scope(args, parser)
         if args.command == "recon":
             return _run_recon(args)
+        if args.command == "recon-wiki":
+            return _run_recon_wiki(args)
         if args.command == "import-recon":
             imported = import_flask_source(
                 args.source,
@@ -158,7 +171,7 @@ def main(
                 report_writer=report_writer,
             )
         if args.command == "resume":
-            return _run_resume(args)
+            return _run_resume(args, report_writer=report_writer)
         if args.command == "attack":
             return _run_attack(args, workflow=attack_workflow)
         if args.command in {"validate", "validation"}:
@@ -188,6 +201,7 @@ def main(
         ScopePathError,
         UpdateError,
         ValidationError,
+        ReconWikiError,
         ValidationCoordinatorError,
         SourceImportError,
         FileNotFoundError,
@@ -350,6 +364,52 @@ def _parser() -> argparse.ArgumentParser:
         ),
     )
     _add_session_options(recon)
+
+    recon_wiki = commands.add_parser(
+        "recon-wiki",
+        help="maintain a provenance-aware persistent Recon coverage wiki",
+    )
+    wiki_commands = recon_wiki.add_subparsers(dest="wiki_command", required=True)
+    wiki_init = wiki_commands.add_parser("init", help="create an empty Recon Wiki")
+    wiki_init.add_argument("--root", type=Path, required=True)
+
+    wiki_ingest = wiki_commands.add_parser(
+        "ingest", help="snapshot one Recon database into the immutable source layer",
+    )
+    wiki_ingest.add_argument("database", type=Path)
+    wiki_ingest.add_argument("--root", type=Path, required=True)
+    wiki_ingest.add_argument(
+        "--kind", choices=("runtime", "source", "benchmark"), required=True,
+    )
+    wiki_ingest.add_argument("--label")
+    wiki_ingest.add_argument(
+        "--target-id",
+        help="logical target identity when the recorded origin is an environment alias",
+    )
+
+    wiki_compare = wiki_commands.add_parser(
+        "compare", help="measure runtime method/path recall against a source baseline",
+    )
+    wiki_compare.add_argument("--observed-db", type=Path, required=True)
+    wiki_compare.add_argument("--baseline-db", type=Path, required=True)
+    wiki_compare.add_argument(
+        "--baseline-kind", choices=("source", "benchmark"), default="source",
+        help="provenance of the baseline database (default: source)",
+    )
+    wiki_compare.add_argument("--root", type=Path, required=True)
+    wiki_compare.add_argument(
+        "--target-id",
+        help="assert one logical target for both databases (for example staging vs loopback)",
+    )
+    wiki_compare.add_argument(
+        "--include-excluded", action="store_true",
+        help="include static and other excluded endpoints in both inventories",
+    )
+
+    wiki_lint = wiki_commands.add_parser(
+        "lint", help="check source integrity, provenance, and generated pages",
+    )
+    wiki_lint.add_argument("--root", type=Path, required=True)
 
     source_import = commands.add_parser(
         "import-recon",
@@ -950,6 +1010,16 @@ def _complete_executable_recon_plan(
             steps = [ReconStep.ASSET_DISCOVERY]
         else:
             requested = set(model_target.steps) if model_target is not None else set()
+            # DNS and port discovery operate on DOMAIN/IP targets.  Planning
+            # models may still propose them for an exact URL/API target, but
+            # preserving those steps violates the executor contract and makes
+            # HTTP-only exclusion rules look unenforceable before Recon starts.
+            if target.asset_type in {AssetType.URL, AssetType.API}:
+                requested.difference_update({
+                    ReconStep.DNS_RESOLUTION,
+                    ReconStep.HOST_PORT_DISCOVERY,
+                    ReconStep.ASSET_DISCOVERY,
+                })
             requested.update({
                 ReconStep.HTTP_PROBE,
                 ReconStep.ORIGIN_DISCOVERY,
@@ -1039,11 +1109,19 @@ def _run_recon(
         selected_document, selected_markdown = scope_coordinator.load_approved_scope()
         if identify_program(str(selected_document.source.requested_url)) != identify_program(program_url):
             raise ScopePathError("Scope revision approval does not match the requested program")
-    main_agent = CodexMainAgent(
-        timeout_seconds=args.codex_timeout,
-        main_model=args.recon_model or RECON_MODEL,
-        attack_model=getattr(args, "attack_model", None),
+    models = ScanModelChoices.resolve(
+        recon_model=args.recon_model, attack_model=getattr(args, "attack_model", None),
+        validation_model=getattr(args, "validation_model", None),
+        report_model=getattr(args, "report_model", None),
     )
+    if prepare_attack and scan_id is not None:
+        try:
+            settings_root = Path(args.run_root).expanduser().absolute().parent
+            write_scan_model_choices(scan_model_settings_path(settings_root, scan_id),
+                                     scan_id=scan_id, models=models)
+        except (OSError, ValueError) as exc:
+            raise ReconCoordinatorError(f"cannot persist scan model choices: {exc}") from exc
+    main_agent = CodexMainAgent(timeout_seconds=args.codex_timeout, **models.agent_options())
 
     if revision is not None:
         scope_document, scope_markdown = selected_document, selected_markdown
@@ -1229,12 +1307,16 @@ def _run_recon(
             steps = (
                 [ReconStep.ASSET_DISCOVERY]
                 if target.asset_type is AssetType.WILDCARD
-                else [
+                else ([
                     ReconStep.DNS_RESOLUTION,
                     ReconStep.HTTP_PROBE,
                     ReconStep.ORIGIN_DISCOVERY,
                     ReconStep.ENDPOINT_DISCOVERY,
-                ]
+                ] if target.asset_type not in {AssetType.URL, AssetType.API} else [
+                    ReconStep.HTTP_PROBE,
+                    ReconStep.ORIGIN_DISCOVERY,
+                    ReconStep.ENDPOINT_DISCOVERY,
+                ])
             )
             complete_plan_targets.append(ReconPlanTarget(
                 asset_type=target.asset_type,
@@ -1375,6 +1457,7 @@ def _run_recon(
         if prepare_attack:
             run_dir = run_output.resolve()
             run_dir.mkdir(parents=True, exist_ok=False)
+            write_scan_model_choices(run_dir / MODEL_SETTINGS_FILE, scan_id=scan_id, models=models)
             if effective_policy_context:
                 (run_dir / "PolicyGuidance.md").write_text(effective_policy_context, encoding="utf-8")
             db_path = run_dir / "Recon.db"
@@ -1389,7 +1472,7 @@ def _run_recon(
             scope_value=scope_document.scope_id,
             db_path=db_path,
             ffuf_wordlist=args.ffuf_wordlist,
-            recon_model=args.recon_model,
+            recon_model=models.recon_model,
             ffuf_max_time_seconds=args.ffuf_max_time_seconds,
             target_policies=policies,
             require_policy_enforcement=True,
@@ -1420,6 +1503,12 @@ def _run_recon(
             executor.conn, scan_id=scan_id, stage="recon"
         )
         recon_failures = 0
+        recon_handoff_ready = False
+        report_root = (
+            args.run_root.parent / "ReportRun" / scan_id
+            if prepare_attack else None
+        )
+        pipeline_path: Path | None = None
         try:
             work("recon", "execute", "started")
             with model_call_context(scan_id=scan_id, stage="Recon"):
@@ -1479,10 +1568,23 @@ def _run_recon(
                 recon_review.model_dump_json(indent=2), encoding="utf-8"
             )
             work("recon", "export", "started")
+            service_endpoint_count = executor.conn.execute(
+                "SELECT COUNT(*) FROM endpoints WHERE coalesce(is_excluded,0)=0"
+            ).fetchone()[0]
+            # ReconExecutor only returns target-local failures recorded as
+            # recoverable.  A partial surface can therefore continue through
+            # the immutable handoff; fatal policy, integrity, annotation, and
+            # dependency errors raise before this point and remain fail-closed.
+            recon_handoff_ready = not recon_failures or service_endpoint_count > 0
             executor.conn.execute(
                 "UPDATE scans SET status=?, finished_at=CURRENT_TIMESTAMP "
                 "WHERE scan_id=?",
-                ("completed_with_errors" if recon_failures else "completed", scan_id),
+                (
+                    "completed"
+                    if not recon_failures or (prepare_attack and recon_handoff_ready)
+                    else "completed_with_errors",
+                    scan_id,
+                ),
             )
             executor.conn.commit()
             export_surface(
@@ -1505,12 +1607,27 @@ def _run_recon(
                     error_message=str(exc),
                 )
             finally:
+                if report_root is not None and db_path.is_file():
+                    try:
+                        write_scan_summary(
+                            db_path,
+                            report_root,
+                            scan_id=scan_id,
+                            errors=[{
+                                "stage": "recon",
+                                "error_type": type(exc).__name__,
+                            }],
+                        )
+                    except Exception:
+                        # Preserve the original fatal boundary. A summary write
+                        # must never replace an authorization/integrity error.
+                        pass
                 getattr(executor, "close", executor.conn.close)()
             raise
         print(f"Recon Surface saved: {surface_path}")
         try:
             #NOTE: recon에서 attack과 validation을 이어서 진행하는 작업이 필요할까?
-            if prepare_attack and run_dir is not None and not recon_failures:
+            if prepare_attack and run_dir is not None and recon_handoff_ready:
                 work("main", "handoff", "started")
                 handoff_path = _write_recon_handoff(
                     executor=executor,
@@ -1529,8 +1646,13 @@ def _run_recon(
                 materialize_pipeline(handoff_path, pipeline_path)
                 work("main", "handoff", "finished")
                 work("attack", "execute", "started")
+                attack_planning_agent = CodexMainAgent(
+                    timeout_seconds=args.codex_timeout,
+                    main_model=models.attack_model,
+                )
                 attack_result = AttackCoordinator(
                     agent=main_agent,
+                    planning_agent=attack_planning_agent,
                     db_path=pipeline_path,
                     scope_path=run_dir / "Scope.md",
                     policy_path=run_dir / "TargetPolicy.json",
@@ -1551,7 +1673,7 @@ def _run_recon(
                     coordinator = build_native_validation_coordinator(
                         db_path=pipeline_path,
                         policy_path=run_dir / "TargetPolicy.json",
-                        validation_model=args.validation_model,
+                        validation_model=models.validation_model,
                     )
                 work("validation", "execute", "started")
                 with model_call_context(scan_id=scan_id, stage="Validation"):
@@ -1564,14 +1686,24 @@ def _run_recon(
                     with model_call_context(scan_id=scan_id, stage="Report"):
                         report_results = generate_scan_reports(
                             pipeline_path,
-                            args.run_root.parent / "ReportRun" / scan_id,
+                            report_root,
                             scan_id=scan_id,
                             platform=report_platform,
                             writer=report_writer,
-                            model=args.report_model,
+                            model=models.report_model,
                         )
                     work("report", "draft", "finished")
                     print(f"Report drafts generated: {len(report_results)}")
+                else:
+                    write_scan_summary(
+                        pipeline_path,
+                        report_root,
+                        scan_id=scan_id,
+                        errors=[{
+                            "stage": "validation",
+                            "error_type": "IncompleteValidation",
+                        }],
+                    )
                 print(f"Recon handoff saved: {handoff_path}")
                 print(
                     f"Legacy Attack plan saved: {legacy_plan['database']} "
@@ -1583,9 +1715,43 @@ def _run_recon(
                     f"Validation {len(validation_result.case_ids)} cases; "
                     f"shared DB: {pipeline_path}"
                 )
+            elif report_root is not None:
+                write_scan_summary(
+                    db_path,
+                    report_root,
+                    scan_id=scan_id,
+                    errors=[{
+                        "stage": "recon",
+                        "error_type": "NoUsableReconSurface",
+                    }],
+                )
+        except BaseException as exc:
+            summary_database = (
+                pipeline_path
+                if pipeline_path is not None and pipeline_path.is_file()
+                else db_path
+            )
+            if report_root is not None and summary_database.is_file():
+                try:
+                    write_scan_summary(
+                        summary_database,
+                        report_root,
+                        scan_id=scan_id,
+                        errors=[{
+                            "stage": "pipeline",
+                            "error_type": type(exc).__name__,
+                        }],
+                    )
+                except Exception:
+                    # Keep the original downstream failure as the primary
+                    # signal if even the deterministic summary cannot persist.
+                    pass
+            raise
         finally:
             getattr(executor, "close", executor.conn.close)()
-    return 2 if recon_failures else 0
+    # Target-local tool failures are retained in Recon.db and ScanSummary, but
+    # do not turn an otherwise completed integrated run into a process error.
+    return 2 if recon_failures and not (prepare_attack and recon_handoff_ready) else 0
 
 
 # 승인된 Scope에서 사용자가 요청한 Recon 대상을 고른다.
@@ -1917,6 +2083,10 @@ def _write_recon_handoff(
             hash_artifact(run_dir / name, root=run_dir, role=role,
                           media_type=media_type)
         )
+    model_path = run_dir / MODEL_SETTINGS_FILE
+    if model_path.exists():
+        artifacts.append(hash_artifact(model_path, root=run_dir, role="scan-models",
+                                       media_type="application/json"))
     counts = {
         table: executor.conn.execute(
             f"SELECT COUNT(*) FROM {table} "
@@ -2262,17 +2432,15 @@ def _run_report(args: argparse.Namespace, *, writer: object | None = None) -> in
             else report_status(args.database)
         )
     elif args.case_id:
-        result = CaseReportAgent(
+        report_agent = CaseReportAgent(
             writer or CodexReportWriter(
                 CodexMainAgent(main_model=args.report_model or "gpt-6-sol")
             )
-        ).run(
-            args.database,
-            args.output_dir,
-            platform=args.platform,
-            case_id=args.case_id,
-            language=args.language,
         )
+        report_options = {"platform": args.platform, "case_id": args.case_id}
+        if args.language is not None:
+            report_options["language"] = args.language
+        result = report_agent.run(args.database, args.output_dir, **report_options)
     else:
         if args.language is not None:
             raise ValueError("report language selection requires --case-id")
@@ -2299,6 +2467,61 @@ def _run_login() -> int:
 
 
 # 저장된 Recon 관측 결과에 태그를 붙임
+def _run_recon_wiki(args: argparse.Namespace) -> int:
+    if args.wiki_command == "init":
+        root = init_wiki(args.root)
+        print(json.dumps({"wiki_root": str(root), "index": str(root / "wiki/index.md")}))
+        return 0
+    if args.wiki_command == "ingest":
+        source = ingest_database(
+            args.root, args.database, kind=args.kind, label=args.label,
+            target_id=args.target_id,
+        )
+        print(json.dumps({
+            "source_id": source.source_id,
+            "kind": source.kind,
+            "target": source.target,
+            "endpoints": source.endpoint_count,
+            "created": source.created,
+            "raw": str(source.raw_path),
+            "page": str(source.page_path),
+        }, ensure_ascii=False))
+        return 0
+    if args.wiki_command == "compare":
+        comparison = compare_databases(
+            args.root,
+            observed_database=args.observed_db,
+            baseline_database=args.baseline_db,
+            baseline_kind=args.baseline_kind,
+            target_id=args.target_id,
+            include_excluded=args.include_excluded,
+        )
+        print(json.dumps({
+            "comparison_id": comparison.comparison_id,
+            "baseline": comparison.baseline_count,
+            "observed": comparison.observed_count,
+            "matched": comparison.matched_count,
+            "exact_recall": comparison.exact_recall,
+            "path_recall": comparison.path_recall,
+            "evidence": {
+                "confirmed": comparison.confirmed_count,
+                "declared_candidates": comparison.declared_candidate_count,
+                "inferred_candidates": comparison.inferred_candidate_count,
+                "confirmed_matched": comparison.confirmed_matched_count,
+                "declared_candidates_matched": comparison.declared_candidate_matched_count,
+                "inferred_candidates_matched": comparison.inferred_candidate_matched_count,
+            },
+            "missing": len(comparison.missing),
+            "report": str(comparison.report_path),
+        }, ensure_ascii=False))
+        return 0
+    if args.wiki_command == "lint":
+        issues = lint_wiki(args.root)
+        print(json.dumps({"ok": not issues, "issues": issues}, ensure_ascii=False))
+        return 0 if not issues else 1
+    raise ReconWikiError(f"unsupported Recon Wiki operation: {args.wiki_command}")
+
+
 def _run_tag(args: argparse.Namespace) -> int:
     from aidast.recon import db as dbmod
     from aidast.recon.annotations import tag_pending_observations
@@ -2326,16 +2549,48 @@ def _run_tag(args: argparse.Namespace) -> int:
 
 
 # 로컬 대시보드 서버 실행
-def _run_resume(args: argparse.Namespace) -> int:
+def _run_resume(args: argparse.Namespace, *, report_writer: object | None = None) -> int:
     try:
         plan = inspect_resume(args.result_root, args.scan_id)
+        # Freeze the first resumed choices for legacy scans that predate the
+        # model record, and restore the private record from a verified handoff.
+        write_scan_model_choices(scan_model_settings_path(args.result_root, plan.scan_id),
+                                 scan_id=plan.scan_id, models=plan.models)
     except (OSError, ValueError, sqlite3.Error) as exc:
         raise MainAgentError(f"scan cannot resume: {exc}") from exc
     print(f"Resuming {plan.scan_id} from {plan.stage}", flush=True)
-    with model_call_context(scan_id=plan.scan_id, stage=plan.stage.title()):
-        execute_resume(plan, agent=CodexMainAgent(timeout_seconds=args.codex_timeout))
+    report_root = Path(args.result_root).expanduser().resolve() / "ReportRun" / plan.scan_id
+    try:
+        with model_call_context(scan_id=plan.scan_id, stage=plan.stage.title()):
+            execute_resume(
+                plan,
+                agent=CodexMainAgent(
+                    timeout_seconds=args.codex_timeout,
+                    **plan.models.agent_options(),
+                ),
+                planning_agent=CodexMainAgent(
+                    timeout_seconds=args.codex_timeout,
+                    main_model=plan.models.attack_model,
+                ),
+            )
+    except BaseException as exc:
+        try:
+            write_scan_summary(plan.database, report_root, scan_id=plan.scan_id,
+                               errors=[{"stage": plan.stage, "error_type": type(exc).__name__}])
+        except Exception:
+            # Preserve the primary stage failure if artifact storage also fails.
+            pass
+        raise
+    with model_call_context(scan_id=plan.scan_id, stage="Report"):
+        reports = generate_scan_reports(
+            plan.database, report_root, scan_id=plan.scan_id,
+            platform=report_platform_for_program_url(plan.program_url or ""),
+            writer=report_writer, model=plan.models.report_model,
+        )
+    print(f"Report drafts generated: {len(reports)}", flush=True)
+    print(f"Scan summary saved: {reports.summary['summary_markdown_path']}", flush=True)
     print(f"Resumed scan completed: {plan.scan_id}", flush=True)
-    return 0
+    return 2 if reports.errors else 0
 
 
 def _run_dashboard(args: argparse.Namespace) -> int:

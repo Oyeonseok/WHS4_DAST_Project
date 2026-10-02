@@ -75,7 +75,7 @@ def test_normal_tags_create_parameter_bound_hypotheses_and_account_for_unknowns(
     assert 'private-value' not in json.dumps(agent.contexts)
 
 
-def test_replanning_is_idempotent_and_respects_parameter_identity_variants(tmp_path):
+def test_replanning_is_idempotent_and_respects_parameter_identity_variants(tmp_path, monkeypatch):
     from aidast.attack.recon_hypotheses import plan_recon_attack
     path = pipeline(tmp_path)
     def change(response, context):
@@ -88,6 +88,16 @@ def test_replanning_is_idempotent_and_respects_parameter_identity_variants(tmp_p
     assert ensure_coverage_manifest(path, 'scan').total == 3
     with sqlite3.connect(path) as conn:
         conn.row_factory = sqlite3.Row
+        from aidast.pipeline.lifecycle import register_credential_reference
+        register_credential_reference(
+            conn, scan_id='scan', label='fixture-auth',
+            reference_uri='env://AIDAST_TEST_COVERAGE_AUTH',
+            identity_role='authenticated',
+        )
+        monkeypatch.setenv(
+            'AIDAST_TEST_COVERAGE_AUTH',
+            '{"Authorization":"Bearer fixture"}',
+        )
         stage = start_stage_run(conn, scan_id='scan', stage='attack')
         tasks = claim_coverage_batch(conn, scan_id='scan', stage_run_id=stage, batch_size=8)
         assert len(tasks) == 3
@@ -326,6 +336,93 @@ def test_a_negative_attempt_without_completed_http_evidence_is_not_tested(tmp_pa
         conn.row_factory = sqlite3.Row
         reconcile_coverage_batch(conn, stage_run_id=stage)
         assert conn.execute('SELECT status FROM attack_coverage_items WHERE coverage_id=?', (task['coverage_id'],)).fetchone()[0] == 'error_retryable'
+
+
+def test_completed_inconclusive_http_evidence_is_terminal_unsupported(tmp_path):
+    from aidast.attack.recon_hypotheses import plan_recon_attack
+    from aidast.attack.coverage import reconcile_coverage_batch
+    path = pipeline(tmp_path)
+    plan_recon_attack(path, 'scan', agent=Planner())
+    ensure_coverage_manifest(path, 'scan')
+    with sqlite3.connect(path) as conn:
+        conn.row_factory = sqlite3.Row
+        stage = start_stage_run(conn, scan_id='scan', stage='attack')
+        task = claim_coverage_batch(conn, scan_id='scan', stage_run_id=stage, batch_size=1)[0]
+        endpoint = conn.execute(
+            """SELECT e.method,e.normalized_path,o.base_url FROM endpoints e
+               JOIN origins o ON o.origin_id=e.origin_id WHERE e.endpoint_id=?""",
+            (task['endpoint_id'],),
+        ).fetchone()
+        conn.execute("UPDATE attack_tasks SET status='completed' WHERE task_id=?", (task['task_id'],))
+        conn.execute(
+            """INSERT INTO attack_attempts
+               (attempt_id,scan_id,task_id,endpoint_id,skill_name,request_fingerprint,
+                outcome,resolution_reason,resolved_at)
+               VALUES ('attempt-inconclusive','scan',?,?,?,?,'inconclusive',?,CURRENT_TIMESTAMP)""",
+            (task['task_id'], task['endpoint_id'], task['skill_name'], 'f'*64,
+             'The response did not establish the required security property.'),
+        )
+        conn.execute(
+            """INSERT INTO attack_http_requests
+               (request_id,scan_id,stage_run_id,task_id,policy_id,method,url,
+                request_fingerprint,status,response_status,scheduled_at,
+                endpoint_reference_id,result_json)
+               VALUES ('request-inconclusive','scan',?,?,'policy',?,?,?,'completed',200,0,?,'{}')""",
+            (stage, task['task_id'], endpoint['method'],
+             endpoint['base_url'].rstrip('/') + endpoint['normalized_path'],
+             'f'*64, task['endpoint_id']),
+        )
+        reconcile_coverage_batch(conn, stage_run_id=stage)
+        status, reason = conn.execute(
+            'SELECT status,disposition_reason FROM attack_coverage_items WHERE coverage_id=?',
+            (task['coverage_id'],),
+        ).fetchone()
+        assert status == 'unsupported'
+        assert reason == 'The response did not establish the required security property.'
+
+
+def test_off_target_attempt_does_not_poison_exact_inconclusive_evidence(tmp_path):
+    from aidast.attack.recon_hypotheses import plan_recon_attack
+    from aidast.attack.coverage import reconcile_coverage_batch
+    path = pipeline(tmp_path)
+    plan_recon_attack(path, 'scan', agent=Planner())
+    ensure_coverage_manifest(path, 'scan')
+    with sqlite3.connect(path) as conn:
+        conn.row_factory = sqlite3.Row
+        stage = start_stage_run(conn, scan_id='scan', stage='attack')
+        task = claim_coverage_batch(conn, scan_id='scan', stage_run_id=stage, batch_size=1)[0]
+        method = conn.execute(
+            'SELECT method FROM endpoints WHERE endpoint_id=?', (task['endpoint_id'],),
+        ).fetchone()[0]
+        conn.execute("UPDATE attack_tasks SET status='completed' WHERE task_id=?", (task['task_id'],))
+        conn.executemany(
+            """INSERT INTO attack_attempts
+               (attempt_id,scan_id,task_id,endpoint_id,skill_name,request_fingerprint,
+                outcome,resolution_reason,resolved_at)
+               VALUES (?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)""",
+            [
+                ('selected','scan',task['task_id'],task['endpoint_id'],task['skill_name'],
+                 'a'*64,'inconclusive','Exact response remained inconclusive'),
+                ('redirect','scan',task['task_id'],None,task['skill_name'],
+                 'b'*64,'negative','Redirect target was outside the selected endpoint'),
+            ],
+        )
+        conn.execute(
+            """INSERT INTO attack_http_requests
+               (request_id,scan_id,stage_run_id,task_id,policy_id,method,url,
+                request_fingerprint,status,response_status,scheduled_at,
+                endpoint_reference_id,result_json)
+               VALUES ('selected-request','scan',?,?,'policy',?,'https://example.test/exact',
+                       ?,'completed',308,0,?,'{}')""",
+            (stage, task['task_id'], method, 'a'*64, task['endpoint_id']),
+        )
+        reconcile_coverage_batch(conn, stage_run_id=stage)
+        status, reason = conn.execute(
+            'SELECT status,disposition_reason FROM attack_coverage_items WHERE coverage_id=?',
+            (task['coverage_id'],),
+        ).fetchone()
+        assert status == 'unsupported'
+        assert reason == 'Exact response remained inconclusive'
 
 
 @pytest.mark.parametrize('request_endpoint,credential_reference,expected', [('exact',None,'tested_negative'),('other',None,'error_retryable'),('exact','invented-auth','error_retryable')])

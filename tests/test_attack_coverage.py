@@ -124,6 +124,29 @@ def imported_pipeline(tmp_path: Path):
     )
 
 
+def test_running_task_can_be_skipped_after_request_bound_policy_denial(tmp_path: Path) -> None:
+    imported = imported_pipeline(tmp_path)
+    with sqlite3.connect(imported.pipeline_database) as conn, conn:
+        stage = start_stage_run(conn, scan_id=imported.scan_id, stage="attack")
+        task = create_task(conn, stage_run_id=stage, skill_name="hunt-business-logic")
+    transition_task(
+        imported.pipeline_database, imported.scan_id, stage, task, "running",
+    )
+    transition_task(
+        imported.pipeline_database, imported.scan_id, stage, task, "skipped",
+        "[policy] exact request envelope was denied before dispatch",
+    )
+    with sqlite3.connect(imported.pipeline_database) as conn:
+        assert conn.execute(
+            "SELECT status,error_message FROM attack_tasks WHERE task_id=?", (task,),
+        ).fetchone() == (
+            "skipped", "[policy] exact request envelope was denied before dispatch",
+        )
+        assert conn.execute(
+            "SELECT event_type FROM audit_events WHERE task_id=? ORDER BY created_at", (task,),
+        ).fetchall()[-1] == ("task.skipped",)
+
+
 def test_manifest_has_one_item_per_source_annotation_and_is_idempotent(tmp_path: Path) -> None:
     imported = imported_pipeline(tmp_path)
 
@@ -235,6 +258,84 @@ def test_exhaustive_batches_leave_no_silent_unfinished_items(tmp_path: Path) -> 
         assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
 
 
+def test_explicit_auth_prerequisite_is_blocked_before_native_agent_dispatch(
+    tmp_path: Path,
+) -> None:
+    imported = imported_pipeline(tmp_path)
+    ensure_coverage_manifest(imported.pipeline_database, imported.scan_id)
+    with sqlite3.connect(imported.pipeline_database) as conn, conn:
+        authenticated = conn.execute(
+            "SELECT coverage_id FROM attack_coverage_items ORDER BY coverage_id LIMIT 1"
+        ).fetchone()[0]
+        conn.execute(
+            "UPDATE attack_coverage_items SET required_identity_role='authenticated' "
+            "WHERE coverage_id=?",
+            (authenticated,),
+        )
+
+    agent = UnsupportedCoverageAgent()
+    result = ExhaustiveAttackCoordinator(
+        agent=agent, db_path=imported.pipeline_database,
+        scope_path=imported.recon_database.parent / "Scope.md",
+        policy_path=imported.recon_database.parent / "TargetPolicy.json",
+        batch_size=4,
+    ).run(imported.scan_id)
+
+    assert len(agent.calls) == 1
+    assert len(agent.calls[0]["attack_tasks"]) == 3
+    assert all(
+        task["required_identity_role"] == "unauthenticated"
+        for task in agent.calls[0]["attack_tasks"]
+    )
+    assert result.coverage["by_status"] == {"blocked_auth": 1, "unsupported": 3}
+    with sqlite3.connect(imported.pipeline_database) as conn:
+        row = conn.execute(
+            "SELECT status,disposition_reason,attempt_count,last_task_id "
+            "FROM attack_coverage_items WHERE coverage_id=?",
+            (authenticated,),
+        ).fetchone()
+        assert row == (
+            "blocked_auth",
+            "[auth] authenticated identity prerequisite has no usable "
+            "same-origin credential reference",
+            0,
+            None,
+        )
+        assert conn.execute(
+            "SELECT previous_status,next_status,stage_run_id,task_id "
+            "FROM attack_coverage_events WHERE coverage_id=? ORDER BY rowid DESC LIMIT 1",
+            (authenticated,),
+        ).fetchone() == ("pending", "blocked_auth", result.stage_run_ids[0], None)
+
+
+def test_all_auth_blocked_batch_completes_without_calling_native_agent(
+    tmp_path: Path,
+) -> None:
+    imported = imported_pipeline(tmp_path)
+    ensure_coverage_manifest(imported.pipeline_database, imported.scan_id)
+    with sqlite3.connect(imported.pipeline_database) as conn, conn:
+        conn.execute(
+            "UPDATE attack_coverage_items SET required_identity_role='authenticated'"
+        )
+
+    agent = UnsupportedCoverageAgent()
+    result = ExhaustiveAttackCoordinator(
+        agent=agent, db_path=imported.pipeline_database,
+        scope_path=imported.recon_database.parent / "Scope.md",
+        policy_path=imported.recon_database.parent / "TargetPolicy.json",
+        batch_size=2,
+    ).run(imported.scan_id)
+
+    assert agent.calls == []
+    assert result.batches == 1
+    assert result.coverage["by_status"] == {"blocked_auth": 4}
+    with sqlite3.connect(imported.pipeline_database) as conn:
+        assert conn.execute(
+            "SELECT status,error_message FROM stage_runs WHERE stage_run_id=?",
+            (result.stage_run_ids[0],),
+        ).fetchone() == ("completed", None)
+
+
 def test_failed_native_batches_reconcile_and_continue_to_other_coverage(
     tmp_path: Path,
 ) -> None:
@@ -272,6 +373,16 @@ def test_failed_native_batches_reconcile_and_continue_to_other_coverage(
     assert result.coverage["unfinished"] == 0
     assert result.coverage["by_status"] == {"error_terminal": 4}
     assert agent.calls == 2
+    with sqlite3.connect(imported.pipeline_database) as conn:
+        assert conn.execute(
+            "SELECT status,count(*) FROM stage_runs WHERE stage='attack' GROUP BY status"
+        ).fetchall() == [("completed", 2)]
+        assert conn.execute(
+            "SELECT count(*) FROM audit_events WHERE event_type='stage.failed'"
+        ).fetchone() == (0,)
+        assert conn.execute(
+            "SELECT count(*) FROM audit_events WHERE event_type='task.failed'"
+        ).fetchone() == (4,)
 
 
 def test_coverage_tasks_include_non_secret_owned_object_fixtures(tmp_path: Path) -> None:
@@ -582,7 +693,9 @@ def test_stopped_unknown_probe_is_kept_as_failed_while_other_coverage_continues(
     assert result.coverage['unfinished'] == 0
     assert result.coverage['by_status'] == {'error_terminal':1,'unsupported':3}
     with sqlite3.connect(imported.pipeline_database) as conn:
-        assert conn.execute("SELECT status,error_message FROM stage_runs WHERE stage_run_id=?", (result.stage_run_ids[0],)).fetchone() == ('failed','native Attack Agent returned FAILED: One stopped HTTP probe has an unknown response.')
+        assert conn.execute("SELECT status,error_message FROM stage_runs WHERE stage_run_id=?", (result.stage_run_ids[0],)).fetchone() == ('completed',None)
+        assert conn.execute("SELECT count(*) FROM audit_events WHERE stage_run_id=? AND event_type='stage.failed'", (result.stage_run_ids[0],)).fetchone() == (0,)
+        assert conn.execute("SELECT count(*) FROM audit_events WHERE stage_run_id=? AND event_type='task.failed'", (result.stage_run_ids[0],)).fetchone() == (1,)
         assert conn.execute("SELECT status,error_message,response_status FROM attack_http_requests WHERE request_id='stopped-probe'").fetchone() == ('outcome_unknown','TimeoutError',None)
         status,reason,attempts = conn.execute("SELECT status,disposition_reason,attempt_count FROM attack_coverage_items WHERE last_task_id=?", (agent.calls[0]['attack_tasks'][0]['task_id'],)).fetchone()
         assert status == 'error_terminal' and attempts == 1
@@ -607,6 +720,13 @@ def test_active_or_mutating_unknown_request_still_blocks_continuation(tmp_path,s
             scope_path=imported.recon_database.parent/'Scope.md', policy_path=imported.recon_database.parent/'TargetPolicy.json',
             batch_size=2, retry_limit=1).run(imported.scan_id)
     assert len(agent.calls) == 1
+    with sqlite3.connect(imported.pipeline_database) as conn:
+        assert conn.execute(
+            "SELECT count(*) FROM stage_runs WHERE stage='attack' AND status='failed'"
+        ).fetchone() == (1,)
+        assert conn.execute(
+            "SELECT count(*) FROM audit_events WHERE event_type='stage.failed'"
+        ).fetchone() == (1,)
 
 
 def test_failed_result_with_foreign_envelope_still_stops_the_stage(tmp_path):
@@ -618,6 +738,13 @@ def test_failed_result_with_foreign_envelope_still_stops_the_stage(tmp_path):
             scope_path=imported.recon_database.parent/'Scope.md', policy_path=imported.recon_database.parent/'TargetPolicy.json',
             batch_size=2).run(imported.scan_id)
     assert len(agent.calls) == 1
+    with sqlite3.connect(imported.pipeline_database) as conn:
+        assert conn.execute(
+            "SELECT count(*) FROM stage_runs WHERE stage='attack' AND status='failed'"
+        ).fetchone() == (1,)
+        assert conn.execute(
+            "SELECT count(*) FROM audit_events WHERE event_type='stage.failed'"
+        ).fetchone() == (1,)
 
 
 def test_last_failed_batch_does_not_leave_normal_attack_failed(tmp_path):
@@ -630,7 +757,7 @@ def test_last_failed_batch_does_not_leave_normal_attack_failed(tmp_path):
     assert len(agent.calls) == 1
     with sqlite3.connect(imported.pipeline_database) as conn:
         assert conn.execute("SELECT status FROM stage_runs WHERE stage_run_id=?", (result.stage_run_id,)).fetchone() == ('completed',)
-        assert conn.execute("SELECT count(*) FROM stage_runs WHERE stage='attack' AND status='failed'").fetchone()[0] == 1
+        assert conn.execute("SELECT count(*) FROM stage_runs WHERE stage='attack' AND status='failed'").fetchone()[0] == 0
         assert conn.execute("SELECT count(*) FROM attack_http_requests WHERE status='outcome_unknown'").fetchone()[0] == 1
     status = coverage_status(imported.pipeline_database, imported.scan_id)
     assert status.unfinished == 0

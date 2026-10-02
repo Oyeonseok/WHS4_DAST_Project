@@ -69,6 +69,34 @@ class ValidationRuntimeSemanticTests(unittest.TestCase):
             validate_runtime_semantics(contract, self.profile("hunt-idor"))
         )
 
+    def test_read_only_negative_control_can_use_an_inert_same_origin_path(self):
+        assertion = {
+            "assertion_id": "marker", "kind": "body_contains",
+            "expected": '"password":',
+        }
+        same_request = {"request": {}, "assertions": [assertion]}
+        contract = HttpRuntimeContract.model_validate({
+            "schema_version": 1,
+            "target": same_request,
+            "positive_control": {
+                "request": {}, "assertions": [{
+                    "assertion_id": "healthy", "kind": "status_equals", "expected": 200,
+                }],
+            },
+            "negative_control": {
+                **same_request,
+                "endpoint_template": "/__aidast_negative_control_missing__",
+            },
+        })
+        self.assertIsNone(
+            validate_runtime_semantics(contract, self.profile("hunt-source-leak"))
+        )
+        invalid = contract.model_copy(update={
+            "target": contract.target.model_copy(update={"endpoint_template": "/other"}),
+        })
+        with self.assertRaisesRegex(RuntimeSemanticError, "only for the inert negative"):
+            validate_runtime_semantics(invalid, self.profile("hunt-source-leak"))
+
     def test_http_negative_control_must_test_the_target_marker(self):
         contract = HttpRuntimeContract(
             schema_version=1,

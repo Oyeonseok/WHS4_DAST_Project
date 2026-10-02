@@ -873,6 +873,41 @@ class ReconCliTests(unittest.TestCase):
             ReconStep.ENDPOINT_DISCOVERY,
         ])
 
+    def test_execute_removes_domain_only_steps_from_selected_url(self) -> None:
+        target = ScopeAsset(
+            asset_type=AssetType.URL,
+            asset="https://example.com/app",
+            description="웹 앱",
+            eligibility="보상 대상",
+            maximum_severity="Critical",
+        )
+        proposed = ReconPlan(
+            plan_id="plan_url_with_domain_steps",
+            scope_id="scope_test",
+            objective="승인된 웹 앱 정찰",
+            mode="RECON",
+            targets=[ReconPlanTarget(
+                asset_type=AssetType.URL,
+                asset=target.asset,
+                steps=[
+                    ReconStep.DNS_RESOLUTION,
+                    ReconStep.HOST_PORT_DISCOVERY,
+                    ReconStep.HTTP_PROBE,
+                ],
+                constraints=[],
+            )],
+            global_constraints=["Scope 준수"],
+            completion_criteria=["완료"],
+        )
+
+        completed = cli_module._complete_executable_recon_plan(proposed, [target])
+
+        self.assertEqual(completed.targets[0].steps, [
+            ReconStep.HTTP_PROBE,
+            ReconStep.ORIGIN_DISCOVERY,
+            ReconStep.ENDPOINT_DISCOVERY,
+        ])
+
     def test_wildcard_start_url_does_not_narrow_asset_discovery_policy(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_dir:
             root = Path(temporary_dir) / "Scope"

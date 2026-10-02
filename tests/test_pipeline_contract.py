@@ -98,6 +98,45 @@ class PipelineSchemaTests(unittest.TestCase):
         self.assertEqual(row[0], "cancelled")
         self.assertIsNotNone(row[1])
 
+    def test_reconciled_stage_may_complete_with_a_terminal_failed_task(self):
+        run = start_stage_run(self.conn, scan_id="scan", stage="attack")
+        task = create_task(
+            self.conn, stage_run_id=run, skill_name="evidence_review",
+        )
+        transition_task(self.conn, task, status="running")
+        transition_task(
+            self.conn, task, status="failed", error_message="request deadline",
+        )
+
+        with self.assertRaisesRegex(ValueError, "completed stages"):
+            finish_stage_run(self.conn, run)
+        finish_stage_run(
+            self.conn, run, allow_terminal_task_errors=True,
+        )
+
+        self.assertEqual(
+            self.conn.execute(
+                "SELECT status,error_message FROM attack_tasks WHERE task_id=?",
+                (task,),
+            ).fetchone(),
+            ("failed", "request deadline"),
+        )
+        self.assertEqual(
+            self.conn.execute(
+                "SELECT status,error_message FROM stage_runs WHERE stage_run_id=?",
+                (run,),
+            ).fetchone(),
+            ("completed", None),
+        )
+        self.assertEqual(
+            self.conn.execute(
+                "SELECT event_type FROM audit_events WHERE stage_run_id=? "
+                "ORDER BY rowid DESC LIMIT 2",
+                (run,),
+            ).fetchall(),
+            [("stage.completed",), ("task.failed",)],
+        )
+
     def test_scan_boundaries_for_tasks_findings_facts_and_attempts(self):
         run = start_stage_run(self.conn, scan_id="scan", stage="offline_review")
         with self.assertRaises(sqlite3.IntegrityError):

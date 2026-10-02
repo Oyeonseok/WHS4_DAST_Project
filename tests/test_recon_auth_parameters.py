@@ -304,6 +304,16 @@ def test_zap_uses_disposable_private_profile_and_copies_only_addon_packages(tmp_
  assert 'private-session-value' not in capsys.readouterr().out
 
 
+def test_missing_optional_zap_is_reported_as_unavailable_not_failed(tmp_path, monkeypatch, capsys):
+ def missing(*_args, **_kwargs):
+  raise FileNotFoundError('zaproxy')
+ monkeypatch.setattr(secondary.subprocess, 'run', missing)
+ assert secondary._run_zap(tmp_path/'plan.yaml', zap_executable='zaproxy') is None
+ output = capsys.readouterr().out
+ assert '건너뜁니다' in output
+ assert '실패' not in output
+
+
 def test_ffuf_stops_launching_roots_after_proxy_active_budget_is_exhausted(tmp_path,monkeypatch):
  from aidast.recon.tools import endpoint_discovery as discovery
  from types import SimpleNamespace

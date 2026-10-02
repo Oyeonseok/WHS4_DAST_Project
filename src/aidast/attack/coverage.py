@@ -70,8 +70,10 @@ TERMINAL_STATUSES = frozenset({
 })
 
 _TRANSITIONS: dict[str, frozenset[str]] = {
-    "pending": frozenset({"running", "policy_excluded", "unsupported"}),
-    "error_retryable": frozenset({"running", "error_terminal"}),
+    "pending": frozenset({
+        "running", "blocked_auth", "policy_excluded", "unsupported",
+    }),
+    "error_retryable": frozenset({"running", "blocked_auth", "error_terminal"}),
     "running": frozenset({
         "tested_negative", "candidate", "blocked_auth", "policy_excluded",
         "unsupported", "error_retryable", "error_terminal",
@@ -672,6 +674,9 @@ def claim_coverage_batch(
 ) -> list[dict[str, Any]]:
     if not 1 <= batch_size <= 50:
         raise ValueError("coverage batch size must be between 1 and 50")
+    _block_unavailable_authenticated_coverage(
+        conn, scan_id=scan_id, stage_run_id=stage_run_id,
+    )
     rows = conn.execute(
         """SELECT c.*,e.method,e.normalized_path,o.base_url AS origin_url
            FROM attack_coverage_items c
@@ -755,6 +760,45 @@ def claim_coverage_batch(
     return claimed
 
 
+def _block_unavailable_authenticated_coverage(
+    conn: sqlite3.Connection, *, scan_id: str, stage_run_id: str,
+) -> int:
+    """Finish explicit authenticated prerequisites before native dispatch.
+
+    This gate intentionally reads only the durable coverage prerequisite.  It
+    does not infer authentication from the vulnerability class, route name, or
+    agent prompt, so anonymous hypotheses remain executable.  A blocked item
+    can be reopened by ``requeue_credential_blocked_coverage`` after a usable
+    same-origin opaque credential reference is registered.
+    """
+    rows = conn.execute(
+        """SELECT c.*,o.base_url AS origin_url
+           FROM attack_coverage_items c
+           JOIN endpoints e ON e.endpoint_id=c.endpoint_id
+           JOIN origins o ON o.origin_id=e.origin_id
+           WHERE c.scan_id=? AND c.status IN ('pending','error_retryable')
+             AND c.required_identity_role='authenticated'
+           ORDER BY c.coverage_id""",
+        (scan_id,),
+    ).fetchall()
+    blocked = 0
+    for row in rows:
+        references = _credential_references(
+            conn, scan_id, "authenticated", available_only=True,
+            origin_url=str(row["origin_url"]),
+        )
+        if references:
+            continue
+        transition_coverage(
+            conn, str(row["coverage_id"]), "blocked_auth",
+            "[auth] authenticated identity prerequisite has no usable "
+            "same-origin credential reference",
+            stage_run_id=stage_run_id,
+        )
+        blocked += 1
+    return blocked
+
+
 def requeue_coverage(
     database: Path, scan_id: str, statuses: Iterable[str], *, reason: str,
 ) -> int:
@@ -804,17 +848,27 @@ def reconcile_coverage_batch(
     ).fetchall()
     for row in rows:
         attempts = conn.execute(
-            """SELECT attempt_id,outcome,finding_id,request_fingerprint,endpoint_id FROM attack_attempts
+            """SELECT attempt_id,outcome,finding_id,request_fingerprint,endpoint_id,resolution_reason FROM attack_attempts
                WHERE scan_id=? AND task_id=? ORDER BY created_at,attempt_id""",
             (row["scan_id"], row["last_task_id"]),
         ).fetchall()
         finding_ids = sorted({str(item["finding_id"]) for item in attempts if item["finding_id"]})
-        outcomes = {str(item["outcome"] or "") for item in attempts}
         task_status = str(row["task_status"])
         if row['category'] == 'attack_hypothesis':
             finding_ids = [finding_id for finding_id in finding_ids
                 if _hypothesis_finding_evidence(conn, row, finding_id, stage_run_id, row['last_task_id'])]
-        negative_http_evidence = bool(attempts) and all(_selected_http_evidence(conn, row, item, stage_run_id, row['last_task_id'], exact=row['category'] == 'attack_hypothesis') for item in attempts)
+        selected_attempts = [
+            item for item in attempts
+            if _selected_http_evidence(
+                conn, row, item, stage_run_id, row['last_task_id'],
+                exact=row['category'] == 'attack_hypothesis',
+            )
+        ]
+        # Redirect and canonicalization probes remain audit evidence, but an
+        # off-target attempt must neither poison nor prove the selected
+        # endpoint hypothesis. Reconcile only exact, completed HTTP evidence.
+        outcomes = {str(item["outcome"] or "") for item in selected_attempts}
+        negative_http_evidence = bool(selected_attempts)
         if finding_ids:
             transition_coverage(
                 conn, row["coverage_id"], "candidate",
@@ -828,6 +882,23 @@ def reconcile_coverage_batch(
             transition_coverage(
                 conn, row["coverage_id"], "tested_negative",
                 "Attack completed with terminal negative evidence",
+                stage_run_id=stage_run_id, task_id=row["last_task_id"],
+            )
+        elif task_status == "completed" and negative_http_evidence and outcomes and outcomes <= {
+            "negative", "rejected", "inconclusive",
+        }:
+            # A completed task with policy-bound HTTP evidence and an explicit
+            # inconclusive disposition has reached a durable bounded result.
+            # Replaying the same hypothesis cannot turn missing context into
+            # evidence and can trigger target rate limits.  Keep it visible as
+            # unsupported rather than retrying until an error_terminal state.
+            reason = next(
+                (str(item["resolution_reason"]) for item in reversed(attempts)
+                 if item["resolution_reason"]),
+                "Attack completed with bounded evidence that remained inconclusive",
+            )
+            transition_coverage(
+                conn, row["coverage_id"], "unsupported", reason,
                 stage_run_id=stage_run_id, task_id=row["last_task_id"],
             )
         elif task_status == "skipped":

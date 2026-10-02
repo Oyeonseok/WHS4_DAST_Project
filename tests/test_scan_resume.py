@@ -14,6 +14,9 @@ import pytest
 from aidast.pipeline.lifecycle import create_task, finish_stage_run, start_stage_run
 from aidast.pipeline.materialize import materialize_pipeline
 from aidast.pipeline.models import HandoffManifest, hash_artifact
+from aidast.pipeline.model_settings import (
+    MODEL_SETTINGS_FILE, ScanModelChoices, scan_model_settings_path, write_scan_model_choices,
+)
 from aidast.pipeline.resume import execute_resume, inspect_resume
 from aidast.recon import db
 from aidast.web.launch import ScanLaunchManager
@@ -25,7 +28,7 @@ SCAN_ID = "scan_resume_fixture"
 SCOPE_ID = "scope_resume_fixture"
 
 
-def _fixture(root: Path, *, grouped: bool = False) -> Path:
+def _fixture(root: Path, *, grouped: bool = False, models: ScanModelChoices | None = None) -> Path:
     suffix = Path("example-platform/example-program") if grouped else Path()
     run = root / "Runs" / suffix / SCAN_ID
     run.mkdir(parents=True)
@@ -61,7 +64,8 @@ def _fixture(root: Path, *, grouped: bool = False) -> Path:
     scope_md = run / "Scope.md"
     policy = run / "TargetPolicy.json"
     approval = run / "Approval.json"
-    scope_json.write_text(json.dumps({"scope_id": SCOPE_ID}), encoding="utf-8")
+    scope_json.write_text(json.dumps({"scope_id": SCOPE_ID,
+                                     "source": {"requested_url": "https://hackerone.com/example"}}), encoding="utf-8")
     scope_md.write_text("# Example approved scope\n", encoding="utf-8")
     policy.write_text(json.dumps({"scope_id": SCOPE_ID}), encoding="utf-8")
     approval.write_text(json.dumps({
@@ -70,6 +74,10 @@ def _fixture(root: Path, *, grouped: bool = False) -> Path:
         "scope_markdown_sha256": hashlib.sha256(scope_md.read_bytes()).hexdigest(),
     }), encoding="utf-8")
     artifacts = [hash_artifact(path, root=run) for path in (recon, scope_json, scope_md, policy, approval)]
+    if models is not None:
+        model_path = write_scan_model_choices(run / MODEL_SETTINGS_FILE, scan_id=SCAN_ID, models=models)
+        write_scan_model_choices(scan_model_settings_path(root, SCAN_ID), scan_id=SCAN_ID, models=models)
+        artifacts.append(hash_artifact(model_path, root=run, role="scan-models"))
     handoff = run / "Handoff.json"
     handoff.write_text(HandoffManifest(scan_id=SCAN_ID, db_path="Recon.db", artifacts=artifacts).model_dump_json(), encoding="utf-8")
     pipeline = root / "AttackRuns" / suffix / SCAN_ID / "Pipeline.db"

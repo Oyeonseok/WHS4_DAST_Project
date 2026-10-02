@@ -293,7 +293,7 @@ def test_classifier_direct_context_never_invokes_model(monkeypatch, adapter):
 def test_adapter_subprocess_disables_tools_and_browser(monkeypatch, adapter, operation):
     from pathlib import Path
     from types import SimpleNamespace
-    agent = adapter.CodexMainAgent()
+    agent = adapter.CodexMainAgent(timeout_seconds=600)
     data = inputs()
     context = {k: [_x.model_dump(mode='json') for _x in v] if isinstance(v, list) else v for k, v in data.items()}
     monkeypatch.setattr(adapter.shutil, 'which', lambda _: '/fake/codex')
@@ -314,7 +314,7 @@ def test_adapter_subprocess_disables_tools_and_browser(monkeypatch, adapter, ope
         payload = decisions(context) if operation == 'classification' else interpretation()
         Path(command[command.index('--output-last-message') + 1]).write_text(json.dumps(payload))
         return SimpleNamespace(returncode=0, stderr='')
-    monkeypatch.setattr(adapter.subprocess, 'run', run)
+    monkeypatch.setattr(adapter.codex_process, 'run_codex', run)
     if operation == 'classification':
         assert agent.classify_exclusion_resources(context).decisions[0].classification == 'match'
     else:

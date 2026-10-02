@@ -87,8 +87,8 @@ def test_dynamic_source_path_is_not_inferred_from_an_unrelated_capture():
     assert extract_response_argument_bindings({'services.js': source, 'page.js': PAGE}) == []
 
 
-@pytest.mark.parametrize('maximum,expected', [(0, None), (2, 32)])
-def test_ffuf_baseline_is_preserved_when_ai_selects_only_extra_root(tmp_path, monkeypatch, maximum, expected):
+@pytest.mark.parametrize('maximum', [0, 2])
+def test_ffuf_baseline_is_preserved_when_ai_selects_only_extra_root(tmp_path, monkeypatch, maximum):
     words = tmp_path / 'words'; words.write_text('read\n')
     calls = []
     def run(command, **kwargs):
@@ -105,7 +105,15 @@ def test_ffuf_baseline_is_preserved_when_ai_selects_only_extra_root(tmp_path, mo
     assert urls[:3] == ['https://example.test/FUZZ', 'https://example.test/directory/FUZZ',
                        'https://example.test/reader/FUZZ']
     assert 'https://example.test/reader/items/FUZZ' in urls
-    assert all(kwargs['timeout'] == expected for _, kwargs in calls)
+    timeouts = [kwargs['timeout'] for _, kwargs in calls]
+    if maximum == 0:
+        assert timeouts == [None] * len(calls)
+    else:
+        # The phase owns one shared deadline. Each root receives only the
+        # remaining time plus the subprocess cleanup allowance.
+        assert all(timeout is not None and 30 < timeout <= maximum + 30
+                   for timeout in timeouts)
+        assert timeouts == sorted(timeouts, reverse=True)
 
 
 def test_cli_accepts_unlimited_ffuf_time_but_rejects_negative():

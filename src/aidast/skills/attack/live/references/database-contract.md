@@ -85,6 +85,20 @@ For HTTP findings, each attempt declares path/query
 values, non-secret headers, one JSON or text body, and one to sixteen assertions.
 Supported assertion kinds are `status_equals`, `header_equals`, `body_contains`,
 `json_equals`, `duration_at_least_ms`, and `duration_at_most_ms`.
+Preserve the content encoding that produced the Attack evidence. In particular,
+an `application/x-www-form-urlencoded` source request must use an encoded
+`text_body` and the matching `Content-Type`; do not convert it to `json_body`.
+Likewise, do not convert a captured JSON request into form data. The positive
+control must first prove that the chosen encoding reaches the healthy path.
+
+For a read-only `GET` or `HEAD` finding on a literal exposure path, an inert
+negative control may declare `endpoint_template` on the `negative_control`
+attempt only. Use a same-origin, origin-relative, deliberately nonexistent path
+such as `/__aidast_negative_control_missing__`, and evaluate the exact same
+effect assertions as the target. This is the correct control when headers or
+query parameters are ignored by the server and would return the target body
+again. Do not use alternate endpoints for state-changing methods, target, or
+positive control attempts.
 
 For optional deeper HTTP login impact checks, add `session_verification` to the runtime
 contract. Capture a same-origin protected GET resource during Attack and declare
@@ -280,6 +294,9 @@ identity, and parser path and should pass. Negative-control assertions also
 describe the vulnerability effect, so they should fail for the inert input. Do
 not write an "effect is absent" assertion for the negative control because a
 passing assertion means `signal_observed=true`.
+For literal read-only disclosure routes, prefer the bounded missing-path
+negative control above over `Range`, `Accept`, cache, or other headers unless
+Attack directly observed that the header produces an inert response.
 
 Do not place credentials in runtime headers. Declare `required_identity_roles`
 and let the trusted Validation runtime resolve their opaque references. Browser,

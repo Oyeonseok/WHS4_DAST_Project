@@ -125,6 +125,22 @@ def normalize_read_only_attack_policy(policy: TargetPolicyProposal) -> TargetPol
     })
 
 
+def normalize_recon_read_only_methods(policy: TargetPolicyProposal) -> TargetPolicyProposal:
+    """Repair model output that copied Attack mutation methods into Recon."""
+    safe = [method for method in policy.allowed_methods if method in SAFE_METHODS]
+    if not safe:
+        safe = ["GET", "HEAD", "OPTIONS"]
+    if safe == policy.allowed_methods:
+        return policy
+    return policy.model_copy(update={
+        "allowed_methods": safe,
+        "policy_notes": [
+            *policy.policy_notes,
+            "Python removed state-changing methods from Recon allowed_methods.",
+        ],
+    })
+
+
 class TargetPolicySelectionProposal(TargetPolicyControls):
     """Planner policy controls bound to an application-owned target ID."""
 

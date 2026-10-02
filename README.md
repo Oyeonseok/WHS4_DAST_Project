@@ -365,6 +365,9 @@ aidast recon "<PROGRAM_URL>" \
 wildcard 배치, 브라우저 모드는 [Recon 실행 제어](docs/OPERATIONS.md#recon-실행-제어)를
 참고하세요.
 
+여러 실행과 소스 기준 목록을 출처별로 누적하고 메서드·경로 커버리지를 비교하려면
+[Recon LLM Wiki 사용 안내](docs/RECON_LLM_WIKI.md)를 참고하세요.
+
 ### 관측 태깅
 
 미태깅 Recon 관측은 별도로 재개할 수 있습니다.

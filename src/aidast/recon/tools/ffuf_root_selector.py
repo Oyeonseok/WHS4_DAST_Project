@@ -95,8 +95,9 @@ def select_ffuf_roots_from_endpoints(
         from aidast.agents.policy_guidance import policy_guidance_context
         precautions = ('Apply the bound policy precautions before selecting fuzzing roots. '
             'Consider GET fuzzing requests beneath each root, including baseline prefix '
-            'candidates. Omit a root when those operations would match an exclusion or '
-            'their permission cannot be established. An empty roots list is a valid '
+            'candidates. A root is a bounded read-only discovery prefix, not a claim that '
+            'a vulnerability or mutation is permitted. Omit a root when the prefix itself '
+            'is excluded or its bounded GET discovery would match an exclusion. An empty roots list is a valid '
             'decision to skip this stage. Policy context is not endpoint evidence.\n'
             + policy_guidance_context(target_policy) + '\n\n')
     prompt = (

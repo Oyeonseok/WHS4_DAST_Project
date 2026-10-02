@@ -89,7 +89,7 @@ def test_wait_expiry_rechecks_before_send(monkeypatch):
     broker = RequestBroker(target(snapshot), transport=wire)
     def expire():
         monkeypatch.setattr('aidast.core.exclusion_guard.time.time', lambda: snapshot['expires_at']+1)
-    broker.governor = SimpleNamespace(reserve=lambda *a,**k: SimpleNamespace(wait=expire,complete=lambda:None,timeout_seconds=10))
+    broker.governor = SimpleNamespace(acquire=lambda *a,**k: SimpleNamespace(wait=expire,complete=lambda:None,timeout_seconds=10))
     with pytest.raises(RequestPolicyError, match='exclusion'):
         broker.request(URL)
     assert not wire.calls
@@ -99,7 +99,7 @@ def test_wait_cannot_mutate_admitted_body():
     data = bytearray(b'original')
     wire = Wire()
     broker = RequestBroker(target(compiled()), transport=wire)
-    broker.governor = SimpleNamespace(reserve=lambda *a,**k: SimpleNamespace(wait=lambda:data.extend(b'changed'),complete=lambda:None,timeout_seconds=10))
+    broker.governor = SimpleNamespace(acquire=lambda *a,**k: SimpleNamespace(wait=lambda:data.extend(b'changed'),complete=lambda:None,timeout_seconds=10))
     broker.request(URL,data=data)
     assert wire.calls[0][3] == b'original'
 

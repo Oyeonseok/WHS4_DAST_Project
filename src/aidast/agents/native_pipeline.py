@@ -22,6 +22,7 @@ from pydantic import BaseModel, ValidationError
 from aidast.auth.codex import CodexAuth, CodexAuthError
 from aidast.core import codex_process
 from aidast.agents.policy_guidance import policy_skill_text, stage_policy_skill
+from aidast.agents.failure_diagnostics import persisted_work_snapshot, preserve_native_failure
 from aidast.scope.exclusions import ResourceClassification
 from aidast.scope.exclusion_binding import classify_with_agent, SCOPE_EXCLUSION_INSTRUCTIONS
 from aidast.core.model_calls import logged_model_call, record_jsonl_usage, record_session_usage
@@ -46,6 +47,7 @@ from aidast.recon.policy import (
     TargetPolicyProposal,
     TargetPolicySelectionSetProposal,
     ToolPolicy,
+    normalize_recon_read_only_methods,
     normalize_read_only_attack_policy,
     validate_policy_for_target,
 )
@@ -166,8 +168,8 @@ class CodexMainAgent:
     """Uses the locally authenticated Codex CLI as the planning-only Main Agent."""
 
     DEFAULT_MAIN_MODEL = "gpt-6-sol"
-    DEFAULT_ATTACK_MODEL = "gpt-6-sol"
-    DEFAULT_CHAINING_MODEL = "gpt-6-sol"
+    DEFAULT_ATTACK_MODEL = "gpt-5.6-sol"
+    DEFAULT_CHAINING_MODEL = "gpt-5.6-sol"
     DEFAULT_VALIDATION_MODEL = "gpt-6-sol"
 
     def __init__(
@@ -366,6 +368,7 @@ class CodexMainAgent:
                 **selection.model_dump(exclude={"target_id"}),
             )
             item = self._normalize_grounded_execution_controls(item, scope_markdown)
+            item = normalize_recon_read_only_methods(item)
             item = normalize_read_only_attack_policy(item)
             if item.asset_type is AssetType.WILDCARD:
                 wildcard = item.asset.lower().rstrip(".")
@@ -471,9 +474,11 @@ Advisories guide testing within explicit authorization without preventing launch
 Fresh model output is bounded to 64 blockers and 64 advisories. The application
 stamps policy_review_version after evidence validation; do not claim host review.
 Supported execution_rules fields:
-- request_limits: maximum, period_seconds (null for total/lifetime quota), scope
+- request_limits: maximum, period_seconds (null for a non-window quota), scope
   scan/program/target, source_quote. Preserve stated windows, including per-second,
   per-minute and per-day quotas; do not convert lifetime quotas into periodic rates.
+  A null program quota is lifetime program-wide; null scan and target budgets reset
+  for each scan, with target additionally isolated by normalized origin.
   For example, a mandatory 10 requests/second ceiling is supported as maximum=10,
   period_seconds=1, scope="program", plus the exact source_quote. The schema has
   these fields; do not classify a supported numeric ceiling as unsupported. When
@@ -1239,32 +1244,56 @@ another codex exec process. Return only the required structured result.
                 name="aidast-attack-authorization",
                 daemon=True,
             )
+            before = persisted_work_snapshot(db_path, scan_id=scan_id, stage_run_id=stage_run_id)
+            event_text = ""
+
+            def failure(message: str, code: str, stderr: str = "", exit_code: int | None = None):
+                error = MainAgentError(message)
+                saved = preserve_native_failure(
+                    db_path, scan_id=scan_id, stage_run_id=stage_run_id, event_text=event_text,
+                    stderr=stderr, failure_code=code, before=before, exit_code=exit_code,
+                )
+                error.failure_diagnostics = saved["summary"]
+                error.diagnostic_directory = saved["directory"]
+                error.diagnostic_storage_error = saved["storage_error"]
+                return error
+
+            process_timeout = None
             helper_broker.start()
             broker.start()
             try:
                 with tempfile.TemporaryFile(mode="w+t", encoding="utf-8") as events:
-                    completed = codex_process.run_codex(
-                        command,
-                        input="$aidast-policy\n\n" + policy_skill_text() + "\n\n" + prompt,
-                        stdout=events,
-                        timeout=self._timeout_seconds,
-                    )
-                    events.seek(0)
-                    record_jsonl_usage(events)
+                    try:
+                        completed = codex_process.run_codex(
+                            command,
+                            input="$aidast-policy\n\n" + policy_skill_text() + "\n\n" + prompt,
+                            stdout=events,
+                            timeout=self._timeout_seconds,
+                        )
+                    finally:
+                        events.seek(0)
+                        event_text = events.read()
+                        record_jsonl_usage(event_text.splitlines())
             except codex_process.CodexProcessTimeout as exc:
-                raise MainAgentError(f"native Attack Agent: {exc}") from exc
+                process_timeout = exc
             finally:
                 broker_stop.set()
                 broker.join(timeout=1)
                 helper_broker.close()
+            if process_timeout is not None:
+                raise failure(f"native Attack Agent: {process_timeout}", "timeout",
+                              process_timeout.stderr or "") from process_timeout
             if broker_errors:
-                raise MainAgentError(
-                    f"Attack authorization broker failed: {broker_errors[0]}"
+                raise failure(
+                    f"Attack authorization broker failed: {broker_errors[0]}",
+                    "authorization_broker", completed.stderr, completed.returncode,
                 ) from broker_errors[0]
             if completed.returncode != 0:
-                raise MainAgentError(
+                diagnostic = completed.stderr.strip()[-2000:] or _codex_jsonl_diagnostic(event_text)
+                raise failure(
                     "native Attack Agent failed with exit code "
-                    f"{completed.returncode}: {completed.stderr.strip()[-2000:]}"
+                    f"{completed.returncode}: {diagnostic}",
+                    "nonzero_exit", completed.stderr, completed.returncode,
                 )
             if not result_path.is_file() or result_path.stat().st_size > self._max_result_bytes:
                 raise MainAgentError("native Attack Agent returned no bounded result")
@@ -1446,15 +1475,17 @@ another codex exec process. Return only the required structured result.
                         timeout=self._timeout_seconds,
                     )
                     events.seek(0)
-                    record_jsonl_usage(events)
+                    event_text = events.read()
+                    record_jsonl_usage(event_text.splitlines())
             except codex_process.CodexProcessTimeout as exc:
                 raise MainAgentError(f"native Chaining Agent: {exc}") from exc
             finally:
                 helper_broker.close()
             if completed.returncode != 0:
+                diagnostic = completed.stderr.strip()[-2000:] or _codex_jsonl_diagnostic(event_text)
                 raise MainAgentError(
                     "native Chaining Agent failed with exit code "
-                    f"{completed.returncode}: {completed.stderr.strip()[-2000:]}"
+                    f"{completed.returncode}: {diagnostic}"
                 )
             if not result_path.is_file() or result_path.stat().st_size > self._max_result_bytes:
                 raise MainAgentError("native Chaining Agent returned no bounded result")
@@ -1754,3 +1785,24 @@ class CodexSkillAttackPlanner:
             model_type=FindingAssessment, artifact_name="attack-assessment",
             operation="Attack evidence assessment", allow_browser=False,
         ).model_dump(mode="json")
+
+def _codex_jsonl_diagnostic(value: str, *, limit: int = 2000) -> str:
+    """Extract bounded failure details from Codex JSONL when stderr is empty."""
+    messages = []
+    for line in value.splitlines()[-200:]:
+        try:
+            event = json.loads(line)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if not isinstance(event, dict):
+            continue
+        if event.get("error"):
+            messages.append(json.dumps(event["error"], ensure_ascii=False))
+        elif str(event.get("type") or "").endswith((".failed", ".error")):
+            messages.append(json.dumps(event, ensure_ascii=False))
+        item = event.get("item")
+        if isinstance(item, dict) and item.get("type") == "agent_message":
+            text = item.get("text")
+            if isinstance(text, str) and text.strip():
+                messages.append(text.strip())
+    return "\n".join(messages)[-limit:]

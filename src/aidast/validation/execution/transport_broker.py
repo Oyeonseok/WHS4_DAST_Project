@@ -217,7 +217,7 @@ class ValidationTransportBroker:
                     reservations.append(TransportReservation(operation_id, scheduled, limits.timeout_seconds))
                     previous = scheduled
                 for spec, reservation in zip(specs, reservations):
-                    self._permits[reservation.operation_id] = self.governor.reserve(
+                    self._permits[reservation.operation_id] = self.governor.acquire(
                         spec.policy_url, units=spec.request_units,
                         timeout_seconds=limits.timeout_seconds, concurrency_units=spec.concurrency_units,
                     )

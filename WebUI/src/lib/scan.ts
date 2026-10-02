@@ -2,6 +2,14 @@ import type { Snapshot } from './events';
 
 export type ExecutionProfileId = 'safe-recon' | 'focused-discovery';
 
+export function approvedScopeSelection(scopeId: string, targets: readonly string[]) {
+  const selectedScopeId = scopeId.trim();
+  if (!selectedScopeId || targets.length === 0 || targets.some(target => !target.trim())) {
+    throw new Error('An approved Scope and at least one target are required.');
+  }
+  return { scope_id: selectedScopeId, targets: [...targets] };
+}
+
 export function isValidTagBatchSize(value: number): boolean {
   return Number.isInteger(value) && value >= 1 && value <= 200;
 }
@@ -9,7 +17,7 @@ export function isValidTagBatchSize(value: number): boolean {
 export function scanRetryAction(scan: Pick<Snapshot, 'status' | 'stage'>): 'resume' | 'rescan' | null {
   if (scan.status === 'completed' || scan.status === 'cancelled') return 'rescan';
   if (scan.status !== 'failed') return null;
-  return scan.stage === 'Attack' || scan.stage === 'Chaining' || scan.stage === 'Validation'
+  return scan.stage === 'Attack' || scan.stage === 'Chaining' || scan.stage === 'Validation' || scan.stage === 'Report'
     ? 'resume'
     : 'rescan';
 }

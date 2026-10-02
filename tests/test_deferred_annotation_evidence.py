@@ -108,6 +108,35 @@ def test_deferred_tagging_reuses_sanitized_observation_evidence() -> None:
     assert '"content_length": 42' in agent.prompt
 
 
+def test_deferred_tagging_skips_non_actionable_excluded_inventory() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        database = Path(temporary) / "Recon.db"
+        with db.connect(database) as connection:
+            db.insert_scan(connection, scan_id="scan", scope_type="test", scope_value="scope")
+            asset_id = db.insert_asset(
+                connection, scan_id="scan", identifier="example.com", asset_type="DOMAIN")
+            origin_id = db.upsert_origin(
+                connection, asset_id=asset_id, scheme="https", host="example.com",
+                port=443, base_url="https://example.com")
+            ObservationRecorder(connection, origin_id=origin_id, scan_id="scan").record(
+                "fixture", [
+                    {"method": "GET", "path": "/account", "source": "fixture"},
+                    {"method": "POST", "path": "/declared", "source": "passive_declaration",
+                     "verification_status": "candidate", "traffic_class": "passive"},
+                    {"method": "GET", "path": "/app.js", "source": "fixture"},
+                ])
+            agent = RecordingAgent()
+            completed, failed = tag_pending_observations(
+                connection, scan_id="scan", agent=agent)
+            tagged_paths = [row[0] for row in connection.execute(
+                """SELECT e.path FROM endpoint_annotations a
+                   JOIN endpoint_observations o ON o.observation_id=a.observation_id
+                   JOIN endpoints e ON e.endpoint_id=o.endpoint_id""")]
+
+    assert (completed, failed) == (1, 0)
+    assert tagged_paths == ["/account"]
+
+
 def test_deferred_tagging_preserves_successful_batches_and_retries_pending() -> None:
     with tempfile.TemporaryDirectory() as temporary:
         database = Path(temporary) / "Recon.db"

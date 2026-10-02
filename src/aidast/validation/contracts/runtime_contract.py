@@ -119,12 +119,15 @@ class HttpAttemptContract(StrictContract):
     request: HttpRequestTemplate
     assertions: tuple[ResponseAssertion, ...] = Field(min_length=1, max_length=16)
     identity_mode: Literal["case", "anonymous"] = "case"
+    endpoint_template: str | None = Field(default=None, min_length=1, max_length=4096)
 
     @model_serializer(mode="wrap")
     def stable_identity_document(self, handler):
         document = handler(self)
         if self.identity_mode == "case":
             document.pop("identity_mode", None)
+        if self.endpoint_template is None:
+            document.pop("endpoint_template", None)
         return document
 
     @field_validator("assertions", mode="before")
@@ -138,6 +141,21 @@ class HttpAttemptContract(StrictContract):
         identifiers = [item.assertion_id for item in self.assertions]
         if len(identifiers) != len(set(identifiers)):
             raise ValueError("runtime assertion IDs must be unique within an attempt")
+        if self.endpoint_template is not None:
+            parsed = urlsplit(self.endpoint_template)
+            decoded = unquote(parsed.path)
+            if (
+                not decoded.startswith("/")
+                or decoded.startswith("//")
+                or parsed.scheme
+                or parsed.netloc
+                or parsed.query
+                or parsed.fragment
+                or ".." in decoded.split("/")
+                or any(character in decoded for character in "\\%{}")
+                or any(ord(character) <= 32 for character in decoded)
+            ):
+                raise ValueError("attempt endpoint_template must be a literal same-origin path")
         return self
 
 

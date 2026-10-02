@@ -141,6 +141,33 @@ class PipelineMaterializationTests(unittest.TestCase):
                 source_schema,
             )
 
+    def test_materialization_makes_only_first_party_declarations_attack_eligible(self) -> None:
+        with db.connect(self.recon_path) as connection:
+            asset = db.insert_asset(connection, scan_id="scan", identifier="example.test", asset_type="URL")
+            origin = db.upsert_origin(connection, asset_id=asset, scheme="https", host="example.test",
+                                      port=443, base_url="https://example.test/")
+            trusted = db.upsert_endpoint(connection, origin_id=origin, method="POST", path="/login",
+                normalized_path="/login", source_tool="adaptive_js", is_excluded=True,
+                exclude_reason="unverified_candidate", verification_status="candidate")
+            untrusted = db.upsert_endpoint(connection, origin_id=origin, method="POST", path="/guess",
+                normalized_path="/guess", source_tool="ai_pattern", is_excluded=True,
+                exclude_reason="unverified_candidate", verification_status="candidate")
+        manifest = HandoffManifest.model_validate_json(self.handoff_path.read_text())
+        self.handoff_path.write_text(manifest.model_copy(update={"artifacts": [hash_artifact(
+            self.recon_path, root=self.root, role="database",
+            media_type="application/vnd.sqlite3")]}).model_dump_json(indent=2))
+
+        pipeline = self.root / "Pipeline.db"
+        materialize_pipeline(self.handoff_path, pipeline)
+
+        with sqlite3.connect(pipeline) as connection:
+            rows = dict(connection.execute("SELECT endpoint_id,is_excluded FROM endpoints"))
+            self.assertEqual(rows[trusted], 0)
+            self.assertEqual(rows[untrusted], 1)
+            self.assertEqual(connection.execute(
+                "SELECT verification_status,exclude_reason FROM endpoints WHERE endpoint_id=?", (trusted,)
+            ).fetchone(), ("candidate", "unverified_candidate"))
+
     def test_live_migration_is_idempotent_on_v4_copy(self) -> None:
         pipeline_path = self.root / "Pipeline.db"
         materialize_pipeline(self.handoff_path, pipeline_path)

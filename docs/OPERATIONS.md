@@ -51,6 +51,10 @@ export AIDAST_RESULT_ROOT="/path/to/dast_result"
 
 ## 로컬 웹 대시보드
 
+로컬 VulnBank를 대시보드에서 실행하고 81개 소스 기준과 종료 후
+비교하는 구체적인 설정·HITL·재개·반복 검증 절차는
+[VulnBank 웹 대시보드 운영 가이드](VULNBANK_DASHBOARD_RUNBOOK.md)를 참고하세요.
+
 `aidast dashboard --ui-dir <WebUI-dist>`는 clone한 저장소의 `result/`에 있는 persisted run을
 읽기 전용으로 투영합니다. `/api/v1/scans`와 scan snapshot REST API, scan별
 WebSocket replay stream을 제공하고 선택한 정적 WebUI도 같은 origin에서 제공합니다.

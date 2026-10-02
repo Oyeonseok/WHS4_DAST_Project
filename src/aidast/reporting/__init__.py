@@ -18,6 +18,7 @@ from .render import render_report as render_case_report
 from .runtime import ReportAgent as CaseReportAgent
 from .runtime import ReportError as CaseReportError
 from .runtime import ReportWriter as CaseReportWriter
+from .scan_summary import write_scan_summary
 
 LegacyReportAgent = ReportAgent
 LegacyCitedText = CitedText
@@ -65,4 +66,5 @@ __all__ = [
     "validate_draft",
     "validate_case_draft",
     "validate_legacy_draft",
+    "write_scan_summary",
 ]

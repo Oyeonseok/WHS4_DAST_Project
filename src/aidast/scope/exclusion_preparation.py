@@ -225,6 +225,12 @@ def selected_startup_operations(targets, *, start_urls=None, plan=None):
             if url is None and target.asset_type in {AssetType.DOMAIN,AssetType.IP_ADDRESS}:
                 url='https://'+target.asset
             steps=[step.value for step in planned[key].steps]
+            if target.asset_type in {AssetType.URL, AssetType.API}:
+                # Exact web targets never execute DNS/port discovery.  Ignore
+                # incompatible model-proposed steps here as a defensive policy
+                # boundary as well as normalizing them in the CLI plan.
+                steps=[step for step in steps if step not in {
+                    'ASSET_DISCOVERY','DNS_RESOLUTION','HOST_PORT_DISCOVERY'}]
             operations=[StartupOperation(step,url if step=='HTTP_PROBE' else None)
                 for step in steps if step in {'ASSET_DISCOVERY','DNS_RESOLUTION','HOST_PORT_DISCOVERY','HTTP_PROBE'}]
             if not operations and steps:

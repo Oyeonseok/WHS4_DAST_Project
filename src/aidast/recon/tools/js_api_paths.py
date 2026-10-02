@@ -405,6 +405,7 @@ def extract_js_api_paths(
     script: str, method_at: Callable[[str, int, int], str | None],
     *, location_callback: Callable[[str, str | None, int, int], None] | None = None,
     include_class_get_anchors: bool = False,
+    include_explicit_writes: bool = False,
 ) -> list[tuple[str, str | None]]:
     """Return path expressions and their HTTP method evidence in source order."""
     literals = _join_static_literals(script, _literals(script))
@@ -486,7 +487,11 @@ def extract_js_api_paths(
             or re.fullmatch(r'\$\{[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*\}', segment)
             for segment in path_segments
         )
-        explicit_path = (method == 'GET' and value.startswith('/') and not value.startswith('//')
+        explicit_method = method == 'GET' or (
+            include_explicit_writes
+            and method in {'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'}
+        )
+        explicit_path = (explicit_method and value.startswith('/') and not value.startswith('//')
                          and not any(char.isspace() or ord(char) < 32 for char in value)
                          and supported_segments
                          and script.startswith((')', ','), _skip_trivia(script, match.end)))

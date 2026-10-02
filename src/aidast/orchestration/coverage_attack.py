@@ -75,10 +75,13 @@ class ExhaustiveAttackCoordinator:
             stage_run_id, tasks = self._start_batch(scan_id)
             if not tasks:
                 with closing(sqlite3.connect(self.db_path)) as conn, conn:
-                    finish_stage_run(
-                        conn, stage_run_id, status="failed",
-                        error_message="unfinished coverage items are not schedulable",
-                    )
+                    after_preflight = coverage_status(self.db_path, scan_id)
+                    if after_preflight.unfinished == 0:
+                        finish_stage_run(conn, stage_run_id, status="completed")
+                        stages.append(stage_run_id)
+                        break
+                    finish_stage_run(conn, stage_run_id, status="failed",
+                                     error_message="unfinished coverage items are not schedulable")
                 raise AttackCoordinatorError(
                     "unfinished coverage items remain but none are schedulable"
                 )
@@ -138,7 +141,15 @@ class ExhaustiveAttackCoordinator:
     def _recover_failed_batch(
         self, stage_run_id: str, exc: BaseException,
     ) -> bool:
-        """Persist evidence, release the lease, and report safe continuation."""
+        """Persist evidence, close the batch, and report safe continuation.
+
+        A native ``FAILED`` envelope can be the aggregate representation of a
+        bounded task outcome, such as one request deadline.  Once every task
+        and request has a durable disposition, that batch completed its
+        orchestration responsibility even though an individual task failed.
+        Keep the task/coverage failure visible and reserve ``stage.failed`` for
+        a batch whose execution or completion contract is actually incomplete.
+        """
         with closing(sqlite3.connect(self.db_path)) as conn, conn:
             conn.row_factory = sqlite3.Row
             conn.execute("PRAGMA foreign_keys=ON")
@@ -149,15 +160,6 @@ class ExhaustiveAttackCoordinator:
                 conn, stage_run_id=stage_run_id,
                 retry_limit=self.retry_limit,
             )
-            row = conn.execute(
-                "SELECT status FROM stage_runs WHERE stage_run_id=?",
-                (stage_run_id,),
-            ).fetchone()
-            if row is not None and row[0] == "running":
-                finish_stage_run(
-                    conn, stage_run_id, status="failed",
-                    error_message=str(exc),
-                )
             open_leads = conn.execute(
                 """SELECT COUNT(*) FROM attack_attempts a
                    JOIN attack_tasks t ON t.task_id=a.task_id
@@ -176,7 +178,20 @@ class ExhaustiveAttackCoordinator:
                    WHERE stage_run_id=? AND status IN ('pending','running')""",
                 (stage_run_id,),
             ).fetchone()[0]
-            return not (open_leads or unknown_requests or incomplete_tasks)
+            can_continue = not (open_leads or unknown_requests or incomplete_tasks)
+            recoverable = isinstance(exc, AttackBatchFailure) and can_continue
+            row = conn.execute(
+                "SELECT status FROM stage_runs WHERE stage_run_id=?",
+                (stage_run_id,),
+            ).fetchone()
+            if row is not None and row[0] == "running":
+                finish_stage_run(
+                    conn, stage_run_id,
+                    status="completed" if recoverable else "failed",
+                    error_message=None if recoverable else str(exc),
+                    allow_terminal_task_errors=recoverable,
+                )
+            return can_continue
 
     @staticmethod
     def _record_stopped_probes(conn: sqlite3.Connection, stage_run_id: str) -> set[str]:

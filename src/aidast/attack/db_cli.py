@@ -178,12 +178,15 @@ def transition_task(
 ) -> dict:
     transitions = {
         "pending": {"running", "skipped"},
-        "running": {"completed", "failed"},
+        # Request-bound policy decisions can only be known after a task has
+        # entered running and submitted its exact envelope to the broker. An
+        # explicit denial or evidence/auth blocker is a terminal skip.
+        "running": {"completed", "skipped", "failed"},
     }
     if status not in {"running", "completed", "skipped", "failed"}:
         raise ValueError("invalid Attack task status")
-    if status == "failed" and not (reason or "").strip():
-        raise ValueError("failed Attack tasks require a reason")
+    if status in {"skipped", "failed"} and not (reason or "").strip():
+        raise ValueError(f"{status} Attack tasks require a reason")
     with closing(sqlite3.connect(db_path)) as conn, conn:
         conn.execute("PRAGMA foreign_keys=ON")
         _completed_scan(conn, scan_id)
@@ -405,6 +408,14 @@ def commit_finding(db_path: Path, scan_id: str, payload_path: Path) -> dict:
                 validated_runtime,
                 resolved_profile,
             )
+            negative_endpoint = getattr(
+                getattr(validated_runtime, "negative_control", None),
+                "endpoint_template", None,
+            )
+            if negative_endpoint is not None and method not in {"GET", "HEAD"}:
+                raise ValueError(
+                    "alternate negative-control endpoints require a read-only method"
+                )
             runtime_contract = validated_runtime.model_dump(mode="json")
             runtime_contract_json = canonical_json(runtime_contract)
             runtime_contract_sha256 = canonical_sha256(runtime_contract)

@@ -336,7 +336,7 @@ class ValidationRequestBroker:
                 raise
         self.request_ids.append(request_id)
         try:
-            self._permits[request_id] = self.governor.reserve(
+            self._permits[request_id] = self.governor.acquire(
                 url, timeout_seconds=self.policy.limits.timeout_seconds,
             )
         except GovernorError as exc:

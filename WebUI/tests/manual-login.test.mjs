@@ -29,3 +29,11 @@ test('malformed responses cannot enable a login confirmation', () => {
     assert.equal(login.parseManualLogin?.(value), null);
   }
 });
+
+test('runtime user action kinds are parsed and labelled without inventing an AI decision', () => {
+  const request = login.parseManualLogin({ manual_login: { ...pending, action_kind: 'captcha', problem: 'captcha_required' } });
+  assert.equal(request.action_kind, 'captcha');
+  assert.equal(login.manualActionLabel(request, 'en'), 'CAPTCHA verification');
+  assert.equal(login.manualActionLabel({ ...pending, action_kind: 'recon_login' }, 'ko'), '정찰 중 로그인');
+  assert.equal(login.parseManualLogin({ manual_login: { ...pending, action_kind: 'unknown' } }), null);
+});

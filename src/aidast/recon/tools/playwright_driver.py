@@ -51,6 +51,7 @@ from aidast.core.http_safety import (
 )
 from aidast.recon.tools.api_secondary_discovery import _http_request
 from aidast.recon.tools.page_identity import canonical_visit_key, screen_fingerprint
+from aidast.recon.tools.user_action import visible_user_action
 
 
 def _wait_for_manual_login(
@@ -138,6 +139,12 @@ class ManualSessionConfig:
 
     # Dashboard confirmation is operator attestation, not an API auth check.
     operator_confirmation: Callable[[Callable[[], str | None]], bool] | None = None
+
+    # Runtime HITL uses the already visible CDP browser. A missing event pump
+    # means the runtime is headless/unavailable; it must not open another GUI.
+    operator_action_confirmation: Callable[
+        [str, Callable[[], str | None], Callable[[], None] | None], bool
+    ] | None = None
 
     # Storage 값을 HTTP Header로 변환
     #
@@ -333,6 +340,7 @@ class PlaywrightDriver:
         # flow has actually started.
         self._interactive_authentication_enabled = bool(preauthenticated)
         self._operator_confirmed_login = False
+        self._operator_action_failures: set[str] = set()
 
         # 외부 Chromium Process
         self._chrome_process: (
@@ -935,7 +943,7 @@ class PlaywrightDriver:
                     raise ValueError('browser request budget exhausted')
                 # A configured proxy owns its shared permit; direct routes own theirs.
                 governor = RequestGovernor(None if self.proxy_url else self.target_policy.request_governor)
-                permit = governor.reserve(request.url, timeout_seconds=self.target_policy.limits.timeout_seconds)
+                permit = governor.acquire(request.url, timeout_seconds=self.target_policy.limits.timeout_seconds)
                 fetched = None
                 try:
                     permit.wait()
@@ -1488,6 +1496,9 @@ class PlaywrightDriver:
                     "visible login form", "visible login control",
                 }:
                     return "login_form_visible"
+                required_action = visible_user_action(page)
+                if required_action is not None:
+                    return required_action
                 text = page.locator("body").inner_text(timeout=3000).lower()
                 if any(marker in text for marker in (
                     "use the invitation code to get access", "invite code is required",
@@ -1499,6 +1510,60 @@ class PlaywrightDriver:
         except Exception:
             return "browser_unavailable"
         return None if target_page_seen else "target_page_missing"
+
+    def resolve_user_action(self, page: Page | None = None, *, problem: str | None = None) -> bool:
+        """Wait for operator input in the same visible runtime BrowserContext.
+
+        Headless/login_mode=none runs do not become GUI sessions mid-run. A
+        blocked page is skipped and the dashboard explains that limitation.
+        Policy routing remains enabled throughout the operator interaction.
+        """
+        confirmation = self.session_config.operator_action_confirmation
+        if confirmation is None:
+            return True
+        page = page or self._ensure_page()
+        try:
+            if page.is_closed() or not self._same_origin(page.url):
+                return True
+            if self.target_policy is not None and not self.target_policy.allows_url(page.url):
+                return True
+            detected = visible_user_action(page, include_login=self._interactive_authentication_enabled)
+        except Exception:
+            return True
+        problem = problem or detected
+        if problem is None:
+            return True
+        if problem not in {'login_form_visible', 'mfa_required', 'captcha_required', 'access_required'}:
+            raise ValueError('unsupported operator UI action')
+        if problem in self._operator_action_failures:
+            return False
+        context = self.context
+        def browser_problem():
+            try:
+                if self.context is not context or page.is_closed():
+                    return 'browser_unavailable'
+                self.context.cookies()  # dispatch navigation before reading the current page
+                if not self._same_origin(page.url):
+                    return 'target_page_missing'
+                if self.target_policy is not None and not self.target_policy.allows_url(page.url):
+                    return 'target_page_missing'
+                return visible_user_action(page, include_login=True)
+            except Exception:
+                return 'browser_unavailable'
+        poll_browser = (lambda: page.wait_for_timeout(50)) if self._browser_kind == 'cdp' else None
+        try:
+            accepted = confirmation(problem, browser_problem, poll_browser)
+            if accepted and self.context is context and browser_problem() is None:
+                if not self.save_session():
+                    raise RuntimeError('could not save the operator-completed browser state')
+                self._auth_expired = False
+                return True
+        except Exception:
+            # Keep the browser/session and partial Recon evidence available.
+            # Expiry or closure only stops automatic actions on this page.
+            pass
+        self._operator_action_failures.add(problem)
+        return False
 
     def capture_and_start(self) -> None:
         """Log in once and keep the same Chromium context for Recon."""
@@ -2972,6 +3037,8 @@ class PlaywrightDriver:
         page = (
             self._ensure_page()
         )
+        if not self.resolve_user_action(page):
+            return 0
 
         config = (
             self.interaction_config
@@ -3158,6 +3225,8 @@ class PlaywrightDriver:
 
                 actions += 1
                 close_failed = False
+                if not self.resolve_user_action(page):
+                    break
 
                 if (
                     self._auth_expired

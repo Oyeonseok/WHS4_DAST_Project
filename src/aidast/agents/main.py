@@ -3,8 +3,11 @@ from __future__ import annotations
 import hashlib
 import json
 import shutil
+import subprocess
 import tempfile
 import unicodedata
+from collections import deque
+from collections.abc import Iterable
 from datetime import datetime, timezone
 from importlib.resources import files
 from pathlib import Path
@@ -34,6 +37,7 @@ from aidast.recon.policy import (
     TargetPolicySelectionSetProposal,
     ToolPolicy,
     canonical_host_for_asset,
+    normalize_recon_read_only_methods,
     normalize_read_only_attack_policy,
     validate_policy_for_target,
 )
@@ -102,7 +106,43 @@ def _codex_output_schema(model_type: type[BaseModel]) -> dict:
 
 
 class MainAgentError(RuntimeError):
-    pass
+    """Public failure message with optional private, bounded CLI diagnostics."""
+
+    def __init__(
+        self, message: str, *, failure_code: str | None = None,
+        exit_code: int | None = None, diagnostic: str = "",
+        diagnostic_source: str = "none", requested_model: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        # Exception strings are projected into stage history. Raw CLI output
+        # belongs only on the exception for local investigation, never there.
+        self.diagnostic = diagnostic[-2_000:]
+        self.failure_diagnostics = None if failure_code is None else {
+            "failure_code": failure_code, "exit_code": exit_code,
+            "diagnostic_source": diagnostic_source,
+            "requested_model": requested_model,
+        }
+
+
+def _structured_jsonl_failure_diagnostic(lines: Iterable[str]) -> str:
+    """Keep recent failure events; successful model text is never a diagnostic."""
+    messages = []
+    for line in deque(lines, maxlen=200):
+        if len(line) > 65_536:
+            continue
+        try:
+            event = json.loads(line)
+        except (json.JSONDecodeError, RecursionError):
+            continue
+        if not isinstance(event, dict):
+            continue
+        error = event.get("error")
+        event_type = str(event.get("type") or "")
+        if error:
+            messages.append(json.dumps(error, ensure_ascii=False)[-2_000:])
+        elif event_type == "error" or event_type.endswith((".failed", ".error")):
+            messages.append(json.dumps(event, ensure_ascii=False)[-2_000:])
+    return "\n".join(messages)[-2_000:]
 
 
 class CodexValidationReviewer:
@@ -432,6 +472,7 @@ class CodexMainAgent:
                 **selection.model_dump(exclude={"target_id"}),
             )
             item = self._normalize_grounded_execution_controls(item, scope_markdown)
+            item = normalize_recon_read_only_methods(item)
             item = normalize_read_only_attack_policy(item)
             if item.asset_type is AssetType.WILDCARD:
                 wildcard = item.asset.lower().rstrip(".")
@@ -586,9 +627,11 @@ Advisories guide testing within explicit authorization without preventing launch
 Fresh model output is bounded to 64 blockers and 64 advisories. The application
 stamps policy_review_version after evidence validation; do not claim host review.
 Supported execution_rules fields:
-- request_limits: maximum, period_seconds (null for total/lifetime quota), scope
+- request_limits: maximum, period_seconds (null for a non-window quota), scope
   scan/program/target, source_quote. Preserve stated windows, including per-second,
   per-minute and per-day quotas; do not convert lifetime quotas into periodic rates.
+  A null program quota is lifetime program-wide; null scan and target budgets reset
+  for each scan, with target additionally isolated by normalized origin.
   For example, a mandatory 10 requests/second ceiling is supported as maximum=10,
   period_seconds=1, scope="program", plus the exact source_quote. The schema has
   these fields; do not classify a supported numeric ceiling as unsupported. When
@@ -821,6 +864,7 @@ Reuse compatible input keys; never invent operator values or confirmations.
                     "in_app_browser",
                 ]
             with tempfile.TemporaryFile(mode="w+t", encoding="utf-8") as events:
+                expired = None
                 try:
                     completed = codex_process.run_codex(
                         command,
@@ -829,25 +873,40 @@ Reuse compatible input keys; never invent operator values or confirmations.
                         timeout=self._timeout_seconds,
                     )
                 except codex_process.CodexProcessTimeout as exc:
-                    raise MainAgentError(
-                        f"Codex {operation}: {exc}"
-                    ) from exc
+                    expired = exc
                 events.seek(0)
                 record_jsonl_usage(events)
+                events.seek(0)
+                event_diagnostic = _structured_jsonl_failure_diagnostic(events)
+
+            def failure(message: str, code: str, stderr: str = "", exit_code: int | None = None) -> MainAgentError:
+                diagnostic = stderr.strip()[-2_000:] or event_diagnostic
+                return MainAgentError(message, failure_code=code,
+                    exit_code=exit_code, diagnostic=diagnostic,
+                    diagnostic_source="stderr" if stderr.strip() else "jsonl" if event_diagnostic else "none",
+                    requested_model=self._main_model)
+
+            if expired is not None:
+                raise failure(f"Codex {operation}: {expired}", "timeout", expired.stderr or "") from expired
 
             if completed.returncode != 0:
-                diagnostic = completed.stderr.strip()[-2_000:]
-                raise MainAgentError(
+                error = failure(
                     f"Codex {operation} failed with exit code "
-                    f"{completed.returncode}: {diagnostic}"
+                    f"{completed.returncode}", "nonzero_exit", completed.stderr,
+                    completed.returncode,
                 )
+                cause = subprocess.CalledProcessError(completed.returncode, ["codex", "exec"],
+                    output=event_diagnostic, stderr=completed.stderr.strip()[-2_000:])
+                raise error from cause
             if not result_path.exists():
-                raise MainAgentError(
-                    f"Codex completed without a structured {artifact_name} result"
+                raise failure(
+                    f"Codex completed without a structured {artifact_name} result",
+                    "missing_result", completed.stderr, completed.returncode,
                 )
             if result_path.stat().st_size > self._max_result_bytes:
-                raise MainAgentError(
-                    f"Codex result exceeds the {self._max_result_bytes}-byte budget"
+                raise failure(
+                    f"Codex result exceeds the {self._max_result_bytes}-byte budget",
+                    "result_budget", completed.stderr, completed.returncode,
                 )
 
             try:
@@ -855,8 +914,9 @@ Reuse compatible input keys; never invent operator values or confirmations.
                     result_path.read_text(encoding="utf-8")
                 )
             except (OSError, ValidationError, ValueError) as exc:
-                raise MainAgentError(
-                    f"Codex returned an invalid {artifact_name} result: {exc}"
+                raise failure(
+                    f"Codex returned an invalid {artifact_name} result: {exc}",
+                    "invalid_result", completed.stderr, completed.returncode,
                 ) from exc
 
     @staticmethod

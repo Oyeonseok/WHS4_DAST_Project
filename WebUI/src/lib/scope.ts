@@ -22,6 +22,17 @@ export function selectApprovedScope(scopes: readonly { scope_id: string }[], cur
   return scopes[0]?.scope_id ?? '';
 }
 
+export function createScopeResponseGuard() {
+  let selection = 0;
+  return {
+    invalidate: () => { selection += 1; },
+    capture: () => {
+      const started = selection;
+      return () => started === selection;
+    },
+  };
+}
+
 export type PolicyReferenceSummary = {
   requested_url: string;
   final_url: string | null;

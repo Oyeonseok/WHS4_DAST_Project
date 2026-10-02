@@ -6,6 +6,7 @@ export type ManualLoginRequest = {
   expires_at: number;
   problem: string | null;
   auth_state: 'operator_confirmed' | null;
+  action_kind?: 'login' | 'recon_login' | 'mfa' | 'captcha' | 'access';
 };
 
 export function parseManualLogin(value: unknown): ManualLoginRequest | null {
@@ -18,8 +19,19 @@ export function parseManualLogin(value: unknown): ManualLoginRequest | null {
       || typeof data.expires_at !== 'number' || !Number.isFinite(data.expires_at)
       || !['waiting', 'confirmed', 'accepted', 'expired', 'failed'].includes(String(data.status))
       || !(data.problem === null || typeof data.problem === 'string')
+      || !(data.action_kind === undefined || ['login', 'recon_login', 'mfa', 'captcha', 'access'].includes(String(data.action_kind)))
       || !(data.auth_state === null || data.auth_state === 'operator_confirmed')) return null;
   return data as ManualLoginRequest;
+}
+
+export function manualActionLabel(request: ManualLoginRequest, language: 'ko' | 'en'): string {
+  const kind = request.problem === 'mfa_required' ? 'mfa' : request.problem === 'captcha_required' ? 'captcha' : request.action_kind || 'login';
+  const labels = {
+    login: ['브라우저 로그인', 'Browser login'], recon_login: ['정찰 중 로그인', 'Login during Recon'],
+    mfa: ['MFA 인증', 'MFA verification'], captcha: ['CAPTCHA 확인', 'CAPTCHA verification'],
+    access: ['사이트 접근 확인', 'Site access confirmation'],
+  };
+  return labels[kind][language === 'ko' ? 0 : 1];
 }
 
 export function canConfirmManualLogin(request: ManualLoginRequest | null, scanId: string,

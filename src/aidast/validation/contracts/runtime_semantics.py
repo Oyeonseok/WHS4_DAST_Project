@@ -140,9 +140,15 @@ def validate_runtime_semantics(
     """Reject controls or assertions that cannot establish the profile signal."""
 
     if isinstance(runtime, HttpRuntimeContract):
+        if runtime.target.endpoint_template is not None or runtime.positive_control.endpoint_template is not None:
+            raise RuntimeSemanticError(
+                "HTTP endpoint override is allowed only for the inert negative control"
+            )
         _different(
-            {"request": runtime.target.request.model_dump(mode="json"), "identity_mode": runtime.target.identity_mode},
-            {"request": runtime.negative_control.request.model_dump(mode="json"), "identity_mode": runtime.negative_control.identity_mode},
+            {"request": runtime.target.request.model_dump(mode="json"), "identity_mode": runtime.target.identity_mode,
+             "endpoint_template": runtime.target.endpoint_template},
+            {"request": runtime.negative_control.request.model_dump(mode="json"), "identity_mode": runtime.negative_control.identity_mode,
+             "endpoint_template": runtime.negative_control.endpoint_template},
             "HTTP target and inert negative control requests must differ",
         )
         assertion_kinds = {item.kind for item in runtime.target.assertions}

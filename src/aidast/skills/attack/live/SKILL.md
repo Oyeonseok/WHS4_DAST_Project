@@ -179,16 +179,30 @@ configuration. The shared DB contains both Recon and Attack records.
    fact is useful context but is never a substitute for this promotion. When an
    exact safe-method request can test a Validation profile's declared impact path,
    include it as `impact_development_contract`; otherwise omit it.
+   For a literal read-only exposure where changing headers or query parameters
+   does not make an inert response, set `negative_control.endpoint_template` to
+   a same-origin nonexistent path as described in the database contract. Never
+   use that endpoint override for a state-changing method.
    For optional deeper login impact checks, declare a captured protected GET in
    `runtime_contract.session_verification`, with the fresh response token's
    JSON path and an observed account-field assertion. An authentication/token
    marker can support controlled login reproduction; a session read supplies additional impact evidence. Follow the database
    contract for the bounded declaration; never retain a raw returned token.
+   Preserve the captured request encoding in every HTTP replay contract:
+   form-urlencoded evidence uses an encoded `text_body` plus its Content-Type,
+   while JSON evidence uses `json_body`. A format conversion that the target
+   rejects makes both the positive control and the finding unusable.
 9. Close all leads for the task, then transition it to `completed`. A coverage
-   task with no request/attempt evidence must be `skipped` with the exact blocker
+   task with no request/attempt evidence must be `skipped` with the exact blocker,
+   including when a request-bound policy decision denies a task after it entered
+   `running`; that denial is not a task failure
    reason; never mark it completed merely to empty the queue. Continue until
    every configured task is `completed` or `skipped`. Chaining is not part of
    this stage; a future Chaining Agent owns that work.
+   When a policy-bound request produced usable evidence but the Skill's proof
+   gate still cannot be decided, close the lead as `inconclusive` with the exact
+   missing evidence and complete the task. That is a terminal bounded result;
+   do not repeat an equivalent request merely to change its label.
 
 # Lead closure gate
 

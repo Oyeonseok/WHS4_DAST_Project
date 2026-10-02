@@ -54,7 +54,7 @@ _STATUS_MAP = {
     "planning": "running",
     "verifying_handoff": "running",
     "completed": "completed",
-    "completed_with_errors": "completed",
+    "completed_with_errors": "failed",
     "failed": "failed",
     "blocked": "failed",
     "paused": "paused",
@@ -115,6 +115,11 @@ def _columns(conn: sqlite3.Connection, table: str) -> set[str]:
     return {str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})")}
 
 
+def _has_columns(conn: sqlite3.Connection, table: str, *required: str) -> bool:
+    """Optional projection tables may come from an older or partial schema."""
+    return set(required).issubset(_columns(conn, table))
+
+
 def _stage(value: Any) -> str:
     return _STAGE_MAP.get(str(value or "").strip().lower(), "Recon")
 
@@ -127,7 +132,7 @@ def _scan_status(conn: sqlite3.Connection, scan_id: str, raw_status: Any, *, has
     status = _status(raw_status)
     if status == "paused":
         return status
-    if not has_stages:
+    if not has_stages or not _has_columns(conn, "stage_runs", "scan_id", "stage", "status"):
         return status
     latest: dict[str, str] = {}
     for stage, stage_status in conn.execute(
@@ -145,7 +150,7 @@ def _scan_finished_at(
     conn: sqlite3.Connection, scan_id: str, scan_finished_at: Any, *, has_stages: bool
 ) -> str | None:
     finished = _utc(scan_finished_at) if scan_finished_at else None
-    if has_stages:
+    if has_stages and _has_columns(conn, "stage_runs", "scan_id", "finished_at"):
         for row in conn.execute(
             "SELECT finished_at FROM stage_runs WHERE scan_id=? AND finished_at IS NOT NULL",
             (scan_id,),
@@ -174,6 +179,23 @@ def _level(event_type: str) -> str:
     if any(word in lowered for word in ("completed", "confirmed", "approved")):
         return "success"
     return "info"
+
+
+def _audit_level(event_type: str, details_json: Any) -> str:
+    """Preserve terminal policy/evidence dispositions as warnings.
+
+    Older Attack workers could only move a running task to ``failed`` after a
+    request-bound denial. Coverage reconciliation correctly classifies those
+    structured blockers as terminal non-errors, so the dashboard must not
+    present them as pipeline failures.
+    """
+    if event_type == "task.failed":
+        reason = _json_object(details_json).get("reason")
+        if isinstance(reason, str) and reason.lstrip().casefold().startswith(
+            ("[policy]", "[auth]", "[budget]", "[evidence]")
+        ):
+            return "warning"
+    return _level(event_type)
 
 
 def _audit_message(event_type: str) -> str:
@@ -308,10 +330,14 @@ class DashboardProjector:
             try:
                 raw = scope_path.read_bytes()
                 document = json.loads(raw)
+                if not isinstance(document, dict):
+                    continue
                 if document.get("scope_id") != scope_id:
                     continue
                 approval_path = scope_path.with_name("Approval.json")
                 approval = json.loads(approval_path.read_text(encoding="utf-8"))
+                if not isinstance(approval, dict):
+                    continue
                 digest = hashlib.sha256(raw).hexdigest()
                 approved = (
                     approval.get("scope_id") == scope_id
@@ -319,13 +345,21 @@ class DashboardProjector:
                 )
                 policy_path = scope_path.with_name("TargetPolicy.json")
                 budget = 0
+                values: list[int] = []
                 if policy_path.is_file():
                     policy = json.loads(policy_path.read_text(encoding="utf-8"))
-                    values = [
-                        int(item.get("limits", {}).get("max_requests", 0))
-                        for item in policy.get("policies", [])
-                        if isinstance(item, dict)
-                    ]
+                    policies = policy.get("policies", []) if isinstance(policy, dict) else []
+                    if not isinstance(policies, list):
+                        policies = []
+                    for item in policies:
+                        limits = item.get("limits") if isinstance(item, dict) else None
+                        if not isinstance(limits, dict):
+                            continue
+                        maximum = limits.get("max_requests")
+                        if type(maximum) is int:
+                            values.append(maximum)
+                        elif isinstance(maximum, str) and re.fullmatch(r"[0-9]{1,20}", maximum.strip()):
+                            values.append(int(maximum))
                     budget = sum(value for value in values if value > 0)
                 relative = scope_path.relative_to(scope_root)
                 platform, slug = relative.parts[:2]
@@ -334,10 +368,12 @@ class DashboardProjector:
                     "yeswehack": "ywh",
                 }.get(platform, platform)
                 program_id = f"{platform_prefix}-{slug.replace('_', '-')}"
+                analysis = document.get("analysis")
+                analysis = analysis if isinstance(analysis, dict) else {}
                 program_name = (
                     "PRISM VDP"
                     if program_id == "h1-prism-vdp"
-                    else str(document.get("analysis", {}).get("program_name") or slug)[:160]
+                    else str(analysis.get("program_name") or slug)[:160]
                 )
                 per_target_budget = values[0] if values and values[0] > 0 and len(set(values)) == 1 else None
                 return ScopeInfo(approved, scope_id, program_name, program_id, budget, per_target_budget)
@@ -355,14 +391,18 @@ class DashboardProjector:
         if scan is None:
             raise ScanNotFoundError(f"unknown scan: {scan_id}")
         scan_columns = set(scan.keys())
+        raw_scan_status = scan["status"] if "status" in scan_columns else "pending"
         scope = self._scope_info(str(scan["scope_value"]) if "scope_value" in scan_columns else "")
 
         stages: list[sqlite3.Row] = []
-        if "stage_runs" in tables:
+        if _has_columns(conn, "stage_runs", "scan_id", "stage_run_id", "stage", "status"):
+            stage_columns = _columns(conn, "stage_runs")
+            timestamps = [name for name in ("started_at", "created_at") if name in stage_columns]
+            ordering = (f"COALESCE({','.join(timestamps)})" if len(timestamps) > 1
+                        else timestamps[0] if timestamps else "rowid")
             stages = list(
                 conn.execute(
-                    """SELECT rowid,* FROM stage_runs WHERE scan_id=?
-                    ORDER BY COALESCE(started_at,created_at),rowid""",
+                    f"SELECT rowid,* FROM stage_runs WHERE scan_id=? ORDER BY {ordering},rowid",
                     (scan_id,),
                 )
             )
@@ -372,7 +412,7 @@ class DashboardProjector:
         activity: str | None = None
         if stage_name == "Recon" and current is not None and current["status"] == "running":
             activity = "Preparing Recon"
-            if "pipeline_runs" in tables:
+            if _has_columns(conn, "pipeline_runs", "stage", "scan_id", "status", "task_id"):
                 active_task = conn.execute(
                     """SELECT p.stage FROM pipeline_runs p
                     WHERE p.scan_id=? AND p.status='running' AND p.task_id IS NOT NULL
@@ -395,11 +435,13 @@ class DashboardProjector:
         stage_statuses: dict[str, str] = {}
         for row in stages:
             stage_statuses[_stage(row["stage"])] = str(row["status"])
+        if raw_scan_status == "completed_with_errors" and stage_name == "Recon" and active is None:
+            stage_statuses["Recon"] = "failed"
         if scope.approved:
             stage_statuses["Scope"] = "completed"
 
         task_total = task_done = 0
-        if current is not None and "attack_tasks" in tables:
+        if current is not None and _has_columns(conn, "attack_tasks", "stage_run_id", "status"):
             task_total = int(
                 conn.execute(
                     "SELECT count(*) FROM attack_tasks WHERE stage_run_id=?",
@@ -413,7 +455,7 @@ class DashboardProjector:
                     (current["stage_run_id"],),
                 ).fetchone()[0]
             )
-        if stage_name == "Recon" and "pipeline_runs" in tables:
+        if stage_name == "Recon" and _has_columns(conn, "pipeline_runs", "status", "scan_id", "task_id"):
             task_total, task_done = conn.execute(
                 """SELECT count(*), count(*) FILTER (
                     WHERE p.status IN ('success','failed','skipped','completed')
@@ -423,7 +465,9 @@ class DashboardProjector:
                 ) latest ON latest.latest_row=p.rowid""",
                 (scan_id,),
             ).fetchone()
-        if stage_name == "Validation" and current is not None and "validation_cases" in tables:
+        if stage_name == "Validation" and current is not None and _has_columns(
+            conn, "validation_cases", "scan_id", "latest_stage_run_id", "processing_phase"
+        ):
             task_total, task_done = conn.execute(
                 """SELECT count(*), COALESCE(sum(CASE processing_phase
                     WHEN 'blind_replay' THEN 25
@@ -435,7 +479,10 @@ class DashboardProjector:
                 (scan_id, current["stage_run_id"]),
             ).fetchone()
             task_total *= 100
-        if stage_name == "Report" and "validation_cases" in tables:
+        if stage_name == "Report" and _has_columns(
+            conn, "validation_cases", "scan_id", "case_id", "current_status", "processing_phase",
+            "decision_stage_run_id", "latest_stage_run_id"
+        ):
             cases = conn.execute(
                 """SELECT case_id FROM validation_cases WHERE scan_id=?
                 AND current_status='CONFIRMED' AND processing_phase='completed'
@@ -485,6 +532,11 @@ class DashboardProjector:
                 stage_statuses['Attack'] = 'running'
 
         requests = 0
+        scoped_endpoints = all((
+            _has_columns(conn, "endpoints", "endpoint_id", "origin_id"),
+            _has_columns(conn, "origins", "origin_id", "asset_id"),
+            _has_columns(conn, "assets", "asset_id", "scan_id"),
+        ))
         for table in ("http_transactions", "attack_http_requests", "validation_http_requests"):
             if table in tables:
                 columns = _columns(conn, table)
@@ -496,7 +548,7 @@ class DashboardProjector:
                 elif (
                     table == "http_transactions"
                     and "endpoint_id" in columns
-                    and {"endpoints", "origins", "assets"}.issubset(tables)
+                    and scoped_endpoints
                 ):
                     requests += int(
                         conn.execute(
@@ -525,7 +577,8 @@ class DashboardProjector:
         service_endpoints = 0
         live_endpoints = 0
         if "endpoints" in tables:
-            if "assets" in tables and "origins" in tables:
+            endpoint_columns = _columns(conn, "endpoints")
+            if scoped_endpoints:
                 endpoints = int(
                     conn.execute(
                         """SELECT count(*) FROM endpoints e
@@ -534,25 +587,31 @@ class DashboardProjector:
                         (scan_id,),
                     ).fetchone()[0]
                 )
-            else:
+            elif "scan_id" in endpoint_columns:
+                endpoints = int(conn.execute(
+                    "SELECT count(*) FROM endpoints WHERE scan_id=?", (scan_id,),
+                ).fetchone()[0])
+            elif int(conn.execute("SELECT count(*) FROM scans").fetchone()[0]) == 1:
                 endpoints = int(conn.execute("SELECT count(*) FROM endpoints").fetchone()[0])
-            endpoint_columns = _columns(conn, "endpoints")
-            scoped = {"assets", "origins"}.issubset(tables)
             source = ("FROM endpoints e JOIN origins o ON o.origin_id=e.origin_id "
-                      "JOIN assets a ON a.asset_id=o.asset_id" if scoped else "FROM endpoints e")
-            where = "a.scan_id=?" if scoped else "1=1"
-            parameters = (scan_id,) if scoped else ()
+                      "JOIN assets a ON a.asset_id=o.asset_id" if scoped_endpoints else "FROM endpoints e")
+            if scoped_endpoints:
+                where, parameters = "a.scan_id=?", (scan_id,)
+            elif "scan_id" in endpoint_columns:
+                where, parameters = "e.scan_id=?", (scan_id,)
+            else:
+                where, parameters = ("1=1" if endpoints else "1=0"), ()
             where += " AND e.is_excluded=0" if "is_excluded" in endpoint_columns else ""
             service_endpoints = int(conn.execute(
                 f"SELECT count(*) {source} WHERE {where}", parameters,
             ).fetchone()[0])
             evidence: list[str] = []
-            if "endpoint_observations" in tables and {
+            if "endpoint_id" in endpoint_columns and "endpoint_observations" in tables and {
                 "endpoint_id", "discovery_kind"
             }.issubset(_columns(conn, "endpoint_observations")):
                 evidence.append("EXISTS (SELECT 1 FROM endpoint_observations v "
                                 "WHERE v.endpoint_id=e.endpoint_id AND v.discovery_kind='http_response')")
-            if "http_transactions" in tables and {
+            if "endpoint_id" in endpoint_columns and "http_transactions" in tables and {
                 "endpoint_id", "response_status"
             }.issubset(_columns(conn, "http_transactions")):
                 evidence.append("EXISTS (SELECT 1 FROM http_transactions h "
@@ -564,14 +623,21 @@ class DashboardProjector:
                 ).fetchone()[0])
 
         findings: list[dict[str, Any]] = []
-        if "findings" in tables:
-            has_endpoints = "endpoints" in tables
-            query = """SELECT f.finding_id,f.title,f.severity,f.status,f.cwe_id,f.endpoint_id"""
+        if _has_columns(conn, "findings", "finding_id", "scan_id", "title", "severity"):
+            finding_columns = _columns(conn, "findings")
+            has_endpoints = "endpoint_id" in finding_columns and _has_columns(
+                conn, "endpoints", "endpoint_id", "method", "normalized_path"
+            )
+            fields = ("finding_id", "title", "severity", "status", "cwe_id", "endpoint_id")
+            query = "SELECT " + ",".join(
+                f"f.{name}" if name in finding_columns else f"NULL AS {name}" for name in fields
+            )
             if has_endpoints:
                 query += ",e.method,e.normalized_path FROM findings f LEFT JOIN endpoints e ON e.endpoint_id=f.endpoint_id"
             else:
                 query += ",NULL AS method,NULL AS normalized_path FROM findings f"
-            query += " WHERE f.scan_id=? ORDER BY f.created_at DESC LIMIT 500"
+            ordering = "f.created_at" if "created_at" in finding_columns else "f.rowid"
+            query += f" WHERE f.scan_id=? ORDER BY {ordering} DESC LIMIT 500"
             for row in conn.execute(query, (scan_id,)):
                 endpoint = " ".join(
                     part for part in (str(row["method"] or ""), str(row["normalized_path"] or "")) if part
@@ -581,21 +647,31 @@ class DashboardProjector:
                         "id": str(row["finding_id"])[:256],
                         "title": str(row["title"])[:500],
                         "severity": str(row["severity"]),
-                        "status": str(row["status"]),
+                        "status": str(row["status"] or "unavailable"),
                         "endpoint": endpoint[:1000],
                         "cwe": str(row["cwe_id"] or "Unclassified")[:128],
                     }
                 )
 
         audits: list[sqlite3.Row] = []
-        if "audit_events" in tables:
+        if _has_columns(conn, "audit_events", "audit_event_id", "scan_id", "event_type"):
+            audit_columns = _columns(conn, "audit_events")
+            fields = ("audit_event_id", "event_type", "details_json", "created_at", "task_id")
+            query = "SELECT a.rowid," + ",".join(
+                f"a.{name}" if name in audit_columns else f"NULL AS {name}" for name in fields
+            )
+            has_stage_join = "stage_run_id" in audit_columns and _has_columns(
+                conn, "stage_runs", "stage_run_id", "stage"
+            )
+            if has_stage_join:
+                error = "s.error_message" if _has_columns(conn, "stage_runs", "error_message") else "NULL"
+                query += (f",COALESCE(s.stage,'recon') AS stage,{error} AS stage_error "
+                          "FROM audit_events a LEFT JOIN stage_runs s ON s.stage_run_id=a.stage_run_id")
+            else:
+                query += ",'recon' AS stage,NULL AS stage_error FROM audit_events a"
             audits = list(
                 conn.execute(
-                    """SELECT a.rowid,a.audit_event_id,a.event_type,a.details_json,a.created_at,
-                    a.task_id,COALESCE(s.stage,'recon') AS stage,s.error_message AS stage_error
-                    FROM audit_events a LEFT JOIN stage_runs s
-                    ON s.stage_run_id=a.stage_run_id
-                    WHERE a.scan_id=? ORDER BY a.rowid""",
+                    query + " WHERE a.scan_id=? ORDER BY a.rowid",
                     (scan_id,),
                 )
             )
@@ -604,7 +680,7 @@ class DashboardProjector:
             "version": 1,
             "scan_id": scan_id,
             "status": _scan_status(
-                conn, scan_id, scan["status"] if "status" in scan_columns else "pending",
+                conn, scan_id, raw_scan_status,
                 has_stages="stage_runs" in tables,
             ),
             "stage": stage_name,
@@ -660,7 +736,7 @@ class DashboardProjector:
                 "task_id": str(row["task_id"])[:128] if row["task_id"] else None,
                 "level": ("error" if activity["state"] == "failed" else
                           "success" if activity["state"] == "finished" else "info")
-                if activity else _level(event_type),
+                if activity else _audit_level(event_type, row["details_json"]),
                 "message_code": "recon.activity" if activity else "pipeline.audit_event",
                 "message_params": activity or {"event_type": event_type[:180]},
                 "failure_code": _failure_category(row["stage_error"]) if event_type == "stage.failed" else None,
@@ -769,7 +845,9 @@ class DashboardProjector:
                     "stage": _stage(row["stage"]),
                     "level": ("error" if activity["state"] == "failed" else
                               "success" if activity["state"] == "finished" else "info")
-                    if activity else _level(str(row["event_type"])),
+                    if activity else _audit_level(
+                        str(row["event_type"]), row["details_json"]
+                    ),
                     "message": "Recon activity" if activity else _audit_message(str(row["event_type"])),
                     "message_code": "recon.activity" if activity else "pipeline.audit_event",
                     "message_params": activity or {"event_type": str(row["event_type"])[:180]},
@@ -1194,14 +1272,14 @@ class DashboardProjector:
                     try:
                         with closing(self._source(database)) as conn:
                             row = conn.execute(
-                                "SELECT scan_id,status,started_at,finished_at FROM scans WHERE scan_id=?",
+                                "SELECT * FROM scans WHERE scan_id=?",
                                 (directory.name,),
                             ).fetchone()
                             if row:
                                 tables = _tables(conn)
                                 has_stages = "stage_runs" in tables
                                 status = _scan_status(
-                                    conn, row["scan_id"], row["status"],
+                                    conn, row["scan_id"], row["status"] if "status" in row.keys() else "pending",
                                     has_stages=has_stages,
                                 )
                                 targets = []
@@ -1221,9 +1299,9 @@ class DashboardProjector:
                                     "scan_id": row["scan_id"],
                                     "status": status,
                                     "targets": targets,
-                                    "started_at": _utc(row["started_at"]),
+                                    "started_at": _utc(row["started_at"] if "started_at" in row.keys() else None),
                                     "finished_at": _scan_finished_at(
-                                        conn, row["scan_id"], row["finished_at"],
+                                        conn, row["scan_id"], row["finished_at"] if "finished_at" in row.keys() else None,
                                         has_stages=has_stages,
                                     ) if status in {"completed", "failed", "cancelled"} else None,
                                 }

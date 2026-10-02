@@ -107,9 +107,11 @@ Advisories guide testing within explicit authorization without preventing launch
 Fresh model output is bounded to 64 blockers and 64 advisories. The application
 stamps policy_review_version after evidence validation; do not claim host review.
 Supported execution_rules fields:
-- request_limits: maximum, period_seconds (null for total/lifetime quota), scope
+- request_limits: maximum, period_seconds (null for a non-window quota), scope
   scan/program/target, source_quote. Preserve stated windows, including per-second,
   per-minute and per-day quotas; do not convert lifetime quotas into periodic rates.
+  A null program quota is lifetime program-wide; null scan and target budgets reset
+  for each scan, with target additionally isolated by normalized origin.
   For example, a mandatory 10 requests/second ceiling is supported as maximum=10,
   period_seconds=1, scope="program", plus the exact source_quote. The schema has
   these fields; do not classify a supported numeric ceiling as unsupported. When

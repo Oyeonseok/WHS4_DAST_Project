@@ -7,7 +7,7 @@ import json
 import time
 from pathlib import Path
 from typing import Callable, Mapping
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlsplit
 
 from aidast.recon.policy import TargetPolicy
 
@@ -69,7 +69,15 @@ class HttpReproductionPort:
                 raise ValueError("HTTP replay requires a staged runtime contract")
             runtime = HttpRuntimeContract.model_validate(blind_case.runtime_contract)
             attempt = runtime.for_attempt(attempt_kind)
-            url, headers, data = render_http_request(blind_case.endpoint, attempt.request)
+            endpoint = blind_case.endpoint
+            if attempt.endpoint_template is not None:
+                if attempt_kind != "negative_control" or blind_case.method not in {"GET", "HEAD"}:
+                    raise ValueError("alternate control endpoints require a read-only negative control")
+                base = urlsplit(blind_case.endpoint)
+                endpoint = urljoin(
+                    f"{base.scheme}://{base.netloc}/", attempt.endpoint_template.lstrip("/"),
+                )
+            url, headers, data = render_http_request(endpoint, attempt.request)
         else:
             url, headers, data = self.request_builder(blind_case, attempt_kind, batch_no, ordinal)
         broker = ValidationRequestBroker(
@@ -79,6 +87,8 @@ class HttpReproductionPort:
             credential_resolver=self.credential_resolver,
             credential_references=(() if runtime is not None
                                    and runtime.for_attempt(attempt_kind).identity_mode == "anonymous" else None),
+            request_boundary=((blind_case.method, url) if runtime is not None
+                              and runtime.for_attempt(attempt_kind).endpoint_template is not None else None),
         )
         try:
             started = self.clock()

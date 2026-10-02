@@ -7,12 +7,15 @@ import json
 import re
 import sqlite3
 from contextlib import closing
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from aidast.pipeline.models import HandoffManifest
 from aidast.pipeline.locations import scan_run_directory
+from aidast.pipeline.model_settings import (
+    MODEL_SETTINGS_FILE, ScanModelChoices, load_scan_model_choices, read_scan_model_choices,
+)
 
 
 _SCAN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
@@ -28,6 +31,8 @@ class ResumePlan:
     scope_path: Path
     policy_path: Path
     targets: tuple[str, ...]
+    models: ScanModelChoices = field(default_factory=ScanModelChoices.resolve)
+    program_url: str | None = None
 
 
 def _sha256(path: Path) -> str:
@@ -76,6 +81,19 @@ def inspect_resume(result_root: Path, scan_id: str) -> ResumePlan:
     policy = json.loads(policy_path.read_text(encoding="utf-8"))
     if policy.get("scope_id") != scope_id:
         raise ValueError("target policy does not match the approved Scope")
+    saved_models = load_scan_model_choices(root, scan_id)
+    model_path = verified.get(MODEL_SETTINGS_FILE)
+    if model_path is not None:
+        models = read_scan_model_choices(model_path, scan_id=scan_id)
+        if saved_models is not None and saved_models != models:
+            raise ValueError("scan model settings do not match the verified handoff")
+    else:
+        # Existing source imports and older scans have no model record.
+        models = saved_models if saved_models is not None else ScanModelChoices.resolve()
+    source_document = scope_document.get("source")
+    program_url = source_document.get("requested_url") if isinstance(source_document, dict) else None
+    if not isinstance(program_url, str):
+        program_url = None
 
     with closing(sqlite3.connect(database.resolve().as_uri() + "?mode=ro", uri=True)) as conn:
         source = conn.execute(
@@ -106,29 +124,43 @@ def inspect_resume(result_root: Path, scan_id: str) -> ResumePlan:
             )
         )
 
-    for stage in ("attack", "chaining", "validation"):
+    for stage in ("attack", "chaining", "validation", "report"):
         previous = latest.get(stage)
         if previous is None:
-            return ResumePlan(scan_id, scope_id, stage, None, database, scope_path, policy_path, targets)
+            return ResumePlan(scan_id, scope_id, stage, None, database, scope_path, policy_path,
+                              targets, models, program_url)
         stage_run_id, status = previous
         if status == "failed" or (stage == "attack" and status == "completed" and unfinished_attack):
-            return ResumePlan(scan_id, scope_id, stage, stage_run_id, database, scope_path, policy_path, targets)
+            return ResumePlan(scan_id, scope_id, stage, stage_run_id, database, scope_path, policy_path,
+                              targets, models, program_url)
         if status not in ({"completed"} if stage == "attack" else {"completed", "skipped"}):
             raise ValueError(f"{stage} is still active or cannot be retried: {status}")
     raise ValueError("all post-Recon stages have already completed")
 
 
-def execute_resume(plan: ResumePlan, *, agent: Any | None = None, validation_factory: Any | None = None) -> None:
+def execute_resume(
+    plan: ResumePlan,
+    *,
+    agent: Any | None = None,
+    planning_agent: Any | None = None,
+    validation_factory: Any | None = None,
+) -> None:
     """Continue from the selected stage through Validation using the same scan ID."""
+    if plan.stage == "report":
+        # Report retries are entirely offline; the CLI drafts from the current
+        # verified cases after this function returns.
+        return
     from aidast.agents.main import CodexMainAgent
     from aidast.orchestration.attack import AttackCoordinator
     from aidast.orchestration.chaining import ChainingCoordinator
     from aidast.validation import build_native_validation_coordinator
 
-    main_agent = (agent or CodexMainAgent()) if plan.stage in {"attack", "chaining"} else None
+    main_agent = (agent or CodexMainAgent(**plan.models.agent_options())) if plan.stage in {"attack", "chaining"} else None
     if plan.stage == "attack":
         AttackCoordinator(
-            agent=main_agent, db_path=plan.database,
+            agent=main_agent,
+            planning_agent=(planning_agent or CodexMainAgent(main_model=plan.models.attack_model)),
+            db_path=plan.database,
             scope_path=plan.scope_path, policy_path=plan.policy_path,
         ).run(plan.scan_id)
     if plan.stage in {"attack", "chaining"}:
@@ -137,9 +169,11 @@ def execute_resume(plan: ResumePlan, *, agent: Any | None = None, validation_fac
             scope_path=plan.scope_path, policy_path=plan.policy_path,
         ).run(plan.scan_id)
     coordinator = (
-        validation_factory(db_path=plan.database, policy_path=plan.policy_path)
+        validation_factory(db_path=plan.database, policy_path=plan.policy_path,
+                           validation_model=plan.models.validation_model)
         if validation_factory is not None else
-        build_native_validation_coordinator(db_path=plan.database, policy_path=plan.policy_path)
+        build_native_validation_coordinator(db_path=plan.database, policy_path=plan.policy_path,
+                                             validation_model=plan.models.validation_model)
     )
     if plan.stage == "validation" and plan.stage_run_id:
         coordinator.resume(plan.stage_run_id)

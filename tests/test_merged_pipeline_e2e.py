@@ -114,7 +114,9 @@ class EmptyAttackAgent:
         )
 
 
-def test_recon_snapshot_drives_downstream_pipeline_without_mutation() -> None:
+def test_recon_snapshot_drives_downstream_pipeline_without_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     with tempfile.TemporaryDirectory() as temporary:
         root = Path(temporary)
         recon_path = root / "Recon.db"
@@ -212,6 +214,22 @@ def test_recon_snapshot_drives_downstream_pipeline_without_mutation() -> None:
         source_before = recon_path.read_bytes()
         pipeline_path = root / "Pipeline.db"
         materialize_pipeline(handoff_path, pipeline_path)
+        # Keep this end-to-end fixture on the authenticated IDOR dispatch path.
+        # Production scans without a usable same-origin credential now close
+        # that explicit prerequisite as blocked_auth before agent dispatch.
+        from aidast.pipeline.lifecycle import register_credential_reference
+        with sqlite3.connect(pipeline_path) as connection:
+            register_credential_reference(
+                connection,
+                scan_id="scan",
+                label="fixture-auth",
+                reference_uri="env://AIDAST_MERGED_PIPELINE_AUTH",
+                identity_role="authenticated",
+            )
+        monkeypatch.setenv(
+            "AIDAST_MERGED_PIPELINE_AUTH",
+            '{"Authorization":"Bearer fixture"}',
+        )
 
         attack = AttackCoordinator(
             agent=EmptyAttackAgent(),

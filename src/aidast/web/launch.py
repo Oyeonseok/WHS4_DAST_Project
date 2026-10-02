@@ -15,6 +15,8 @@ import sqlite3
 import subprocess
 import sys
 import threading
+import tempfile
+from contextlib import contextmanager
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
@@ -29,6 +31,9 @@ from aidast.orchestration.scope import CoordinatorError, ScopeCoordinator
 from aidast.recon.policy import validate_start_url_for_target
 from aidast.recon.profiles import EXECUTION_PROFILES, ProfileId, profile_request_rate
 from aidast.pipeline.resume import inspect_resume
+from aidast.pipeline.model_settings import (
+    ScanModelChoices, scan_model_settings_path, write_scan_model_choices,
+)
 from aidast.pipeline.lifecycle import finish_stage_run
 from aidast.scope.models import AssetType
 from aidast.scope.exclusion_preparation import prepare_exclusions, normalize_start_urls
@@ -326,6 +331,7 @@ class LaunchJob:
     process: Any | None = None
     finished_at: str | None = None
     stop_requested: bool = False
+    process_log: Path | None = None
 
 
 ProcessFactory = Callable[..., Any]
@@ -421,6 +427,12 @@ class ScanLaunchManager:
         scope, preparation = self._prepare_launch(request)
         preparation.require_ready()
         scan_id = f"scan_{uuid4().hex}"
+        models = ScanModelChoices.resolve(
+            recon_model=request.recon_model, attack_model=request.attack_model,
+            validation_model=request.validation_model, report_model=request.report_model,
+        )
+        write_scan_model_choices(scan_model_settings_path(self.result_root, scan_id),
+                                 scan_id=scan_id, models=models)
         argv: list[str] = [
             sys.executable,
             "-m",
@@ -496,23 +508,25 @@ class ScanLaunchManager:
         env = os.environ.copy()
         env["AIDAST_RESULT_ROOT"] = str(self.result_root)
         env["AIDAST_DASHBOARD_MANUAL_LOGIN"] = "1"
+        env["PYTHONUNBUFFERED"] = "1"
         source_root = self.project_root / "src"
         if source_root.is_dir():
             prior = env.get("PYTHONPATH", "")
             env["PYTHONPATH"] = str(source_root) + (os.pathsep + prior if prior else "")
         try:
-            process = self.process_factory(
-                argv,
-                cwd=self.project_root,
-                env=env,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                shell=False,
-                start_new_session=not _windows_host(),
-                **({"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
-                   if _windows_host() else {}),
-            )
+            with self._process_output(job) as output:
+                process = self.process_factory(
+                    argv,
+                    cwd=self.project_root,
+                    env=env,
+                    stdin=subprocess.DEVNULL,
+                    stdout=output,
+                    stderr=subprocess.STDOUT,
+                    shell=False,
+                    start_new_session=not _windows_host(),
+                    **({"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+                       if _windows_host() else {}),
+                )
         except OSError as exc:
             job.status = "failed"
             job.finished_at = _now()
@@ -529,7 +543,8 @@ class ScanLaunchManager:
                       "error", message_code="pipeline.start_failed")
             raise ValueError("scan process could not be managed") from exc
         job.status = "running"
-        self._log(scan_id, "launch.started", "Recon", "AI DAST pipeline process started.", message_code="pipeline.started")
+        self._log(scan_id, "launch.started", "Recon", "AI DAST pipeline process started.",
+                  message_code="pipeline.started", message_params=self._process_result(job))
         threading.Thread(target=self._monitor, args=(job,), daemon=True).start()
         return {
             "scan_id": scan_id, "status": "running", "started_at": started,
@@ -549,6 +564,7 @@ class ScanLaunchManager:
         env = os.environ.copy()
         env["AIDAST_RESULT_ROOT"] = str(self.result_root)
         env["AIDAST_DASHBOARD_MANUAL_LOGIN"] = "1"
+        env["PYTHONUNBUFFERED"] = "1"
         source_root = self.project_root / "src"
         if source_root.is_dir():
             prior = env.get("PYTHONPATH", "")
@@ -558,14 +574,15 @@ class ScanLaunchManager:
             if existing is not None and existing.status in {"pending", "running", "paused"}:
                 raise ValueError("this scan already has an active process")
             try:
-                job.process = self.process_factory(
-                    argv, cwd=self.project_root, env=env,
-                    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL, shell=False,
-                    start_new_session=not _windows_host(),
-                    **({"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
-                       if _windows_host() else {}),
-                )
+                with self._process_output(job) as output:
+                    job.process = self.process_factory(
+                        argv, cwd=self.project_root, env=env,
+                        stdin=subprocess.DEVNULL, stdout=output,
+                        stderr=subprocess.STDOUT, shell=False,
+                        start_new_session=not _windows_host(),
+                        **({"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+                           if _windows_host() else {}),
+                    )
             except OSError as exc:
                 raise ValueError("scan resume process could not be started") from exc
             try:
@@ -578,6 +595,7 @@ class ScanLaunchManager:
             scan_id, f"resume:{attempt_id}:started", plan.stage.title(),
             "Scan resumed from the last unfinished stage.",
             message_code="pipeline.resumed",
+            message_params=self._process_result(job),
         )
         threading.Thread(
             target=self._monitor_resume, args=(job, attempt_id, plan.stage), daemon=True,
@@ -586,6 +604,27 @@ class ScanLaunchManager:
             "scan_id": scan_id, "status": "running", "stage": plan.stage.title(),
             "started_at": started, "targets": list(plan.targets),
         }
+
+    @contextmanager
+    def _process_output(self, job: LaunchJob):
+        """Keep each attempt's diagnostics private and independent of the UI."""
+        directory = self.result_root / ".webui" / "process-logs"
+        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        with tempfile.NamedTemporaryFile(
+            mode="wb", prefix="process-", suffix=".log",
+            dir=directory, delete=False,
+        ) as output:
+            job.process_log = Path(output.name)
+            yield output
+
+    def _process_result(self, job: LaunchJob, code: int | None = None) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        if code is not None:
+            result["exit_code"] = code
+        process_log = getattr(job, "process_log", None)
+        if process_log is not None:
+            result["diagnostic_log"] = str(process_log.relative_to(self.result_root))
+        return result
 
     def _process_marker(self, scan_id: str) -> Path:
         self.projector.validate_scan_id(scan_id)
@@ -602,10 +641,13 @@ class ScanLaunchManager:
         if not _windows_host() and os.getpgid(pid) != pid:
             raise ValueError("scan process was not started in an isolated session")
         _state, started = self._process_stat(pid)
+        self._write_process_marker(scan_id, {"pid": pid, "started": started})
+
+    def _write_process_marker(self, scan_id: str, identity: dict[str, Any]) -> None:
         marker = self._process_marker(scan_id)
         marker.parent.mkdir(parents=True, exist_ok=True)
         temporary = marker.with_name(f".{marker.name}.{uuid4().hex}.tmp")
-        temporary.write_text(json.dumps({"pid": pid, "started": started}), encoding="utf-8")
+        temporary.write_text(json.dumps(identity), encoding="utf-8")
         os.chmod(temporary, 0o600)
         temporary.replace(marker)
 
@@ -680,6 +722,33 @@ class ScanLaunchManager:
             raise ValueError("scan has no persisted status")
         return str(row[0])
 
+    def _remember_pause_status(self, scan_id: str, pid: int, status: str) -> None:
+        """Retain the raw Recon state when a later Pipeline stage is paused."""
+        try:
+            marker = json.loads(self._process_marker(scan_id).read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            # Older in-memory process adapters have no durable marker.
+            # Their existing Recon-only pause contract restores running.
+            if status == "running":
+                return
+            raise ValueError("scan has no persisted process identity")
+        if not isinstance(marker, dict) or marker.get("pid") != pid or self._isolated_scan_pid(scan_id) != pid:
+            raise ValueError("scan process identity changed")
+        marker["pause_resume_status"] = status
+        self._write_process_marker(scan_id, marker)
+
+    def _pause_resume_status(self, scan_id: str) -> str:
+        try:
+            marker = json.loads(self._process_marker(scan_id).read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return "running"
+        if not isinstance(marker, dict):
+            raise ValueError("invalid scan process identity")
+        status = marker.get("pause_resume_status", "running")
+        if not isinstance(status, str) or not re.fullmatch(r"[a-z_]{1,32}", status) or status == "paused":
+            raise ValueError("invalid scan pause status")
+        return status
+
     def pause(self, scan_id: str) -> dict[str, str]:
         self.projector.validate_scan_id(scan_id)
         if os.name != "posix" and not _windows_host():
@@ -688,21 +757,28 @@ class ScanLaunchManager:
             job = self._jobs.get(scan_id)
             if job is not None and job.stop_requested:
                 raise ValueError("scan cancellation is already in progress")
-            if self._persisted_scan_status(scan_id) != "running":
+            state = self.projector.snapshot(scan_id)
+            if state["status"] != "running":
                 raise ValueError("scan is not running")
+            previous_status = self._persisted_scan_status(scan_id)
+            if previous_status == "paused":
+                raise ValueError("scan is not running")
+            if not re.fullmatch(r"[a-z_]{1,32}", previous_status):
+                raise ValueError("invalid scan pause status")
             pid = (self._control_scan(scan_id, "pause") if _windows_host()
                    else self._signal_pid(scan_id, signal.SIGSTOP))
             try:
-                self._set_scan_pause_status(scan_id, expected="running", status="paused")
+                self._remember_pause_status(scan_id, pid, previous_status)
+                self._set_scan_pause_status(scan_id, expected=previous_status, status="paused")
             except (OSError, sqlite3.Error, ValueError):
                 if _windows_host():
                     self._control_scan(scan_id, "resume")
                 else:
-                    signal_session(pid, signal.SIGCONT)
+                    self._signal_pid(scan_id, signal.SIGCONT)
                 raise
             if job is not None:
                 job.status = "paused"
-            self._log(scan_id, "pause.finished", "Recon", "Scan paused by operator.",
+            self._log(scan_id, "pause.finished", state["stage"], "Scan paused by operator.",
                       "warning", message_code="pipeline.paused")
         return {"scan_id": scan_id, "status": "paused"}
 
@@ -711,22 +787,29 @@ class ScanLaunchManager:
         if os.name != "posix" and not _windows_host():
             raise ValueError("scan pause is unavailable on this host")
         with self._lock:
-            if self._persisted_scan_status(scan_id) != "paused":
-                raise ValueError("scan is not paused")
-            pid = (self._control_scan(scan_id, "resume") if _windows_host()
-                   else self._signal_pid(scan_id, signal.SIGCONT))
-            try:
-                self._set_scan_pause_status(scan_id, expected="paused", status="running")
-            except (OSError, sqlite3.Error, ValueError):
-                if _windows_host():
-                    self._control_scan(scan_id, "pause")
-                else:
-                    signal_session(pid, signal.SIGSTOP)
-                raise
             job = self._jobs.get(scan_id)
+            if job is not None and job.stop_requested:
+                raise ValueError("scan cancellation is already in progress")
+            state = self.projector.snapshot(scan_id)
+            if state["status"] != "paused":
+                raise ValueError("scan is not paused")
+            if self._isolated_scan_pid(scan_id) is None:
+                raise ValueError("this scan has no isolated active process managed by this dashboard")
+            resumed_status = self._pause_resume_status(scan_id)
+            # Restore completed Recon before waking a later stage: its input
+            # contract must never observe paused/running Recon after resume.
+            self._set_scan_pause_status(scan_id, expected="paused", status=resumed_status)
+            try:
+                if _windows_host():
+                    self._control_scan(scan_id, "resume")
+                else:
+                    self._signal_pid(scan_id, signal.SIGCONT)
+            except (OSError, sqlite3.Error, ValueError):
+                self._set_scan_pause_status(scan_id, expected=resumed_status, status="paused")
+                raise
             if job is not None:
                 job.status = "running"
-            self._log(scan_id, "pause.resumed", "Recon", "Paused scan continued.",
+            self._log(scan_id, "pause.resumed", state["stage"], "Paused scan continued.",
                       message_code="pipeline.continued")
         return {"scan_id": scan_id, "status": "running"}
 
@@ -735,7 +818,8 @@ class ScanLaunchManager:
         with self._lock:
             job = self._jobs.get(scan_id)
             if job is None or job.process is None:
-                status = self._persisted_scan_status(scan_id)
+                state = self.projector.snapshot(scan_id)
+                status = state["status"]
                 if status not in {"running", "paused"}:
                     raise ValueError("scan is not active")
                 pid = self._isolated_scan_pid(scan_id)
@@ -744,15 +828,20 @@ class ScanLaunchManager:
                 if status == "paused":
                     if _windows_host():
                         self._control_scan(scan_id, "resume")
-                    else:
-                        signal_session(pid, signal.SIGCONT)
                 if _windows_host():
                     self._control_scan(scan_id, "terminate")
                 else:
-                    signal_session(pid, signal.SIGTERM)
+                    try:
+                        signal_session(pid, signal.SIGTERM)
+                    except PermissionError:
+                        # The PID identity was verified above. If macOS denies
+                        # one descendant process-group signal, terminate the
+                        # owned worker directly so cancellation can still
+                        # close its transports and persist a terminal state.
+                        os.kill(pid, signal.SIGTERM)
                 threading.Thread(target=self._finish_adopted_cancel,
-                                 args=(scan_id, pid), daemon=True).start()
-                self._log(scan_id, "cancel.requested", "Recon", "Scan cancellation requested.",
+                                 args=(scan_id, pid, state["stage"]), daemon=True).start()
+                self._log(scan_id, "cancel.requested", state["stage"], "Scan cancellation requested.",
                           "warning", message_code="pipeline.cancel_requested")
                 return {"scan_id": scan_id, "status": "cancelling"}
             if job.status not in {"running", "paused"}:
@@ -766,8 +855,6 @@ class ScanLaunchManager:
                 if job.status == "paused" and isinstance(job.process, subprocess.Popen):
                     if _windows_host():
                         self._control_scan(scan_id, "resume")
-                    elif os.name == "posix":
-                        signal_session(job.process.pid, signal.SIGCONT)
                 if _windows_host() and isinstance(job.process, subprocess.Popen):
                     self._control_scan(scan_id, "terminate")
                 else:
@@ -784,7 +871,7 @@ class ScanLaunchManager:
         result = self.cancel(scan_id)
         return {**result, "status": "stopping"}
 
-    def _finish_adopted_cancel(self, scan_id: str, pid: int) -> None:
+    def _finish_adopted_cancel(self, scan_id: str, pid: int, stage: str = "Recon") -> None:
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline and self._isolated_scan_pid(scan_id) == pid:
             time.sleep(0.1)
@@ -799,24 +886,30 @@ class ScanLaunchManager:
         try:
             self._persist_stop(scan_id)
         except (OSError, sqlite3.Error, ValueError):
-            self._log(scan_id, "cancel.persist_failed", "Recon",
+            self._log(scan_id, "cancel.persist_failed", stage,
                       "Scan process ended, but its persisted status could not be updated.",
                       "error", message_code="pipeline.cancel_persist_failed")
             return
         self._forget_process(scan_id)
-        self._log(scan_id, "cancel.finished", "Recon", "Scan cancelled by operator.",
+        self._log(scan_id, "cancel.finished", stage, "Scan cancelled by operator.",
                   "warning", message_code="pipeline.cancelled")
 
     @staticmethod
     def _terminate_process(process: Any) -> None:
         if isinstance(process, subprocess.Popen) and os.name == "posix":
-            signal_session(process.pid, signal.SIGTERM)
+            try:
+                signal_session(process.pid, signal.SIGTERM)
+            except PermissionError:
+                process.terminate()
             def force_stop() -> None:
                 try:
                     process.wait(timeout=5)
                 except subprocess.TimeoutExpired:
                     if process.poll() is None:
-                        signal_session(process.pid, signal.SIGKILL)
+                        try:
+                            signal_session(process.pid, signal.SIGKILL)
+                        except PermissionError:
+                            process.kill()
             threading.Thread(target=force_stop, daemon=True).start()
         else:
             process.terminate()
@@ -874,11 +967,13 @@ class ScanLaunchManager:
         with self._lock:
             job.finished_at = _now()
             job.status = "completed" if code == 0 else "failed"
+        self._accumulate_runtime_wiki(job)
         self._log(
             job.scan_id, f"resume:{attempt_id}:finished", stage.title(),
             "Resumed scan completed." if code == 0 else "Resumed scan exited with an error.",
             "success" if code == 0 else "error",
             message_code="pipeline.resume_completed" if code == 0 else "pipeline.resume_failed",
+            message_params=self._process_result(job, code),
         )
 
     def _monitor(self, job: LaunchJob) -> None:
@@ -890,6 +985,7 @@ class ScanLaunchManager:
         with self._lock:
             job.finished_at = _now()
             job.status = "completed" if code == 0 else "failed"
+        self._accumulate_runtime_wiki(job)
         try:
             stage = self.projector.snapshot(job.scan_id)["stage"]
         except ScanNotFoundError:
@@ -899,7 +995,9 @@ class ScanLaunchManager:
             else "AI DAST pipeline exited with an error."
         )
         level = "success" if code == 0 else "error"
-        self._log(job.scan_id, "launch.finished", stage, message, level, message_code="pipeline.completed" if code == 0 else "pipeline.failed")
+        self._log(job.scan_id, "launch.finished", stage, message, level,
+                  message_code="pipeline.completed" if code == 0 else "pipeline.failed",
+                  message_params=self._process_result(job, code))
 
     def _finish_stopped_job(self, job: LaunchJob, stage: str) -> None:
         with self._lock:
@@ -911,16 +1009,45 @@ class ScanLaunchManager:
                           "error", message_code="pipeline.cancel_persist_failed")
             job.finished_at = _now()
             job.status = "cancelled"
+            self._accumulate_runtime_wiki(job)
             self._log(job.scan_id, "cancel.finished", stage, "Scan cancelled by operator.",
                       "warning", message_code="pipeline.cancelled")
 
-    def _log(self, scan_id: str, key: str, stage: str, message: str, level: str = "info", *, message_code: str) -> None:
+    def _accumulate_runtime_wiki(self, job: LaunchJob) -> None:
+        """Archive each stable Recon.db without feeding it back into execution."""
+        program_id = getattr(getattr(job, "scope", None), "program_id", None)
+        if not isinstance(program_id, str) or not program_id:
+            return
+        try:
+            from .recon_wiki import ReconWikiCatalog
+            ReconWikiCatalog(self.result_root).accumulate(
+                job.scan_id,
+                program_id=program_id,
+                baseline_id=None,
+                baseline_kind="source",
+                target_id=program_id,
+            )
+        except (OSError, sqlite3.Error, ValueError, RuntimeError) as exc:
+            self._log(
+                job.scan_id, "recon-wiki:auto:failed", "Recon",
+                "Recon Wiki automatic accumulation failed.", "warning",
+                message_code="recon_wiki.auto_failed",
+                message_params={"error_type": type(exc).__name__},
+            )
+        else:
+            self._log(
+                job.scan_id, "recon-wiki:auto:completed", "Recon",
+                "Recon.db was accumulated in the Recon Wiki.", "success",
+                message_code="recon_wiki.auto_completed",
+            )
+
+    def _log(self, scan_id: str, key: str, stage: str, message: str, level: str = "info", *, message_code: str, message_params: dict[str, Any] | None = None) -> None:
         self.projector.record_event(
             scan_id,
             source_key=key,
             event_type="log.appended",
             payload={"stage": stage, "level": level, "message": message,
-                     "message_code": message_code, "message_params": {}},
+                     "message_code": message_code, "message_params": message_params or {}},
         )
 
     def snapshot(self, scan_id: str) -> dict[str, Any]:

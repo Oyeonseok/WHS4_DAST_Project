@@ -33,11 +33,16 @@ class AttackCoordinator:
         self,
         *,
         agent: CodexMainAgent,
+        planning_agent: CodexMainAgent | None = None,
         db_path: Path,
         scope_path: Path,
         policy_path: Path,
     ) -> None:
         self._agent = agent
+        # Endpoint hypothesis planning is part of Attack.  Keep it on the
+        # selected Attack model instead of silently using the Recon/Main model.
+        # The default preserves compatibility for direct coordinator callers.
+        self._planning_agent = planning_agent or agent
         self._db_path = Path(db_path).expanduser().resolve()
         self._scope_path = Path(scope_path).expanduser().resolve()
         self._policy_path = Path(policy_path).expanduser().resolve()
@@ -62,7 +67,7 @@ class AttackCoordinator:
         with closing(sqlite3.connect(self._db_path)) as conn, conn:
             planning_stage = start_stage_run(conn, scan_id=scan_id, stage='attack')
         try:
-            plan_recon_attack(self._db_path, scan_id, agent=self._agent,
+            plan_recon_attack(self._db_path, scan_id, agent=self._planning_agent,
                 progress=lambda processed, total: self._planning_progress(scan_id, processed, total),
                 stage_run_id=planning_stage,
                 repair_progress=lambda processed, total, attempt, issues: self._planning_progress(

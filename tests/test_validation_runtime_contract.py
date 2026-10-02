@@ -136,6 +136,24 @@ class ValidationRuntimeContractTests(unittest.TestCase):
             canonical_sha256(raw),
         )
 
+    def test_negative_control_accepts_only_literal_same_origin_path(self):
+        raw = legacy_contract_document()
+        raw["negative_control"] = {
+            **raw["negative_control"],
+            "endpoint_template": "/__aidast_negative_control_missing__",
+        }
+        validated = validate_runtime_contract(raw)
+        self.assertEqual(
+            validated.negative_control.endpoint_template,
+            "/__aidast_negative_control_missing__",
+        )
+        for invalid in ("https://evil.invalid/x", "//evil.invalid/x", "/../x", "/%2e%2e/x"):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                validate_runtime_contract({
+                    **raw,
+                    "negative_control": {**raw["negative_control"], "endpoint_template": invalid},
+                })
+
     def test_session_verification_rejects_external_write_and_status_only_requests(self):
         base = legacy_contract_document()
         verification = {

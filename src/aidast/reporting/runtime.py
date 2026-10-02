@@ -21,6 +21,19 @@ class ReportError(ValueError):
     """Invalid report input, provenance, or persistence state."""
 
 
+class ReportWriterError(RuntimeError):
+    """An offline writer failed after the report source was verified."""
+
+    def __init__(self, cause: Exception):
+        self.cause_type = type(cause).__name__
+        # Writer exceptions can contain untrusted prompts or credentials.
+        super().__init__(f"report writer failed ({self.cause_type})")
+
+
+class ReportDraftError(ValueError):
+    """Writer output was rejected before it reached immutable storage."""
+
+
 def _json(value: object) -> str:
     encoded = json.dumps(
         value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False,
@@ -112,14 +125,31 @@ class ReportAgent:
         self, pipeline_db: Path, output_dir: Path, *, platform: str, case_id: str,
         language: str | None = None,
     ) -> dict:
-        from .case_runtime import _load, prepare_case_report, record_case_report
+        result = self.prepare(
+            pipeline_db, output_dir, platform=platform, case_id=case_id,
+            language=language,
+        )
+        if result.get("eligibility") in {"known", "review_only"} or result["status"] == "drafted":
+            return result
+        if self.writer is None:
+            return result
+        draft = self.draft(result, case_id=case_id, platform=platform)
+        from .case_runtime import record_case_report
+
+        return record_case_report(Path(result["report_db"]), draft)
+
+    def prepare(
+        self, pipeline_db: Path, output_dir: Path, *, platform: str, case_id: str,
+        language: str | None = None,
+    ) -> dict:
+        """Prepare one isolated case directory without invoking the writer."""
+        from .case_runtime import prepare_case_report
         from .presentation import report_language
 
         if language is not None and language not in ("ko", "en"):
             raise ReportError("report language must be ko or en")
         if language is not None and platform != "generic":
             raise ReportError("language selection is supported for generic reports")
-
         result = prepare_case_report(
             pipeline_db, output_dir, platform=platform, case_id=case_id,
         )
@@ -133,18 +163,37 @@ class ReportAgent:
         if platform == "generic":
             locale = language or report_language(database, platform=platform)
             _publish(database.parent / "Report.language.json", _json({"language": locale}) + "\n")
+        return result
+
+    def draft(self, prepared: dict, *, case_id: str, platform: str) -> dict:
+        """Invoke and validate the writer without mutating report storage."""
+        from .case_runtime import _load
+        from .presentation import report_language
+
         if self.writer is None:
-            return result
-        _, context, _, _ = _load(Path(result["report_db"]))
+            raise ReportError("report drafting requires a writer")
+        database = Path(prepared["report_db"])
+        _, context, stored, _ = _load(database)
+        if stored is not None:
+            raise ReportError("report already contains an immutable draft")
         from .submission import sanitize_writer_context
 
         writer_context = sanitize_writer_context(context)
-        writer_context["language"] = report_language(Path(result["report_db"]), platform=platform)
+        writer_context["language"] = report_language(database, platform=platform)
         writer_context["output_schema"] = ReportDraft.model_json_schema()
         with model_call_context(
             scan_id=writer_context["source"]["scan_id"],
             stage="Report",
             case_id=case_id,
         ):
-            draft = self.writer.write(writer_context)
-        return record_case_report(Path(result["report_db"]), draft)
+            try:
+                draft = self.writer.write(writer_context)
+            except Exception as exc:
+                raise ReportWriterError(exc) from exc
+        from .models import validate_draft
+
+        try:
+            validate_draft(draft, context)
+        except ValueError as exc:
+            raise ReportDraftError(str(exc)) from exc
+        return draft

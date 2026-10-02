@@ -734,6 +734,33 @@ def _redacted_url(url: str) -> str:
     return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, query, ""))
 
 
+def _admission_timeout(policy: dict, timeout: float) -> float:
+    """Bound queue waiting separately from the physical request timeout.
+
+    A compliant shared queue can consume multiple rate slots and response
+    times before this helper is admitted. Only the existing finite request
+    budgets contribute queue slots; this does not authorize extra requests.
+    The governor still enforces its durable scan deadline during admission.
+    """
+    limits = policy["limits"]
+    binding = policy.get("request_governor")
+    if not binding:
+        return timeout
+    # Other policies share this scan queue, even when this policy's own
+    # request allowance is smaller.
+    queue_requests = binding["scan_max_requests"]
+    rate = min(float(limits["requests_per_second"]), binding["requests_per_second"])
+    concurrency = min(limits["concurrency"], binding["concurrency"])
+    response_batches = math.ceil(queue_requests / concurrency)
+    admission = min(
+        3600.0,
+        timeout + queue_requests / rate + response_batches * limits["timeout_seconds"],
+    )
+    if binding["scan_max_seconds"] is not None:
+        admission = min(admission, binding["scan_max_seconds"])
+    return admission
+
+
 def _reserve(
     db_path: Path, *, scan_id: str, stage_run_id: str, task_id: str,
     policy: dict, method: str, url: str, fingerprint: str,
@@ -952,18 +979,33 @@ def guarded_request(
             error_message="stage or task stopped before dispatch", finished_at=time.time(),
         )
         raise RequestGuardError("Attack stage or task stopped before dispatch")
-    _set_status(db_path, request_id, status="running", dispatched_at=time.time())
     try:
-        permit = RequestGovernor(policy.get("request_governor")).reserve(url, timeout_seconds=timeout)
+        governor = RequestGovernor(policy.get("request_governor"))
+        permit = governor.acquire(
+            url, timeout_seconds=timeout,
+            wait_timeout_seconds=_admission_timeout(policy, timeout),
+        )
     except GovernorError as exc:
         _set_status(db_path, request_id, status="failed", error_message=str(exc), finished_at=time.time())
         raise RequestGuardError(str(exc)) from exc
     opener = build_opener(ProxyHandler({}), _NoRedirect())
     opener.addheaders = []
     request = Request(url, data=body, headers=headers, method=method)
+    dispatched = False
     try:
         permit.wait()
         admit()
+        with closing(sqlite3.connect(db_path)) as conn:
+            state = conn.execute(
+                """SELECT s.status,t.status FROM attack_http_requests r
+                   JOIN stage_runs s ON s.stage_run_id=r.stage_run_id
+                   JOIN attack_tasks t ON t.task_id=r.task_id WHERE r.request_id=?""",
+                (request_id,),
+            ).fetchone()
+        if state != ("running", "running"):
+            raise RequestGuardError("Attack stage or task stopped before dispatch")
+        _set_status(db_path, request_id, status="running", dispatched_at=time.time())
+        dispatched = True
         try:
             response = opener.open(request, timeout=permit.timeout_seconds)
         except HTTPError as exc:
@@ -979,9 +1021,11 @@ def guarded_request(
             response.close()
     except Exception as exc:
         _set_status(
-            db_path, request_id, status="outcome_unknown",
-            error_message=type(exc).__name__, finished_at=time.time(),
+            db_path, request_id, status="outcome_unknown" if dispatched else "failed",
+            error_message=type(exc).__name__ if dispatched else str(exc), finished_at=time.time(),
         )
+        if not dispatched:
+            raise RequestGuardError(str(exc)) from exc
         raise RequestGuardError("HTTP request outcome is unknown") from exc
     finally:
         permit.complete()

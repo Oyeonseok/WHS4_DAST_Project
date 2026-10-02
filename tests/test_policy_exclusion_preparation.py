@@ -488,6 +488,22 @@ def test_selected_startup_capabilities_preserve_http_only_and_hold_missing_or_un
             result.require_ready()
 
 
+def test_url_startup_ignores_model_proposed_domain_discovery_steps(tmp_path):
+    from aidast.recon.models import ReconPlan,ReconPlanTarget
+    doc=document(False)
+    target=doc.analysis.in_scope_assets[0]
+    plan=ReconPlan(plan_id='url_capability_fixture',scope_id=doc.scope_id,objective='Offline',mode='FULL_RECON',
+        targets=[ReconPlanTarget(asset_type=target.asset_type,asset=target.asset,
+            steps=['DNS_RESOLUTION','HOST_PORT_DISCOVERY','HTTP_PROBE'],constraints=[])],
+        global_constraints=[],completion_criteria=['review'])
+    operations=api().selected_startup_operations([target],plan=plan)
+    assert operations[target.asset] == [api().StartupOperation('HTTP_PROBE', target.asset)]
+    result=api().prepare_exclusions(document=doc,analysis=doc.analysis,targets=[target],
+        result_root=tmp_path,database_paths=[],cache_only=True,startup_operations=operations)
+    result.require_ready()
+    assert result.public()['held']==0
+
+
 def test_empty_explicit_startup_map_does_not_fall_back_to_an_invented_probe(tmp_path):
     doc=document(False)
     result=api().prepare_exclusions(document=doc,analysis=doc.analysis,targets=doc.analysis.in_scope_assets,
@@ -516,19 +532,26 @@ def test_web_holds_unknown_domain_ip_capabilities_before_process(tmp_path,kind,a
         manager.launch(ScanLaunchRequest(scope_id=doc.scope_id,targets=[asset],authorization_confirmed=True))
 
 
-def test_all_targets_forced_dns_is_checked_even_for_a_url_probe_plan(tmp_path,monkeypatch):
+def test_all_targets_does_not_force_domain_discovery_for_a_url_plan(tmp_path,monkeypatch):
     import aidast.cli as cli
+    from aidast.recon.policy import TargetPolicy
     from aidast.recon.models import ReconPlan,ReconPlanTarget
     doc=approved(tmp_path,document(False))
     class Agent(FakeReconMainAgent):
         def create_recon_plan(self,**kwargs):
             return ReconPlan(plan_id='all_fixture',scope_id=doc.scope_id,objective='Offline fixture',mode='FULL_RECON',
                 targets=[ReconPlanTarget(asset_type='URL',asset=URL,steps=['HTTP_PROBE'],constraints=[])],global_constraints=[],completion_criteria=['review'])
-        def create_target_policies(self,**kwargs):pytest.fail('completed all-targets DNS must be held before policies/login/executor')
+        def create_target_policies(self,**kwargs):
+            assert kwargs['plan'].targets[0].steps == [
+                'HTTP_PROBE','ORIGIN_DISCOVERY','ENDPOINT_DISCOVERY']
+            return {('URL',URL):TargetPolicy(scope_id=doc.scope_id,policy_id='fixture',
+                asset_type='URL',asset=URL,allowed_hosts=['example.com'])}
+    class ReachedSessionSetup(Exception): pass
     monkeypatch.setattr(cli,'CodexMainAgent',lambda **_:Agent())
-    monkeypatch.setattr(cli,'collect_target_sessions',lambda *a,**k:pytest.fail('unmanaged startup opened login'))
-    monkeypatch.setattr(cli,'ReconExecutor',lambda *a,**k:pytest.fail('unmanaged startup created executor'))
-    assert cli.main(['recon',PROGRAM_URL,'--all-targets','--execute','--login-mode','runtime-browser','--output-dir',str(tmp_path/'Scope')])==1
+    monkeypatch.setattr(cli,'collect_target_sessions',lambda *a,**k:pytest.fail('runtime browser collected a session too early'))
+    monkeypatch.setattr(cli,'ReconExecutor',lambda *a,**k:(_ for _ in ()).throw(ReachedSessionSetup()))
+    with pytest.raises(ReachedSessionSetup):
+        cli.main(['recon',PROGRAM_URL,'--all-targets','--execute','--login-mode','runtime-browser','--output-dir',str(tmp_path/'Scope')])
 
 
 @pytest.mark.parametrize('selection', ['denied_url','held_url','held_wildcard','system_browser','ready_url','empty_rules'])

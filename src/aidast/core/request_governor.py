@@ -1,7 +1,9 @@
 """Dependency-free durable outbound safety limits, also loaded by mitmdump.
 
-Reservations never refund request units. Periods are rolling windows; pending
-reservations count toward them too. Synchronous admission rejects immediately;
+Reservations never refund request units. Nonperiodic target budgets apply per
+scan and normalized origin; program budgets remain program-wide. Program and
+target periods are rolling windows across scans; pending reservations count too.
+Synchronous admission rejects immediately;
 async proxy admission can wait within its timeout while response hooks run.
 """
 from __future__ import annotations
@@ -129,8 +131,9 @@ class RequestGovernor:
         b = self.binding
         for rule in b['request_limits']:
             where, args = 'program=? AND id<>?', [b['program_id'], exclude]
-            if rule['scope'] == 'scan': where += ' AND scan=?'; args.append(b['scan_id'])
-            elif rule['scope'] == 'target': where += ' AND origin=?'; args.append(origin)
+            if rule['scope'] == 'scan' or (rule['scope'] == 'target' and rule['period_seconds'] is None):
+                where += ' AND scan=?'; args.append(b['scan_id'])
+            if rule['scope'] == 'target': where += ' AND origin=?'; args.append(origin)
             if rule['period_seconds'] is not None:
                 where += ' AND charged>?'; args.append(now - rule['period_seconds'])
             used = conn.execute('SELECT coalesce(sum(units),0) FROM governor_requests WHERE ' + where, args).fetchone()[0]
@@ -163,7 +166,42 @@ class RequestGovernor:
             conn.execute("INSERT INTO governor_requests VALUES (?,?,?,?,?,?,?,?,'reserved')", (ident, b['program_id'], b['scan_id'], origin, units, concurrency_units, now, expires))
         return _Permit(self, ident, timeout_seconds)
 
-    async def acquire_async(self, url, units=1, timeout_seconds=30, *, concurrency_units=1):
+    def acquire(self, url, units=1, timeout_seconds=30, *, concurrency_units=1,
+                wait_timeout_seconds=None):
+        """Wait for temporary synchronous admission limits before reserving.
+
+        ``reserve`` remains the immediate accounting primitive. Network
+        transports use this method so a rolling rate window or a short-lived
+        concurrency lease delays a request instead of being reported as a
+        permanent exhausted quota.
+        """
+        _number(timeout_seconds, 'request timeout', maximum=86400)
+        if wait_timeout_seconds is None:
+            wait_timeout_seconds = timeout_seconds
+        _number(wait_timeout_seconds, 'request admission timeout', maximum=86400)
+        end = self.clock() + wait_timeout_seconds
+        while True:
+            remaining = end - self.clock()
+            if remaining <= 0:
+                raise GovernorError('shared request deadline exhausted while waiting')
+            try:
+                permit = self.reserve(
+                    url, units, remaining, concurrency_units=concurrency_units,
+                    _nonblocking=True,
+                )
+            except GovernorBusyError as exc:
+                delay = min(exc.retry_after, remaining)
+                if delay <= 0:
+                    raise GovernorError('shared request deadline exhausted while waiting') from exc
+                self.sleeper(delay)
+                continue
+            permit.timeout = timeout_seconds
+            permit.timeout_seconds = timeout_seconds
+            permit.admission_deadline = end
+            return permit
+
+    async def acquire_async(self, url, units=1, timeout_seconds=30, *, concurrency_units=1,
+                            wait_timeout_seconds=None):
         """Wait for temporary limits without blocking the proxy event loop.
 
         Pending capacity retries do not charge a request. A reserved permit is
@@ -171,11 +209,14 @@ class RequestGovernor:
         Permanent budget/quota and policy errors are never retried.
         """
         _number(timeout_seconds, 'request timeout', maximum=86400)
+        if wait_timeout_seconds is None:
+            wait_timeout_seconds = timeout_seconds
+        _number(wait_timeout_seconds, 'request admission timeout', maximum=86400)
         loop = asyncio.get_running_loop()
-        end = loop.time() + timeout_seconds
+        end = loop.time() + wait_timeout_seconds
         permit = None
         try:
-            async with asyncio.timeout(timeout_seconds):
+            async with asyncio.timeout(wait_timeout_seconds):
                 while True:
                     remaining = end - loop.time()
                     if remaining <= 0:
@@ -185,11 +226,14 @@ class RequestGovernor:
                         break
                     except GovernorBusyError as exc:
                         await asyncio.sleep(min(exc.retry_after, remaining))
+                # The reservation lease must cover queueing, while the
+                # physical request still receives the policy's original
+                # network timeout once it is dispatched.
+                permit.timeout = timeout_seconds
                 await permit.wait_async()
                 remaining = end - loop.time()
                 if remaining <= 0:
                     raise TimeoutError()
-                permit.timeout_seconds = min(permit.timeout_seconds, remaining)
                 return permit
         except BaseException as exc:
             if permit is not None:
@@ -204,6 +248,7 @@ class _Permit:
         self.governor, self.ident, self.timeout = governor, ident, timeout
         self.done = False
         self.timeout_seconds = timeout
+        self.admission_deadline = None
 
     def wait(self):
         g = self.governor
@@ -236,11 +281,14 @@ class _Permit:
             now = g.clock()
             if now >= deadline:
                 raise GovernorError('shared scan deadline exhausted')
+            if self.admission_deadline is not None and now >= self.admission_deadline:
+                raise GovernorError('shared request deadline exhausted while waiting')
             if self.done or row is None or row[3] != 'reserved' or now >= row[2]:
                 raise GovernorError('request permit expired or already dispatched')
             rate = g.binding['requests_per_second']
             due = max(now, previous + row[1] / rate if previous is not None else row[4] + (row[1] - 1) / rate)
-            if due >= deadline or due >= row[2]:
+            if (due >= deadline or due >= row[2]
+                    or (self.admission_deadline is not None and due >= self.admission_deadline)):
                 raise GovernorError('shared request deadline exhausted while pacing')
             if due <= now:
                 self.timeout_seconds = min(self.timeout, deadline - now)

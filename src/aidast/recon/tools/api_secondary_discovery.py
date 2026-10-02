@@ -44,6 +44,10 @@ from aidast.recon.tools.js_argument_bindings import extract_response_argument_bi
 from aidast.recon.tools.js_fetch_bindings import extract_fetch_response_bindings
 from aidast.recon.tools.html_scripts import declared_script_urls
 from aidast.recon.tools.openapi_get import declared_get_candidates
+from aidast.recon.tools.passive_declarations import (
+    MAX_DECLARATIONS, declared_form_routes, declared_html_routes, declared_index_routes,
+    declared_js_routes, declared_openapi_routes, inferred_openapi_routes,
+)
 from .observed_parameters import bind_dom_gets, observed_named_values
 from .request_identity import authentication_key, has_authentication, credential_values
 from .js_evidence import DocumentScripts
@@ -211,7 +215,7 @@ def _effective_port(parsed) -> int | None:
 def _same_origin(
     url: str,
     base_url: str,
-) -> bool:
+) -> bool | None:
 
     try:
 
@@ -963,6 +967,13 @@ def _run_zap(
                 timeout=timeout,
             )
 
+    except FileNotFoundError:
+        print(
+            "  [안내] ZAP 실행 파일을 찾지 못해 선택적 2차 탐색을 건너뜁니다."
+        )
+
+        return None
+
     except (
         subprocess.TimeoutExpired,
         OSError,
@@ -1131,6 +1142,42 @@ def _deduplicate(
     return list(
         unique.values()
     )
+
+
+def _merge_passive_declarations(results: list[dict], declarations: list[dict]) -> list[dict]:
+    """Retain declared fields/provenance when an existing response is stronger."""
+    # Discovery relationships may intentionally share a method/URL.  For
+    # example a literal JS route and collection-detail evidence carry distinct
+    # provenance used by scheduling.  Preserve those rows and deduplicate only
+    # the passive declarations being appended.
+    merged = [dict(row) for row in results]
+    by_key = {(str(row.get("method", "GET")).upper(), row.get("url") or row.get("path")): row
+              for row in merged}
+    for declaration in _deduplicate(declarations):
+        key = declaration["method"], declaration["url"]
+        existing = by_key.get(key)
+        if existing is None:
+            existing = dict(declaration)
+            by_key[key] = existing
+            merged.append(existing)
+            continue
+        fields = list(existing.get("declared_parameters") or [])
+        for field in declaration.get("declared_parameters", []):
+            if field not in fields and len(fields) < 100:
+                fields.append(field)
+        if fields:
+            existing["declared_parameters"] = fields
+        evidence = dict(existing.get("evidence") or {})
+        for name in ("source_scripts", "seed_paths"):
+            values = list(evidence.get(name) or [])
+            for value in declaration.get("evidence", {}).get(name, []):
+                if value not in values and len(values) < 10:
+                    values.append(value)
+            if values:
+                evidence[name] = values
+        existing["evidence"] = evidence
+        existing.setdefault("context", declaration.get("context"))
+    return merged
 
 
 # =========================================================
@@ -1541,6 +1588,7 @@ def discover_adaptive_js_api_candidates(
     observed_responses=(),
     ai_pattern_planner=None,
     state: AdaptiveDiscoveryState | None = None,
+    include_passive_writes: bool = False,
 ) -> list[dict]:
     """Check bounded first-party JS GET candidates absent from observed traffic."""
     if target_policy is not None and not proxy_url:
@@ -1586,6 +1634,31 @@ def discover_adaptive_js_api_candidates(
     binding_documents = []
     dom_documents = []
     inline_sources = {}
+    passive_declarations: list[dict] = []
+    if include_passive_writes:
+        for record in observed_responses:
+            if not isinstance(record, dict):
+                continue
+            url, body = record.get("url"), record.get("response_body")
+            if (record.get("method") != "GET" or record.get("capture_bodies") is not True
+                    or record.get("policy_blocked") or not _same_authentication(record, headers)
+                    or not successful_response(record.get("response_status"))
+                    or not isinstance(url, str) or not _same_origin(url, base_url)
+                    or not isinstance(body, (str, bytes)) or len(body) > 2_000_000
+                    or not isinstance(record.get("response_headers"), dict)
+                    or (target_policy is not None and not target_policy.allows_observed_url(url))):
+                continue
+            text = body.decode("utf-8", errors="replace") if isinstance(body, bytes) else body
+            media = _media_type(record["response_headers"])
+            extract = declared_html_routes if media in {"text/html", "application/xhtml+xml"} else declared_index_routes
+            if extract == declared_index_routes and media not in {
+                "text/plain", "application/xml", "text/xml", "application/sitemap+xml",
+            }:
+                continue
+            passive_declarations.extend(extract(text, document_url=url, base_url=base_url,
+                target_policy=target_policy, limit=MAX_DECLARATIONS - len(passive_declarations)))
+            if len(passive_declarations) >= MAX_DECLARATIONS:
+                break
     for record in observed_responses:
         if not isinstance(record, dict):
             continue
@@ -1637,7 +1710,7 @@ def discover_adaptive_js_api_candidates(
         new_scripts = [url for url in scripts if url not in retained_scripts][:script_limit]
         scripts = list(retained_scripts) + new_scripts
     if not scripts and not (ai_pattern_planner is not None and binding_documents):
-        return []
+        return passive_declarations
 
     if broker is None and target_policy is not None:
         broker = _request_broker(target_policy, proxy_url)
@@ -1701,6 +1774,12 @@ def discover_adaptive_js_api_candidates(
             script, module_paths, api_paths = state.script(script_url, body, headers, lambda text: (
                 extract_js_module_references(text), extract_js_api_paths(text, _literal_call_method)))
         analyzed_source[script_url] = script
+        if include_passive_writes:
+            # Keep declarations independently of GET verification budgets. A
+            # template or write is never converted into a request URL here.
+            passive_declarations.extend(declared_js_routes(script, document_url=script_url,
+                base_url=base_url, target_policy=target_policy,
+                limit=MAX_DECLARATIONS - len(passive_declarations)))
         for reference in module_paths:
             module_url = urlparse(urljoin(script_url, reference))._replace(fragment="").geturl()
             if (not _same_origin(module_url, base_url)
@@ -2076,6 +2155,9 @@ def discover_adaptive_js_api_candidates(
         except Exception as exc:
             if diagnostic_callback is not None:
                 diagnostic_callback('phase_error',component='ai_patterns',error_type=type(exc).__name__)
+    # Prefer an independently observed/verified GET over its declaration. The
+    # remaining declarations stay candidates even when verification was deferred.
+    results = _merge_passive_declarations(results, passive_declarations)
     if diagnostic_callback is not None:
         diagnostic_callback(
             "completed", component="adaptive_js",
@@ -2094,6 +2176,8 @@ def discover_adaptive_js_api_candidates(
             detail_route_templates=len(detail_route_templates),
             detail_duplicates_skipped=detail_duplicates_skipped, detail_response_reuses=detail_response_reuses,
             detail_control_probes=detail_control_probes, detail_controls_suppressed=detail_controls_suppressed,
+            passive_declaration_count=len(passive_declarations),
+            passive_declaration_limit_reached=len(passive_declarations) >= MAX_DECLARATIONS,
         )
     return results
 
@@ -2222,6 +2306,7 @@ def discover_api_secondary(
         return []
 
     results: list[dict] = []
+    passive_spec_declarations: list[dict] = []
 
     # =====================================================
     # Temporary Directory
@@ -2263,6 +2348,7 @@ def discover_api_secondary(
             for index, definition in enumerate(openapi_definitions[:10]):
                 document = definition.document
                 document_url = definition.document_url or definition.url or base_url
+                passive_only_document = False
                 if document is None and definition.url:
                     if (not _same_origin(document_url, base_url)
                             or (target_policy is not None and not target_policy.allows_url(document_url, method='GET'))):
@@ -2274,7 +2360,22 @@ def discover_api_secondary(
                     try:
                         document = json.loads(body)
                     except (ValueError, UnicodeDecodeError):
-                        continue
+                        # YAML is already an installed dependency. Safe loading
+                        # parses declarations only and does not resolve references.
+                        try:
+                            import yaml
+                            document = yaml.safe_load(body)
+                            passive_only_document = True
+                        except (ValueError, UnicodeDecodeError, yaml.YAMLError, RecursionError):
+                            continue
+                passive_spec_declarations.extend(declared_openapi_routes(document,
+                    document_url=document_url, base_url=base_url, target_policy=target_policy,
+                    limit=MAX_DECLARATIONS - len(passive_spec_declarations)))
+                passive_spec_declarations.extend(inferred_openapi_routes(document,
+                    document_url=document_url, base_url=base_url, target_policy=target_policy,
+                    limit=MAX_DECLARATIONS - len(passive_spec_declarations)))
+                if passive_only_document:
+                    continue
                 fallback.extend(declared_get_candidates(document, document_url=document_url,
                     base_url=base_url, target_policy=target_policy, observed_values=observed_values))
                 # ZAP imports only parameter-free, literal, allowed GETs. Its
@@ -2308,11 +2409,12 @@ def discover_api_secondary(
             )
             openapi_plan.chmod(0o600)
 
-            if _run_zap(
+            zap_status = _run_zap(
                 openapi_plan,
                 zap_executable=zap_executable,
                 proxy_url=proxy_url,
-            ):
+            )
+            if zap_status:
 
                 openapi_results = (
                     _parse_zap_har(
@@ -2332,6 +2434,8 @@ def discover_api_secondary(
                     openapi_results
                 )
                 activity("phase_completed", "zap_openapi", count=len(openapi_results))
+            elif zap_status is None:
+                activity("phase_skipped", "zap_openapi")
             else:
                 activity("phase_error", "zap_openapi")
             results.extend(fallback)
@@ -2377,11 +2481,12 @@ def discover_api_secondary(
             )
             graphql_plan.chmod(0o600)
 
-            if _run_zap(
+            zap_status = _run_zap(
                 graphql_plan,
                 zap_executable=zap_executable,
                 proxy_url=proxy_url,
-            ):
+            )
+            if zap_status:
 
                 graphql_results = (
                     _parse_zap_har(
@@ -2401,6 +2506,8 @@ def discover_api_secondary(
                     graphql_results
                 )
                 activity("phase_completed", "zap_graphql", count=len(graphql_results))
+            elif zap_status is None:
+                activity("phase_skipped", "zap_graphql")
             else:
                 activity("phase_error", "zap_graphql")
         else:
@@ -2419,6 +2526,12 @@ def discover_api_secondary(
         unique, base_url=base_url, target_policy=target_policy,
         headers=headers, broker=broker, proxy_url=proxy_url,
     )
+    # Parsing is independent of request budgets and ZAP availability. Append
+    # declarations after verification so a template is never actively probed.
+    unique = _merge_passive_declarations(unique, passive_spec_declarations)
+    activity("phase_completed", "openapi_passive_declarations",
+             count=len(passive_spec_declarations),
+             limit_reached=len(passive_spec_declarations) >= MAX_DECLARATIONS)
     activity(
         "phase_completed", "api_get_verification",
         candidate_count=sum(item.get("verification_status") == "candidate" for item in unique),

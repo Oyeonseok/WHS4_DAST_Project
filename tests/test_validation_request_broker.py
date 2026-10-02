@@ -187,6 +187,36 @@ class ValidationRequestBrokerTests(unittest.TestCase):
         self.assertIsNone(calls[1].get_header("Authorization"))
         self.assertIsNone(calls[1].get_header("Cookie"))
 
+    def test_read_only_negative_control_uses_bounded_same_origin_endpoint(self):
+        calls = []
+        proof = [{"assertion_id": "effect", "kind": "body_contains", "expected": "secret"}]
+        runtime = HttpRuntimeContract.model_validate({
+            "schema_version": 1,
+            "target": {"request": {"path_parameters": {"id": 1}}, "assertions": proof},
+            "positive_control": {"request": {"path_parameters": {"id": 1}}, "assertions": proof},
+            "negative_control": {
+                "endpoint_template": "/items/__aidast_negative_control_missing__",
+                "request": {}, "assertions": proof,
+            },
+        })
+        blind = self.blind.model_copy(update={
+            "credential_references": (),
+            "runtime_contract": runtime.model_dump(mode="json"),
+        })
+        def transport(request, timeout):
+            calls.append(request.full_url)
+            response = Response()
+            response.status = 404
+            response.read = lambda maximum: b"missing"
+            return response
+        result = HttpReproductionPort(transport=transport).execute(
+            blind, attempt_kind="negative_control", batch_no=1, ordinal=1,
+            attempt_id=self.attempt, db_path=self.path, scan_id="scan",
+            stage_run_id=self.stage, case_id="case", policy=self.policy,
+        )
+        self.assertEqual(calls, ["https://test/items/__aidast_negative_control_missing__"])
+        self.assertFalse(result.signal_observed)
+
     def test_request_is_policy_checked_and_persists_redacted_ledger(self):
         result = self.broker().request("https://test/items/7?token=private", method="GET")
         self.assertEqual(result.body, b"ok")
