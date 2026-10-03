@@ -739,6 +739,9 @@ def test_normal_attack_continues_after_repair_exhaustion(tmp_path):
     assert result.status == 'COMPLETED'
     assert len(agent.calls) == 1
     assert [task['skill_name'] for task in agent.calls[0]['attack_tasks']] == ['hunt-xss']
+    assert agent.calls[0]['attack_tasks'][0]['selection_reasons'] == [
+        'exhaustive Recon DB coverage item', 'black-box Recon hypothesis: xss',
+    ]
 
 
 def test_all_invalid_proposals_become_unexecuted_and_do_not_claim_tests(tmp_path):

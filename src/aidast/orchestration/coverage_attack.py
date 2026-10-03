@@ -297,11 +297,21 @@ class ExhaustiveAttackCoordinator:
             )
             tasks = []
             for item in claimed:
+                annotation_category = str(
+                    item.get("source_context", {})
+                    .get("active_annotation", {})
+                    .get("category", "")
+                )
+                hypothesis_reason = (
+                    f"black-box Recon hypothesis: {item['vuln_class']}"
+                    if annotation_category == "attack_hypothesis"
+                    else f"explicit source-import annotation: {item['vuln_class']}"
+                )
                 tasks.append({
                     **item,
                     "selection_reasons": [
                         "exhaustive Recon DB coverage item",
-                        f"source vulnerability annotation: {item['vuln_class']}",
+                        hypothesis_reason,
                     ],
                     "template_ids": list(template_ids_for_skill(item["skill_name"])),
                 })
