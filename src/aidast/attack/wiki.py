@@ -111,7 +111,9 @@ def database_snapshot(database: Path, *, kind: str, scan_id: str | None = None) 
                 "ORDER BY rowid", (scan_id,))] if "stage_runs" in tables else []
             if kind == "runtime":
                 attack_stages = [row for row in stages if row["stage"].lower() == "attack"]
-                if not attack_stages or any(row["status"] in {"pending", "running"} for row in stages):
+                if (scan["status"] not in {"completed", "failed", "cancelled"}
+                        or not attack_stages
+                        or any(row["status"] in {"pending", "running"} for row in stages)):
                     raise AttackWikiError("runtime evidence requires a terminal post-run Attack stage")
                 if "attack_http_requests" in tables and conn.execute(
                     "SELECT 1 FROM attack_http_requests WHERE scan_id=? "
@@ -159,10 +161,11 @@ def database_snapshot(database: Path, *, kind: str, scan_id: str | None = None) 
                 })
             source_assisted = scan["scope_type"] == "source_import" or any(
                 "source_import" in str(row["source_tools"] or "") for row in rows)
-            if "endpoint_annotations" in tables and "endpoint_observations" in tables:
+            if {"endpoint_annotations", "annotation_runs"} <= tables:
                 source_assisted = source_assisted or bool(conn.execute("""SELECT 1 FROM endpoint_annotations an
                     JOIN annotation_runs ar ON ar.annotation_run_id=an.annotation_run_id
-                    WHERE ar.scan_id=? AND an.category IN ('vulnerability','source_vulnerability') LIMIT 1""",
+                    WHERE ar.scan_id=? AND an.category IN
+                        ('vulnerability','source_vulnerability','benchmark_catalog_vulnerability') LIMIT 1""",
                     (scan_id,)).fetchone())
             origins = sorted({item["origin"] for item in items})
             return {"scan": scan, "stages": stages, "items": items, "origins": origins,
@@ -304,6 +307,27 @@ def compare_sources(root: Path, *, observed_source_id: str, baseline_source_ids:
         result[name + "_recall"] = len(matched) / len(denominator) if denominator else None
     tested_keys = {coverage_key(item) for item in observed_items if item["tested"]}
     result["missing"] = [dict(zip(KEY_FIELDS, key)) for key in sorted(baseline_keys - tested_keys)]
+    # Keep the full claim denominator authoritative: a post-run blocker does
+    # not establish that a benchmark claim was ineligible before execution.
+    # In particular unsupported also includes exhausted budgets/time limits.
+    observed_statuses: dict[tuple[str, ...], set[str]] = {}
+    for item in observed_items:
+        observed_statuses.setdefault(coverage_key(item), set()).add(item["status"])
+    missing_by_disposition: dict[str, list[dict[str, str]]] = {}
+    for key in sorted(baseline_keys - tested_keys):
+        statuses = observed_statuses.get(key, set())
+        disposition = (next(iter(statuses)) if len(statuses) == 1 else
+                       "not_planned" if not statuses else "mixed")
+        missing_by_disposition.setdefault(disposition, []).append(dict(zip(KEY_FIELDS, key)))
+    result["missing_by_disposition"] = missing_by_disposition
+    result["missing_disposition_counts"] = {
+        name: len(items) for name, items in missing_by_disposition.items()}
+    result["denominator_semantics"] = (
+        "Recall uses all baseline claims (or historically tested coordinates). "
+        "Policy, authentication and unsupported dispositions remain visible in the "
+        "denominator. Post-run dispositions are not verified eligibility labels; "
+        "unsupported may include exhausted budgets. This is coverage recall, "
+        "not measured vulnerability detection recall.")
     classes = sorted({key[3] for key in baseline_keys})
     result["by_vulnerability"] = {name: {"baseline": len({key for key in baseline_keys if key[3] == name}),
         "tested": len({key for key in baseline_keys & tested_keys if key[3] == name})} for name in classes}
@@ -314,6 +338,8 @@ def compare_sources(root: Path, *, observed_source_id: str, baseline_source_ids:
         *[f"- Baseline: [{source['source_id']}](../sources/{source['source_id']}.md) ({source['kind']})" for source in baselines],
         f"- Execution mode: `{result['execution_mode']}`", f"- Coverage denominator: {result['baseline_count']}",
         f"- Positive finding denominator: {result['baseline_positive_count']}", "",
+        result["denominator_semantics"], "",
+        f"- Missing test dispositions: `{result['missing_disposition_counts']}`", "",
         "| Evidence level | Matched | Recall |", "|---|---:|---:|",
         *[f"| {name} | {result[name + '_matched_count']} | " +
           (f"{result[name + '_recall']:.2%}" if result[name + '_recall'] is not None else "N/A") + " |"

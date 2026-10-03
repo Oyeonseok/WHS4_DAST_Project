@@ -84,6 +84,52 @@ def test_runtime_requires_terminal_stage_but_source_is_evaluation_only(tmp_path)
     assert source["execution_mode"] == "source_assisted" and source["tested_count"] == 0
 
 
+def test_runtime_requires_terminal_scan_even_when_attack_stage_has_finished(tmp_path):
+    path = database(tmp_path / "Pipeline.db")
+    with sqlite3.connect(path) as conn:
+        conn.execute("UPDATE scans SET status='running',finished_at=NULL")
+    with pytest.raises(AttackWikiError, match="terminal"):
+        database_snapshot(path, kind="runtime")
+
+
+def test_benchmark_catalog_annotations_mark_source_assisted_execution(tmp_path):
+    path = database(tmp_path / "Pipeline.db")
+    with sqlite3.connect(path) as conn:
+        conn.execute("PRAGMA foreign_keys=OFF")
+        conn.execute("INSERT INTO annotation_runs(annotation_run_id,scan_id,model,prompt_version,"
+                     "taxonomy_version,status) VALUES ('catalog-run','run','test','test','test','completed')")
+        conn.execute("INSERT INTO endpoint_annotations(annotation_id,annotation_run_id,observation_id,"
+                     "category,tag,confidence,rationale,created_at) VALUES "
+                     "('catalog','catalog-run','observation','benchmark_catalog_vulnerability',"
+                     "'idor',1,'claim','2026-01-02')")
+    assert database_snapshot(path, kind="runtime")["execution_mode"] == "source_assisted"
+
+
+def test_missing_tests_keep_policy_auth_and_unsupported_dispositions_separate(tmp_path):
+    root = tmp_path / "Wiki"
+    baselines = [ingest(root, database(tmp_path / f"{parameter}.db", scan=parameter,
+                                    source=True, parameter=parameter), kind="source")["source_id"]
+                 for parameter in ("id", "policy", "auth", "budget", "unplanned")]
+    path = database(tmp_path / "observed.db")
+    with sqlite3.connect(path) as conn:
+        conn.execute("PRAGMA foreign_keys=OFF")
+        for parameter, status in (("policy", "policy_excluded"), ("auth", "blocked_auth"),
+                                  ("budget", "unsupported")):
+            conn.execute("""INSERT INTO attack_coverage_items(coverage_id,coverage_key,scan_id,
+                endpoint_id,annotation_id,vuln_class,skill_name,injection_location,parameter_name,
+                required_identity_role,status) VALUES (?,?, 'run','endpoint',?,'idor',
+                'hunt-idor','path',?,'unauthenticated',?)""",
+                (parameter, parameter.ljust(64, "x"), parameter, parameter, status))
+    observed = ingest(root, path)
+    score = compare_sources(root, observed_source_id=observed["source_id"],
+                            baseline_source_ids=baselines)
+    assert score["baseline_count"] == 5 and score["tested_recall"] == 1 / 5
+    assert score["missing_disposition_counts"] == {
+        "policy_excluded": 1, "blocked_auth": 1, "unsupported": 1, "not_planned": 1}
+    assert len(score["missing"]) == 4
+    assert "not verified eligibility" in score["denominator_semantics"]
+
+
 def test_confirmation_requires_completed_independent_validation(tmp_path):
     path = database(tmp_path / "Pipeline.db", confirmed=True, coverage_status="confirmed")
     assert ingest(tmp_path / "Wiki", path)["confirmed_count"] == 1

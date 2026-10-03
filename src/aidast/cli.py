@@ -1038,6 +1038,46 @@ def _complete_executable_recon_plan(
     return plan.model_copy(update={"targets": targets}) if targets else plan
 
 
+def _finalize_recon_failure(
+    executor: ReconExecutor,
+    *,
+    stage_run_id: str,
+    scan_id: str,
+    database: Path,
+    report_root: Path | None,
+    error: BaseException,
+) -> None:
+    """Attempt each cleanup independently without replacing the original error."""
+    status = "cancelled" if isinstance(error, (KeyboardInterrupt, SystemExit)) else "failed"
+    try:
+        with executor.conn:
+            executor.conn.execute(
+                "UPDATE scans SET status=?, finished_at=CURRENT_TIMESTAMP WHERE scan_id=?",
+                (status, scan_id),
+            )
+    except Exception as cleanup_error:
+        error.add_note(f"Recon scan finalization failed: {type(cleanup_error).__name__}")
+    try:
+        finish_stage_run(
+            executor.conn, stage_run_id, status=status, error_message=str(error),
+        )
+    except Exception as cleanup_error:
+        error.add_note(f"Recon stage finalization failed: {type(cleanup_error).__name__}")
+    try:
+        if report_root is not None and database.is_file():
+            write_scan_summary(
+                database, report_root, scan_id=scan_id,
+                errors=[{"stage": "recon", "error_type": type(error).__name__}],
+            )
+    except Exception as cleanup_error:
+        error.add_note(f"Recon summary write failed: {type(cleanup_error).__name__}")
+    finally:
+        try:
+            getattr(executor, "close", executor.conn.close)()
+        except Exception as cleanup_error:
+            error.add_note(f"Recon cleanup failed: {type(cleanup_error).__name__}")
+
+
 def _run_recon(
     args: argparse.Namespace,
     *,
@@ -1595,34 +1635,10 @@ def _run_recon(
         # KeyboardInterrupt/SystemExit must also finalize the durable scan and
         # stage records; they are re-raised after cleanup below.
         except BaseException as exc:
-            executor.conn.execute(
-                "UPDATE scans SET status='failed', finished_at=CURRENT_TIMESTAMP "
-                "WHERE scan_id=?",
-                (scan_id,),
+            _finalize_recon_failure(
+                executor, stage_run_id=stage_run_id, scan_id=scan_id,
+                database=db_path, report_root=report_root, error=exc,
             )
-            executor.conn.commit()
-            try:
-                finish_stage_run(
-                    executor.conn, stage_run_id, status="failed",
-                    error_message=str(exc),
-                )
-            finally:
-                if report_root is not None and db_path.is_file():
-                    try:
-                        write_scan_summary(
-                            db_path,
-                            report_root,
-                            scan_id=scan_id,
-                            errors=[{
-                                "stage": "recon",
-                                "error_type": type(exc).__name__,
-                            }],
-                        )
-                    except Exception:
-                        # Preserve the original fatal boundary. A summary write
-                        # must never replace an authorization/integrity error.
-                        pass
-                getattr(executor, "close", executor.conn.close)()
             raise
         print(f"Recon Surface saved: {surface_path}")
         try:

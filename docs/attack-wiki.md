@@ -52,6 +52,13 @@ is `null` (displayed N/A) when no historical positives exist. Multiple explicit
 baseline snapshot IDs form a deduplicated union. Runtime baselines must precede
 the observed run; a run cannot be compared to itself.
 
+Comparisons retain the full baseline denominator and report missing tests by
+their persisted disposition (`policy_excluded`, `blocked_auth`, `unsupported`,
+or other statuses); absent hypotheses are `not_planned`. These are execution
+diagnostics, not independently reviewed eligibility labels. `unsupported` can
+also mean exhausted execution budgets, so dropping it would inflate coverage.
+No eligible vulnerability detection recall is inferred from these inventories.
+
 ## Offline workflow
 
 ```sh
@@ -107,4 +114,8 @@ require two principals, such as owner-versus-foreign IDOR differentials, remain
 `blocked_auth` unless two opaque credential references already exist in the
 scan. Challenges requiring destructive state changes, social engineering,
 external services or unsupported protocols stay outside the eligible safe
-black-box denominator and remain visible as explicit blockers.
+black-box evaluation scope and remain visible as explicit blockers. The current
+Wiki does not have a reviewed eligibility manifest: its full-baseline coverage
+recall retains those coordinates in the denominator and reports their distinct
+dispositions. An eligible detection recall requires a separately reviewed,
+version-bound eligibility baseline.

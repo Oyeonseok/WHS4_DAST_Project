@@ -1932,7 +1932,14 @@ def discover_endpoints(
         if run_id and os.environ.get("AIDAST_DASHBOARD_MANUAL_LOGIN") == "1":
             from aidast.auth.manual_login import ManualLoginGate, ManualLoginStore
             from aidast.auth.endpoints import normalize_origin
-            gate = ManualLoginGate(ManualLoginStore(RESULT_ROOT), run_id, normalize_origin(base_url))
+            # Five minutes was too short for a rate-limited SPA to finish
+            # loading and for an operator to create or enter a lab account.
+            # Keep the browser policy-routed while allowing a practical HITL
+            # window; the dashboard confirmation remains mandatory.
+            gate = ManualLoginGate(
+                ManualLoginStore(RESULT_ROOT), run_id, normalize_origin(base_url),
+                timeout_seconds=900,
+            )
             def confirm_login(browser_problem):
                 def poll_browser():
                     # A Playwright-managed visible browser shares this worker's

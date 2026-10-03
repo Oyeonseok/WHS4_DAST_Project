@@ -61,7 +61,11 @@ class ManualLoginStore:
                  confirmed_at, auth_state, problem, action_kind)
                 VALUES (?, ?, ?, 'waiting', ?, ?, NULL, NULL, ?, ?)''',
                 (scan_id, request_id, target_origin, now, now + timeout_seconds, problem, action_kind))
-        return self.read(scan_id)
+            # Return the row written by this transaction. A later read by scan
+            # alone could return a replacement request owned by another gate.
+            row = conn.execute('SELECT * FROM manual_login WHERE scan_id=? AND request_id=?',
+                               (scan_id, request_id)).fetchone()
+        return dict(row)
 
     def read(self, scan_id: str) -> dict | None:
         with self._connect() as conn:
@@ -80,7 +84,9 @@ class ManualLoginStore:
                 (now, scan_id, request_id, now)).rowcount
             if not changed:
                 raise ValueError('login request is no longer waiting or does not match this scan')
-        return self.read(scan_id)
+            row = conn.execute('SELECT * FROM manual_login WHERE scan_id=? AND request_id=?',
+                               (scan_id, request_id)).fetchone()
+        return dict(row)
 
     def reject_confirmation(self, scan_id: str, request_id: str, problem: str) -> None:
         with self._connect() as conn:
@@ -143,5 +149,10 @@ class ManualLoginGate:
         except BaseException:
             current = self.store.read(self.scan_id)
             if current and current['request_id'] == request_id and current['status'] in {'waiting', 'confirmed'}:
-                self.store.finish(self.scan_id, request_id, 'failed')
+                try:
+                    self.store.finish(self.scan_id, request_id, 'failed')
+                except ValueError:
+                    # Another gate may replace the row after read(). Leave its
+                    # request intact and preserve the original browser error.
+                    pass
             raise
