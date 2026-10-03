@@ -9,7 +9,11 @@ statuses and authentication requirements to choose applicable installed Hunt Ski
 A tag describes observed functionality; it does not establish a vulnerability.
 No scan-wide top-eight restriction applies. Eight is an execution batch size.
 Keep separate hypotheses for distinct parameter locations/names and required identities.
-Preserve source/benchmark hypotheses; never imply that other endpoints were tested.
+For a normal dashboard scan, use only black-box Recon evidence. Source vulnerability
+annotations, benchmark catalog claims, prior Wiki baselines, and answer inventories are
+evaluation-only and must never enter this planning prompt. Explicit `source_import`
+workflows bypass this rule through their separate source-assisted coverage path. Never
+imply that an endpoint was tested during planning.
 
 Only reference the supplied endpoint, its own annotation IDs, and captured parameter
 name/location pairs. Endpoint-wide tests use location `endpoint` and an empty name.

@@ -66,7 +66,10 @@ class ExhaustiveAttackCoordinator:
             resolve_abandoned_attack_leads(conn, scan_id)
         manifest = ensure_coverage_manifest(self.db_path, scan_id)
         if not manifest.total:
-            raise ValueError("Recon DB has no source vulnerability coverage annotations")
+            raise ValueError(
+                "Recon DB has no executable black-box hypotheses or explicit "
+                "source-import coverage annotations"
+            )
         stages: list[str] = []
         for _batch_no in range(1, self.max_batches + 1):
             current = coverage_status(self.db_path, scan_id)
