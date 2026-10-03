@@ -25,13 +25,19 @@ class AttackWikiCatalog(ReconWikiCatalog):
                         continue
                     kind = "source" if inventory["execution_mode"] == "source_assisted" else "runtime"
                     relative = path.resolve().relative_to(self.result_root).as_posix()
+                    location = Path(relative).parent.as_posix()
+                    route_keys = frozenset(
+                        (str(item["method"]), str(item["path"]))
+                        for item in inventory["items"]
+                    )
                     entries.append({"database_id": hashlib.sha256(relative.encode()).hexdigest()[:24],
                         "scan_id": inventory["scan"]["scan_id"], "kind": kind,
-                        "label": f"{inventory['scan']['scan_id']} · {path.name}",
+                        "label": f"{inventory['scan']['scan_id']} · {location} · {path.name}",
                         "target": ", ".join(inventory["origins"]),
                         "started_at": inventory["scan"]["started_at"] or "",
                         "hypothesis_count": len(inventory["items"]),
-                        "execution_mode": inventory["execution_mode"], "_path": path.resolve()})
+                        "execution_mode": inventory["execution_mode"], "_path": path.resolve(),
+                        "_route_keys": route_keys})
                 except (AttackWikiError, OSError, sqlite3.Error, ValueError):
                     continue
         return sorted(entries, key=lambda item: (item["started_at"], item["scan_id"]), reverse=True)
@@ -72,6 +78,11 @@ class AttackWikiCatalog(ReconWikiCatalog):
                 raise AttackWikiError("source-assisted evidence cannot be a black-box runtime baseline")
             if baseline_kind == "source" and baseline["kind"] != "source":
                 raise AttackWikiError("selected baseline source provenance does not match")
+            if not runtime["_route_keys"] & baseline["_route_keys"]:
+                raise AttackWikiError(
+                    "selected baseline route inventory does not overlap this scan; "
+                    "choose a baseline for the same application"
+                )
             baseline_source = ingest_database(wiki_root, baseline["_path"], kind=baseline_kind,
                 label=baseline["scan_id"], target_id=logical_target, scan_id=baseline["scan_id"])
             comparison = compare_sources(wiki_root, observed_source_id=source["source_id"],

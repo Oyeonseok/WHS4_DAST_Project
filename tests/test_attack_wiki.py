@@ -213,6 +213,26 @@ def test_dashboard_opaque_ids_and_symlink_boundary(tmp_path):
     assert catalog.status("run", program_id="program")["source_id"] == result["source_id"]
 
 
+def test_dashboard_rejects_disjoint_application_baseline(tmp_path):
+    root = tmp_path / "result"
+    database(root / "runtime/Pipeline.db")
+    baseline_path = database(
+        root / "different-app/Pipeline.db", scan="source", source=True
+    )
+    with sqlite3.connect(baseline_path) as conn:
+        conn.execute(
+            "UPDATE endpoints SET path='/foreign/:id',normalized_path='/foreign/:id'"
+        )
+    catalog = AttackWikiCatalog(root)
+    baseline = next(item for item in catalog.entries() if item["scan_id"] == "source")
+    assert "different-app" in baseline["label"]
+    with pytest.raises(AttackWikiError, match="route inventory does not overlap"):
+        catalog.accumulate(
+            "run", program_id="program", baseline_id=baseline["database_id"],
+            baseline_kind="source",
+        )
+
+
 def test_cli_ingests_and_lints(tmp_path, capsys):
     path = database(tmp_path / "Pipeline.db")
     root = tmp_path / "Wiki"
