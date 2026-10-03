@@ -140,6 +140,22 @@ class FfufRootSelectionSkillTests(unittest.TestCase):
         self.assertEqual(roots, ["/api"])
         self.assertEqual(agent.call_args.kwargs["main_model"], "gpt-6-sol")
 
+    def test_selector_drops_api_collection_leaf_without_literal_child_actions(self) -> None:
+        result = FfufRootSelection(
+            base_url="", roots=["/", "/api", "/api/Products", "/rest/admin"],
+            count=4, selection_reason="Observed API roots.",
+        )
+        endpoints = [
+            {"path": "/api/Products", "method": "GET", "source": "browser"},
+            {"path": "/api/Products/{id}", "method": "GET", "source": "js"},
+            {"path": "/rest/admin", "method": "GET", "source": "browser"},
+            {"path": "/rest/admin/application-version", "method": "GET", "source": "js"},
+        ]
+        with mock.patch.object(CodexMainAgent, "_run_structured", return_value=result):
+            roots = select_ffuf_roots_from_endpoints(endpoints)
+
+        self.assertEqual(roots, ["/", "/api", "/rest/admin"])
+
     def test_ffuf_selects_roots_before_running(self) -> None:
         with tempfile.NamedTemporaryFile() as wordlist:
             with (

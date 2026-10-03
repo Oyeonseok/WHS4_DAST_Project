@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -72,6 +73,43 @@ def _validate_selected_roots(
     return sorted(selected, key=lambda root: (root.count("/"), root))[:max_roots]
 
 
+def _remove_api_collection_leaves(
+    roots: list[str], endpoints: list[dict[str, str]],
+) -> list[str]:
+    """Do not append a generic discovery wordlist below a collection leaf.
+
+    A public client frequently exposes both ``/api/Products`` and
+    ``/api/Products/{id}``. Fuzzing ``/api/Products/FUZZ`` with deployment
+    words such as ``health`` or ``debug`` mostly exercises the ORM identifier
+    parser and produces misleading 500 routes. Keep a deeper API/REST root only
+    when Recon observed at least one literal child action beneath it. Dynamic
+    identifiers do not make a collection a useful discovery prefix.
+    """
+    observed = {item["path"].rstrip("/") or "/" for item in endpoints}
+    result = []
+    for root in roots:
+        normalized = root.rstrip("/") or "/"
+        parts = [part for part in normalized.split("/") if part]
+        if len(parts) < 2 or parts[0].casefold() not in {"api", "rest"}:
+            result.append(root)
+            continue
+        prefix = normalized + "/"
+        children = {
+            path[len(prefix):].split("/", 1)[0]
+            for path in observed
+            if path.startswith(prefix)
+        }
+        literal_children = {
+            child for child in children
+            if child and not child.isdigit()
+            and re.fullmatch(r"(?::[A-Za-z_$][\w$.-]*|\{[A-Za-z_$][\w$.-]*\})", child) is None
+        }
+        if normalized in observed and not literal_children:
+            continue
+        result.append(root)
+    return result
+
+
 def select_ffuf_roots_from_endpoints(
     endpoints: list[dict], *, max_roots: int = DEFAULT_MAX_ROOTS,
     target_policy: TargetPolicy | None = None,
@@ -121,11 +159,12 @@ def select_ffuf_roots_from_endpoints(
     except Exception as exc:
         raise FfufRootSelectionError("ffuf root selection agent failed") from exc
 
-    return _validate_selected_roots(
+    roots = _validate_selected_roots(
         result.roots,
         allowed=_allowed_prefixes(payload),
         max_roots=max_roots,
     )
+    return _remove_api_collection_leaves(roots, payload)
 
 
 __all__ = [
