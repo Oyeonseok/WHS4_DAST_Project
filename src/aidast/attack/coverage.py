@@ -853,19 +853,27 @@ def claim_coverage_batch(
         conn, scan_id=scan_id, stage_run_id=stage_run_id,
     )
     rows = conn.execute(
-        """SELECT c.*,e.method,e.normalized_path,o.base_url AS origin_url
-           FROM attack_coverage_items c
-           JOIN endpoints e ON e.endpoint_id=c.endpoint_id
-           JOIN origins o ON o.origin_id=e.origin_id
-           WHERE c.scan_id=? AND c.status IN ('pending','error_retryable')
-             AND c.attempt_count < ?
-           ORDER BY CASE c.status WHEN 'error_retryable' THEN 0 ELSE 1 END,
-                    CASE c.vuln_class
+        """WITH ranked AS (
+               SELECT c.*,e.method,e.normalized_path,o.base_url AS origin_url,
+                      ROW_NUMBER() OVER (
+                          PARTITION BY c.status,c.vuln_class
+                          ORDER BY e.normalized_path,c.coverage_id
+                      ) AS class_rank
+               FROM attack_coverage_items c
+               JOIN endpoints e ON e.endpoint_id=c.endpoint_id
+               JOIN origins o ON o.origin_id=e.origin_id
+               WHERE c.scan_id=? AND c.status IN ('pending','error_retryable')
+                 AND c.attempt_count < ?
+           )
+           SELECT * FROM ranked
+           ORDER BY CASE status WHEN 'error_retryable' THEN 0 ELSE 1 END,
+                    class_rank,
+                    CASE vuln_class
                         WHEN 'brute_force' THEN 90
                         WHEN 'race_condition' THEN 91
                         ELSE 10
                     END,
-                    c.vuln_class,e.normalized_path,c.coverage_id
+                    vuln_class,normalized_path,coverage_id
            LIMIT ?""",
         (scan_id, max_attempts, batch_size),
     ).fetchall()

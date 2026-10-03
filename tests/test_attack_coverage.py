@@ -613,6 +613,35 @@ def test_disruptive_rate_and_concurrency_classes_are_scheduled_last(tmp_path: Pa
     assert "brute_force" not in first_batch_classes
 
 
+def test_each_batch_gives_distinct_vulnerability_classes_a_turn(tmp_path: Path) -> None:
+    imported = imported_pipeline(tmp_path)
+    ensure_coverage_manifest(imported.pipeline_database, imported.scan_id)
+    with sqlite3.connect(imported.pipeline_database) as conn:
+        rows = conn.execute(
+            "SELECT coverage_id FROM attack_coverage_items ORDER BY rowid"
+        ).fetchall()
+        for (coverage_id,) in rows[:-1]:
+            conn.execute(
+                "UPDATE attack_coverage_items SET vuln_class='auth_bypass' "
+                "WHERE coverage_id=?", (coverage_id,),
+            )
+        conn.execute(
+            "UPDATE attack_coverage_items SET vuln_class='cors' WHERE coverage_id=?",
+            (rows[-1][0],),
+        )
+    agent = UnsupportedCoverageAgent()
+    ExhaustiveAttackCoordinator(
+        agent=agent, db_path=imported.pipeline_database,
+        scope_path=imported.recon_database.parent / "Scope.md",
+        policy_path=imported.recon_database.parent / "TargetPolicy.json",
+        batch_size=2,
+    ).run(imported.scan_id)
+
+    assert {task["vuln_class"] for task in agent.calls[0]["attack_tasks"]} == {
+        "auth_bypass", "cors",
+    }
+
+
 def test_exhaustive_interrupt_persists_retryable_recovery_state(tmp_path: Path) -> None:
     imported = imported_pipeline(tmp_path)
 
@@ -635,6 +664,37 @@ def test_exhaustive_interrupt_persists_retryable_recovery_state(tmp_path: Path) 
         assert conn.execute(
             "SELECT status,count(*) FROM attack_coverage_items GROUP BY status ORDER BY status"
         ).fetchall() == [("error_retryable", 2), ("pending", 2)]
+
+
+def test_model_policy_refusal_without_requests_is_terminal_and_other_batches_continue(
+    tmp_path: Path,
+) -> None:
+    imported = imported_pipeline(tmp_path)
+
+    class RefusingAgent:
+        calls = 0
+
+        def run_attack_orchestrator(self, **kwargs):
+            self.calls += 1
+            error = RuntimeError("bounded model invocation was refused")
+            error.failure_code = "model_policy_refusal"
+            raise error
+
+    agent = RefusingAgent()
+    result = ExhaustiveAttackCoordinator(
+        agent=agent, db_path=imported.pipeline_database,
+        scope_path=imported.recon_database.parent / "Scope.md",
+        policy_path=imported.recon_database.parent / "TargetPolicy.json",
+        batch_size=2,
+    ).run(imported.scan_id)
+
+    assert agent.calls == 2
+    assert result.coverage["by_status"] == {"unsupported": 4}
+    with sqlite3.connect(imported.pipeline_database) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM attack_attempts").fetchone() == (0,)
+        assert conn.execute(
+            "SELECT DISTINCT status FROM stage_runs WHERE stage='attack'"
+        ).fetchall() == [("completed",)]
 
 
 def test_failed_batch_preserves_terminal_per_task_dispositions(tmp_path: Path) -> None:

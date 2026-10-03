@@ -1254,6 +1254,12 @@ codex exec process. Return only the required structured result.
 
             def failure(message: str, code: str, stderr: str = "", exit_code: int | None = None):
                 error = MainAgentError(message)
+                diagnostic_text = (stderr + "\n" + message).casefold()
+                error.failure_code = (
+                    "model_policy_refusal"
+                    if "flagged for possible cybersecurity risk" in diagnostic_text
+                    else code
+                )
                 saved = preserve_native_failure(
                     db_path, scan_id=scan_id, stage_run_id=stage_run_id, event_text=event_text,
                     stderr=stderr, failure_code=code, before=before, exit_code=exit_code,

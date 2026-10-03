@@ -18,7 +18,7 @@ from aidast.attack.coverage import (
 )
 from aidast.attack.template_loader import template_ids_for_skill
 from aidast.orchestration.attack import AttackBatchFailure, AttackCoordinator, AttackCoordinatorError
-from aidast.pipeline.lifecycle import finish_stage_run, start_stage_run
+from aidast.pipeline.lifecycle import finish_stage_run, start_stage_run, transition_task
 
 
 @dataclass(frozen=True)
@@ -134,7 +134,9 @@ class ExhaustiveAttackCoordinator:
                     continue
                 raise
             except BaseException as exc:
-                self._recover_failed_batch(stage_run_id, exc)
+                can_continue = self._recover_failed_batch(stage_run_id, exc)
+                if getattr(exc, "failure_code", None) == "model_policy_refusal" and can_continue:
+                    continue
                 raise
         return self._finish_result(scan_id, stages)
 
@@ -153,6 +155,48 @@ class ExhaustiveAttackCoordinator:
         with closing(sqlite3.connect(self.db_path)) as conn, conn:
             conn.row_factory = sqlite3.Row
             conn.execute("PRAGMA foreign_keys=ON")
+            policy_refusal = getattr(exc, "failure_code", None) == "model_policy_refusal"
+            if policy_refusal:
+                open_leads = conn.execute(
+                    """SELECT COUNT(*) FROM attack_attempts a
+                       JOIN attack_tasks t ON t.task_id=a.task_id
+                       WHERE t.stage_run_id=? AND a.outcome='lead'
+                         AND a.finding_id IS NULL AND a.resolved_at IS NULL""",
+                    (stage_run_id,),
+                ).fetchone()[0]
+                unknown_requests = conn.execute(
+                    """SELECT COUNT(*) FROM attack_http_requests
+                       WHERE stage_run_id=? AND status IN
+                         ('reserved','running','outcome_unknown')""",
+                    (stage_run_id,),
+                ).fetchone()[0]
+                if not open_leads and not unknown_requests:
+                    reason = (
+                        "Attack model policy refused this bounded task; no HTTP request "
+                        "or unresolved lead was produced, so the task was not tested."
+                    )
+                    task_rows = conn.execute(
+                        """SELECT task_id,status FROM attack_tasks
+                           WHERE stage_run_id=? AND status IN ('pending','running')""",
+                        (stage_run_id,),
+                    ).fetchall()
+                    for task in task_rows:
+                        transition_task(
+                            conn, task["task_id"],
+                            status="skipped" if task["status"] == "pending" else "cancelled",
+                            error_message=reason,
+                        )
+                    coverage_rows = conn.execute(
+                        """SELECT coverage_id,last_task_id FROM attack_coverage_items
+                           WHERE last_stage_run_id=? AND status='running'""",
+                        (stage_run_id,),
+                    ).fetchall()
+                    for coverage in coverage_rows:
+                        transition_coverage(
+                            conn, coverage["coverage_id"], "unsupported", reason,
+                            stage_run_id=stage_run_id,
+                            task_id=coverage["last_task_id"],
+                        )
             # Preserve per-task terminal evidence even when the native
             # orchestrator rejects the batch as a whole (for example,
             # one denied authorization among otherwise completed tasks).
@@ -179,7 +223,9 @@ class ExhaustiveAttackCoordinator:
                 (stage_run_id,),
             ).fetchone()[0]
             can_continue = not (open_leads or unknown_requests or incomplete_tasks)
-            recoverable = isinstance(exc, AttackBatchFailure) and can_continue
+            recoverable = (
+                isinstance(exc, AttackBatchFailure) or policy_refusal
+            ) and can_continue
             row = conn.execute(
                 "SELECT status FROM stage_runs WHERE stage_run_id=?",
                 (stage_run_id,),
