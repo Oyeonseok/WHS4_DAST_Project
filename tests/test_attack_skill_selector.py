@@ -81,6 +81,64 @@ class AttackSkillSelectorTests(unittest.TestCase):
             )
         self.assertEqual(selected, ("hunt-misc",))
 
+    def test_approved_scan_ignores_source_and_benchmark_skill_answers(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path = root / "Pipeline.db"
+            conn = db.init_db(path)
+            db.insert_scan(conn, scan_id="scan", scope_type="approved", scope_value="scope")
+            asset = db.insert_asset(
+                conn, scan_id="scan", identifier="example.test", asset_type="DOMAIN",
+            )
+            origin = db.upsert_origin(
+                conn, asset_id=asset, scheme="https", host="example.test", port=443,
+                base_url="https://example.test",
+            )
+            endpoint = db.upsert_endpoint(
+                conn, origin_id=origin, method="GET", path="/neutral",
+                normalized_path="/neutral", source_tool="fixture",
+            )
+            conn.execute(
+                "INSERT INTO observations VALUES "
+                "('source-answer',?,'source_vulnerability','sqli','session answer','fixture',CURRENT_TIMESTAMP)",
+                (origin,),
+            )
+            conn.execute(
+                "INSERT INTO annotation_runs VALUES "
+                "('tags','scan','fixture','tags','1','completed',NULL,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)"
+            )
+            conn.execute(
+                "INSERT INTO endpoint_observations "
+                "(observation_id,endpoint_id,source_tool,discovery_kind,observed_url,"
+                "association_method,observed_at) VALUES "
+                "('endpoint-observation',?,'fixture','http','https://example.test/neutral',"
+                "'exact',CURRENT_TIMESTAMP)",
+                (endpoint,),
+            )
+            conn.executemany(
+                "INSERT INTO endpoint_annotations(annotation_id,observation_id,annotation_run_id,"
+                "category,tag,rationale,created_at) VALUES (?, 'endpoint-observation','tags',?,?,"
+                "'answer',CURRENT_TIMESTAMP)",
+                [
+                    ('source-annotation', 'source_vulnerability', 'sqli'),
+                    ('benchmark-annotation', 'benchmark_catalog_vulnerability', 'xss'),
+                ],
+            )
+            conn.execute(
+                "UPDATE scans SET status='completed',finished_at=CURRENT_TIMESTAMP "
+                "WHERE scan_id='scan'"
+            )
+            conn.commit()
+            conn.close()
+
+            selected, reasons = select_relevant_attack_skills(
+                path, "scan", available_attack_skill_names(),
+            )
+
+        self.assertEqual(selected, ("hunt-misc",))
+        self.assertNotIn("hunt-sqli", reasons)
+        self.assertNotIn("hunt-xss", reasons)
+
     def test_unrelated_origin_header_does_not_select_cors(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = selector_database(Path(temporary))

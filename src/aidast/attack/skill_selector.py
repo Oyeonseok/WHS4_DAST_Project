@@ -117,10 +117,11 @@ def select_relevant_attack_skills(
     with closing(sqlite3.connect(uri, uri=True)) as conn:
         conn.execute("PRAGMA query_only=ON")
         scan = conn.execute(
-            "SELECT status,finished_at FROM scans WHERE scan_id=?", (scan_id,)
+            "SELECT status,finished_at,scope_type FROM scans WHERE scan_id=?", (scan_id,)
         ).fetchone()
         if scan is None or str(scan[0]).casefold() != "completed" or not scan[1]:
             raise ValueError("Attack Skill selection requires a completed Recon scan")
+        source_assisted = str(scan[2]) == "source_import"
 
         origins = conn.execute(
             """SELECT o.base_url,o.framework_signature,o.main_crawler_mode,o.spa_detected
@@ -144,11 +145,15 @@ def select_relevant_attack_skills(
                WHERE a.scan_id=? AND e.is_excluded=0 LIMIT 3000""",
             (scan_id,),
         ).fetchall()
+        observation_filter = "" if source_assisted else (
+            "AND lower(r.type) NOT IN "
+            "('vulnerability','source_vulnerability','benchmark_catalog_vulnerability')"
+        )
         observations = conn.execute(
-            """SELECT r.type,r.key,r.value
+            f"""SELECT r.type,r.key,r.value
                FROM observations r JOIN origins o ON o.origin_id=r.origin_id
                JOIN assets a ON a.asset_id=o.asset_id
-               WHERE a.scan_id=? LIMIT 2000""",
+               WHERE a.scan_id=? {observation_filter} LIMIT 2000""",
             (scan_id,),
         ).fetchall()
         signals = conn.execute(
@@ -158,14 +163,18 @@ def select_relevant_attack_skills(
                WHERE a.scan_id=? LIMIT 2000""",
             (scan_id,),
         ).fetchall()
+        annotation_filter = "" if source_assisted else (
+            "AND n.category NOT IN "
+            "('vulnerability','source_vulnerability','benchmark_catalog_vulnerability')"
+        )
         annotations = conn.execute(
-            """SELECT n.category,n.tag
+            f"""SELECT n.category,n.tag
                FROM endpoint_annotations n
                JOIN endpoint_observations v ON v.observation_id=n.observation_id
                JOIN endpoints e ON e.endpoint_id=v.endpoint_id
                JOIN origins o ON o.origin_id=e.origin_id
                JOIN assets a ON a.asset_id=o.asset_id
-               WHERE a.scan_id=? LIMIT 3000""",
+               WHERE a.scan_id=? {annotation_filter} LIMIT 3000""",
             (scan_id,),
         ).fetchall()
         transactions = conn.execute(
@@ -274,7 +283,7 @@ def select_relevant_attack_skills(
     source_markers = {
         str(key or "").casefold()
         for kind, key, _value in observations
-        if str(kind or "").casefold() == "source_vulnerability"
+        if source_assisted and str(kind or "").casefold() == "source_vulnerability"
     }
     source_skill_map = {
         # The score orders a bounded eight-skill validation batch by likely
