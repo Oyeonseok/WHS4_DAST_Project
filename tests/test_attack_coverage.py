@@ -51,6 +51,13 @@ def test_jwt_coverage_requests_an_issued_authenticated_token() -> None:
     assert _credential_role("jwt_crypto", "unauthenticated") == "authenticated"
 
 
+@pytest.mark.parametrize("vuln_class", ["session", "auth_bypass", "cors"])
+def test_control_differentials_receive_an_opaque_authenticated_reference(
+    vuln_class: str,
+) -> None:
+    assert _credential_role(vuln_class, "unauthenticated") == "authenticated"
+
+
 def test_brute_force_prefers_verifier_secret_over_replacement_password() -> None:
     class Parameter(dict):
         pass
