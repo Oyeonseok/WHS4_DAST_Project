@@ -67,7 +67,13 @@ class AttackCoordinator:
         with closing(sqlite3.connect(self._db_path)) as conn, conn:
             planning_stage = start_stage_run(conn, scan_id=scan_id, stage='attack')
         try:
+            # Keep each structured planning turn small.  Recon can surface
+            # hundreds of SPA routes; sixteen dense endpoint contexts made a
+            # single model turn exceed the 15-minute idle deadline and lose
+            # the rest of the pipeline.  Each completed batch is durable, so
+            # four endpoints provides frequent progress and bounded retries.
             plan_recon_attack(self._db_path, scan_id, agent=self._planning_agent,
+                batch_size=4,
                 progress=lambda processed, total: self._planning_progress(scan_id, processed, total),
                 stage_run_id=planning_stage,
                 repair_progress=lambda processed, total, attempt, issues: self._planning_progress(
@@ -267,10 +273,6 @@ class AttackCoordinator:
                 "native Attack completion envelope mismatch: " + ",".join(mismatches)
             )
 
-        if result.status == "FAILED":
-            reason = result.summary.strip() or "no failure summary"
-            raise AttackBatchFailure(f"native Attack Agent returned FAILED: {reason}")
-
         with closing(sqlite3.connect(self._db_path)) as conn:
             rows = conn.execute(
                 "SELECT finding_id FROM findings WHERE scan_id=?", (scan_id,)
@@ -325,6 +327,9 @@ class AttackCoordinator:
         ]
         if invalid_confirmed:
             raise AttackCoordinatorError("confirmed attempts must link to a finding")
+        if result.status == "FAILED":
+            reason = result.summary.strip() or "no failure summary"
+            raise AttackBatchFailure(f"native Attack Agent returned FAILED: {reason}")
         incomplete_tasks = [task_id for task_id, status in task_rows if status not in {"completed", "skipped"}]
         if incomplete_tasks:
             raise AttackCoordinatorError(

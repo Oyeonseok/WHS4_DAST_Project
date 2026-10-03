@@ -474,6 +474,42 @@ def test_coverage_task_exposes_all_db_parameters_and_source_context(tmp_path: Pa
     assert "SQL injection" in task["source_context"]["active_annotation"]["rationale"]
 
 
+def test_coverage_context_exposes_request_shape_without_captured_values(tmp_path: Path) -> None:
+    imported = imported_pipeline(tmp_path)
+    with sqlite3.connect(imported.pipeline_database) as conn:
+        endpoint_id = conn.execute(
+            "SELECT endpoint_id FROM endpoints WHERE normalized_path LIKE '%users%' LIMIT 1"
+        ).fetchone()[0]
+        conn.execute(
+            """INSERT INTO http_transactions(
+                   http_transaction_id,endpoint_id,source,method,url,request_body,content_type
+               ) VALUES(?,?,?,?,?,?,?)""",
+            ("tx-shape", endpoint_id, "browser", "POST", "https://example.test/api/users/7",
+             json.dumps({"display_name": "must-not-leak", "profile": {"age": 37},
+                         "roles": ["admin-secret"]}), "application/json"),
+        )
+
+    agent = UnsupportedCoverageAgent()
+    ExhaustiveAttackCoordinator(
+        agent=agent, db_path=imported.pipeline_database,
+        scope_path=imported.recon_database.parent / "Scope.md",
+        policy_path=imported.recon_database.parent / "TargetPolicy.json",
+        batch_size=4,
+    ).run(imported.scan_id)
+
+    task = next(item for item in agent.calls[0]["attack_tasks"]
+                if item["endpoint_id"] == endpoint_id)
+    shapes = task["source_context"]["request_shapes"]
+    assert shapes == [{
+        "method": "POST", "encoding": "json",
+        "fields": {"display_name": "string", "profile": {"age": "number"},
+                   "roles": {"type": "array", "item": "string"}},
+    }]
+    serialized = json.dumps(shapes)
+    assert "must-not-leak" not in serialized
+    assert "admin-secret" not in serialized
+
+
 def test_terminal_coverage_can_be_explicitly_requeued_without_deleting_evidence(
     tmp_path: Path,
 ) -> None:
@@ -782,6 +818,48 @@ def test_failed_result_with_foreign_envelope_still_stops_the_stage(tmp_path):
         assert conn.execute(
             "SELECT count(*) FROM audit_events WHERE event_type='stage.failed'"
         ).fetchone() == (1,)
+
+
+def test_failed_result_omitting_new_finding_still_stops_the_stage(tmp_path: Path) -> None:
+    from aidast.orchestration.attack import AttackCoordinatorError
+
+    class MissingFindingAgent(StoppedProbeAgent):
+        def run_attack_orchestrator(self, **kwargs) -> AttackStageResult:
+            result = super().run_attack_orchestrator(**kwargs)
+            with sqlite3.connect(kwargs["db_path"]) as conn:
+                conn.execute(
+                    """INSERT INTO findings
+                       (finding_id,scan_id,title,vuln_type,severity,endpoint_id)
+                       VALUES ('unreported-finding',?,'fixture','fixture','INFO',?)""",
+                    (kwargs["scan_id"], kwargs["attack_tasks"][0]["endpoint_id"]),
+                )
+            return result
+
+    imported = imported_pipeline(tmp_path)
+    agent = MissingFindingAgent()
+    with pytest.raises(AttackCoordinatorError, match="newly committed findings"):
+        ExhaustiveAttackCoordinator(
+            agent=agent, db_path=imported.pipeline_database,
+            scope_path=imported.recon_database.parent / "Scope.md",
+            policy_path=imported.recon_database.parent / "TargetPolicy.json",
+            batch_size=2,
+        ).run(imported.scan_id)
+
+    assert len(agent.calls) == 1
+    with sqlite3.connect(imported.pipeline_database) as conn:
+        assert conn.execute(
+            "SELECT status FROM stage_runs WHERE stage_run_id=?",
+            (agent.calls[0]["stage_run_id"],),
+        ).fetchone() == ("failed",)
+        assert conn.execute(
+            "SELECT count(*) FROM audit_events WHERE event_type='stage.failed'"
+        ).fetchone() == (1,)
+        assert conn.execute(
+            "SELECT finding_id FROM findings WHERE scan_id=?", (imported.scan_id,),
+        ).fetchall() == [("unreported-finding",)]
+        assert conn.execute(
+            "SELECT status FROM attack_http_requests WHERE request_id='stopped-probe'"
+        ).fetchone() == ("outcome_unknown",)
 
 
 def test_last_failed_batch_does_not_leave_normal_attack_failed(tmp_path):

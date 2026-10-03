@@ -805,14 +805,14 @@ class PlaywrightDriver:
             )
         )
 
-    def _launch_managed_runtime(self) -> None:
+    def _launch_managed_runtime(self, *, headless: bool = True) -> None:
         self._ensure_playwright()
         assert self.playwright is not None
 
         self._shutdown_runtime()
 
         launch_options: dict = {
-            "headless": True,
+            "headless": headless,
             "args": [
                 "--disable-dev-shm-usage",
                 "--disable-blink-features=AutomationControlled",
@@ -1572,12 +1572,40 @@ class PlaywrightDriver:
         self._operator_confirmed_login = False
         self.authentication_endpoints.clear()
         try:
-            # Keep login direct. Attach CDP only for passive endpoint metadata;
-            # routing and policy interception remain disabled until login ends.
-            self._launch_manual_browser(manual_login=True)
-            self._attach_manual_browser()
-            self._register_authentication_observer()
-            print("  [Playwright] 직접 연결 로그인 창을 열었습니다. 브라우저에서 로그인해주세요.")
+            policy_managed_login = has_request_exclusions(self.target_policy)
+            if policy_managed_login:
+                # A visible Playwright runtime keeps the same proxy and request
+                # guard as Recon.  This permits operator login without opening
+                # an unmanaged network path around request exclusions.
+                self._launch_managed_runtime(headless=False)
+                self._register_authentication_observer()
+                assert self.page is not None
+                try:
+                    self.page.goto(
+                        self.session_config.login_url,
+                        wait_until="domcontentloaded",
+                        timeout=self.session_config.timeout_ms,
+                    )
+                except PlaywrightTimeoutError:
+                    # Rate-limited SPAs can commit the approved document while
+                    # deferred scripts keep DOMContentLoaded pending.  The
+                    # operator can still finish login in that committed page.
+                    current_url = str(getattr(self.page, "url", "") or "")
+                    parsed = urlparse(current_url)
+                    if (
+                        parsed.scheme not in {"http", "https"}
+                        or self.target_policy is None
+                        or not self.target_policy.allows_url(current_url)
+                    ):
+                        raise
+                print("  [Playwright] 정책이 적용된 로그인 창을 열었습니다. 브라우저에서 로그인해주세요.")
+            else:
+                # Where no request exclusions exist, preserve the direct login
+                # flow for identity providers which reject proxied automation.
+                self._launch_manual_browser(manual_login=True)
+                self._attach_manual_browser()
+                self._register_authentication_observer()
+                print("  [Playwright] 직접 연결 로그인 창을 열었습니다. 브라우저에서 로그인해주세요.")
             dashboard_confirmation = self.session_config.operator_confirmation
             if dashboard_confirmation is not None:
                 operator_confirmed = dashboard_confirmation(self._manual_login_problem)
@@ -1637,7 +1665,8 @@ class PlaywrightDriver:
             # Active policy enforcement is attached only after login; the login
             # flow contributes only secret-free passive endpoint coordinates.
             self._phase = "runtime"
-            self._register_context_handlers()
+            if not policy_managed_login:
+                self._register_context_handlers()
             for page in self.context.pages:
                 self._register_page_handlers(page)
         except BaseException:

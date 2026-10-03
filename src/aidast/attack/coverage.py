@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+from urllib.parse import parse_qsl
 from collections import Counter
 from contextlib import closing
 from dataclasses import asdict, dataclass
@@ -268,7 +269,88 @@ def _source_context(
             }
             for row in related
         ],
+        "request_shapes": _request_shapes(conn, endpoint_id),
     }
+
+
+def _value_shape(value: Any, *, depth: int = 0) -> Any:
+    """Describe captured input structure without copying any captured value."""
+    if depth >= 3:
+        return "nested"
+    if isinstance(value, dict):
+        return {
+            str(key)[:128]: _value_shape(child, depth=depth + 1)
+            for key, child in list(value.items())[:64]
+        }
+    if isinstance(value, list):
+        return {
+            "type": "array",
+            "item": _value_shape(value[0], depth=depth + 1) if value else "unknown",
+        }
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, (int, float)):
+        return "number"
+    return "string"
+
+
+def _request_shapes(conn: sqlite3.Connection, endpoint_id: str) -> list[dict[str, Any]]:
+    """Project bounded JSON/form field shapes from Recon traffic.
+
+    Captured values, headers, receipts, and full bodies are intentionally never
+    returned.  Attack receives enough structure to build a legitimate request
+    while credentials and personal data remain confined to Recon.db.
+    """
+    rows = conn.execute(
+        """SELECT method,content_type,substr(request_body,1,131072) request_body
+           FROM http_transactions
+           WHERE endpoint_id=? AND request_body IS NOT NULL
+           ORDER BY captured_at DESC,http_transaction_id DESC LIMIT 16""",
+        (endpoint_id,),
+    ).fetchall()
+    shapes: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for row in rows:
+        raw = row["request_body"]
+        if isinstance(raw, bytes):
+            raw = raw[:131072].decode("utf-8", errors="replace")
+        text = str(raw)[:131072]
+        content_type = str(row["content_type"] or "").split(";", 1)[0].strip().lower()
+        try:
+            if content_type == "application/json" or (
+                not content_type and text.lstrip().startswith(("{", "["))
+            ):
+                fields = _value_shape(json.loads(text))
+                encoding = "json"
+            elif content_type == "application/x-www-form-urlencoded" and all(
+                "=" in part for part in text.split("&")
+            ):
+                fields = {
+                    str(key)[:128]: "string"
+                    for key, _ in parse_qsl(text, keep_blank_values=True)[:64]
+                }
+                encoding = "form"
+            else:
+                continue
+        except (json.JSONDecodeError, RecursionError, UnicodeError, ValueError):
+            continue
+        method = str(row["method"] or "").upper()
+        fingerprint = json.dumps(
+            [method, encoding, fields], sort_keys=True, separators=(",", ":"),
+        )
+        if fingerprint in seen:
+            continue
+        seen.add(fingerprint)
+        shapes.append({
+            "method": method,
+            "encoding": encoding,
+            "fields": fields,
+        })
+        if len(shapes) >= 4:
+            break
+    return shapes
 
 
 def ensure_coverage_manifest(database: Path, scan_id: str) -> CoverageManifestResult:
