@@ -1,0 +1,211 @@
+method,normalized_path,category,verification_status,is_excluded,exclude_reason,response_statuses,parameters,source_tools,content_type,auth_required,endpoint_id
+GET,/,application,verified,0,,200,,"katana_auth_standard,mitmproxy,playwright_runtime",,,endpoint_e7aff6b2ffc3429abe287f5bc06e358e
+GET,/.env,application,verified,0,,200,,"ffuf,mitmproxy",text/plain; charset=utf-8,,endpoint_e0b4c2abd9754fbd9c8a76db092a65c4
+GET,/.env.bak,application,verified,0,,200,,"ffuf,mitmproxy",text/plain; charset=utf-8,,endpoint_896e523f5a054cf78246715c0282bac6
+POST,/admin/approve_loan/{loan_id},application,candidate,0,unverified_candidate,,path:loan_id (integer) [id],passive_declaration,,,endpoint_07bf8a3034d648f7b2087dbae41cd83e
+POST,/admin/create_admin,application,candidate,0,unverified_candidate,,json:password (string); json:username (string),passive_declaration,,,endpoint_eb721e07fb884a94927d380d766ca172
+POST,/admin/delete_account/{user_id},application,candidate,0,unverified_candidate,,path:user_id (integer) [id],passive_declaration,,,endpoint_28a8be8a737545a6a629e5bb8dbfac79
+POST,/api/ai/chat,application,candidate,0,unverified_candidate,,json:message (string),passive_declaration,,,endpoint_83bdd3f51ea04b43a1077237f1be16af
+GET,/api/ai/chat/anonymous,application,observed,0,,405,,"katana_auth_standard,mitmproxy,playwright_interaction",text/html; charset=utf-8,,endpoint_e356582f77874ba7ae795b0a9ec0ecdb
+POST,/api/ai/chat/anonymous,application,candidate,0,unverified_candidate,,json:message (string),adaptive_js,,,endpoint_453d636db61c44ad9f233070b896fc18
+GET,/api/ai/system-info,application,candidate,0,unverified_candidate,,,passive_declaration,,,endpoint_2c25830c4f5a45359befdf19c2c761f7
+GET,/api/bill-categories,application,candidate,0,unverified_candidate,,,passive_declaration,,,endpoint_f2f0da20cb8440ea82150e66761c3c99
+POST,/api/bill-payments/create,application,candidate,0,unverified_candidate,,json:amount (number); json:biller_id (integer) [id]; json:card_id (integer) [id]; json:description (string); json:payment_method (string),passive_declaration,,,endpoint_48e46ba1dd73475e92fa7cbc59d7c395
+GET,/api/bill-payments/history,application,candidate,0,unverified_candidate,,,passive_declaration,,,endpoint_fbea4985a275404e86fd345f09cbd7f3
+GET,/api/billers/by-category/{category_id},application,candidate,0,unverified_candidate,,path:category_id (integer) [id],passive_declaration,,,endpoint_327dde9965284aba8930a27ad9e7b333
+GET,/api/check_balance,application,candidate,1,unverified_candidate,,,passive_route_inference,,,endpoint_3808f124d67248b58c95b05bfd920973
+GET,/api/check_balance/{account_number},application,candidate,1,unverified_candidate,,path:account_number (string),passive_route_inference,,,endpoint_e7e63acc4bdb4c808b10565b17143052
+GET,/api/docs,application,verified,0,,200,,"katana_auth_standard,mitmproxy,playwright_interaction",text/html; charset=utf-8,,endpoint_1bab62d6e93b4fea9f4f4ee1fc878655
+GET,/api/docs/all.js,static/support,observed,1,static_asset,404,,"katana_auth_standard,mitmproxy,playwright_interaction",,,endpoint_4858c17ee9b7447083aa066dcb516e62
+GET,/api/docs/auth/actions.js,static/support,observed,1,static_asset,404,,"katana_auth_standard,mitmproxy,playwright_interaction",,,endpoint_8267002e22e94497a1b168e7d6e6cc59
+GET,/api/docs/auth/index.js,static/support,observed,1,static_asset,404,,"katana_auth_standard,mitmproxy,playwright_interaction",,,endpoint_de412fd6758d4ddba45f45196f070a93
+GET,/api/docs/auth/reducers.js,static/support,observed,1,static_asset,404,,"katana_auth_standard,mitmproxy,playwright_interaction",,,endpoint_36b2948d31a2474b8125f4e7ad3aef82
+GET,/api/docs/auth/selectors.js,static/support,observed,1,static_asset,404,,"katana_auth_standard,mitmproxy,playwright_interaction",,,endpoint_22bddaa1c9ec40469d48bedf7cc5ea25
+GET,/api/docs/auth/spec-wrap-actions.js,static/support,observed,1,static_asset,404,,"katana_auth_standard,mitmproxy,playwright_interaction",,,endpoint_6066fef068544cfb8303d251f966b932
+GET,/api/docs/configs/actions.js,static/support,observed,1,static_asset,404,,"katana_auth_standard,mitmproxy",,,endpoint_6c83eb0eac924fee9e3b81377627d189
+GET,/api/docs/configs/helpers.js,static/support,observed,1,static_asset,404,,"katana_auth_standard,mitmproxy",,,endpoint_5607ad8a22144647b6958bde787a1c9d
+GET,/api/docs/configs/index.js,static/support,observed,1,static_asset,404,,"katana_auth_standard,mitmproxy",,,endpoint_9875ca38ff3241efa88d3c9148e02331
+GET,/api/docs/configs/reducers.js,static/support,observed,1,static_asset,404,,"katana_auth_standard,mitmproxy",,,endpoint_29f512400efb47cfb75ad07277b62aaa
+GET,/api/docs/configs/selectors.js,static/support,observed,1,static_asset,404,,"katana_auth_standard,mitmproxy",,,endpoint_5723fc5617d94fb7a8ff7f347f336882
+GET,/api/docs/configs/spec-actions.js,static/support,observed,1,static_asset,404,,"katana_auth_standard,mitmproxy",,,endpoint_fc8c1dcbb7574abd971f4037b29b6125
+GET,/api/docs/core/plugins/all.js,static/support,observed,1,static_asset,,,katana_auth_standard,,,endpoint_7736940525654ae7ac030f9749afb4d8
+GET,/api/docs/core/plugins/auth/actions.js,static/support,observed,1,static_asset,,,katana_auth_standard,,,endpoint_2180f77543dc435bb958df22a6f49345
+GET,/api/docs/core/plugins/auth/index.js,static/support,observed,1,static_asset,,,katana_auth_standard,,,endpoint_c7445addc3f446cbba8c32f989ae54c2
+GET,/api/docs/core/plugins/auth/reducers.js,static/support,observed,1,static_asset,,,katana_auth_standard,,,endpoint_c598e820b37043c6aa71f6f4883b8840
+GET,/api/docs/core/plugins/auth/selectors.js,static/support,observed,1,static_asset,,,katana_auth_standard,,,endpoint_10ac3d553e1e49d797cc8b31b4b7eb51
+GET,/api/docs/core/plugins/auth/spec-wrap-actions.js,static/support,observed,1,static_asset,,,katana_auth_standard,,,endpoint_6b993443bed5433f93cc8651ad5b4b4f
+GET,/api/docs/core/plugins/configs/actions.js,static/support,observed,1,static_asset,,,katana_auth_standard,,,endpoint_9c405206981a4195aed4002073363fa5
+GET,/api/docs/core/plugins/configs/helpers.js,static/support,observed,1,static_asset,,,katana_auth_standard,,,endpoint_ade22023e18a4d57a9035d80b0aa85d3
+GET,/api/docs/core/plugins/configs/index.js,static/support,observed,1,static_asset,,,katana_auth_standard,,,endpoint_efeb34289efe4f22bb58650b8050ddd6
+GET,/api/docs/core/plugins/configs/reducers.js,static/support,observed,1,static_asset,,,katana_auth_standard,,,endpoint_b6e9993bf6d94ee1bc4689231dea317c
+GET,/api/docs/core/plugins/configs/selectors.js,static/support,observed,1,static_asset,,,katana_auth_standard,,,endpoint_ec165a44effd4fada96ff40f486f6cfb
+GET,/api/docs/core/plugins/configs/spec-actions.js,static/support,observed,1,static_asset,,,katana_auth_standard,,,endpoint_aa529603d18c43948c229382fc4a3d41
+GET,/api/docs/core/plugins/deep-linking/helpers.js,static/support,observed,1,static_asset,,,katana_auth_standard,,,endpoint_edf3bdb9f48348da9eace1eac42402a4
+GET,/api/docs/core/plugins/deep-linking/index.js,static/support,observed,1,static_asset,,,katana_auth_standard,,,endpoint_da5bbc9c03ca4683801afc7726952104
+GET,/api/docs/core/plugins/deep-linking/layout.js,static/support,observed,1,static_asset,,,katana_auth_standard,,,endpoint_0c8f6a42cf394e9a8a19b0f244c7e8ff
+GET,/api/docs/core/plugins/download-url.js,static/support,observed,1,static_asset,,,katana_auth_standard,,,endpoint_57c75dc18ef34616977af8752a59604c
+GET,/api/docs/core/plugins/err/actions.js,static/support,observed,1,static_asset,,,katana_auth_standard,,,endpoint_3f5f4085704c4ec6a44469dfa01d8138
+GET,/api/docs/core/plugins/err/error-transformers/hook.js,static/support,observed,1,static_asset,,,katana_auth_standard,,,endpoint_f86bf09a4abb477eab5367b0de2d1d2c
+GET,/api/docs/core/plugins/err/error-transformers/transformers/not-of-type.js,static/support,observed,1,static_asset,,,katana_auth_standard,,,endpoint_3a906f7889b34e7e9363e17aee845211
+GET,/api/docs/core/plugins/err/error-transformers/transformers/parameter-oneof.js,static/support,observed,1,static_asset,,,katana_auth_standard,,,endpoint_e95db4ba46934564acec6118980a5bea
+GET,/api/docs/core/plugins/err/index.js,static/support,observed,1,static_asset,,,katana_auth_standard,,,endpoint_c3d2c12ec4704e7b91ef3fcfd959ca51
+GET,/api/docs/core/plugins/err/reducers.js,static/support,observed,1,static_asset,,,katana_auth_standard,,,endpoint_66023919dc714f649a5f4474c5fef911
+GET,/api/docs/core/plugins/err/selectors.js,static/support,observed,1,static_asset,,,katana_auth_standard,,,endpoint_f8ba23dc0cc44f6f86e87bfcb222d002
+GET,/api/docs/core/plugins/filter/index.js,static/support,observed,1,static_asset,,,katana_auth_standard,,,endpoint_30fac984f9d04d65a56b2c2b8a138de9
+GET,/api/docs/core/plugins/filter/opsFilter.js,static/support,observed,1,static_asset,,,katana_auth_standard,,,endpoint_51df1b82bed040c2bb3fbd277a45902c
+GET,/api/docs/core/plugins/layout/actions.js,static/support,observed,1,static_asset,,,katana_auth_standard,,,endpoint_8a93775eb25049e083bb0e61b74c7584
+GET,/api/docs/core/plugins/layout/index.js,static/support,observed,1,static_asset,,,katana_auth_standard,,,endpoint_79f195ce19c34dc2835d5fe4b28dbdad
+GET,/api/docs/core/plugins/layout/reducers.js,static/support,observed,1,static_asset,,,katana_auth_standard,,,endpoint_af95d667b7764e7083cd9942ed21c0c7
+GET,/api/docs/core/plugins/layout/selectors.js,static/support,observed,1,static_asset,,,katana_auth_standard,,,endpoint_190fef53f9b34c1cac6a9ea34e59e82b
+GET,/api/docs/core/plugins/layout/spec-extensions/wrap-selector.js,static/support,observed,1,static_asset,,,katana_auth_standard,,,endpoint_7ffeb9404c1e4ad891625ef285faf683
+GET,/api/docs/core/plugins/logs/index.js,static/support,observed,1,static_asset,,,katana_auth_standard,,,endpoint_fb77fb37f5164dc4a655baff2ca5fb80
+GET,/api/docs/core/plugins/oas3/actions.js,static/support,observed,1,static_asset,,,katana_auth_standard,,,endpoint_e5e72e5cab254ee8bbbb88fc7dd710d5
+GET,/api/docs/core/plugins/oas3/auth-extensions/wrap-selectors.js,static/support,observed,1,static_asset,,,katana_auth_standard,,,endpoint_504ed8bf440d4ddc8a89dbe04eb6a832
+GET,/api/docs/core/plugins/oas3/components/index.js,static/support,observed,1,static_asset,,,katana_auth_standard,,,endpoint_8b5c50059e21457984b4931d3181f09f
+GET,/api/docs/core/plugins/oas3/index.js,static/support,observed,1,static_asset,,,katana_auth_standard,,,endpoint_f7708a39b4a34c41bbec20c7737c80fa
+GET,/api/docs/core/plugins/oas3/reducers.js,static/support,observed,1,static_asset,,,katana_auth_standard,,,endpoint_bcc26fcefb004d4b82bc472719120cee
+GET,/api/docs/core/plugins/oas3/selectors.js,static/support,observed,1,static_asset,,,katana_auth_standard,,,endpoint_2bc6918a632d4d34b41f7f4d47417ce2
+GET,/api/docs/core/plugins/oas3/spec-extensions/selectors.js,static/support,observed,1,static_asset,,,katana_auth_standard,,,endpoint_9d5b8c346cce43d081054a7bbcca9b23
+GET,/api/docs/core/plugins/oas3/spec-extensions/wrap-selectors.js,static/support,observed,1,static_asset,,,katana_auth_standard,,,endpoint_922969b8721c4bc4930c49aa41d78711
+GET,/api/docs/core/plugins/oas3/wrap-components/index.js,static/support,observed,1,static_asset,,,katana_auth_standard,,,endpoint_29b41877e7754d1a9d3f8c634b413838
+GET,/api/docs/core/plugins/oas3/wrap-components/online-validator-badge.js,static/support,observed,1,static_asset,,,katana_auth_standard,,,endpoint_7841767d2cc647a0afc59e447e645474
+GET,/api/docs/core/plugins/on-complete/index.js,static/support,observed,1,static_asset,,,katana_auth_standard,,,endpoint_a9d5f34adef3415798474448d7ab2c63
+GET,/api/docs/core/plugins/request-snippets/fn.js,static/support,observed,1,static_asset,,,katana_auth_standard,,,endpoint_d73319f4f96140409491c98e1c513ce3
+GET,/api/docs/core/plugins/request-snippets/index.js,static/support,observed,1,static_asset,,,katana_auth_standard,,,endpoint_b82b71eeec1b4ce5ae707bc3bdc82b1d
+GET,/api/docs/core/plugins/request-snippets/selectors.js,static/support,observed,1,static_asset,,,katana_auth_standard,,,endpoint_4528718241784d0b92aa76ccb8612d24
+GET,/api/docs/core/plugins/safe-render/index.js,static/support,observed,1,static_asset,,,katana_auth_standard,,,endpoint_b1b5dcef2d914aecaf0cb7c5f6286707
+GET,/api/docs/core/plugins/samples/fn.js,static/support,observed,1,static_asset,,,katana_auth_standard,,,endpoint_03ce55ff709a497394d1baa7de66b866
+GET,/api/docs/core/plugins/samples/index.js,static/support,observed,1,static_asset,,,katana_auth_standard,,,endpoint_7ad68f8a1d7b4a5ea3faea57f790f9fb
+GET,/api/docs/core/plugins/spec/actions.js,static/support,observed,1,static_asset,,,katana_auth_standard,,,endpoint_1e42440d7c2d4df5bcc363aa4c5c5c97
+GET,/api/docs/core/plugins/spec/index.js,static/support,observed,1,static_asset,,,katana_auth_standard,,,endpoint_8ac9c9e3353e40259887a08b872522ed
+GET,/api/docs/core/plugins/spec/reducers.js,static/support,observed,1,static_asset,,,katana_auth_standard,,,endpoint_fa0e20bf821c412db60b887f1fec00bd
+GET,/api/docs/core/plugins/spec/selectors.js,static/support,observed,1,static_asset,,,katana_auth_standard,,,endpoint_9e6c0c5a4cb04a94a6c23f85f9c453e5
+GET,/api/docs/core/plugins/spec/wrap-actions.js,static/support,observed,1,static_asset,,,katana_auth_standard,,,endpoint_047fa8d1eb8340cb97645462f746c7af
+GET,/api/docs/core/plugins/swagger-js/configs-wrap-actions.js,static/support,observed,1,static_asset,404,,"katana_auth_standard,mitmproxy",,,endpoint_95f50cd186494528b4090ed0a7154bf4
+GET,/api/docs/core/plugins/swagger-js/index.js,static/support,observed,1,static_asset,404,,"katana_auth_standard,mitmproxy",,,endpoint_a714bf6b3c7e490fbdf4364853add791
+GET,/api/docs/core/plugins/util/index.js,static/support,observed,1,static_asset,,,katana_auth_standard,,,endpoint_64d1b7e7d8744a8f9d824ed531f3fdea
+GET,/api/docs/core/plugins/view/fn.js,static/support,observed,1,static_asset,,,katana_auth_standard,,,endpoint_4afdd4c2bb474bddb50d81b85902cc50
+GET,/api/docs/core/plugins/view/index.js,static/support,observed,1,static_asset,,,katana_auth_standard,,,endpoint_774d382092b64972be0c24040678905c
+GET,/api/docs/deep-linking/helpers.js,static/support,observed,1,static_asset,404,,"katana_auth_standard,mitmproxy",,,endpoint_a8c8e725bf1b4175860c6d3635edc4dc
+GET,/api/docs/deep-linking/index.js,static/support,observed,1,static_asset,404,,"katana_auth_standard,mitmproxy",,,endpoint_a7c73c30a7144064a79cef1b2c7e6cba
+GET,/api/docs/deep-linking/layout.js,static/support,observed,1,static_asset,404,,"katana_auth_standard,mitmproxy",,,endpoint_cd2e0b82a0214961a1ff204e34155954
+GET,/api/docs/download-url.js,static/support,observed,1,static_asset,404,,"katana_auth_standard,mitmproxy",,,endpoint_fa912855b2284ad1934ecbd478d3f355
+GET,"/api/docs/e.json%7C%7CH.call%28n,o%29%7C%7C%21H.call%28t,o%29%7C%7C%28e.line=i%7C%7Ce.line,e.lineStart=s%7C%7Ce.lineStart,e.position=u%7C%7Ce.position,ce%28e,",application,observed,0,,,,katana_auth_standard,,,endpoint_7866775394b54bd094c9a8faed83fc02
+GET,/api/docs/err/actions.js,static/support,observed,1,static_asset,404,,"katana_auth_standard,mitmproxy",,,endpoint_fd07b27b5a704c9ab9f73638cd13baf7
+GET,/api/docs/err/error-transformers/hook.js,static/support,observed,1,static_asset,,,katana_auth_standard,,,endpoint_c8f713c535534800b47efe89aaf30b93
+GET,/api/docs/err/error-transformers/transformers/not-of-type.js,static/support,observed,1,static_asset,,,katana_auth_standard,,,endpoint_8000b298d55d4058885935da857be3cf
+GET,/api/docs/err/error-transformers/transformers/parameter-oneof.js,static/support,observed,1,static_asset,,,katana_auth_standard,,,endpoint_a563b741e9c745f39718adfa68378b94
+GET,/api/docs/err/index.js,static/support,observed,1,static_asset,404,,"katana_auth_standard,mitmproxy",,,endpoint_58652876ed3246d4b73a9cc6e8153d49
+GET,/api/docs/err/reducers.js,static/support,observed,1,static_asset,404,,"katana_auth_standard,mitmproxy",,,endpoint_7f31fa76779147d9b8b6adb80f16e053
+GET,/api/docs/err/selectors.js,static/support,observed,1,static_asset,404,,"katana_auth_standard,mitmproxy",,,endpoint_28928c9d1ad743fe9b9a729b5052345a
+GET,/api/docs/filter/index.js,static/support,observed,1,static_asset,404,,"katana_auth_standard,mitmproxy",,,endpoint_887b31e7d581428f964fe6659900ae04
+GET,/api/docs/filter/opsFilter.js,static/support,observed,1,static_asset,404,,"katana_auth_standard,mitmproxy",,,endpoint_5ea7941844ba4cfcac09858bb0a71e5c
+GET,/api/docs/index.css,static/support,verified,1,static_asset,200,,"katana_auth_standard,mitmproxy",text/css; charset=utf-8,,endpoint_05f209145ed74d1387785171cc0a6049
+GET,/api/docs/layout/actions.js,static/support,observed,1,static_asset,404,,"katana_auth_standard,mitmproxy",,,endpoint_43313510559444e4bfb4c55ef02a8613
+GET,/api/docs/layout/index.js,static/support,observed,1,static_asset,404,,"katana_auth_standard,mitmproxy",,,endpoint_f57cfe5f48f74e6181b79ff2d3e783d0
+GET,/api/docs/layout/reducers.js,static/support,observed,1,static_asset,404,,"katana_auth_standard,mitmproxy",,,endpoint_9a04d6c67600400595b301e05ff296fc
+GET,/api/docs/layout/selectors.js,static/support,observed,1,static_asset,404,,"katana_auth_standard,mitmproxy",,,endpoint_e1bdeda1e7824774b1fb1384a2436f37
+GET,/api/docs/layout/spec-extensions/wrap-selector.js,static/support,observed,1,static_asset,,,katana_auth_standard,,,endpoint_eb64cff2d0f0485fbc3e2795accc1411
+GET,/api/docs/logs/index.js,static/support,observed,1,static_asset,404,,"katana_auth_standard,mitmproxy",,,endpoint_c0f343fa12f646379c58c35bb35f0aa1
+GET,/api/docs/oas3/actions.js,static/support,observed,1,static_asset,404,,"katana_auth_standard,mitmproxy",,,endpoint_6db07513d7f04cbd9ebd0e1427c0ffa0
+GET,/api/docs/oas3/auth-extensions/wrap-selectors.js,static/support,observed,1,static_asset,,,katana_auth_standard,,,endpoint_d99d26404b8841b998bebabe313a1c30
+GET,/api/docs/oas3/components/index.js,static/support,observed,1,static_asset,404,,"katana_auth_standard,mitmproxy",,,endpoint_18bb4bd6c84246b491e9a1a60eb802c3
+GET,/api/docs/oas3/index.js,static/support,observed,1,static_asset,404,,"katana_auth_standard,mitmproxy",,,endpoint_3a63168c8dd1462784c7bde8787f037d
+GET,/api/docs/oas3/reducers.js,static/support,observed,1,static_asset,404,,"katana_auth_standard,mitmproxy",,,endpoint_04c091c45b674ab5a82c3c09d64eed0a
+GET,/api/docs/oas3/selectors.js,static/support,observed,1,static_asset,404,,"katana_auth_standard,mitmproxy",,,endpoint_5909ec268fbc42b391c033717372af21
+GET,/api/docs/oas3/spec-extensions/selectors.js,static/support,observed,1,static_asset,,,katana_auth_standard,,,endpoint_67fc94bfda5f47cd9c2838b10600ef1c
+GET,/api/docs/oas3/spec-extensions/wrap-selectors.js,static/support,observed,1,static_asset,,,katana_auth_standard,,,endpoint_d6792a72ee77452b9f69fa3813dfb0dd
+GET,/api/docs/oas3/wrap-components/index.js,static/support,observed,1,static_asset,404,,"katana_auth_standard,mitmproxy",,,endpoint_291ef17d021e40a69884d05ea7c242aa
+GET,/api/docs/oas3/wrap-components/online-validator-badge.js,static/support,observed,1,static_asset,,,katana_auth_standard,,,endpoint_6637aa48ec334055b7c8b49db9d0d86f
+GET,/api/docs/oauth2-redirect.html,application,verified,0,,200,,"katana_auth_standard,mitmproxy,playwright_interaction",text/html; charset=utf-8,,endpoint_23079853f4e745da8abc56514d14d0cf
+GET,/api/docs/on-complete/index.js,static/support,observed,1,static_asset,404,,"katana_auth_standard,mitmproxy",,,endpoint_5616779b145a421daba89be415148c82
+GET,/api/docs/request-snippets/fn.js,static/support,observed,1,static_asset,404,,"katana_auth_standard,mitmproxy",,,endpoint_3f9aa266d2cb4ee98327ab8e2a758b5b
+GET,/api/docs/request-snippets/index.js,static/support,observed,1,static_asset,404,,"katana_auth_standard,mitmproxy",,,endpoint_cc7104929c5d459bad6b1a6d679e0111
+GET,/api/docs/request-snippets/selectors.js,static/support,observed,1,static_asset,404,,"katana_auth_standard,mitmproxy",,,endpoint_a7c7c4315437491294760e4af669d96e
+GET,/api/docs/safe-render/index.js,static/support,observed,1,static_asset,404,,"katana_auth_standard,mitmproxy",,,endpoint_e56dd5c554aa451bb2ed4d9bd6bea782
+GET,/api/docs/samples/fn.js,static/support,observed,1,static_asset,404,,"katana_auth_standard,mitmproxy",,,endpoint_8962314247da4a2dac2788b1811151b4
+GET,/api/docs/samples/index.js,static/support,observed,1,static_asset,404,,"katana_auth_standard,mitmproxy",,,endpoint_97bf5faf7f074deb911fe8c921431fe7
+GET,/api/docs/spec/actions.js,static/support,observed,1,static_asset,,,katana_auth_standard,,,endpoint_1d32944f8f9a434bb46f29666d099f71
+GET,/api/docs/spec/index.js,static/support,observed,1,static_asset,,,katana_auth_standard,,,endpoint_f139a3ec88154ef89b2c93792ec7bcf8
+GET,/api/docs/spec/reducers.js,static/support,observed,1,static_asset,,,katana_auth_standard,,,endpoint_195d251078b54306852408c11f74525b
+GET,/api/docs/spec/selectors.js,static/support,observed,1,static_asset,,,katana_auth_standard,,,endpoint_441eae8ca63842eaa2ac7aacfceba2ff
+GET,/api/docs/spec/wrap-actions.js,static/support,observed,1,static_asset,,,katana_auth_standard,,,endpoint_c111411c3f8d4868baf7a7772ba9652b
+GET,/api/docs/swagger-js/configs-wrap-actions.js,static/support,observed,1,static_asset,404,,"katana_auth_standard,mitmproxy",,,endpoint_06fceddbd00f4fe083339ab4456ae194
+GET,/api/docs/swagger-js/index.js,static/support,observed,1,static_asset,404,,"katana_auth_standard,mitmproxy",,,endpoint_b4ca35053acf40ef8a952b3f6195215c
+GET,/api/docs/swagger-ui-bundle.js,static/support,verified,1,static_asset,200,,"katana_auth_standard,mitmproxy,playwright_interaction",application/javascript; charset=utf-8,,endpoint_c9bb2a500daa4ab8afdbb36bb3e5127a
+GET,/api/docs/swagger-ui-standalone-preset.js,static/support,verified,1,static_asset,200,,"katana_auth_standard,mitmproxy,playwright_interaction",application/javascript; charset=utf-8,,endpoint_e863901c7c7842a09c67392295d9ca25
+GET,/api/docs/swagger-ui.css,static/support,verified,1,static_asset,200,,"katana_auth_standard,mitmproxy",text/css; charset=utf-8,,endpoint_ce3a68a68aec40f0b6c12dc317a4453f
+GET,"/api/docs/t.json%7C%7Cxe.call%28r,i%29%7C%7C%21xe.call%28e,i%29%7C%7C%28t.line=s%7C%7Ct.line,t.lineStart=u%7C%7Ct.lineStart,t.position=a%7C%7Ct.position,Qe%28t,",application,observed,0,,404,,"katana_auth_standard,mitmproxy,playwright_interaction",,,endpoint_870084903d354892a17984c2a4326dba
+GET,/api/docs/util/index.js,static/support,observed,1,static_asset,,,katana_auth_standard,,,endpoint_e3ebc22e98ac4a5ab60dd9493139d21d
+GET,/api/docs/view/fn.js,static/support,observed,1,static_asset,,,katana_auth_standard,,,endpoint_84278976fda64daea88b19b74576432a
+GET,/api/docs/view/index.js,static/support,observed,1,static_asset,,,katana_auth_standard,,,endpoint_e0273ff5ffd749ec8084df693a6e1ec7
+POST,/api/login,application,candidate,1,unverified_candidate,,,passive_route_inference,,,endpoint_ebe0b9193a674728b1a253fc9640cecf
+POST,/api/register,application,candidate,1,unverified_candidate,,,passive_route_inference,,,endpoint_06c08c2ce87c4ad48f244d3ebe9a992b
+POST,/api/request_loan,application,candidate,1,unverified_candidate,,,passive_route_inference,,,endpoint_a35cba9c0c5d4e568704feb411238181
+GET,/api/sup3r_s3cr3t_admin,application,candidate,1,unverified_candidate,,,passive_route_inference,,,endpoint_cf2ac6c9addd4892972f26aefb94c791
+GET,/api/transactions,application,candidate,0,unverified_candidate,,query:account_number (string),passive_declaration,,,endpoint_9e2286aed5c6452fbdc8a5f1b52a8934
+GET,/api/transactions/{account_number},application,candidate,1,unverified_candidate,,path:account_number (string),passive_route_inference,,,endpoint_e0f889e1c4e2454e9d51ea9bc8696e1b
+POST,/api/transfer,application,candidate,1,unverified_candidate,,,passive_route_inference,,,endpoint_71965e15ecac4510b5932c0993880fdc
+POST,/api/upload_profile_picture,application,candidate,1,unverified_candidate,,,passive_route_inference,,,endpoint_8c0c182504a04bcd96afd9c2eb88dd80
+POST,/api/upload_profile_picture_url,application,candidate,1,unverified_candidate,,,passive_route_inference,,,endpoint_d57e532bf6114fd0a1791e943d91b34a
+POST,/api/v1/forgot-password,application,candidate,0,unverified_candidate,,json:username (string); path:version (integer),passive_declaration,,,endpoint_bbb1deb430a94b989654027de6e69d04
+POST,/api/v1/merchants/login,application,candidate,0,unverified_candidate,,json:email (string); json:password (string),adaptive_js,,,endpoint_e12f3f652eaa45b08c6cd21b72b8c537
+GET,/api/v1/merchants/me,application,observed,0,,401,,"adaptive_js,mitmproxy,passive_declaration",application/json,,endpoint_75c6460eabec44f8aa341f96afe80524
+POST,/api/v1/merchants/register,application,candidate,0,unverified_candidate,,json:email (string); json:name (string); json:password (string),adaptive_js,,,endpoint_5b392465fa23423bafdbe1737575a874
+GET,/api/v1/payments,application,observed,0,,401,,"adaptive_js,mitmproxy,passive_declaration",application/json,,endpoint_fff9929bb6774e328c7b2ba989f81cac
+POST,/api/v1/payments/charge,application,candidate,0,unverified_candidate,,json:amount (number); json:card_number (string); json:currency (string); json:cvv (string); json:description (string); json:expiry_date (string); json:merchant_order_id (string) [id],adaptive_js,,,endpoint_330c9e7c6cf041a1b87d19944a18a35a
+GET,/api/v1/payments/merchant_id/{merchant_id},application,candidate,0,unverified_candidate,,path:merchant_id (integer) [id],passive_declaration,,,endpoint_07a7ca8f294448e39af6cd37c8c21acc
+GET,/api/v1/payments/{payment_id},application,candidate,0,unverified_candidate,,path:payment_id (integer) [id],passive_declaration,,,endpoint_33ca6828121440cab7861c90419099fd
+POST,/api/v1/reset-password,application,candidate,0,unverified_candidate,,json:new_password (string); json:reset_pin (string); json:username (string); path:version (integer),passive_declaration,,,endpoint_928742fcdde74e6cb8989c4504cbbaff
+POST,/api/v2/forgot-password,application,candidate,0,unverified_candidate,,json:username (string); path:version (integer),passive_declaration,,,endpoint_680b39e86bec45d89168df3b6aed850d
+POST,/api/v2/reset-password,application,candidate,0,unverified_candidate,,json:new_password (string); json:reset_pin (string); json:username (string); path:version (integer),passive_declaration,,,endpoint_e4336c50faa6494ebe0e6e9846aafdec
+GET,/api/v3/forgot-password,application,observed,0,,405,,"katana_auth_standard,mitmproxy,playwright_interaction",,,endpoint_c6233708c8154a9e8e4eb47207dab0d4
+POST,/api/v3/forgot-password,application,candidate,0,unverified_candidate,,json:username (string); path:version (integer),adaptive_js,,,endpoint_bc47289b489145ccb093b3a084ae3111
+POST,/api/v3/reset-password,application,candidate,0,unverified_candidate,,json:new_password (string); json:reset_pin (string); json:username (string); path:version (integer),"adaptive_js,passive_declaration",,,endpoint_c184b8c6a7db4a9c9b58df884099ae03
+GET,/api/virtual-cards,application,candidate,0,unverified_candidate,,,passive_declaration,,,endpoint_fda0253dec2a4175b583e2a3a0d66147
+POST,/api/virtual-cards/create,application,candidate,0,unverified_candidate,,json:card_limit (number); json:card_type (string),passive_declaration,,,endpoint_f11afa2849154e42a177f01109414e25
+POST,/api/virtual-cards/{card_id}/toggle-freeze,application,candidate,0,unverified_candidate,,path:card_id (integer) [id],passive_declaration,,,endpoint_fb622058f21143ff9d125918c881ea0a
+GET,/api/virtual-cards/{card_id}/transactions,application,candidate,0,unverified_candidate,,path:card_id (integer) [id],passive_declaration,,,endpoint_38549d338a38401283252ddd8cf7662d
+POST,/api/virtual-cards/{card_id}/update-limit,application,candidate,0,unverified_candidate,,json:limit (number); path:card_id (integer) [id],passive_declaration,,,endpoint_2e164b6c046f4ea8bab33770e8293d63
+GET,/blog,application,verified,0,,200,,"katana_auth_standard,mitmproxy,playwright_interaction",,,endpoint_197c3a9d9d3f4a19963498d223194cd2
+GET,/careers,application,verified,0,,200,,"katana_auth_standard,mitmproxy,playwright_interaction",,,endpoint_e4d4e48526b24d4a8ee85f31d1406ecb
+GET,/check_balance/{account_number},application,candidate,0,unverified_candidate,,path:account_number (string),passive_declaration,,,endpoint_1344206d70f84d95a1300a56753d7a6b
+GET,/compliance,application,verified,0,,200,,"katana_auth_standard,mitmproxy,playwright_interaction",,,endpoint_2ab35cc59c8c4671820d4655e78aae0e
+GET,/dashboard,application,observed,0,,401,,"ffuf,mitmproxy",application/json,,endpoint_4af65cabde184f69911056d25fa9c01b
+GET,/debug/users,application,verified,0,,200,,"ffuf,mitmproxy",application/json,,endpoint_335b80fed69a41d8ba6d9220612df3e7
+GET,/forgot-password,application,verified,0,,200,query:username (string),"ffuf,katana_auth_standard,mitmproxy,passive_declaration,passive_route_inference,playwright_interaction",,,endpoint_23b2f907ceb84d48b67d059a74c28d22
+POST,/forgot-password,application,candidate,1,unverified_candidate,,,passive_route_inference,,,endpoint_62a0b8e53f59449683cb23b00ebc3856
+GET,/graphql,application,verified,0,,200,,"ffuf,mitmproxy",application/json,,endpoint_a4a7e93f2b6841dd97191ecce2efcad3
+GET,/healthz,application,verified,0,,200,,"ffuf,mitmproxy",application/json,,endpoint_9f1c5b3c830246c995ee9ef9afd24a2d
+GET,/internal/config.json,application,candidate,0,unverified_candidate,,,passive_declaration,,,endpoint_b153cd12eb164528a528e6f33c89e60f
+GET,/internal/secret,application,candidate,0,unverified_candidate,,,passive_declaration,,,endpoint_2051b5935c3b4bac9298960f0ae2bfd7
+GET,/latest/meta-data,application,candidate,0,unverified_candidate,,,passive_declaration,,,endpoint_c1e67b0d6be54d83886945ed4036b62a
+GET,/latest/meta-data/ami-id,application,candidate,1,unverified_candidate,,,passive_route_inference,,,endpoint_c00228f37b194615a69566781ea09003
+GET,/latest/meta-data/hostname,application,candidate,1,unverified_candidate,,,passive_route_inference,,,endpoint_a3ef068abbbb42178a607b5c96d89797
+GET,/latest/meta-data/iam,application,candidate,1,unverified_candidate,,,passive_route_inference,,,endpoint_94b4887067df4b10bc0afa8f922e2702
+GET,/latest/meta-data/iam/security-credentials,application,candidate,0,unverified_candidate,,,passive_declaration,,,endpoint_3aa96afa867a478591881d72d68b694e
+GET,/latest/meta-data/iam/security-credentials/vulnbank-role,application,candidate,0,unverified_candidate,,,passive_declaration,,,endpoint_9398c5512c244ed7ae7f58d3b3404443
+GET,/latest/meta-data/instance-id,application,candidate,1,unverified_candidate,,,passive_route_inference,,,endpoint_fa9ef87d15da41fbb74c3bf76b303a0d
+GET,/latest/meta-data/local-ipv4,application,candidate,1,unverified_candidate,,,passive_route_inference,,,endpoint_53f43ebfdecb4a9a8967689ca895e201
+GET,/latest/meta-data/public-ipv4,application,candidate,1,unverified_candidate,,,passive_route_inference,,,endpoint_8ee2044a6c704bbfbada09ed1207db59
+GET,/latest/meta-data/security-groups,application,candidate,1,unverified_candidate,,,passive_route_inference,,,endpoint_c9db908d6df04f6bbc917745c2d5c7ee
+GET,/login,application,verified,0,,200,query:password (string); query:username (string),"ffuf,katana_auth_standard,mitmproxy,passive_declaration,passive_route_inference,playwright_interaction",,,endpoint_908e6f512b6d48baaba874b5e0e03412
+POST,/login,application,candidate,0,unverified_candidate,,json:password (string); json:username (string),adaptive_js,,,endpoint_deef35f5d211491a94035184554249e0
+GET,/merchant,application,candidate,1,unverified_candidate,,,passive_route_inference,,,endpoint_6708c25bfbfc484db061398e711ecdcf
+GET,/merchant/dashboard,application,candidate,1,unverified_candidate,,,passive_route_inference,,,endpoint_e6ba24ee0c1c4c0eacc94080aa9e5a0b
+GET,/merchant/login,application,verified,0,,200,query:email (string); query:password (string),"katana_auth_standard,mitmproxy,passive_declaration,passive_route_inference,playwright_interaction",,,endpoint_dab3988acf5b4dcb91a890d4fcaaff29
+GET,/merchant/register,application,verified,0,,200,query:email (string); query:name (string); query:password (string),"katana_auth_standard,mitmproxy,passive_declaration,passive_route_inference,playwright_interaction",,,endpoint_7ef164eca15d45859aed359626babf92
+GET,/oauth2-redirect.html,application,observed,0,,,,katana_auth_standard,,,endpoint_6019845135a84c63a729b9bb6ddb397a
+GET,/privacy,application,verified,0,,200,,"katana_auth_standard,mitmproxy,playwright_interaction",,,endpoint_bfcd8425c2954ff6a550f94d65f364ae
+GET,/register,application,verified,0,,200,query:password (string); query:username (string),"ffuf,katana_auth_standard,mitmproxy,passive_declaration,passive_route_inference,playwright_interaction",,,endpoint_b784d93b61af418dbf811b7a945e081f
+POST,/register,application,candidate,0,unverified_candidate,,json:password (string); json:username (string),adaptive_js,,,endpoint_905149cd492c435da61e6840bb33e461
+POST,/request_loan,application,candidate,0,unverified_candidate,,json:amount (number),passive_declaration,,,endpoint_523b3505cc8c41f399b20a4e73643912
+GET,/reset-password,application,verified,0,,200,query:new_password (string); query:reset_pin (string); query:username (string),"ffuf,mitmproxy,passive_declaration,passive_route_inference",,,endpoint_9a5b56fea5fc4bffb668af0deb56c5af
+POST,/reset-password,application,candidate,1,unverified_candidate,,,passive_route_inference,,,endpoint_be861d202cd246008aa60ee9331cb280
+GET,/static/:param,application,verified,1,static_asset,200,,"katana_auth_standard,mitmproxy,playwright_interaction",application/javascript; charset=utf-8,,endpoint_96b9bfa592994f70a85495fa173da161
+GET,/sup3r_s3cr3t_admin,application,candidate,0,unverified_candidate,,,passive_declaration,,,endpoint_d7a929de7fa04fa7a9254850a55f5e16
+GET,/terms,application,verified,0,,200,,"katana_auth_standard,mitmproxy,playwright_interaction",,,endpoint_086c81c20cbf44fca56852ae247bd901
+GET,/transactions/{account_number},application,candidate,0,unverified_candidate,,path:account_number (string),passive_declaration,,,endpoint_98096cbef7e446d38d79b24bf3325ed7
+POST,/transfer,application,candidate,0,unverified_candidate,,json:amount (number); json:description (string); json:to_account (string),passive_declaration,,,endpoint_c4de7bd289514d7c973b236f8c0f5522
+POST,/upload_profile_picture,application,candidate,0,unverified_candidate,,form:profile_picture (string),passive_declaration,,,endpoint_2eabc792420243a0962861c6259cdcc6
+POST,/upload_profile_picture_url,application,candidate,0,unverified_candidate,,json:image_url (string),passive_declaration,,,endpoint_40098673e3844e2bb7dbb248842a30f4

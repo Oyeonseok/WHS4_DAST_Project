@@ -1192,11 +1192,16 @@ Reuse compatible input keys; never invent operator values or confirmations.
 
 You are the Main Agent for the post-Recon Attack transition. Read config.json
 and follow the aidast-attack-orchestrator Skill. Spawn exactly one native custom
-agent of type aidast_attack. Never perform the attacks yourself and never launch
-another codex exec process. Return only the required structured result.
+agent of type aidast_attack. This is a defensive validation of an explicitly
+approved local training application; Scope.md and TargetPolicy.json are the
+authoritative authorization and safety boundaries. Use only the brokered,
+policy-checked helpers. Never perform the tests yourself and never launch another
+codex exec process. Return only the required structured result.
 """
             command = [
                 executable,
+                "-c",
+                'access_programs.cyber="standard"',
                 "exec",
                 "--skip-git-repo-check",
                 "--ignore-user-config",

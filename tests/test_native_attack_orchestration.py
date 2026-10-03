@@ -334,6 +334,7 @@ class NativeAttackMainAgentTests(unittest.TestCase):
                 self.assertEqual(
                     command[command.index("--model") + 1], "gpt-6-luna"
                 )
+                self.assertIn('access_programs.cyber="standard"', command)
                 self.assertTrue(
                     (work / ".codex/agents/aidast-attack.toml").is_file()
                 )

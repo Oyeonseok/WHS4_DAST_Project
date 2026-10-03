@@ -1934,7 +1934,15 @@ def discover_endpoints(
             from aidast.auth.endpoints import normalize_origin
             gate = ManualLoginGate(ManualLoginStore(RESULT_ROOT), run_id, normalize_origin(base_url))
             def confirm_login(browser_problem):
-                confirmed = gate.wait(browser_problem)
+                def poll_browser():
+                    # A Playwright-managed visible browser shares this worker's
+                    # sync event loop.  Dispatch it while waiting for dashboard
+                    # confirmation so SPA scripts, routing and operator input
+                    # continue instead of freezing on the loading screen.
+                    if driver is not None and driver.page is not None:
+                        driver.page.wait_for_timeout(50)
+
+                confirmed = gate.wait(browser_problem, poll_browser=poll_browser)
                 diagnose("operator_login_confirmed", auth_state="operator_confirmed",
                          target_origin=normalize_origin(base_url))
                 return confirmed
