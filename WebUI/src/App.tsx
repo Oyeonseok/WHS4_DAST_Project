@@ -78,6 +78,9 @@ type TokenUsageState = { scanId: string; data: ScanTokenUsage | null; error: boo
 type WikiDatabase = { database_id: string; scan_id: string; status: string; started_at: string; kind: 'runtime' | 'source' | 'benchmark'; target: string; endpoint_count: number; method_counts: Record<string, number>; label: string };
 type WikiComparison = { comparison_id: string; baseline_count: number; observed_count: number; matched_count: number; exact_recall: number; path_recall: number; missing: number; report_path: string; report_markdown: string; baseline_id: string; baseline_label: string; baseline_kind: 'source' | 'benchmark'; confirmed_count?: number; declared_candidate_count?: number; inferred_candidate_count?: number; confirmed_matched_count?: number; declared_candidate_matched_count?: number; inferred_candidate_matched_count?: number };
 type WikiStatus = { configured: boolean; scan_id: string; program_id?: string; target_id?: string; source_id?: string; endpoint_count?: number; wiki_index?: string; comparison?: WikiComparison | null; lint?: { ok: boolean; issues: string[] } };
+type AttackWikiDatabase = { database_id: string; scan_id: string; kind: 'runtime' | 'source'; label: string; target: string; started_at: string; hypothesis_count: number; execution_mode: 'black_box' | 'source_assisted' };
+type AttackWikiComparison = { baseline_id: string; baseline_label: string; baseline_kind: 'runtime' | 'source' | 'benchmark'; baseline_count: number; baseline_positive_count: number; planned_matched_count: number; tested_matched_count: number; candidate_matched_count: number; confirmed_matched_count: number; planned_recall: number; tested_recall: number; candidate_recall: number | null; confirmed_recall: number | null; missing: number; report_path: string; report_markdown: string };
+type AttackWikiStatus = { configured: boolean; scan_id: string; program_id?: string; target_id?: string; source_id?: string; hypothesis_count?: number; tested_count?: number; candidate_count?: number; confirmed_count?: number; execution_mode?: 'black_box' | 'source_assisted'; wiki_index?: string; comparison?: AttackWikiComparison | null; lint?: { ok: boolean; issues: string[] } };
 const scopeStatusLabel: Record<ScopeStatus, string> = { scope_required: 'Scope required', collecting: 'Collecting', awaiting_browser: 'Login required', paused: 'Paused', cancelling: 'Cancelling', cancelled: 'Cancelled', review_required: 'Review Yes / No', approved: 'Approved', rejected: 'Rejected', failed: 'Failed' };
 const scopeStatusTone = (status: ScopeStatus) => status === 'approved' ? 'success' : status === 'failed' || status === 'rejected' ? 'critical' : status === 'cancelled' ? '' : 'warning';
 const THEME_KEY = 'aidast-theme';
@@ -426,6 +429,12 @@ export default function App() {
   const [wikiStatus, setWikiStatus] = useState<WikiStatus | null>(null);
   const [wikiBusy, setWikiBusy] = useState(false);
   const [wikiError, setWikiError] = useState('');
+  const [attackWikiDatabases, setAttackWikiDatabases] = useState<AttackWikiDatabase[]>([]);
+  const [attackWikiBaselineId, setAttackWikiBaselineId] = useState('');
+  const [attackWikiTargetId, setAttackWikiTargetId] = useState('');
+  const [attackWikiStatus, setAttackWikiStatus] = useState<AttackWikiStatus | null>(null);
+  const [attackWikiBusy, setAttackWikiBusy] = useState(false);
+  const [attackWikiError, setAttackWikiError] = useState('');
   const { snapshot, state, error, refresh } = useScanSocket(scanId);
   const manualLogin = useManualLogin(scanId, snapshot?.status || '', !demo && !!scanId);
   const tokenUsage = tokenUsageState?.scanId === scanId ? tokenUsageState.data : null;
@@ -583,6 +592,9 @@ export default function App() {
     setWikiTargetId('');
     setWikiStatus(null);
     setWikiError('');
+    setAttackWikiTargetId('');
+    setAttackWikiStatus(null);
+    setAttackWikiError('');
   }, [scanId]);
   useEffect(() => {
     if (demo || page !== 'Scans' || !scanId) return;
@@ -616,6 +628,42 @@ export default function App() {
         setWikiError('');
       } catch (error) {
         if (!abort.signal.aborted) setWikiError(error instanceof Error ? error.message : 'Recon Wiki unavailable');
+      }
+    })();
+    return () => abort.abort();
+  }, [demo, page, scanId, snapshot?.program_id]);
+  useEffect(() => {
+    if (demo || page !== 'Scans' || !scanId) return;
+    const abort = new AbortController();
+    void (async () => {
+      try {
+        const base = import.meta.env.VITE_API_BASE_URL || location.origin;
+        const [catalogResponse, statusResponse] = await Promise.all([
+          fetch(new URL('/api/v1/attack-wiki/databases', base), {
+            signal: abort.signal, credentials: 'same-origin', cache: 'no-store',
+          }),
+          fetch(new URL(`/api/v1/scans/${encodeURIComponent(scanId)}/attack-wiki`, base), {
+            signal: abort.signal, credentials: 'same-origin', cache: 'no-store',
+          }),
+        ]);
+        const catalogBody = await catalogResponse.json() as { databases?: AttackWikiDatabase[]; detail?: unknown };
+        const statusBody = await statusResponse.json() as AttackWikiStatus & { detail?: unknown };
+        if (!catalogResponse.ok || !Array.isArray(catalogBody.databases)) {
+          throw new Error(apiErrorMessage(catalogBody.detail, `Attack Wiki catalog returned ${catalogResponse.status}`));
+        }
+        if (!statusResponse.ok || typeof statusBody.configured !== 'boolean') {
+          throw new Error(apiErrorMessage(statusBody.detail, `Attack Wiki status returned ${statusResponse.status}`));
+        }
+        if (abort.signal.aborted) return;
+        const baselines = catalogBody.databases.filter(item => item.scan_id !== scanId);
+        setAttackWikiDatabases(catalogBody.databases);
+        setAttackWikiStatus(statusBody);
+        setAttackWikiBaselineId(current => baselines.some(item => item.database_id === current)
+          ? current : statusBody.comparison?.baseline_id || baselines[0]?.database_id || '');
+        setAttackWikiTargetId(current => current || statusBody.target_id || snapshot?.program_id || '');
+        setAttackWikiError('');
+      } catch (error) {
+        if (!abort.signal.aborted) setAttackWikiError(error instanceof Error ? error.message : 'Attack Wiki unavailable');
       }
     })();
     return () => abort.abort();
@@ -1152,6 +1200,34 @@ export default function App() {
       setWikiError(error instanceof Error ? error.message : tk('Recon Wiki를 갱신하지 못했습니다.', 'Could not update Recon Wiki.'));
     } finally { setWikiBusy(false); }
   };
+  const updateAttackWiki = async (compare: boolean) => {
+    if (demo || !scanId || attackWikiBusy) return;
+    const baseline = attackWikiDatabases.find(item => item.database_id === attackWikiBaselineId);
+    if (compare && !baseline) {
+      setAttackWikiError(tk('비교할 Attack 기준 DB를 선택하세요.', 'Select an Attack baseline database to compare.'));
+      return;
+    }
+    setAttackWikiBusy(true); setAttackWikiError('');
+    try {
+      const base = import.meta.env.VITE_API_BASE_URL || location.origin;
+      const response = await fetch(new URL(`/api/v1/scans/${encodeURIComponent(scanId)}/attack-wiki`, base), {
+        method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          baseline_id: compare ? baseline?.database_id : null,
+          baseline_kind: baseline?.kind === 'source' ? 'source' : 'runtime',
+          target_id: attackWikiTargetId.trim(),
+        }),
+      });
+      const body = await response.json() as AttackWikiStatus & { detail?: unknown };
+      if (!response.ok || !body.configured) {
+        throw new Error(apiErrorMessage(body.detail, `Attack Wiki update returned ${response.status}`));
+      }
+      setAttackWikiStatus(body);
+      setAttackWikiTargetId(body.target_id || attackWikiTargetId);
+    } catch (error) {
+      setAttackWikiError(error instanceof Error ? error.message : tk('Attack Wiki를 갱신하지 못했습니다.', 'Could not update Attack Wiki.'));
+    } finally { setAttackWikiBusy(false); }
+  };
   const resumeScan = async () => {
     if (demo || !scanId || resuming) return;
     setResuming(true); setResumeError('');
@@ -1412,6 +1488,59 @@ export default function App() {
       </div>}
     </div>
   </Panel>;
+  const attackWikiBaselines = attackWikiDatabases.filter(item => item.scan_id !== scanId);
+  const selectedAttackWikiBaseline = attackWikiBaselines.find(item => item.database_id === attackWikiBaselineId);
+  const attackWikiPanel = !demo && <Panel
+    title={tk('Attack Wiki 누적·검증', 'Attack Wiki accumulation and evaluation')}
+    subtitle={tk('완료 후에만 블랙박스 실행 증거와 별도 기준을 비교합니다. 계획·실제 테스트·후보·독립 검증을 각각 계산합니다.', 'Compares black-box execution evidence with a separate baseline only after completion. Planned, tested, candidate, and independently confirmed recall are measured separately.')}
+  >
+    <div className="recon-wiki-controls">
+      <label className="form-field"><span>{tk('논리 대상·버전 ID', 'Logical target and version ID')}</span>
+        <input value={attackWikiTargetId} onChange={event => setAttackWikiTargetId(event.target.value)} maxLength={160}
+          placeholder={snapshot?.program_id || tk('예: juice-shop@20.2.0', 'For example juice-shop@20.2.0')}/>
+        <small>{tk('같은 배포를 평가할 때만 실행 DB와 기준 DB에 동일한 ID를 사용합니다.', 'Use the same ID for runtime and baseline only when they represent the same deployment.')}</small>
+      </label>
+      <label className="form-field"><span>{tk('비교 기준 Attack DB', 'Attack baseline database')}</span>
+        <select value={attackWikiBaselineId} onChange={event => setAttackWikiBaselineId(event.target.value)}>
+          <option value="">{tk('기준 없이 현재 실행만 누적', 'Accumulate this run without a baseline')}</option>
+          {attackWikiBaselines.map(item => <option key={item.database_id} value={item.database_id}>
+            [{item.kind}] {item.target} · {item.hypothesis_count} · {item.scan_id.slice(0, 16)}
+          </option>)}
+        </select>
+        <small>{selectedAttackWikiBaseline
+          ? `${selectedAttackWikiBaseline.execution_mode} · ${selectedAttackWikiBaseline.hypothesis_count} hypotheses`
+          : tk('source-assisted 기준은 실행 전에 읽히지 않으며 완료 후 평가에만 사용됩니다.', 'Source-assisted baselines are unavailable to execution and used only for post-run evaluation.')}</small>
+      </label>
+      <div className="button-row">
+        <button className="secondary-button" disabled={!wikiReady || attackWikiBusy} onClick={() => void updateAttackWiki(false)}>
+          {attackWikiBusy ? tk('처리 중…', 'Working…') : tk('현재 Attack 결과 누적', 'Accumulate current Attack result')}
+        </button>
+        <button className="primary-button" disabled={!wikiReady || attackWikiBusy || !selectedAttackWikiBaseline} onClick={() => void updateAttackWiki(true)}>
+          {tk('누적 후 기준과 비교', 'Accumulate and compare')}
+        </button>
+      </div>
+      {!wikiReady && <p className="requirements-note">{tk('스캔이 종료된 뒤에만 Attack 실행 증거를 Wiki에 누적할 수 있습니다.', 'Attack evidence can be accumulated only after the scan reaches a terminal state.')}</p>}
+      {attackWikiError && <p className="form-error" role="alert">{attackWikiError}</p>}
+      {attackWikiStatus?.configured && <div className="recon-wiki-result" role="status">
+        <div className="scan-stats">
+          <div><span>{tk('계획 가설', 'Planned hypotheses')}</span><strong>{attackWikiStatus.hypothesis_count ?? 0}</strong></div>
+          <div><span>{tk('실제 테스트', 'Actually tested')}</span><strong>{attackWikiStatus.tested_count ?? 0}</strong></div>
+          <div><span>{tk('Attack 후보', 'Attack candidates')}</span><strong>{attackWikiStatus.candidate_count ?? 0}</strong></div>
+          <div><span>{tk('독립 검증 확인', 'Independently confirmed')}</span><strong>{attackWikiStatus.confirmed_count ?? 0}</strong></div>
+          <div><span>{tk('실행 모드', 'Execution mode')}</span><strong>{attackWikiStatus.execution_mode === 'source_assisted' ? tk('소스 보조', 'Source assisted') : tk('블랙박스', 'Black box')}</strong></div>
+          {attackWikiStatus.comparison && <>
+            <div><span>{tk('실제 테스트 재현율', 'Tested recall')}</span><strong>{(attackWikiStatus.comparison.tested_recall * 100).toFixed(2)}%</strong></div>
+            <div><span>{tk('후보 재현율', 'Candidate recall')}</span><strong>{attackWikiStatus.comparison.candidate_recall == null ? 'N/A' : `${(attackWikiStatus.comparison.candidate_recall * 100).toFixed(2)}%`}</strong></div>
+            <div><span>{tk('독립 검증 재현율', 'Confirmed recall')}</span><strong>{attackWikiStatus.comparison.confirmed_recall == null ? 'N/A' : `${(attackWikiStatus.comparison.confirmed_recall * 100).toFixed(2)}%`}</strong></div>
+            <div><span>{tk('미테스트 기준 좌표', 'Untested baseline coordinates')}</span><strong>{attackWikiStatus.comparison.missing}</strong></div>
+          </>}
+        </div>
+        <p><code>{attackWikiStatus.wiki_index}</code></p>
+        {attackWikiStatus.comparison && <details><summary>{tk('정확 좌표 비교와 누락 보기', 'View exact-coordinate comparison and gaps')}</summary><pre>{attackWikiStatus.comparison.report_markdown}</pre></details>}
+        {!!attackWikiStatus.lint?.issues.length && <ul>{attackWikiStatus.lint.issues.map(issue => <li key={issue}>{issue}</li>)}</ul>}
+      </div>}
+    </div>
+  </Panel>;
   const scanPanel = <Panel className="scan-summary-panel" title={demo ? tr('Local lab · API assessment') : scanTargetLabel} subtitle={demo ? tr('Synthetic fixture · isolated from program inventory') : `${snapshot?.program_name ? `${snapshot.program_name} · ` : ''}${scanId}`} action={<div className="scan-panel-actions"><Badge tone={snapshot?.status === 'failed' ? 'critical' : snapshot?.status === 'completed' ? 'success' : 'warning'}><span className="dot"/>{cancelling ? tk("취소 처리 중", "Cancelling") : tr(snapshot?.status || state)}</Badge>{scanControls}{!demo && retryAction === 'resume' && <button className="secondary-button" onClick={resumeScan} disabled={resuming}>{resuming ? tk("재실행 요청 중…", "Requesting rerun…") : snapshot?.stage === 'Report' ? tk("보고서만 다시 생성", "Retry report only") : tk("실패 단계부터 재실행", "Rerun from failed stage")}</button>}{!demo && retryAction === 'rescan' && <button className="secondary-button" onClick={openRepeatScan}>{tk("정찰부터 다시 스캔", "Rescan from recon")}</button>}{!demo && scanId && <button className="secondary-button" onClick={() => setModal('scan-progress')}>{snapshot?.stage === 'Recon' ? tk("도구 작업·발견 URL 보기", "View tools and URLs") : tk("진행 창 열기", "Open progress window")}</button>}</div>}>
     {snapshot ? <>
       {manualLoginNotice}
@@ -1668,7 +1797,7 @@ export default function App() {
           <div className="workspace-footer"><Icon name="lock" size={13}/><span>{tr('Python enforces scope, request budget, and authorization gates.')}</span><span>AI DAST · v0.1</span></div>
         </>}
         {page === 'Scopes / Programs' && <><div className="notice"><Icon name="lock"/><div><strong>{tk(`사용자가 등록한 프로그램 ${totalProgramCount}개. ${approvedScopeCount ? `검증된 스코프 산출물 ${approvedScopeCount}개를 불러왔습니다.` : tr('No executable assets.')}`, `${totalProgramCount} registered programs. ${approvedScopeCount ? `${approvedScopeCount} verified Scope artifacts loaded.` : tr('No executable assets.')}`)}</strong><p>{tr('No programs are preloaded. Registration does not establish authorization; only an explicitly approved, integrity-verified Scope becomes executable.')}</p></div></div>{verifiedScopesPanel}{registeredPrograms.length > 0 ? <><div className="toolbar"><label className="search-field"><Icon name="search" size={16}/><input aria-label={tr('Search programs')} value={search} onChange={e => setSearch(e.target.value)} placeholder={tr('Filter registered programs or platforms…')}/></label><button className="secondary-button" onClick={() => setPrivateVisible(v => !v)}>{tr(privateVisible ? 'Hide private name' : 'Reveal private name')}</button></div><Panel title={tr('Scope intake queue')} subtitle={tk(`로컬 등록 프로그램 ${registeredPrograms.length}개 · 명시적인 승인 또는 거절 결정이 필요합니다`, `${registeredPrograms.length} locally registered programs · explicit approval or rejection required`)}><div className="intake-list">{visiblePrograms.map(item => <div key={item.id}><span className="artifact-icon"><Icon name={item.visibility === 'private' ? 'lock' : 'scope'}/></span><div><strong>{item.visibility === 'private' && !privateVisible ? tr('Private program') : item.program}</strong><p>{item.platform} · {tk("등록", "registered")} {new Date(item.created_at).toLocaleString(language === 'ko' ? 'ko-KR' : 'en-GB')}{item.scope_error ? ` · ${item.scope_error}` : ''}</p></div><div className="intake-actions"><Badge tone={scopeStatusTone(item.scope_status)}>{tr(scopeStatusLabel[item.scope_status])}</Badge><button className="secondary-button" onClick={() => openScopeWorkflow(item)}>{tr(item.scope_status === 'review_required' ? 'Review Yes / No' : item.scope_status === 'collecting' || item.scope_status === 'awaiting_browser' || item.scope_status === 'paused' || item.scope_status === 'cancelling' ? 'View progress' : item.scope_status === 'approved' ? 'View result' : 'Collect Scope')}</button></div></div>)}{visiblePrograms.length === 0 && <p className="table-empty">{tr('No registered programs match this filter.')}</p>}</div></Panel></> : <Panel title={tr('No programs registered')} subtitle={tr('Start with a program policy URL')}><Empty title={tr('Your Scope queue is empty')}>{tr('Choose Add program, enter the bug bounty program URL, and select Public or Private. Nothing is added automatically.')}</Empty></Panel>}</>}
-        {page === 'Scans' && <>{!demo && <div className="toolbar"><label>{tr('Persisted scan')} <select aria-label={tr('Select persisted scan')} value={scanId} onChange={event => setScanId(event.target.value)}>{!scanOptions.some(item => item.scan_id === scanId) && scanId && <option value={scanId}>{scanId}</option>}{scanOptions.map(item => <option key={item.scan_id} value={item.scan_id}>{item.targets?.length ? `${item.targets[0]}${item.targets.length > 1 ? tk(` 외 ${item.targets.length - 1}개`, ` + ${item.targets.length - 1} more`) : ''} · ${item.scan_id.slice(0, 13)}` : item.scan_id} · {tr(item.status)}</option>)}</select></label><button className="secondary-button" onClick={refresh}>{tr('Reload snapshot')}</button></div>}{scanPanel}{reconWikiPanel}{!demo && attackTasksContent}<Panel title={tr('Run artifacts & provenance')} subtitle={tr('Mapped to the existing aidast pipeline')}><div className="artifact-list">{[['Scope.json + Approval.json','Scope',tr('Policy, approved assets, and integrity hashes')],['Recon.db + Surface.json','Recon',tr('Observed assets, origins, endpoints, and sessions')],['Handoff.json','Handoff',tr('Hashes and roles of immutable source artifacts')],['Pipeline.db','Attack → Validation','stage_runs · attack_tasks · findings · chain_candidates'],['Report.md + Report.json','Report',tr('Validated local draft; no automatic submission')]].map(([name,s,description]) => <div key={name}><span className="artifact-icon"><Icon name="report"/></span><div><strong className="mono">{name}</strong><p>{description}</p></div><Badge>{tr(s)}</Badge></div>)}</div></Panel></>}
+        {page === 'Scans' && <>{!demo && <div className="toolbar"><label>{tr('Persisted scan')} <select aria-label={tr('Select persisted scan')} value={scanId} onChange={event => setScanId(event.target.value)}>{!scanOptions.some(item => item.scan_id === scanId) && scanId && <option value={scanId}>{scanId}</option>}{scanOptions.map(item => <option key={item.scan_id} value={item.scan_id}>{item.targets?.length ? `${item.targets[0]}${item.targets.length > 1 ? tk(` 외 ${item.targets.length - 1}개`, ` + ${item.targets.length - 1} more`) : ''} · ${item.scan_id.slice(0, 13)}` : item.scan_id} · {tr(item.status)}</option>)}</select></label><button className="secondary-button" onClick={refresh}>{tr('Reload snapshot')}</button></div>}{scanPanel}{reconWikiPanel}{attackWikiPanel}{!demo && attackTasksContent}<Panel title={tr('Run artifacts & provenance')} subtitle={tr('Mapped to the existing aidast pipeline')}><div className="artifact-list">{[['Scope.json + Approval.json','Scope',tr('Policy, approved assets, and integrity hashes')],['Recon.db + Surface.json','Recon',tr('Observed assets, origins, endpoints, and sessions')],['Handoff.json','Handoff',tr('Hashes and roles of immutable source artifacts')],['Pipeline.db','Attack → Validation','stage_runs · attack_tasks · findings · chain_candidates'],['Report.md + Report.json','Report',tr('Validated local draft; no automatic submission')]].map(([name,s,description]) => <div key={name}><span className="artifact-icon"><Icon name="report"/></span><div><strong className="mono">{name}</strong><p>{description}</p></div><Badge>{tr(s)}</Badge></div>)}</div></Panel></>}
         {page === 'Findings' && <>
           {validationError && <div className="error-banner" role="alert">{tr('Validation results unavailable')}</div>}
           <div className="toolbar finding-filters">

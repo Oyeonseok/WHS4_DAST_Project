@@ -112,6 +112,11 @@ configuration. The shared DB contains both Recon and Attack records.
    seed object is missing. Never treat a fixture fact as proof of a
    vulnerability; it only supplies the owned/foreign controls needed to run the
    test. Do not substitute guessed production identifiers.
+   `context_facts` are bounded observations made by earlier black-box Attack
+   batches. Use them to retain the discovered application model across batches
+   and to prioritize follow-up tests. They are supporting context only: their
+   source endpoint and confidence are explicit, they do not establish object
+   ownership, and they never confirm a vulnerability by themselves.
    For JWT/session tasks, an opaque credential reference is the issued-token
    baseline even when the annotated route also has password fields. Evaluate
    the token behavior expressed by the exact task and source context; do not

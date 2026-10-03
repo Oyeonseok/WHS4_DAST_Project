@@ -25,6 +25,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from aidast.auth.manual_login import ManualLoginStore
+from aidast.attack.wiki import AttackWikiError
 from aidast.core.model_calls import SQLiteModelCallSink
 from aidast.orchestration.scope import CoordinatorError, ScopeCoordinator
 from aidast.paths import RESULT_ROOT
@@ -38,6 +39,7 @@ from .programs import ProgramRegistrationRequest, ProgramRegistry
 from .projection import DashboardProjector, ProjectionError, ScanNotFoundError
 from .reports import ReportCatalog, ReportNotFoundError
 from .recon_wiki import ReconWikiCatalog, ReconWikiDashboardError
+from .attack_wiki import AttackWikiCatalog
 from .scope_workflow import (
     ScopeCollectionRequest,
     ScopeDecisionRequest,
@@ -57,6 +59,12 @@ class ManualLoginConfirmation(BaseModel):
 class ReconWikiRequest(BaseModel):
     baseline_id: str | None = Field(default=None, pattern=r"^[a-f0-9]{24}$")
     baseline_kind: Literal["source", "benchmark"] = "source"
+    target_id: str = Field(default="", max_length=160)
+
+
+class AttackWikiRequest(BaseModel):
+    baseline_id: str | None = Field(default=None, pattern=r"^[a-f0-9]{24}$")
+    baseline_kind: Literal["runtime", "source", "benchmark"] = "runtime"
     target_id: str = Field(default="", max_length=160)
 
 
@@ -121,6 +129,7 @@ def create_app(
     reports = ReportCatalog(resolved_root)
     manual_logins = ManualLoginStore(resolved_root)
     recon_wikis = ReconWikiCatalog(resolved_root)
+    attack_wikis = AttackWikiCatalog(resolved_root)
     app.state.launch_manager = manager
     app.state.program_registry = registry
     app.state.scope_workflow = workflow
@@ -317,6 +326,10 @@ def create_app(
     async def recon_wiki_databases() -> dict[str, Any]:
         return {"databases": recon_wikis.public_entries()}
 
+    @app.get("/api/v1/attack-wiki/databases")
+    async def attack_wiki_databases() -> dict[str, Any]:
+        return {"databases": attack_wikis.public_entries()}
+
     @app.post("/api/v1/scans", status_code=202)
     async def start_scan(payload: ScanLaunchRequest, request: Request) -> dict[str, Any]:
         origin = request.headers.get("origin")
@@ -413,6 +426,26 @@ def create_app(
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         except (OSError, sqlite3.Error, ValueError) as exc:
             raise HTTPException(status_code=503, detail="Recon Wiki update unavailable") from exc
+
+    @app.get("/api/v1/scans/{scan_id}/attack-wiki")
+    async def attack_wiki_status(scan_id: str) -> dict[str, Any]:
+        current = await snapshot(scan_id)
+        return attack_wikis.status(scan_id, program_id=current.get("program_id"))
+
+    @app.post("/api/v1/scans/{scan_id}/attack-wiki")
+    async def update_attack_wiki(scan_id: str, payload: AttackWikiRequest, request: Request) -> dict[str, Any]:
+        require_same_origin(request)
+        current = await snapshot(scan_id)
+        if current.get("status") not in {"completed", "failed", "cancelled"}:
+            raise HTTPException(status_code=409, detail="Attack Wiki requires a terminal post-run scan")
+        program_id = str(current.get("program_id") or current.get("scope_id") or scan_id)
+        try:
+            return attack_wikis.accumulate(scan_id, program_id=program_id, baseline_id=payload.baseline_id,
+                                          baseline_kind=payload.baseline_kind, target_id=payload.target_id)
+        except AttackWikiError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except (OSError, sqlite3.Error, ValueError) as exc:
+            raise HTTPException(status_code=503, detail="Attack Wiki update unavailable") from exc
 
     @app.get("/api/v1/scans/{scan_id}/manual-login")
     async def manual_login_status(scan_id: str) -> dict[str, Any]:

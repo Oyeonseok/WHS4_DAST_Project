@@ -591,8 +591,15 @@ def inferred_rest_resource_routes(declarations, *, base_url: str, target_policy=
     for declaration in declarations:
         if not isinstance(declaration, dict):
             continue
-        match = _REST_RESOURCE.fullmatch(str(declaration.get("path") or ""))
+        declared_path = str(declaration.get("path") or "")
+        match = _REST_RESOURCE.fullmatch(declared_path)
         if match is None:
+            continue
+        # A write-only call proves that one action exists, not that the server
+        # exposes a conventional CRUD family. Require a declared collection
+        # read before deriving passive item/verb candidates.
+        if ("{" not in declared_path
+                and str(declaration.get("method") or "").upper() != "GET"):
             continue
         resource = match["resource"]
         evidence = resources.setdefault(resource, {"routes": [], "documents": []})

@@ -416,6 +416,43 @@ def test_coverage_tasks_include_non_secret_owned_object_fixtures(tmp_path: Path)
     )
 
 
+def test_coverage_tasks_retain_safe_black_box_facts_across_batches(tmp_path: Path) -> None:
+    imported = imported_pipeline(tmp_path)
+    with sqlite3.connect(imported.pipeline_database) as conn:
+        endpoint_id = conn.execute(
+            "SELECT endpoint_id FROM endpoints ORDER BY endpoint_id LIMIT 1"
+        ).fetchone()[0]
+        conn.executemany(
+            """INSERT INTO attack_facts
+               (fact_id,scan_id,fact_type,fact_key,fact_value,confidence,
+                source_endpoint_id) VALUES (?,?,?,?,?,?,?)""",
+            [
+                ("fact-behavior", imported.scan_id, "endpoint_behavior",
+                 "users.response_shape", json.dumps({"id_field": "user_id"}),
+                 0.9, endpoint_id),
+                ("fact-secret", imported.scan_id, "auth_behavior",
+                 "login.access_token", "must-not-leak", 1.0, endpoint_id),
+            ],
+        )
+    agent = UnsupportedCoverageAgent()
+
+    ExhaustiveAttackCoordinator(
+        agent=agent, db_path=imported.pipeline_database,
+        scope_path=imported.recon_database.parent / "Scope.md",
+        policy_path=imported.recon_database.parent / "TargetPolicy.json",
+        batch_size=4,
+    ).run(imported.scan_id)
+
+    facts = agent.calls[0]["attack_tasks"][0]["context_facts"]
+    assert any(
+        item["fact_key"] == "users.response_shape"
+        and item["fact_value"] == {"id_field": "user_id"}
+        and item["source_endpoint_id"] == endpoint_id
+        for item in facts
+    )
+    assert all(item["fact_key"] != "login.access_token" for item in facts)
+
+
 def test_coverage_task_exposes_all_db_parameters_and_source_context(tmp_path: Path) -> None:
     imported = imported_pipeline(tmp_path)
     agent = UnsupportedCoverageAgent()

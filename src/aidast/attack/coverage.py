@@ -452,6 +452,68 @@ def _task_fixtures(
     return fixtures
 
 
+_SHAREABLE_FACT_TYPES = frozenset({
+    "api_documentation", "attack_observation", "attack_response_behavior",
+    "auth_behavior", "bounded_probe_result", "captcha_challenge_behavior",
+    "cors_behavior", "endpoint_behavior", "endpoint_runtime", "error_behavior",
+    "error_disclosure", "graphql_metadata", "http_observation",
+    "observed_behavior", "parameter_behavior", "response_behavior",
+    "test_state", "unauthenticated_api_behavior",
+})
+
+
+def _task_context_facts(
+    conn: sqlite3.Connection, scan_id: str, *, endpoint_id: str,
+    parameter_name: str,
+) -> list[dict[str, Any]]:
+    """Carry prior black-box observations into later bounded Attack batches.
+
+    Attack agents already persist reusable facts, but exhaustive coverage runs
+    use a fresh native agent for every batch.  Supplying a small, provenance-
+    bound subset prevents the next batch from losing the application model
+    learned by earlier requests.  Object fixtures remain separate because an
+    observed identifier is not proof that the scanner owns that object.
+    """
+    rows = conn.execute(
+        """SELECT fact_type,fact_key,fact_value,confidence,source_endpoint_id
+           FROM attack_facts
+           WHERE scan_id=? AND fact_type IN ({})
+           ORDER BY CASE WHEN source_endpoint_id=? THEN 0 ELSE 1 END,
+                    CASE WHEN fact_key LIKE ? THEN 0 ELSE 1 END,
+                    confidence DESC,created_at,fact_id LIMIT 48""".format(
+            ",".join("?" for _ in _SHAREABLE_FACT_TYPES)
+        ),
+        (
+            scan_id, *sorted(_SHAREABLE_FACT_TYPES), endpoint_id,
+            f"%{parameter_name}%" if parameter_name else "!never-match!",
+        ),
+    ).fetchall()
+    facts = []
+    for row in rows:
+        key = str(row["fact_key"])
+        normalized_key = key.casefold().replace("-", "_")
+        if any(part in normalized_key for part in (
+            "password", "passwd", "secret", "token", "cookie",
+            "authorization", "api_key", "apikey", "private_key",
+        )):
+            continue
+        value: Any = row["fact_value"]
+        if isinstance(value, str):
+            value = value[:2000]
+            try:
+                value = json.loads(value)
+            except json.JSONDecodeError:
+                pass
+        facts.append({
+            "fact_type": str(row["fact_type"]),
+            "fact_key": key,
+            "fact_value": value,
+            "confidence": float(row["confidence"]),
+            "source_endpoint_id": row["source_endpoint_id"],
+        })
+    return facts
+
+
 def requeue_credential_blocked_coverage(
     conn: sqlite3.Connection, scan_id: str,
 ) -> int:
@@ -706,6 +768,10 @@ def claim_coverage_batch(
         test_fixtures = _task_fixtures(
             conn, scan_id, parameter_name=str(row["parameter_name"]),
         )
+        context_facts = _task_context_facts(
+            conn, scan_id, endpoint_id=str(row["endpoint_id"]),
+            parameter_name=str(row["parameter_name"]),
+        )
         parameter_candidates = _parameter_candidates(
             conn, str(row["endpoint_id"]), str(row["vuln_class"]),
         )
@@ -729,6 +795,7 @@ def claim_coverage_batch(
                 "required_identity_role": row["required_identity_role"],
                 "credential_references": credential_references,
                 "test_fixtures": test_fixtures,
+                "context_facts": context_facts,
                 "source_context": source_context,
             },
         )
@@ -755,6 +822,7 @@ def claim_coverage_batch(
             "required_identity_role": row["required_identity_role"],
             "credential_references": credential_references,
             "test_fixtures": test_fixtures,
+            "context_facts": context_facts,
             "source_context": source_context,
         })
     return claimed
