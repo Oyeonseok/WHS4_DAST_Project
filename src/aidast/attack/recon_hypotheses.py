@@ -14,7 +14,10 @@ from typing import Any, Iterator, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from aidast.attack.coverage import hypothesis_skill_catalog, _canonical_digest, _open_database
+from aidast.attack.coverage import (
+    hypothesis_skill_catalog, _canonical_digest, _open_database,
+    _source_assisted_scan,
+)
 from aidast.attack.surface import ATTACK_ELIGIBLE_ENDPOINT_SQL
 from aidast.recon.annotations import safe_text, safe_url
 from aidast.recon.db import new_id
@@ -48,6 +51,7 @@ class ReconAttackPlan(BaseModel):
 
 
 def _contexts(conn: sqlite3.Connection, scan_id: str) -> Iterator[dict[str, Any]]:
+    source_assisted = _source_assisted_scan(conn, scan_id)
     for endpoint in conn.execute(
         f"""SELECT e.endpoint_id,e.method,e.normalized_path,e.auth_required,e.content_type,o.base_url,o.framework_signature,o.main_crawler_mode,o.spa_detected
         FROM endpoints e JOIN origins o ON o.origin_id=e.origin_id
@@ -56,12 +60,17 @@ def _contexts(conn: sqlite3.Connection, scan_id: str) -> Iterator[dict[str, Any]
         ORDER BY o.base_url,e.normalized_path,e.method,e.endpoint_id""", (scan_id,),
     ):
         endpoint_id = str(endpoint['endpoint_id'])
+        category_filter = "" if source_assisted else (
+            "AND n.category NOT IN "
+            "('vulnerability','source_vulnerability','benchmark_catalog_vulnerability')"
+        )
         raw_annotations = [dict(row) for row in conn.execute(
-            """SELECT n.annotation_id,n.observation_id,n.category,n.tag,n.rationale
+            f"""SELECT n.annotation_id,n.observation_id,n.category,n.tag,n.rationale
             FROM endpoint_annotations n JOIN endpoint_observations v ON v.observation_id=n.observation_id
             JOIN annotation_runs ar ON ar.annotation_run_id=n.annotation_run_id
             WHERE v.endpoint_id=? AND ar.scan_id=? AND ar.status='completed'
-            AND n.category<>'attack_hypothesis' ORDER BY n.category,n.tag,n.annotation_id LIMIT 256""",
+            AND n.category<>'attack_hypothesis' {category_filter}
+            ORDER BY n.category,n.tag,n.annotation_id LIMIT 256""",
             (endpoint_id, scan_id),
         )]
         annotations = []
@@ -521,6 +530,7 @@ commands, browse, or send requests; this step only produces a testing plan.
             if progress is not None:
                 progress(reviewed, total)
 
+        source_assisted = _source_assisted_scan(conn, scan_id)
         pending = []
         for context in _contexts(conn, scan_id):
             previous = conn.execute('SELECT evidence_sha256 FROM attack_endpoint_reviews WHERE scan_id=? AND endpoint_id=?',
@@ -528,7 +538,7 @@ commands, browse, or send requests; this step only produces a testing plan.
             if previous and previous[0] == _canonical_digest(context):
                 reviewed += 1
                 continue
-            if any(annotation['category'] in {'source_vulnerability', 'benchmark_catalog_vulnerability'}
+            if source_assisted and any(annotation['category'] in {'source_vulnerability', 'benchmark_catalog_vulnerability'}
                    for annotation in context['annotations']):
                 with conn:
                     conn.execute("""INSERT OR REPLACE INTO attack_endpoint_reviews

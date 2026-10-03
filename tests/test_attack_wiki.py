@@ -92,7 +92,7 @@ def test_runtime_requires_terminal_scan_even_when_attack_stage_has_finished(tmp_
         database_snapshot(path, kind="runtime")
 
 
-def test_benchmark_catalog_annotations_mark_source_assisted_execution(tmp_path):
+def test_post_run_benchmark_catalog_remains_evaluation_only(tmp_path):
     path = database(tmp_path / "Pipeline.db")
     with sqlite3.connect(path) as conn:
         conn.execute("PRAGMA foreign_keys=OFF")
@@ -102,6 +102,20 @@ def test_benchmark_catalog_annotations_mark_source_assisted_execution(tmp_path):
                      "category,tag,confidence,rationale,created_at) VALUES "
                      "('catalog','catalog-run','observation','benchmark_catalog_vulnerability',"
                      "'idor',1,'claim','2026-01-02')")
+    assert database_snapshot(path, kind="runtime")["execution_mode"] == "black_box"
+
+
+def test_executed_catalog_coverage_marks_source_assisted_execution(tmp_path):
+    path = database(tmp_path / "Pipeline.db")
+    with sqlite3.connect(path) as conn:
+        conn.execute("PRAGMA foreign_keys=OFF")
+        conn.execute("INSERT INTO annotation_runs(annotation_run_id,scan_id,model,prompt_version,"
+                     "taxonomy_version,status) VALUES ('catalog-run','run','test','test','test','completed')")
+        conn.execute("INSERT INTO endpoint_annotations(annotation_id,annotation_run_id,observation_id,"
+                     "category,tag,confidence,rationale,created_at) VALUES "
+                     "('catalog','catalog-run','observation','benchmark_catalog_vulnerability',"
+                     "'idor',1,'claim','2026-01-02')")
+        conn.execute("UPDATE attack_coverage_items SET annotation_id='catalog'")
     assert database_snapshot(path, kind="runtime")["execution_mode"] == "source_assisted"
 
 

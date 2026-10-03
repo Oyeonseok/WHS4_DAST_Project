@@ -507,8 +507,16 @@ def _request_shapes(conn: sqlite3.Connection, endpoint_id: str) -> list[dict[str
     return shapes
 
 
+def _source_assisted_scan(conn: sqlite3.Connection, scan_id: str) -> bool:
+    """Return whether this scan explicitly opted into source-assisted execution."""
+    row = conn.execute(
+        "SELECT scope_type FROM scans WHERE scan_id=?", (scan_id,),
+    ).fetchone()
+    return row is not None and str(row[0]) == "source_import"
+
+
 def ensure_coverage_manifest(database: Path, scan_id: str) -> CoverageManifestResult:
-    """Create one durable item for every source vulnerability annotation."""
+    """Create durable coverage from runtime hypotheses or an explicit source import."""
     with closing(_open_database(database)) as conn, conn:
         scan = conn.execute(
             "SELECT status,finished_at FROM scans WHERE scan_id=?", (scan_id,),
@@ -519,6 +527,12 @@ def ensure_coverage_manifest(database: Path, scan_id: str) -> CoverageManifestRe
         # scan's authenticated UI and successful GET traffic. This closes the
         # Recon-to-Attack handoff without importing a source/benchmark answer.
         seed_observed_object_facts(conn, scan_id)
+        annotation_categories = (
+            ("source_vulnerability", "benchmark_catalog_vulnerability", "attack_hypothesis")
+            if _source_assisted_scan(conn, scan_id)
+            else ("attack_hypothesis",)
+        )
+        placeholders = ",".join("?" for _ in annotation_categories)
         rows = conn.execute(
             f"""SELECT an.annotation_id,an.tag,an.category,an.rationale,e.endpoint_id,e.method,
                       e.normalized_path,COALESCE(e.auth_required,0) auth_required
@@ -529,12 +543,10 @@ def ensure_coverage_manifest(database: Path, scan_id: str) -> CoverageManifestRe
                JOIN origins o ON o.origin_id=e.origin_id
                JOIN assets a ON a.asset_id=o.asset_id
                WHERE a.scan_id=? AND ar.scan_id=? AND ar.status='completed'
-                 AND an.category IN (
-                     'source_vulnerability','benchmark_catalog_vulnerability','attack_hypothesis'
-                 )
+                 AND an.category IN ({placeholders})
                  AND {ATTACK_ELIGIBLE_ENDPOINT_SQL}
                ORDER BY e.endpoint_id,an.tag,an.annotation_id""",
-            (scan_id, scan_id),
+            (scan_id, scan_id, *annotation_categories),
         ).fetchall()
         planning_skills = hypothesis_skill_catalog()
         inserted = 0
@@ -671,13 +683,20 @@ def _task_fixtures(
     conn: sqlite3.Connection, scan_id: str, *, parameter_name: str,
 ) -> list[dict[str, Any]]:
     """Return bounded, non-secret fixture facts relevant to one coverage task."""
+    fact_types = (
+        ("owned_test_object", "benchmark_fixture")
+        if _source_assisted_scan(conn, scan_id)
+        else ("owned_test_object",)
+    )
+    placeholders = ",".join("?" for _ in fact_types)
     rows = conn.execute(
-        """SELECT fact_type,fact_key,fact_value,confidence
+        f"""SELECT fact_type,fact_key,fact_value,confidence
            FROM attack_facts
-           WHERE scan_id=? AND fact_type IN ('owned_test_object','benchmark_fixture')
+           WHERE scan_id=? AND fact_type IN ({placeholders})
            ORDER BY CASE WHEN fact_key LIKE ? THEN 0 ELSE 1 END,
                     fact_type,fact_key LIMIT 32""",
-        (scan_id, f"%.{parameter_name}" if parameter_name else "!never-match!"),
+        (scan_id, *fact_types,
+         f"%.{parameter_name}" if parameter_name else "!never-match!"),
     ).fetchall()
     fixtures = []
     credential_labels = {

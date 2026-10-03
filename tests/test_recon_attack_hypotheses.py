@@ -7,7 +7,9 @@ import pytest
 from aidast.recon import db
 from aidast.recon.annotations import ObservationRecorder
 from aidast.pipeline.live_schema import migrate_live_pipeline_schema
-from aidast.attack.coverage import ensure_coverage_manifest, claim_coverage_batch
+from aidast.attack.coverage import (
+    ensure_coverage_manifest, claim_coverage_batch, _task_fixtures,
+)
 from aidast.pipeline.lifecycle import start_stage_run
 
 
@@ -73,6 +75,52 @@ def test_normal_tags_create_parameter_bound_hypotheses_and_account_for_unknowns(
             ('query', 'q', 'unauthenticated'), ('query', 'q', 'unauthenticated')]
         assert conn.execute('PRAGMA foreign_key_check').fetchall() == []
     assert 'private-value' not in json.dumps(agent.contexts)
+
+
+def test_black_box_planning_never_consumes_source_or_benchmark_answers(tmp_path):
+    from aidast.attack.recon_hypotheses import plan_recon_attack
+
+    path = pipeline(tmp_path)
+    with sqlite3.connect(path) as conn:
+        observation = conn.execute(
+            "SELECT o.observation_id FROM endpoint_observations o "
+            "JOIN endpoints e ON e.endpoint_id=o.endpoint_id "
+            "WHERE e.normalized_path='/search'"
+        ).fetchone()[0]
+        conn.executemany(
+            "INSERT INTO endpoint_annotations(annotation_id,observation_id,annotation_run_id,"
+            "category,tag,rationale,created_at) VALUES (?,?,'tags',?,?,'answer',CURRENT_TIMESTAMP)",
+            [
+                ('source-answer', observation, 'source_vulnerability', 'sqli'),
+                ('benchmark-answer', observation, 'benchmark_catalog_vulnerability', 'xss'),
+            ],
+        )
+        conn.executemany(
+            "INSERT INTO attack_facts(fact_id,scan_id,fact_type,fact_key,fact_value,confidence) "
+            "VALUES (?,'scan',?,?,?,1.0)",
+            [
+                ('owned', 'owned_test_object', 'owned.id', '{"object_id":"1"}'),
+                ('benchmark', 'benchmark_fixture', 'answer.id', '{"object_id":"2"}'),
+            ],
+        )
+
+    agent = Planner()
+    plan_recon_attack(path, 'scan', agent=agent)
+    manifest = ensure_coverage_manifest(path, 'scan')
+
+    serialized = json.dumps(agent.contexts)
+    assert 'source-answer' not in serialized
+    assert 'benchmark-answer' not in serialized
+    assert manifest.by_vulnerability == {'sqli': 1, 'xss': 1}
+    with sqlite3.connect(path) as conn:
+        conn.row_factory = sqlite3.Row
+        assert conn.execute(
+            "SELECT count(*) FROM attack_coverage_items "
+            "WHERE annotation_id IN ('source-answer','benchmark-answer')"
+        ).fetchone()[0] == 0
+        assert [item['fact_type'] for item in _task_fixtures(
+            conn, 'scan', parameter_name='id',
+        )] == ['owned_test_object']
 
 
 def test_grounded_baseline_keeps_strong_recon_signals_in_attack_queue(tmp_path):

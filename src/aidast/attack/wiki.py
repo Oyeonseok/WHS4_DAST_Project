@@ -162,9 +162,14 @@ def database_snapshot(database: Path, *, kind: str, scan_id: str | None = None) 
             source_assisted = scan["scope_type"] == "source_import" or any(
                 "source_import" in str(row["source_tools"] or "") for row in rows)
             if {"endpoint_annotations", "annotation_runs"} <= tables:
-                source_assisted = source_assisted or bool(conn.execute("""SELECT 1 FROM endpoint_annotations an
+                # A catalog imported after a run is evaluation-only. Mark a
+                # runtime source-assisted only when its executed coverage was
+                # actually created from a source/catalog annotation.
+                source_assisted = source_assisted or bool(conn.execute("""SELECT 1
+                    FROM attack_coverage_items c
+                    JOIN endpoint_annotations an ON an.annotation_id=c.annotation_id
                     JOIN annotation_runs ar ON ar.annotation_run_id=an.annotation_run_id
-                    WHERE ar.scan_id=? AND an.category IN
+                    WHERE c.scan_id=? AND ar.scan_id=c.scan_id AND an.category IN
                         ('vulnerability','source_vulnerability','benchmark_catalog_vulnerability') LIMIT 1""",
                     (scan_id,)).fetchone())
             origins = sorted({item["origin"] for item in items})
