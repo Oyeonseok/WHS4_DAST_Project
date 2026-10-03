@@ -605,6 +605,50 @@ class RuntimeBrowserProgramPageReaderTests(unittest.TestCase):
         self.assertEqual(other.click.call_count, 2)
         scope.click.assert_called_once()
 
+    def test_navigation_deduplicates_identical_evidence_across_url_states(self) -> None:
+        url = "https://hackerone.com/files?type=team"
+        page = MagicMock(url=url)
+        page.title.return_value = "Files program"
+        page.wait_for_timeout.return_value = None
+        scope = MagicMock()
+        policy = MagicMock()
+        body = (
+            "Program policy and exact scope assets. files.example is in scope. "
+            * 30
+        )
+
+        scope.click.side_effect = lambda *, timeout: setattr(
+            page, "url", url + "&view=scope"
+        )
+        policy.click.side_effect = lambda *, timeout: setattr(
+            page, "url", url + "&view=policy"
+        )
+        decisions = iter([
+            ScopeNavigationDecision(action="open", candidate_id=0),
+            ScopeNavigationDecision(action="open", candidate_id=1),
+            ScopeNavigationDecision(action="capture", candidate_id=None),
+        ])
+        reader = RuntimeBrowserProgramPageReader(
+            identity="researcher",
+            navigation_agent=lambda _text, _choices: next(decisions),
+        )
+        reader._wait_for_stable_text = MagicMock(return_value=body)
+        reader._navigation_candidates = MagicMock(return_value=(
+            [
+                {"id": 0, "label": "Scope"},
+                {"id": 1, "label": "Program guidelines"},
+            ],
+            {0: scope, 1: policy},
+        ))
+
+        captured = reader._capture_agent_guided(page, url)
+
+        self.assertEqual(captured.text.count("=== PROGRAM VIEW:"), 1)
+        self.assertEqual(captured.text.count("files.example is in scope."), 30)
+        self.assertEqual(len(captured.primary_views), 1)
+        scope.click.assert_called_once_with(timeout=5_000)
+        policy.click.assert_called_once_with(timeout=5_000)
+
     def test_agent_cannot_open_external_target_link(self) -> None:
         url = "https://yeswehack.com/programs/example"
         internal = MagicMock()

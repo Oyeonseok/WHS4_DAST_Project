@@ -871,6 +871,10 @@ Reuse compatible input keys; never invent operator values or confirmations.
                         input="$aidast-policy\n\n" + policy_skill_text() + "\n\n" + prompt,
                         stdout=events,
                         timeout=self._timeout_seconds,
+                        idle_timeout=codex_process.structured_idle_timeout(
+                            self._timeout_seconds,
+                            tools_enabled=allow_browser,
+                        ),
                     )
                 except codex_process.CodexProcessTimeout as exc:
                     expired = exc

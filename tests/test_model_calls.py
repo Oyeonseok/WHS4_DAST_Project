@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -215,6 +216,69 @@ class ModelCallLogTests(unittest.TestCase):
                             artifact_name="deadline", operation="Recon Plan generation",
                         )
                     self.assertIs(caught.exception.__cause__, expired)
+
+    def test_structured_adapters_use_absolute_deadline_for_silent_toolless_turns(self) -> None:
+        from aidast.agents.main import CodexMainAgent
+        from aidast.agents.native_pipeline import CodexMainAgent as NativeAgent
+
+        class Artifact(BaseModel):
+            ok: bool
+
+        def completed(command, **_kwargs):
+            output = Path(command[command.index("--output-last-message") + 1])
+            output.write_text('{"ok":true}', encoding="utf-8")
+            return subprocess.CompletedProcess(command, 0, None, "")
+
+        for adapter in (CodexMainAgent, NativeAgent):
+            with self.subTest(adapter=adapter.__module__):
+                with (
+                    patch(f"{adapter.__module__}.shutil.which", return_value="codex"),
+                    patch.object(adapter, "_require_login"),
+                    patch(
+                        f"{adapter.__module__}.codex_process.run_codex",
+                        side_effect=completed,
+                    ) as run,
+                ):
+                    adapter(timeout_seconds=3600)._run_structured(
+                        prompt="fixture",
+                        model_type=Artifact,
+                        artifact_name="silent-tool-disabled",
+                        operation="captured Scope interpretation",
+                        allow_browser=False,
+                    )
+                    self.assertEqual(run.call_args.kwargs["idle_timeout"], 3600)
+
+    def test_browser_structured_turn_keeps_no_progress_watchdog(self) -> None:
+        from aidast.agents.main import CodexMainAgent
+        from aidast.core.codex_process import CODEX_IDLE_TIMEOUT_SECONDS
+
+        class Artifact(BaseModel):
+            ok: bool
+
+        def completed(command, **_kwargs):
+            output = Path(command[command.index("--output-last-message") + 1])
+            output.write_text('{"ok":true}', encoding="utf-8")
+            return subprocess.CompletedProcess(command, 0, None, "")
+
+        with (
+            patch("aidast.agents.main.shutil.which", return_value="codex"),
+            patch.object(CodexMainAgent, "_require_login"),
+            patch(
+                "aidast.agents.main.codex_process.run_codex",
+                side_effect=completed,
+            ) as run,
+        ):
+            CodexMainAgent(timeout_seconds=3600)._run_structured(
+                prompt="fixture",
+                model_type=Artifact,
+                artifact_name="browser-turn",
+                operation="Scope collection",
+                allow_browser=True,
+            )
+            self.assertEqual(
+                run.call_args.kwargs["idle_timeout"],
+                CODEX_IDLE_TIMEOUT_SECONDS,
+            )
 
     def test_newer_events_page_before_older_events_without_creating_missing_store(self) -> None:
         self.assertEqual(read_model_call_events(self.root), ([], None))
