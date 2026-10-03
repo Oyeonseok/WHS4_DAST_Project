@@ -2519,6 +2519,10 @@ def _run_recon_wiki(args: argparse.Namespace) -> int:
             "matched": comparison.matched_count,
             "exact_recall": comparison.exact_recall,
             "path_recall": comparison.path_recall,
+            "confirmed_recall": comparison.confirmed_recall,
+            "declared_candidate_recall": comparison.declared_candidate_recall,
+            "inferred_candidate_recall": comparison.inferred_candidate_recall,
+            "confirmed_or_declared_recall": comparison.confirmed_or_declared_recall,
             "evidence": {
                 "confirmed": comparison.confirmed_count,
                 "declared_candidates": comparison.declared_candidate_count,

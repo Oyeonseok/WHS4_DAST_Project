@@ -306,7 +306,8 @@ def _request_shapes(conn: sqlite3.Connection, endpoint_id: str) -> list[dict[str
     while credentials and personal data remain confined to Recon.db.
     """
     rows = conn.execute(
-        """SELECT method,content_type,substr(request_body,1,131072) request_body
+        """SELECT method,substr(request_headers,1,131072) request_headers,
+                  substr(request_body,1,131072) request_body
            FROM http_transactions
            WHERE endpoint_id=? AND request_body IS NOT NULL
            ORDER BY captured_at DESC,http_transaction_id DESC LIMIT 16""",
@@ -319,9 +320,28 @@ def _request_shapes(conn: sqlite3.Connection, endpoint_id: str) -> list[dict[str
         if isinstance(raw, bytes):
             raw = raw[:131072].decode("utf-8", errors="replace")
         text = str(raw)[:131072]
-        content_type = str(row["content_type"] or "").split(";", 1)[0].strip().lower()
         try:
+            # http_transactions.content_type describes the response. A JSON
+            # response does not establish that the request was encoded as JSON.
+            headers = json.loads(row["request_headers"] or "{}")
+            if not isinstance(headers, dict):
+                continue
+            media_types = {
+                value.split(";", 1)[0].strip().lower()
+                for name, value in headers.items()
+                if isinstance(name, str) and name.casefold() == "content-type"
+                and isinstance(value, str)
+            }
+            if len(media_types) > 1 or any(
+                not isinstance(value, str)
+                for name, value in headers.items()
+                if name.casefold() == "content-type"
+            ):
+                continue
+            content_type = next(iter(media_types), "")
             if content_type == "application/json" or (
+                content_type.startswith("application/") and content_type.endswith("+json")
+            ) or (
                 not content_type and text.lstrip().startswith(("{", "["))
             ):
                 fields = _value_shape(json.loads(text))

@@ -47,8 +47,12 @@ with `CONFIRMED`. Attack's own `confirmed` label is insufficient.
 For source/benchmark comparisons, all supplied coverage coordinates are the
 claim denominator. For historical runtime comparisons, only previously tested
 coordinates form the coverage denominator; only independently confirmed
-coordinates form the positive finding denominator. Candidate/confirmed recall
-is `null` (displayed N/A) when no historical positives exist. Multiple explicit
+coordinates form the positive finding denominator. Source/benchmark provenance
+alone is not a positive verdict: their positive denominator requires an explicit
+`VULNERABLE` adjudication with an evidence reference. Existing source coverage
+imports without adjudications therefore have no positive denominator.
+Candidate/confirmed recall is `null` (displayed N/A) when no adjudicated or
+historically confirmed positives exist. Multiple explicit
 baseline snapshot IDs form a deduplicated union. Runtime baselines must precede
 the observed run; a run cannot be compared to itself.
 
@@ -74,6 +78,53 @@ python -m aidast.attack.wiki_cli lint --root result/AttackWiki/example
 Use `--kind source` or `--kind benchmark` for an existing coverage database
 whose coordinates are evaluation claims. Ingestion does not generate a coverage
 manifest from source code. Add `--scan-id` for a database with multiple scans.
+
+### Official Juice Shop candidate baseline
+
+Juice Shop v20.2.0 has **116 official challenges**. The shared inventory's
+120 Juice Shop candidates also include four separate controls, which this
+official baseline excludes. The source statuses remain 92 `UNASSESSED`,
+18 `OUT_OF_TEST_SCOPE` (disabled in Docker), and six `MANUAL_ONLY`.
+An official challenge is a candidate, not an established true positive.
+
+First archive the terminal runtime with the existing `ingest --kind runtime`
+command, then create the baseline in that same Wiki:
+
+```sh
+python -m scripts.build_juice_shop_attack_baseline \
+  --root result/AttackWiki/juice-shop --observed-source runtime-CURRENT_ID
+python -m aidast.attack.wiki_cli compare --root result/AttackWiki/juice-shop \
+  --observed-source runtime-CURRENT_ID --baseline-source source-CANDIDATE_ID
+```
+
+The builder validates the pinned source hash and checks observed API route
+overlap with the Juice Shop route reference, rejecting a disjoint application
+such as VulnBank. This consistency check does not prove the deployment version.
+Optional `--candidate-inventory CandidateInventory.db` reads only matching
+official rows and requires their provenance and complete set to match the
+pinned definitions. It never creates a synthetic `Pipeline.db` or modifies
+the runtime database. The snapshot is bound to the archived observation and
+inherits its target and deployment origins.
+
+By default, all 116 candidates remain unmapped and unadjudicated. They remain
+visible in immutable evidence and reports; coverage and positive denominators
+are zero and recall is N/A. Use optional `--mapping reviewed-mappings.json`
+only after independent review. A manifest has `schema_version: 1`,
+`project: "juice-shop"`, `source_version: "v20.2.0"`, the pinned
+`source_sha256`, and an `entries` list. Each entry names `candidate_id`,
+`mapping_evidence_ref`, and `coordinates`, a list of complete seven-field
+coverage keys. Routes, taxonomy, parameters and identity roles are never
+inferred from challenge titles or categories. Missing entries remain unmapped.
+An optional `adjudication_status` is `UNASSESSED`, `VULNERABLE`, or
+`NOT_VULNERABLE`; either verdict requires `adjudication_evidence_ref`.
+Mapped unassessed candidates contribute only to coverage, while source scope
+exclusions and unmapped adjudications contribute to neither recall denominator.
+Conflicting positive/negative coordinate adjudications are reported and
+excluded from the positive denominator. Multi-snapshot comparisons preserve
+each candidate's mapping and verdict history; unique candidate status counts
+may overlap when reviews disagree. These are evaluation snapshots under
+AttackWiki, consumed only after execution; do not pass them or their manifests
+to Attack agents.
 
 ## Dashboard API
 

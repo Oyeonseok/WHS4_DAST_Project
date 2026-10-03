@@ -48,6 +48,10 @@ class CoverageComparison:
     confirmed_matched_count: int
     declared_candidate_matched_count: int
     inferred_candidate_matched_count: int
+    confirmed_recall: float
+    declared_candidate_recall: float
+    inferred_candidate_recall: float
+    confirmed_or_declared_recall: float
     missing: tuple[tuple[str, str], ...]
     report_path: Path
 
@@ -432,6 +436,16 @@ def compare_databases(
                       for key, value in evidence_classes.items())
         for category in ("confirmed", "declared", "inferred")
     }
+    # The disjoint evidence classes use the same baseline denominator. Their
+    # recalls add up to inventory recall; candidates remain unconfirmed.
+    evidence_recalls = {
+        category: count / len(baseline_keys)
+        for category, count in matched_evidence_counts.items()
+    }
+    confirmed_or_declared_count = (
+        matched_evidence_counts["confirmed"] + matched_evidence_counts["declared"]
+    )
+    confirmed_or_declared_recall = confirmed_or_declared_count / len(baseline_keys)
     missing = tuple(sorted(baseline_keys - observed_keys))
     exact_recall = len(matched) / len(baseline_keys) if baseline_keys else 1.0
     observed_paths = {path for _, path in observed_keys}
@@ -454,6 +468,10 @@ def compare_databases(
         f"- Baseline: [`{baseline.source_id}`](../sources/{baseline.source_id}.md)",
         f"- Exact method/path recall: **{len(matched)}/{len(baseline_keys)} "
         f"({exact_recall:.2%})**",
+        f"- Confirmed runtime recall: **{matched_evidence_counts['confirmed']}/"
+        f"{len(baseline_keys)} ({evidence_recalls['confirmed']:.2%})**",
+        f"- Confirmed or directly declared recall: **{confirmed_or_declared_count}/"
+        f"{len(baseline_keys)} ({confirmed_or_declared_recall:.2%})**",
         f"- Path-only recall: **{path_recall:.2%}**",
         "- Passive declared candidates included: **yes**",
         f"- Confirmed runtime routes: **{evidence_counts['confirmed']}** "
@@ -463,8 +481,28 @@ def compare_databases(
         f"- Convention-inferred candidates: **{evidence_counts['inferred']}** "
         f"(baseline matches: {matched_evidence_counts['inferred']})",
         f"- Excluded endpoints included: **{'yes' if include_excluded else 'no'}**",
-        "", "## Recall by method", "", "| Method | Matched | Baseline | Recall |", "|---|---:|---:|---:|",
+        "", "Exact method/path recall measures the full route inventory, including "
+        "unconfirmed candidates. Each method/path pair belongs to its strongest "
+        "evidence class; all evidence contributions use the same baseline denominator.",
+        "", "Confirmed runtime includes observed and verified records. "
+        "Access-denied responses can contribute runtime evidence.",
+        "", "## Recall by evidence", "",
+        "| Evidence | Routes | Baseline matches | Recall contribution |",
+        "|---|---:|---:|---:|",
     ]
+    for category, label in (
+        ("confirmed", "Confirmed runtime"),
+        ("declared", "Directly declared candidate"),
+        ("inferred", "Convention-inferred candidate"),
+    ):
+        lines.append(
+            f"| {label} | {evidence_counts[category]} | "
+            f"{matched_evidence_counts[category]} | {evidence_recalls[category]:.2%} |"
+        )
+    lines.extend([
+        "", "## Recall by method", "", "| Method | Matched | Baseline | Recall |",
+        "|---|---:|---:|---:|",
+    ])
     for method, (method_matched, method_total) in per_method.items():
         lines.append(
             f"| {method} | {method_matched} | {method_total} | "
@@ -491,6 +529,10 @@ def compare_databases(
         confirmed_matched_count=matched_evidence_counts["confirmed"],
         declared_candidate_matched_count=matched_evidence_counts["declared"],
         inferred_candidate_matched_count=matched_evidence_counts["inferred"],
+        confirmed_recall=evidence_recalls["confirmed"],
+        declared_candidate_recall=evidence_recalls["declared"],
+        inferred_candidate_recall=evidence_recalls["inferred"],
+        confirmed_or_declared_recall=confirmed_or_declared_recall,
         missing=missing,
         report_path=report_path,
     )

@@ -67,10 +67,10 @@ def init_wiki(root: Path) -> Path:
     for relative, text in {
         "schema.md": "# Attack Wiki schema\n\n"
         "Evaluation-only knowledge. Never use this directory as an Attack planner input.\n\n"
-        "`raw` holds immutable sanitized SQLite snapshots; `wiki` holds derived pages, "
+        "`raw` holds immutable sanitized evidence inventories; `wiki` holds derived pages, "
         "a target catalog, comparisons and an append-only log.\n\n"
         "Kinds: runtime is post-run evidence, source is an operator baseline, benchmark "
-        "is evaluation ground truth. Source-assisted runs are labeled separately.\n\n"
+        "supplies evaluation claims with separately adjudicated verdicts. Source-assisted runs are labeled separately.\n\n"
         "Exact key: origin, method, normalized path, vulnerability class, input location, "
         "parameter name, identity role. Actual testing needs completed same-task HTTP "
         "evidence; confirmation needs completed independent Validation.\n",
@@ -198,6 +198,24 @@ def _summary(items: list[dict[str, Any]]) -> dict[str, int]:
                for name in ("tested", "candidate", "confirmed")}}
 
 
+def candidate_summary(inventory: dict[str, Any]) -> dict[str, int]:
+    """Keep candidate, mapping and adjudication denominators separate."""
+    candidates = inventory.get("source_candidates", [])
+    def count(field: str, value: str) -> int:
+        return len({item["candidate_id"] for item in candidates if item[field] == value})
+
+    return {
+        "source_candidate_count": len({item["candidate_id"] for item in candidates}),
+        "mapped_candidate_count": count("mapping_status", "reviewed_exact"),
+        "unmapped_candidate_count": count("mapping_status", "unmapped"),
+        "unassessed_candidate_count": count("adjudication_status", "UNASSESSED"),
+        "adjudicated_positive_candidate_count": count("adjudication_status", "VULNERABLE"),
+        "adjudicated_negative_candidate_count": count("adjudication_status", "NOT_VULNERABLE"),
+        "out_of_scope_candidate_count": count("evaluation_status", "OUT_OF_TEST_SCOPE"),
+        "manual_only_candidate_count": count("evaluation_status", "MANUAL_ONLY"),
+    }
+
+
 def _catalog(root: Path, sources: list[dict[str, Any]]) -> None:
     index = ["# Attack Wiki", "", "Evaluation only. Every claim links to its captured evidence.", ""]
     for target in sorted({item["target_id"] for item in sources}):
@@ -212,6 +230,10 @@ def _catalog(root: Path, sources: list[dict[str, Any]]) -> None:
             lines.append(f"| [{_text(source['label'])}](../sources/{source['source_id']}.md) | {source['kind']} | "
                 f"{source['inventory']['execution_mode']} | {stats['hypothesis_count']} | {stats['tested_count']} | "
                 f"{stats['candidate_count']} | {stats['confirmed_count']} |")
+        for source in target_sources:
+            if "source_candidates" in source["inventory"]:
+                lines += ["", f"Source candidate inventory `{source['source_id']}`: "
+                          f"`{candidate_summary(source['inventory'])}`."]
         runtime = [item for item in target_sources if item["kind"] == "runtime"]
         historical = _summary([item for source in runtime for item in source["inventory"]["items"]])
         lines += ["", f"Historical union (deduplicated coordinates): `{historical}`.", "",
@@ -231,6 +253,13 @@ def _catalog(root: Path, sources: list[dict[str, Any]]) -> None:
 def ingest_database(root: Path, database: Path, *, kind: str, label: str | None = None,
                     target_id: str | None = None, scan_id: str | None = None) -> dict[str, Any]:
     inventory = database_snapshot(database, kind=kind, scan_id=scan_id)
+    return _ingest_inventory(root, inventory, kind=kind, label=label, target_id=target_id,
+                             database_path=str(Path(database).expanduser().resolve()))
+
+
+def _ingest_inventory(root: Path, inventory: dict[str, Any], *, kind: str,
+                      label: str | None = None, target_id: str | None = None,
+                      database_path: str | None = None) -> dict[str, Any]:
     root = init_wiki(root)
     label = label or str(inventory["scan"]["scan_id"])
     target_id = target_id or ", ".join(inventory["origins"]) or str(inventory["scan"]["scope_value"])
@@ -240,7 +269,7 @@ def ingest_database(root: Path, database: Path, *, kind: str, label: str | None 
     created = not raw_path.exists()
     if created:
         payload = {"schema_version": 1, **identity, "source_id": source_id,
-                   "captured_at": _now(), "database_path": str(Path(database).expanduser().resolve()),
+                   "captured_at": _now(), "database_path": database_path,
                    "inventory": inventory}
         # Exclusive creation keeps repeated ingestion from replacing raw evidence.
         with raw_path.open("x", encoding="utf-8") as stream:
@@ -255,10 +284,20 @@ def ingest_database(root: Path, database: Path, *, kind: str, label: str | None 
              f"- Inventory SHA256: `{source['inventory_sha256']}`", f"- Coverage: `{stats}`", "",
              f"[Immutable evidence](../../raw/{source_id}.json)", "",
              "A planned hypothesis is not an actual test; an Attack candidate is not an independent confirmation."]
+    candidate_stats = candidate_summary(inventory) if "source_candidates" in inventory else {}
+    if candidate_stats:
+        lines += ["", f"Source candidates: `{candidate_stats}`.", "",
+                  "Unmapped candidates have no coverage key. Unassessed candidates are not positive findings.", "",
+                  "| Source candidate | Mapping | Source scope | Adjudication |",
+                  "|---|---|---|---|"]
+        lines += [f"| [{_text(item['candidate_id'])}]({item['source_url']}) | {item['mapping_status']} | "
+                  f"{item['evaluation_status']} | {item['adjudication_status']} |"
+                  for item in inventory["source_candidates"]]
     _publish(root / "wiki/sources" / f"{source_id}.md", "\n".join(lines) + "\n")
     _catalog(root, sources)
     return {"source_id": source_id, "kind": kind, "target_id": target_id, "created": created,
             "execution_mode": inventory["execution_mode"], **stats,
+            **candidate_stats,
             "raw_path": str(raw_path), "page_path": str(root / "wiki/sources" / f"{source_id}.md")}
 
 
@@ -287,18 +326,40 @@ def compare_sources(root: Path, *, observed_source_id: str, baseline_source_ids:
            for source in baselines):
         raise AttackWikiError("historical runtime baselines must precede the observed run")
     baseline_keys = {coverage_key(item) for source in baselines for item in source["inventory"]["items"]
-                     if source["kind"] != "runtime" or item["tested"]}
-    if not baseline_keys:
+                     if (source["kind"] != "runtime" or item["tested"])
+                     and item.get("baseline_eligible", True)}
+    has_candidates = any("source_candidates" in source["inventory"] for source in baselines)
+    if not baseline_keys and not has_candidates:
         raise AttackWikiError("baseline contains no eligible coverage coordinates")
     positive_keys = {coverage_key(item) for source in baselines for item in source["inventory"]["items"]
-                     if source["kind"] != "runtime" or item["confirmed"]}
+                     if item.get("baseline_eligible", True) and (
+                         item["confirmed"] if source["kind"] == "runtime" else
+                         item.get("adjudication_status") == "VULNERABLE"
+                         and bool(item.get("adjudication_evidence_ref")))}
+    negative_keys = {coverage_key(item) for source in baselines for item in source["inventory"]["items"]
+                     if source["kind"] != "runtime" and item.get("baseline_eligible", True)
+                     and item.get("adjudication_status") == "NOT_VULNERABLE"
+                     and bool(item.get("adjudication_evidence_ref"))}
+    conflicting_keys = positive_keys & negative_keys
+    positive_keys -= conflicting_keys
     observed_items = observed["inventory"]["items"]
     result: dict[str, Any] = {"observed_source_id": observed_source_id,
         "baseline_source_ids": [source["source_id"] for source in baselines], "target_id": observed["target_id"],
         "execution_mode": observed["inventory"]["execution_mode"], "baseline_count": len(baseline_keys),
         "baseline_positive_count": len(positive_keys),
+        "baseline_adjudication_conflict_count": len(conflicting_keys),
         "observed_count": len({coverage_key(item) for item in observed_items}),
         "semantics": "Post-run evaluation only. Historical testing is not a current vulnerability claim."}
+    if has_candidates:
+        candidates = [{**item, "source_id": source["source_id"]} for source in baselines
+                      for item in source["inventory"].get("source_candidates", [])]
+        result.update(candidate_summary({"source_candidates": candidates}))
+        result["source_candidate_histories"] = [
+            {key: item[key] for key in ("candidate_id", "source_id", "mapping_status", "adjudication_status")}
+            for item in candidates]
+        result["unmapped_source_candidates"] = [
+            {key: item[key] for key in ("candidate_id", "source_id", "source_url", "evaluation_status", "adjudication_status")}
+            for item in candidates if item["mapping_status"] == "unmapped"]
     for name in ("planned", "tested", "candidate", "confirmed"):
         keys = {coverage_key(item) for item in observed_items if name == "planned" or item[name]}
         denominator = positive_keys if name in {"candidate", "confirmed"} else baseline_keys
@@ -323,7 +384,10 @@ def compare_sources(root: Path, *, observed_source_id: str, baseline_source_ids:
     result["missing_disposition_counts"] = {
         name: len(items) for name, items in missing_by_disposition.items()}
     result["denominator_semantics"] = (
-        "Recall uses all baseline claims (or historically tested coordinates). "
+        "Coverage recall uses supplied mapped baseline claims (or historically tested coordinates). "
+        "Unmapped source candidates have no coverage coordinate and are reported separately. "
+        "Positive recall requires explicit evidence-backed adjudication or independent historical confirmation; "
+        "source/benchmark provenance alone is not a positive verdict. "
         "Policy, authentication and unsupported dispositions remain visible in the "
         "denominator. Post-run dispositions are not verified eligibility labels; "
         "unsupported may include exhausted budgets. This is coverage recall, "
@@ -345,6 +409,12 @@ def compare_sources(root: Path, *, observed_source_id: str, baseline_source_ids:
           (f"{result[name + '_recall']:.2%}" if result[name + '_recall'] is not None else "N/A") + " |"
           for name in ("planned", "tested", "candidate", "confirmed")], "", "Missing actual tests:", "",
         *[f"- `{_text(' '.join(coverage_key(item)))}`" for item in result["missing"]]]
+    if has_candidates:
+        lines += ["", f"- Source candidate inventory: `{candidate_summary({'source_candidates': candidates})}`",
+                  "", "Unmapped source candidates (excluded from coverage and positive denominators):", "",
+                  *[f"- [{_text(item['candidate_id'])}]({item['source_url']}) — "
+                    f"{item['evaluation_status']} / {item['adjudication_status']}"
+                    for item in result["unmapped_source_candidates"]]]
     _publish(report_path, "\n".join(lines) + "\n")
     _publish(report_path.with_suffix(".json"), json.dumps(result, ensure_ascii=False, indent=2) + "\n")
     result["report_path"] = str(report_path)

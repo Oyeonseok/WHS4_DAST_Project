@@ -247,6 +247,8 @@ def test_runtime_modules_do_not_consume_evaluation_wiki():
     for name in ("attack/planner.py", "attack/recon_hypotheses.py", "attack/runtime.py",
                  "attack/agent.py", "orchestration/attack.py", "orchestration/coverage_attack.py"):
         assert "attack.wiki" not in (root / name).read_text()
+        assert "candidate_baseline" not in (root / name).read_text()
+        assert "build_juice_shop_attack_baseline" not in (root / name).read_text()
 
 
 def test_api_requires_terminal_scan_and_same_origin(tmp_path, monkeypatch):
@@ -266,3 +268,185 @@ def test_api_requires_terminal_scan_and_same_origin(tmp_path, monkeypatch):
         result = client.post("/api/v1/scans/run/attack-wiki", json={}, headers=headers)
         assert result.status_code == 200 and result.json()["tested_count"] == 1
         assert client.get("/api/v1/scans/run/attack-wiki").json()["configured"]
+
+
+@pytest.mark.parametrize("kind", ["source", "benchmark"])
+def test_source_provenance_does_not_make_unadjudicated_coordinates_positive(tmp_path, kind):
+    root = tmp_path / "Wiki"
+    baseline = ingest(root, database(tmp_path / "source.db", scan="source", source=True), kind=kind)
+    observed = ingest(root, database(tmp_path / "observed.db", confirmed=True, coverage_status="candidate"))
+    result = compare_sources(root, observed_source_id=observed["source_id"],
+                             baseline_source_ids=[baseline["source_id"]])
+    assert result["baseline_count"] == 1 and result["tested_recall"] == 1
+    assert result["baseline_positive_count"] == 0
+    assert result["candidate_recall"] is None and result["confirmed_recall"] is None
+
+
+def official_candidates():
+    from pathlib import Path
+    from scripts.build_validation_candidates import juice_candidates
+    source = Path(__file__).resolve().parents[1] / "resources/lab/juice-shop-v20.2.0-challenges.yml"
+    return juice_candidates(source)
+
+
+def candidate_baseline(root, observed, *, manifest=None):
+    from aidast.attack.candidate_baseline import ingest_candidate_baseline
+    from scripts.build_validation_candidates import JUICE_VERSION, JUICE_SHA256
+    return ingest_candidate_baseline(root, official_candidates(), project="juice-shop",
+                                     observed_source_id=observed["source_id"],
+                                     source_version=JUICE_VERSION, source_sha256=JUICE_SHA256,
+                                     mapping_manifest=manifest)
+
+
+def reviewed_manifest(entries):
+    from scripts.build_validation_candidates import JUICE_VERSION, JUICE_SHA256
+    return {"schema_version": 1, "project": "juice-shop", "source_version": JUICE_VERSION,
+            "source_sha256": JUICE_SHA256, "entries": entries}
+
+
+def reviewed_entry(candidate_id, *, verdict="UNASSESSED"):
+    return {"candidate_id": candidate_id, "mapping_evidence_ref": "fixture:exact-coordinate-review",
+            "adjudication_status": verdict,
+            "adjudication_evidence_ref": "fixture:independent-review" if verdict != "UNASSESSED" else None,
+            "coordinates": [{"origin": "https://lab.test", "method": "GET", "path": "/items/:id",
+                             "vuln_class": "idor", "injection_location": "path", "parameter_name": "id",
+                             "required_identity_role": "unauthenticated"}]}
+
+
+def test_all_official_candidates_remain_unmapped_unassessed_without_a_review(tmp_path):
+    root = tmp_path / "AttackWiki"
+    path = database(tmp_path / "Pipeline.db")
+    before = path.read_bytes()
+    observed = ingest(root, path)
+    first = candidate_baseline(root, observed)
+    raw_path = root / "raw" / (first["source_id"] + ".json")
+    raw = raw_path.read_bytes()
+    second = candidate_baseline(root, observed)
+    result = compare_sources(root, observed_source_id=observed["source_id"],
+                             baseline_source_ids=[first["source_id"]])
+    assert first["source_candidate_count"] == 116
+    assert first["unmapped_candidate_count"] == first["unassessed_candidate_count"] == 116
+    assert first["tested_count"] == first["candidate_count"] == first["confirmed_count"] == 0
+    assert first["source_id"] == second["source_id"] and not second["created"]
+    assert raw_path.read_bytes() == raw and path.read_bytes() == before
+    assert result["baseline_count"] == result["baseline_positive_count"] == 0
+    assert result["tested_recall"] is None and result["candidate_recall"] is None
+    assert result["confirmed_recall"] is None and len(result["unmapped_source_candidates"]) == 116
+    assert lint_wiki(root) == ()
+    snapshot = json.loads(raw)["inventory"]
+    assert snapshot["evaluation_only"] and snapshot["execution_mode"] == "evaluation_only"
+    assert snapshot["bound_observed_source_id"] == observed["source_id"]
+    assert {row["evaluation_status"] for row in snapshot["source_candidates"]} == {
+        "UNASSESSED", "OUT_OF_TEST_SCOPE", "MANUAL_ONLY"}
+    assert all("description" not in row for row in snapshot["source_candidates"])
+
+
+@pytest.mark.parametrize("verdict,positive", [("UNASSESSED", 0), ("VULNERABLE", 1), ("NOT_VULNERABLE", 0)])
+def test_mapping_and_positive_adjudication_are_independent(tmp_path, verdict, positive):
+    root = tmp_path / "Wiki"
+    observed = ingest(root, database(tmp_path / "observed.db", confirmed=True, coverage_status="candidate"))
+    candidate_id = next(row["candidate_id"] for row in official_candidates() if row["evaluation_status"] == "UNASSESSED")
+    baseline = candidate_baseline(root, observed, manifest=reviewed_manifest([reviewed_entry(candidate_id, verdict=verdict)]))
+    result = compare_sources(root, observed_source_id=observed["source_id"],
+                             baseline_source_ids=[baseline["source_id"]])
+    assert result["baseline_count"] == 1 and result["tested_recall"] == 1
+    assert result["baseline_positive_count"] == positive
+    assert result["mapped_candidate_count"] == 1 and result["unmapped_candidate_count"] == 115
+    assert result["candidate_recall"] == (1 if positive else None)
+    assert result["confirmed_recall"] == (1 if positive else None)
+
+
+def test_unmapped_positive_and_source_exclusions_never_enter_positive_denominator(tmp_path):
+    root = tmp_path / "Wiki"
+    observed = ingest(root, database(tmp_path / "observed.db"))
+    rows = official_candidates()
+    available = next(row["candidate_id"] for row in rows if row["evaluation_status"] == "UNASSESSED")
+    excluded = next(row["candidate_id"] for row in rows if row["evaluation_status"] == "OUT_OF_TEST_SCOPE")
+    unmapped = {**reviewed_entry(available, verdict="VULNERABLE"), "coordinates": []}
+    baseline = candidate_baseline(root, observed, manifest=reviewed_manifest([
+        unmapped, reviewed_entry(excluded, verdict="VULNERABLE")]))
+    result = compare_sources(root, observed_source_id=observed["source_id"],
+                             baseline_source_ids=[baseline["source_id"]])
+    assert result["adjudicated_positive_candidate_count"] == 2
+    assert result["baseline_positive_count"] == result["baseline_count"] == 0
+    assert result["confirmed_recall"] is None
+
+
+@pytest.mark.parametrize("mutation,error", [
+    (lambda manifest: manifest.update(source_sha256="f" * 64), "provenance"),
+    (lambda manifest: manifest["entries"][0]["coordinates"][0].pop("parameter_name"), "every exact"),
+    (lambda manifest: manifest["entries"][0]["coordinates"][0].update(origin="https://foreign.test"), "origin"),
+    (lambda manifest: manifest["entries"][0].pop("mapping_evidence_ref"), "mapping requires"),
+    (lambda manifest: manifest["entries"][0].update(adjudication_status="VULNERABLE"), "adjudication requires"),
+])
+def test_candidate_manifest_requires_version_exact_mapping_and_adjudication_evidence(tmp_path, mutation, error):
+    root = tmp_path / "Wiki"
+    observed = ingest(root, database(tmp_path / "observed.db"))
+    candidate_id = next(row["candidate_id"] for row in official_candidates() if row["evaluation_status"] == "UNASSESSED")
+    manifest = reviewed_manifest([reviewed_entry(candidate_id)])
+    mutation(manifest)
+    with pytest.raises(AttackWikiError, match=error):
+        candidate_baseline(root, observed, manifest=manifest)
+    assert len(list((root / "raw").glob("*.json"))) == 1
+
+
+def test_candidate_baseline_requires_post_run_observation(tmp_path):
+    from aidast.attack.candidate_baseline import ingest_candidate_baseline
+    from scripts.build_validation_candidates import JUICE_VERSION, JUICE_SHA256
+    with pytest.raises(AttackWikiError, match="terminal runtime"):
+        ingest_candidate_baseline(tmp_path / "Wiki", official_candidates(), project="juice-shop",
+                                  observed_source_id="runtime-absent", source_version=JUICE_VERSION,
+                                  source_sha256=JUICE_SHA256)
+    root = tmp_path / "Wiki"
+    running = database(tmp_path / "running.db", source=True, status="running")
+    source = ingest(root, running, kind="source")
+    with pytest.raises(AttackWikiError, match="terminal runtime"):
+        candidate_baseline(root, source)
+
+
+def test_candidate_union_retains_unassessed_history_and_conflicting_reviews(tmp_path):
+    root = tmp_path / "Wiki"
+    observed = ingest(root, database(tmp_path / "observed.db"))
+    candidate_id = next(row["candidate_id"] for row in official_candidates() if row["evaluation_status"] == "UNASSESSED")
+    snapshots = [candidate_baseline(root, observed)]
+    for verdict in ("VULNERABLE", "NOT_VULNERABLE"):
+        snapshots.append(candidate_baseline(root, observed, manifest=reviewed_manifest([
+            reviewed_entry(candidate_id, verdict=verdict)])))
+    result = compare_sources(root, observed_source_id=observed["source_id"],
+                             baseline_source_ids=[snapshot["source_id"] for snapshot in snapshots])
+    assert result["source_candidate_count"] == 116 and result["unassessed_candidate_count"] == 116
+    assert result["baseline_adjudication_conflict_count"] == 1 and result["baseline_positive_count"] == 0
+    assert {item["adjudication_status"] for item in result["source_candidate_histories"]
+            if item["candidate_id"] == candidate_id} == {"UNASSESSED", "VULNERABLE", "NOT_VULNERABLE"}
+
+
+def test_pinned_juice_builder_guards_application_and_optional_inventory(tmp_path):
+    from pathlib import Path
+    from scripts.build_juice_shop_attack_baseline import build_baseline
+    from scripts.build_validation_candidates import build_inventory, VULN_BANK_COMMIT
+    root = tmp_path / "Wiki"
+    path = database(tmp_path / "Pipeline.db")
+    foreign = ingest(root, path)
+    with pytest.raises(AttackWikiError, match="Juice Shop application"):
+        build_baseline(root, foreign["source_id"])
+    with sqlite3.connect(path) as conn:
+        conn.execute("UPDATE endpoints SET path='/rest/products/search',normalized_path='/rest/products/search'")
+    observed = ingest(root, path)
+    source = Path(__file__).resolve().parents[1] / "resources/lab/juice-shop-v20.2.0-challenges.yml"
+    inventory = tmp_path / "CandidateInventory.db"
+    build_inventory(inventory, source, {}, vuln_commit=VULN_BANK_COMMIT)
+    with sqlite3.connect(inventory) as conn:
+        conn.row_factory = sqlite3.Row
+        sample = dict(conn.execute("SELECT * FROM attack_candidates LIMIT 1").fetchone())
+        for number in range(4):
+            control = {**sample, "candidate_id": f"juice-shop:control-{number}",
+                       "external_id": f"control-{number}", "claim_basis": "source_code"}
+            conn.execute(f"INSERT INTO attack_candidates VALUES ({','.join('?' for _ in control)})", tuple(control.values()))
+        assert conn.execute("SELECT COUNT(*) FROM attack_candidates").fetchone()[0] == 120
+    before = inventory.read_bytes()
+    baseline = build_baseline(root, observed["source_id"], candidate_inventory=inventory)
+    assert baseline["source_candidate_count"] == 116 and inventory.read_bytes() == before
+    with sqlite3.connect(inventory) as conn:
+        conn.execute("DELETE FROM attack_candidates WHERE candidate_id=(SELECT candidate_id FROM attack_candidates LIMIT 1)")
+    with pytest.raises(AttackWikiError, match="pinned official Juice Shop set"):
+        build_baseline(root, observed["source_id"], candidate_inventory=inventory)
