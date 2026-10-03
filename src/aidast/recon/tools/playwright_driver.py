@@ -32,7 +32,7 @@ import urllib.request
 from dataclasses import dataclass, field
 from collections.abc import Callable
 from pathlib import Path
-from urllib.parse import urljoin, urlparse
+from urllib.parse import parse_qsl, unquote, urljoin, urlparse
 
 from playwright.sync_api import (
     Browser,
@@ -183,6 +183,62 @@ _DIALOG_CLOSE_SELECTOR = (
     'button[mat-dialog-close], [role="button"][aria-label*="close" i])'
 )
 _READ_ACTION_LABEL = re.compile(r"\b(?:view|details?|show|read)\b|more information|상세|정보 보기", re.I)
+_REQUEST_FIELD_NAME = re.compile(r"[A-Za-z_$][\w$.-]{0,127}\Z")
+
+
+def _request_shape_parameters(request) -> tuple[str | None, list[dict[str, str]]]:
+    """Return field names/types from one browser request without its values."""
+    try:
+        headers = getattr(request, "headers", {}) or {}
+        if callable(headers):
+            headers = headers()
+    except Exception:
+        headers = {}
+    content_type = next(
+        (str(value).split(";", 1)[0].strip().casefold()
+         for name, value in headers.items() if str(name).casefold() == "content-type"),
+        "",
+    ) if isinstance(headers, dict) else ""
+    try:
+        raw = getattr(request, "post_data_buffer", None)
+        if callable(raw):
+            raw = raw()
+        if isinstance(raw, bytes):
+            raw = raw.decode("utf-8", errors="strict")
+    except Exception:
+        raw = None
+    if not isinstance(raw, str) or not raw or len(raw.encode("utf-8")) > 131_072:
+        return content_type or None, []
+
+    fields: dict[str, str] = {}
+    if "json" in content_type or raw.lstrip().startswith("{"):
+        try:
+            value = json.loads(raw)
+        except (ValueError, TypeError, RecursionError):
+            value = None
+        if isinstance(value, dict):
+            for name, item in value.items():
+                if not isinstance(name, str) or not _REQUEST_FIELD_NAME.fullmatch(name):
+                    continue
+                fields[name] = (
+                    "object" if isinstance(item, dict)
+                    else "array" if isinstance(item, list)
+                    else "boolean" if isinstance(item, bool)
+                    else "number" if isinstance(item, (int, float))
+                    else "string"
+                )
+    elif content_type == "application/x-www-form-urlencoded":
+        try:
+            for name, _ in parse_qsl(raw, keep_blank_values=True, max_num_fields=100):
+                if _REQUEST_FIELD_NAME.fullmatch(name):
+                    fields.setdefault(name, "string")
+        except ValueError:
+            fields = {}
+    return content_type or None, [
+        {"name": name, "location": "form" if content_type == "application/x-www-form-urlencoded" else "json",
+         "data_type": data_type}
+        for name, data_type in list(fields.items())[:100]
+    ]
 
 
 @dataclass
@@ -1426,7 +1482,8 @@ class PlaywrightDriver:
             for item in self.authentication_observations
         ):
             from aidast.recon import db
-            self.authentication_observations.append({
+            content_type, parameters = _request_shape_parameters(request)
+            observation = {
                 "context": {
                     "context_key": "auth_bootstrap",
                     "action_type": "operator_login",
@@ -1438,10 +1495,13 @@ class PlaywrightDriver:
                 "discovery_kind": "passive_login_observation",
                 "method": endpoint.method,
                 "path": endpoint.path,
-                "content_type": None,
+                "content_type": content_type,
                 "source": "auth_bootstrap",
                 "traffic_class": "browser_observation",
-            })
+            }
+            if parameters:
+                observation["declared_parameters"] = parameters
+            self.authentication_observations.append(observation)
 
     def _register_authentication_observer(self) -> None:
         if self.context is not None:
@@ -3390,7 +3450,8 @@ class PlaywrightDriver:
                 path += "#" + parsed.fragment
             if self._path_looks_dangerous(path):
                 continue
-            if any(marker in path.lower() for marker in ("{", "}", "%7b", "%7d")):
+            decoded_path = unquote(unquote(path))
+            if any(marker in decoded_path for marker in ("{", "}")):
                 continue
             paths.append(path)
         return paths
@@ -3508,6 +3569,9 @@ class PlaywrightDriver:
             )
 
             if not path:
+                continue
+
+            if any(marker in unquote(unquote(path)) for marker in ("{", "}")):
                 continue
 
             url = urljoin(self.base_url.rstrip("/") + "/", path)

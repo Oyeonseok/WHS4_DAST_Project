@@ -1577,9 +1577,13 @@ def _run_recon(
                     )
                 _require_complete_recon_annotations(failed_tags)
                 work("recon", "tagging", "finished")
-            if prepare_attack and not recon_failures:
+            if prepare_attack:
                 from aidast.pipeline.browser_credentials import register_browser_session_credentials
 
+                # Recoverable failures from another Recon task must not discard
+                # a same-origin browser session that was already authenticated
+                # and persisted. The registrar independently rejects missing,
+                # unauthenticated, or cross-origin snapshots.
                 registered = register_browser_session_credentials(
                     executor.conn, scan_id=scan_id, result_root=RESULT_ROOT,
                     sessions=list(getattr(executor, "auth_session_files", [])),

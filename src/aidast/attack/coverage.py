@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sqlite3
 from urllib.parse import parse_qsl
 from collections import Counter
@@ -19,6 +20,8 @@ from aidast.recon.db import new_id, now
 from aidast.validation.contracts.models import ValidationError
 from aidast.validation.execution.credentials import PipelineCredentialResolver
 from aidast.validation.persistence.evidence_policy import sanitize_metadata
+from aidast.attack.surface import ATTACK_ELIGIBLE_ENDPOINT_SQL
+from aidast.attack.observed_objects import seed_observed_object_facts
 
 
 VULNERABILITY_SKILLS: dict[str, str] = {
@@ -299,11 +302,13 @@ def _value_shape(value: Any, *, depth: int = 0) -> Any:
 
 
 def _request_shapes(conn: sqlite3.Connection, endpoint_id: str) -> list[dict[str, Any]]:
-    """Project bounded JSON/form field shapes from Recon traffic.
+    """Project bounded JSON/form field shapes from black-box Recon evidence.
 
     Captured values, headers, receipts, and full bodies are intentionally never
     returned.  Attack receives enough structure to build a legitimate request
-    while credentials and personal data remain confined to Recon.db.
+    while credentials and personal data remain confined to Recon.db.  If no
+    browser transaction supplied a body, names lexically declared by a public
+    client bundle or form remain usable as a value-free request schema.
     """
     rows = conn.execute(
         """SELECT method,substr(request_headers,1,131072) request_headers,
@@ -372,6 +377,133 @@ def _request_shapes(conn: sqlite3.Connection, endpoint_id: str) -> list[dict[str
         })
         if len(shapes) >= 4:
             break
+    # Captured traffic is stronger evidence than a static declaration. Do not
+    # mix a possibly stale declared method with an observed request body.
+    if shapes:
+        return shapes
+    try:
+        declared = conn.execute(
+            """SELECT e.method,p.location,p.name,p.data_type
+               FROM endpoints e JOIN parameters p ON p.endpoint_id=e.endpoint_id
+               WHERE e.endpoint_id=? AND p.location IN ('json','form')
+               ORDER BY p.location,p.name LIMIT 128""",
+            (endpoint_id,),
+        ).fetchall()
+    except sqlite3.OperationalError:
+        # Small callers and legacy read-only fixtures may contain only the
+        # traffic table. The migrated production schema always has both.
+        declared = []
+    grouped: dict[tuple[str, str], dict[str, str]] = {}
+    for row in declared:
+        method = str(row["method"] or "").upper()
+        encoding = str(row["location"])
+        data_type = str(row["data_type"] or "string")
+        if data_type == "integer":
+            data_type = "number"
+        if data_type not in {"string", "number", "boolean", "array", "object"}:
+            data_type = "string"
+        fields = grouped.setdefault((method, encoding), {})
+        if len(fields) < 64:
+            fields[str(row["name"])[:128]] = data_type
+    for (method, encoding), fields in grouped.items():
+        fingerprint = json.dumps(
+            [method, encoding, fields], sort_keys=True, separators=(",", ":"),
+        )
+        if fingerprint in seen:
+            continue
+        seen.add(fingerprint)
+        shapes.append({"method": method, "encoding": encoding, "fields": fields})
+        if len(shapes) >= 4:
+            break
+    if shapes:
+        return shapes
+
+    # A public collection response is also black-box schema evidence.  Reuse
+    # field names and primitive/container types only when the write route has
+    # the same origin and collection path (or a single terminal item
+    # placeholder). Values never leave Recon.db.  This covers generic SPA API
+    # clients that pass an opaque object variable to post/put/patch, so the
+    # client bundle proves the route while the observed GET proves its shape.
+    try:
+        endpoint = conn.execute(
+            "SELECT origin_id,method,normalized_path FROM endpoints WHERE endpoint_id=?",
+            (endpoint_id,),
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return shapes
+    if endpoint is None or str(endpoint["method"]).upper() not in {"POST", "PUT", "PATCH"}:
+        return shapes
+    normalized_path = str(endpoint["normalized_path"] or "/")
+    collection_path = re.sub(r"/\{[A-Za-z_$][\w$.-]*\}/?$", "", normalized_path) or "/"
+    try:
+        response_rows = conn.execute(
+            """SELECT h.response_body
+               FROM http_transactions h
+               JOIN endpoints observed ON observed.endpoint_id=h.endpoint_id
+               WHERE observed.origin_id=? AND observed.method='GET'
+                 AND observed.normalized_path IN (?,?)
+                 AND h.response_status BETWEEN 200 AND 299
+                 AND h.response_body IS NOT NULL
+               ORDER BY h.captured_at DESC LIMIT 8""",
+            (endpoint["origin_id"], normalized_path, collection_path),
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return shapes
+
+    def response_object(value: Any) -> dict[str, Any] | None:
+        if not isinstance(value, dict):
+            return None
+        for wrapper in ("data", "items", "results", "rows"):
+            if wrapper not in value:
+                continue
+            wrapped = value.get(wrapper)
+            if isinstance(wrapped, dict):
+                return wrapped
+            if isinstance(wrapped, list):
+                return next((item for item in wrapped if isinstance(item, dict)), None)
+            # A named collection envelope containing a scalar/null does not
+            # describe request fields. Do not reinterpret status/error wrapper
+            # keys as a body schema.
+            return None
+        return value
+
+    fields: dict[str, str] = {}
+    for row in response_rows:
+        raw = row[0]
+        if isinstance(raw, bytes):
+            raw = raw.decode("utf-8", errors="replace")
+        if not isinstance(raw, str) or len(raw) > 200_000:
+            continue
+        try:
+            value = json.loads(raw)
+        except (ValueError, TypeError):
+            continue
+        item = response_object(value)
+        if item is None:
+            continue
+        for name, field_value in item.items():
+            if (not isinstance(name, str) or not name or len(name) > 128
+                    or name in {"createdAt", "updatedAt", "deletedAt"}):
+                continue
+            field_type = (
+                "object" if isinstance(field_value, dict)
+                else "array" if isinstance(field_value, list)
+                else "boolean" if isinstance(field_value, bool)
+                else "number" if isinstance(field_value, (int, float))
+                else "string"
+            )
+            fields.setdefault(name, field_type)
+            if len(fields) >= 64:
+                break
+        if fields:
+            break
+    if fields:
+        shapes.append({
+            "method": str(endpoint["method"]).upper(),
+            "encoding": "json",
+            "fields": dict(sorted(fields.items())),
+            "evidence": "observed_collection_response_schema",
+        })
     return shapes
 
 
@@ -383,8 +515,12 @@ def ensure_coverage_manifest(database: Path, scan_id: str) -> CoverageManifestRe
         ).fetchone()
         if scan is None or scan["status"] != "completed" or not scan["finished_at"]:
             raise ValueError("coverage planning requires a completed Recon scan")
+        # Preserve the minimum object identifiers already demonstrated by this
+        # scan's authenticated UI and successful GET traffic. This closes the
+        # Recon-to-Attack handoff without importing a source/benchmark answer.
+        seed_observed_object_facts(conn, scan_id)
         rows = conn.execute(
-            """SELECT an.annotation_id,an.tag,an.category,an.rationale,e.endpoint_id,e.method,
+            f"""SELECT an.annotation_id,an.tag,an.category,an.rationale,e.endpoint_id,e.method,
                       e.normalized_path,COALESCE(e.auth_required,0) auth_required
                FROM endpoint_annotations an
                JOIN endpoint_observations eo ON eo.observation_id=an.observation_id
@@ -396,7 +532,7 @@ def ensure_coverage_manifest(database: Path, scan_id: str) -> CoverageManifestRe
                  AND an.category IN (
                      'source_vulnerability','benchmark_catalog_vulnerability','attack_hypothesis'
                  )
-                 AND COALESCE(e.is_excluded,0)=0
+                 AND {ATTACK_ELIGIBLE_ENDPOINT_SQL}
                ORDER BY e.endpoint_id,an.tag,an.annotation_id""",
             (scan_id, scan_id),
         ).fetchall()
@@ -597,13 +733,13 @@ _SHAREABLE_FACT_TYPES = frozenset({
     "cors_behavior", "endpoint_behavior", "endpoint_runtime", "error_behavior",
     "error_disclosure", "graphql_metadata", "http_observation",
     "observed_behavior", "parameter_behavior", "response_behavior",
-    "test_state", "unauthenticated_api_behavior",
+    "test_state", "unauthenticated_api_behavior", "observed_reference_object",
 })
 
 
 def _task_context_facts(
     conn: sqlite3.Connection, scan_id: str, *, endpoint_id: str,
-    parameter_name: str,
+    parameter_name: str, normalized_path: str = "",
 ) -> list[dict[str, Any]]:
     """Carry prior black-box observations into later bounded Attack batches.
 
@@ -613,18 +749,25 @@ def _task_context_facts(
     learned by earlier requests.  Object fixtures remain separate because an
     observed identifier is not proof that the scanner owns that object.
     """
+    resource_parts = [
+        part.casefold() for part in normalized_path.split("/")
+        if len(part) >= 3 and not part.startswith(":") and "{" not in part
+    ]
+    resource_pattern = f"%{resource_parts[-1]}%" if resource_parts else "!never-match!"
     rows = conn.execute(
         """SELECT fact_type,fact_key,fact_value,confidence,source_endpoint_id
            FROM attack_facts
            WHERE scan_id=? AND fact_type IN ({})
            ORDER BY CASE WHEN source_endpoint_id=? THEN 0 ELSE 1 END,
                     CASE WHEN fact_key LIKE ? THEN 0 ELSE 1 END,
+                    CASE WHEN lower(fact_key) LIKE ? THEN 0 ELSE 1 END,
                     confidence DESC,created_at,fact_id LIMIT 48""".format(
             ",".join("?" for _ in _SHAREABLE_FACT_TYPES)
         ),
         (
             scan_id, *sorted(_SHAREABLE_FACT_TYPES), endpoint_id,
             f"%{parameter_name}%" if parameter_name else "!never-match!",
+            resource_pattern,
         ),
     ).fetchall()
     facts = []
@@ -912,6 +1055,7 @@ def claim_coverage_batch(
         context_facts = _task_context_facts(
             conn, scan_id, endpoint_id=str(row["endpoint_id"]),
             parameter_name=str(row["parameter_name"]),
+            normalized_path=str(row["normalized_path"]),
         )
         parameter_candidates = _parameter_candidates(
             conn, str(row["endpoint_id"]), str(row["vuln_class"]),

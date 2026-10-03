@@ -351,7 +351,7 @@ export default function App() {
   const [selectedTargets, setSelectedTargets] = useState<string[]>([]);
   const [scanProfile, setScanProfile] = useState<ExecutionProfileId>('safe-recon');
   const [reconModel, setReconModel] = useState('gpt-6.1-sol');
-  const [attackModel, setAttackModel] = useState('gpt-5.6-sol');
+  const [attackModel, setAttackModel] = useState('gpt-6.1-sol');
   const [validationModel, setValidationModel] = useState('gpt-6-sol');
   const [reportModel, setReportModel] = useState('gpt-6.1-sol');
   const [maxRequests, setMaxRequests] = useState(500);
@@ -1336,7 +1336,7 @@ export default function App() {
     setIdentityValues({});
     setPolicyValues({});
     setReconModel('gpt-6.1-sol');
-    setAttackModel('gpt-5.6-sol');
+    setAttackModel('gpt-6.1-sol');
     setValidationModel('gpt-6-sol');
     setReportModel('gpt-6.1-sol');
     setAuthorizationConfirmed(false);
@@ -1353,7 +1353,7 @@ export default function App() {
     setIdentityValues({});
     setPolicyValues({});
     setReconModel('gpt-6.1-sol');
-    setAttackModel('gpt-5.6-sol');
+    setAttackModel('gpt-6.1-sol');
     setValidationModel('gpt-6-sol');
     setReportModel('gpt-6.1-sol');
     setAuthorizationConfirmed(false);

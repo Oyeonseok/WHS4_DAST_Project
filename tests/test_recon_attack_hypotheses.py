@@ -75,6 +75,95 @@ def test_normal_tags_create_parameter_bound_hypotheses_and_account_for_unknowns(
     assert 'private-value' not in json.dumps(agent.contexts)
 
 
+def test_grounded_baseline_keeps_strong_recon_signals_in_attack_queue(tmp_path):
+    from aidast.attack.recon_hypotheses import plan_recon_attack
+    path = pipeline(tmp_path)
+
+    def omit_search_hypotheses(response, context):
+        row = next(row for row in response['endpoints'] if row['hypotheses'])
+        row.update({
+            'hypotheses': [],
+            'disposition': 'insufficient_evidence',
+            'reason': 'Model omitted the observed input.',
+        })
+
+    plan_recon_attack(path, 'scan', agent=Planner(omit_search_hypotheses))
+    manifest = ensure_coverage_manifest(path, 'scan')
+    assert manifest.by_vulnerability == {'sqli': 1, 'xss': 1}
+    with sqlite3.connect(path) as conn:
+        assert conn.execute(
+            "SELECT status FROM attack_endpoint_reviews r JOIN endpoints e "
+            "ON e.endpoint_id=r.endpoint_id WHERE e.normalized_path='/search'"
+        ).fetchone() == ('planned',)
+        rationales = [row[0] for row in conn.execute(
+            "SELECT rationale FROM endpoint_annotations WHERE category='attack_hypothesis'"
+        )]
+    assert all('private-value' not in rationale for rationale in rationales)
+
+
+def test_grounded_baseline_reviews_observed_successful_api_reads_for_exposure():
+    from aidast.attack.coverage import hypothesis_skill_catalog
+    from aidast.attack.recon_hypotheses import _grounded_baseline_hypotheses
+
+    hypotheses = _grounded_baseline_hypotheses({
+        'path': '/api/Profiles', 'method': 'GET', 'auth_required': False,
+        'http_statuses': [200], 'parameters': [], 'technology_context': {},
+        'response_header_names': [],
+    }, hypothesis_skill_catalog())
+
+    assert 'api_misconfig' in {item.vuln_class for item in hypotheses}
+
+
+def test_attack_plans_exact_public_client_declarations_but_not_inferred_crud(tmp_path):
+    from aidast.attack.recon_hypotheses import plan_recon_attack
+    path = pipeline(tmp_path)
+    with sqlite3.connect(path) as conn:
+        origin = conn.execute('SELECT origin_id FROM origins').fetchone()[0]
+        ObservationRecorder(conn, origin_id=origin, scan_id='scan').record('passive', [
+            {
+                'method': 'POST', 'path': '/rest/chat',
+                'url': 'https://example.test/rest/chat',
+                'source': 'adaptive_js', 'discovery_kind': 'js_http_call',
+                'verification_status': 'candidate', 'traffic_class': 'passive',
+                'declared_parameters': [
+                    {'name': 'messages', 'location': 'json', 'data_type': 'array'},
+                ],
+            },
+            {
+                'method': 'DELETE', 'path': '/api/Guesses/{id}',
+                'url': 'https://example.test/api/Guesses/{id}',
+                'source': 'passive_route_inference',
+                'discovery_kind': 'rest_resource_family',
+                'verification_status': 'candidate', 'traffic_class': 'passive',
+            },
+            {
+                'method': 'GET', 'path': '/%7B%7Bhref%7D%7D',
+                'url': 'https://example.test/%7B%7Bhref%7D%7D',
+                'source': 'playwright_http', 'discovery_kind': 'http_request',
+            },
+        ])
+
+    agent = Planner()
+    result = plan_recon_attack(path, 'scan', agent=agent)
+    manifest = ensure_coverage_manifest(path, 'scan')
+
+    planned_paths = {
+        endpoint['path']
+        for call in agent.contexts
+        for endpoint in call['endpoints']
+    }
+    assert '/rest/chat' in planned_paths
+    assert '/api/Guesses/{id}' not in planned_paths
+    assert '/%7B%7Bhref%7D%7D' not in planned_paths
+    assert result['total_endpoints'] == 3
+    assert manifest.by_vulnerability['llm_ai'] == 1
+    with sqlite3.connect(path) as conn:
+        row = conn.execute(
+            "SELECT is_excluded,exclude_reason FROM endpoints WHERE normalized_path='/rest/chat'"
+        ).fetchone()
+    assert row == (1, 'unverified_candidate')
+
+
 def test_replanning_is_idempotent_and_respects_parameter_identity_variants(tmp_path, monkeypatch):
     from aidast.attack.recon_hypotheses import plan_recon_attack
     path = pipeline(tmp_path)
@@ -486,6 +575,36 @@ def test_candidate_only_request_provenance_preserves_method_at_shared_path(tmp_p
         conn.execute("INSERT INTO endpoints(endpoint_id,origin_id,method,path,normalized_path) VALUES ('aaa-get',?,'GET','/shared','/shared')", (origin,))
         conn.execute("INSERT INTO endpoints(endpoint_id,origin_id,method,path,normalized_path) VALUES ('zzz-post',?,'POST','/shared','/shared')", (origin,))
     assert _endpoint_provenance(path, scan_id='scan', method='POST', url='https://example.test/shared') == ('recon_candidate', 'zzz-post')
+
+
+def test_request_provenance_accepts_only_unambiguous_terminal_slash_variant(tmp_path):
+    from aidast.attack.request_cli import _endpoint_provenance
+    path = pipeline(tmp_path)
+    with sqlite3.connect(path) as conn:
+        search = conn.execute(
+            "SELECT endpoint_id FROM endpoints WHERE normalized_path='/search'"
+        ).fetchone()[0]
+        conn.execute("""INSERT INTO endpoint_observations
+            (observation_id,endpoint_id,source_tool,discovery_kind,observed_url,
+             association_method,observed_at)
+            VALUES ('search-response',?,'browser','http_response',
+                    'https://example.test/search','exact','2026-10-04')""", (search,))
+
+    assert _endpoint_provenance(
+        path, scan_id='scan', method='GET', url='https://example.test/search/'
+    )[0] == 'network_observed'
+
+    with sqlite3.connect(path) as conn:
+        origin = conn.execute('SELECT origin_id FROM origins').fetchone()[0]
+        conn.execute("INSERT INTO endpoints(endpoint_id,origin_id,method,path,normalized_path) VALUES ('slash-variant',?,'GET','/search/','/search/')", (origin,))
+        conn.execute("""INSERT INTO endpoint_observations
+            (observation_id,endpoint_id,source_tool,discovery_kind,observed_url,
+             association_method,observed_at)
+            VALUES ('slash-observation','slash-variant','browser','http_response',
+                    'https://example.test/search/','exact','2026-10-04')""")
+    assert _endpoint_provenance(
+        path, scan_id='scan', method='GET', url='https://example.test/search/'
+    ) == ('agent_proposed', None)
 
 
 def test_planning_streams_every_endpoint_through_bounded_model_batches(tmp_path):

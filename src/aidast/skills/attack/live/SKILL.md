@@ -102,11 +102,24 @@ configuration. The shared DB contains both Recon and Attack records.
    merely because it mutates a fixture: use the supplied owned objects,
    credential references, policy-authorized mutation methods, concurrency, and
    request budget to obtain a non-destructive proof.
+   When such a task is the exact collection `POST` endpoint and its
+   `request_shapes` plus `test_fixtures` provide every required field, you may
+   create one inert child inside a supplied owned basket/cart using its matching
+   credential and a supplied observed catalog reference. Record the returned
+   numeric child identifier as an `owned_test_object` fact, without retaining
+   response data or secrets, so a later bounded task can test or clean up that
+   exact child. Do not create accounts, orders, payments, complaints, messages,
+   or arbitrary records as a precondition, and do not guess a missing field or
+   identifier.
    When `credential_references` are present, they are opaque identifiers plus
    non-secret labels and roles. Select only an ID listed on that exact task and
    pass it to the trusted request helper as `credential_reference_id`. Never
    resolve it yourself, place a token/cookie in `headers`, or print a resolved
-   value. IDOR differentials must use two distinct listed references.
+   value. Prefer two distinct listed references for IDOR differentials. When
+   only one reference exists, a read-only IDOR test may instead compare a
+   supplied `owned_test_object` with a distinct `observed_reference_object`
+   collected by black-box Recon. Never use that single-identity exception for
+   a mutation, and never guess the foreign identifier.
    `test_fixtures` are non-secret Recon/Pipeline facts bound to this task. Use
    their exact object IDs and matching `credential_label` instead of claiming a
    seed object is missing. Never treat a fixture fact as proof of a

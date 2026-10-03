@@ -15,6 +15,7 @@ from typing import Any, Iterator, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from aidast.attack.coverage import hypothesis_skill_catalog, _canonical_digest, _open_database
+from aidast.attack.surface import ATTACK_ELIGIBLE_ENDPOINT_SQL
 from aidast.recon.annotations import safe_text, safe_url
 from aidast.recon.db import new_id
 from aidast.attack.hypothesis_validation import PlanningIssue, hypothesis_fields, partition_plan
@@ -48,32 +49,51 @@ class ReconAttackPlan(BaseModel):
 
 def _contexts(conn: sqlite3.Connection, scan_id: str) -> Iterator[dict[str, Any]]:
     for endpoint in conn.execute(
-        """SELECT e.endpoint_id,e.method,e.normalized_path,e.auth_required,e.content_type,o.base_url,o.framework_signature,o.main_crawler_mode,o.spa_detected
+        f"""SELECT e.endpoint_id,e.method,e.normalized_path,e.auth_required,e.content_type,o.base_url,o.framework_signature,o.main_crawler_mode,o.spa_detected
         FROM endpoints e JOIN origins o ON o.origin_id=e.origin_id
-        JOIN assets a ON a.asset_id=o.asset_id WHERE a.scan_id=? AND e.is_excluded=0
+        JOIN assets a ON a.asset_id=o.asset_id WHERE a.scan_id=?
+        AND {ATTACK_ELIGIBLE_ENDPOINT_SQL}
         ORDER BY o.base_url,e.normalized_path,e.method,e.endpoint_id""", (scan_id,),
     ):
         endpoint_id = str(endpoint['endpoint_id'])
-        annotations = [dict(row) for row in conn.execute(
+        raw_annotations = [dict(row) for row in conn.execute(
             """SELECT n.annotation_id,n.observation_id,n.category,n.tag,n.rationale
             FROM endpoint_annotations n JOIN endpoint_observations v ON v.observation_id=n.observation_id
             JOIN annotation_runs ar ON ar.annotation_run_id=n.annotation_run_id
             WHERE v.endpoint_id=? AND ar.scan_id=? AND ar.status='completed'
-            AND n.category<>'attack_hypothesis' ORDER BY n.category,n.tag,n.annotation_id LIMIT 64""",
+            AND n.category<>'attack_hypothesis' ORDER BY n.category,n.tag,n.annotation_id LIMIT 256""",
             (endpoint_id, scan_id),
         )]
-        for annotation in annotations:
+        annotations = []
+        annotation_kinds = set()
+        for annotation in raw_annotations:
+            kind = (annotation['category'], annotation['tag'])
+            if kind in annotation_kinds:
+                continue
+            annotation_kinds.add(kind)
             annotation['rationale'] = safe_text(annotation['rationale'])[:600]
+            annotations.append(annotation)
+            if len(annotations) >= 64:
+                break
         parameters = [dict(row) for row in conn.execute(
             """SELECT name,location,role,data_type,is_identifier FROM parameters
             WHERE endpoint_id=? ORDER BY location,name LIMIT 200""", (endpoint_id,),
         )]
-        observations = [dict(row) for row in conn.execute(
+        raw_observations = [dict(row) for row in conn.execute(
             """SELECT observation_id,source_tool,observed_url FROM endpoint_observations
-            WHERE endpoint_id=? ORDER BY observation_id LIMIT 16""", (endpoint_id,),
+            WHERE endpoint_id=? ORDER BY observation_id LIMIT 128""", (endpoint_id,),
         )]
-        for observation in observations:
+        observations = []
+        observation_kinds = set()
+        for observation in raw_observations:
             observation['observed_url'] = safe_url(observation['observed_url'] or '')
+            kind = (observation['source_tool'], observation['observed_url'])
+            if kind in observation_kinds:
+                continue
+            observation_kinds.add(kind)
+            observations.append(observation)
+            if len(observations) >= 16:
+                break
         header_names = set()
         for response in conn.execute('SELECT response_headers FROM http_transactions WHERE endpoint_id=? ORDER BY rowid DESC LIMIT 16', (endpoint_id,)):
             try:
@@ -110,6 +130,181 @@ def _validate(plan: ReconAttackPlan, contexts: list[dict], skills: dict[str, str
     _, issues = partition_plan(plan, contexts, skills)
     if issues:
         raise ValueError(issues[0].reason)
+
+
+def _grounded_baseline_hypotheses(
+    context: dict[str, Any], skills: dict[str, str],
+) -> list[ReconHypothesis]:
+    """Keep strong Recon signals testable when model planning omits them.
+
+    These are hypotheses only.  They do not contain payloads, source answers,
+    credentials, or response claims, and every non-endpoint hypothesis remains
+    bound to a parameter recorded for this exact endpoint.  Attack policy and
+    Validation still decide whether a request may run and whether evidence is
+    sufficient for a finding.
+    """
+    path = str(context.get("path") or "").casefold()
+    method = str(context.get("method") or "GET").upper()
+    auth_role = "authenticated" if context.get("auth_required") else "unauthenticated"
+    technology = context.get("technology_context") or {}
+    framework = str(technology.get("framework_signature") or "").casefold()
+    spa_detected = bool(technology.get("spa_detected"))
+    hypotheses: dict[tuple[str, str, str, str], ReconHypothesis] = {}
+    parameter_names: set[str] = set()
+
+    def add(
+        vuln_class: str, location: str = "endpoint", parameter: str = "", *,
+        identity: str | None = None, reason: str,
+    ) -> None:
+        if vuln_class not in skills:
+            return
+        role = identity or auth_role
+        key = (vuln_class, location, parameter, role)
+        hypotheses.setdefault(key, ReconHypothesis(
+            vuln_class=vuln_class,
+            annotation_ids=[],
+            injection_location=location,
+            parameter_name=parameter,
+            required_identity_role=role,
+            rationale=reason,
+        ))
+
+    for parameter in context.get("parameters", []):
+        name = str(parameter.get("name") or "")
+        folded = name.casefold().replace("-", "_")
+        location = str(parameter.get("location") or "")
+        parameter_names.add(folded)
+        role = str(parameter.get("role") or "").casefold()
+        identifier = bool(parameter.get("is_identifier")) or role == "identifier"
+        if identifier or folded == "id" or folded.endswith("_id") or folded.endswith("id"):
+            add("idor", location, name, identity="authenticated",
+                reason="Recon recorded an object-identifier input suitable for an owned-versus-foreign authorization differential.")
+        if folded in {"q", "s", "term", "keyword"} or any(token in folded for token in (
+            "search", "query", "filter", "sort", "where", "username", "email", "number",
+        )):
+            add("sqli", location, name,
+                reason="Recon recorded a query-like input suitable for a bounded control-versus-injection differential.")
+        if folded in {"q", "s", "term", "keyword"} or any(token in folded for token in (
+            "search", "query", "message", "comment", "description", "title", "name", "text",
+        )):
+            add("xss", location, name,
+                reason="Recon recorded a text input suitable for a bounded reflection and encoding differential.")
+        if role == "url" or any(token in folded for token in (
+            "redirect", "return_url", "returnurl", "next", "continue", "callback",
+        )):
+            add("open_redirect", location, name,
+                reason="Recon recorded a navigation URL input suitable for a same-origin redirect differential.")
+        if role == "url" or any(token in folded for token in (
+            "url", "uri", "webhook", "fetch", "proxy", "preview", "import",
+        )):
+            add("ssrf", location, name,
+                reason="Recon recorded a server-side URL candidate suitable for an in-scope destination differential.")
+        if role == "file" or any(token in folded for token in (
+            "file", "path", "folder", "template", "download", "attachment",
+        )):
+            add("lfi", location, name,
+                reason="Recon recorded a file or path input suitable for a bounded traversal differential.")
+        if "template" in folded:
+            add("ssti", location, name,
+                reason="Recon recorded a template-named input suitable for a non-destructive expression differential.")
+        if location == "json" and any(token in folded for token in (
+            "query", "filter", "where", "selector", "username", "email",
+        )):
+            add("nosqli", location, name,
+                reason="Recon recorded a JSON query-like input suitable for a bounded operator-handling differential.")
+
+    authentication_path = any(token in path for token in (
+        "/login", "/signin", "/auth", "/account", "/admin",
+    ))
+    recovery_path = any(token in path for token in (
+        "forgot", "reset-password", "reset_password", "recovery", "recover",
+        "security-question", "security_question",
+    ))
+    mfa_path = any(token in path for token in (
+        "/2fa", "two-factor", "two_factor", "/mfa", "/otp", "/totp",
+    ))
+    captcha_path = "captcha" in path
+    credential_fields = bool(parameter_names & {
+        "email", "username", "user", "password", "pass", "pin", "code",
+        "otp", "token", "totptoken", "totp_token",
+    })
+
+    if method in {"GET", "HEAD", "OPTIONS"} and any(token in path for token in (
+        "/.env", ".bak", ".backup", ".map", "/debug", "/source", "/snippet",
+        "/swagger", "/openapi", "/docs", "/config", "/version",
+    )):
+        add("source_artifacts", reason=
+            "The observed read-only route name is a high-confidence source, build, debug, or configuration artifact surface.")
+    if method in {"GET", "HEAD", "OPTIONS"} and any(token in path for token in (
+        "/admin", "/config", "/version", "/health", "/debug", "/internal",
+    )):
+        add("api_misconfig", reason=
+            "The observed read-only administrative or diagnostic route warrants an anonymous exposure differential.")
+    if (method == "GET" and (path.startswith("/api/") or path.startswith("/rest/"))
+            and any(status == 200 for status in context.get("http_statuses", [])
+                    if isinstance(status, int))):
+        add("api_misconfig", identity="unauthenticated", reason=
+            "Recon observed a successful API read suitable for anonymous exposure and response-minimization checks.")
+    if context.get("auth_required") or authentication_path:
+        add("auth_bypass", identity="unauthenticated", reason=
+            "Recon identified an authentication or authorization boundary suitable for an anonymous baseline check.")
+    if authentication_path and (credential_fields or method == "POST"):
+        add("brute_force", identity="unauthenticated", reason=
+            "Recon identified a credential-verification transition suitable for a small bounded rate-limit differential.")
+    if recovery_path:
+        add("forgot_password", identity="unauthenticated", reason=
+            "Recon identified an account-recovery transition suitable for enumeration, token exposure, and replay checks.")
+        add("host_header", identity="unauthenticated", reason=
+            "Recon identified an account-recovery route suitable for a bounded host-derived link differential.")
+    if mfa_path or parameter_names & {"otp", "totp", "totptoken", "totp_token", "setup_token"}:
+        add("mfa_bypass", reason=
+            "Recon identified an MFA factor or token transition suitable for skip, omission, and replay checks.")
+    if captcha_path or any("captcha" in name for name in parameter_names):
+        add("captcha_bypass", identity="unauthenticated", reason=
+            "Recon identified a CAPTCHA field or route suitable for omission and single-use enforcement checks.")
+    if any(token in path for token in ("upload", "file-upload", "profile/image", "avatar")):
+        add("file_upload", reason=
+            "Recon identified an upload surface suitable for bounded type and storage-handling checks.")
+    if any(token in path for token in ("/jwt", "/token")) or parameter_names & {
+        "jwt", "token", "access_token", "id_token",
+    }:
+        add("jwt_crypto", reason=
+            "Recon identified a token-bearing surface suitable for format, signature, and claim enforcement checks.")
+    if method in {"POST", "PUT", "PATCH"} and any(token in path for token in (
+        "register", "cart", "basket", "order", "checkout", "payment", "transfer", "loan",
+    )):
+        add("business_logic", reason=
+            "Recon identified a state transition in an account or transaction workflow suitable for bounded invariant checks.")
+    if method in {"POST", "PUT", "PATCH", "DELETE"} and context.get("auth_required"):
+        add("csrf", reason=
+            "Recon identified an authenticated state-changing route suitable for origin and anti-CSRF enforcement checks.")
+    if method in {"POST", "PUT", "PATCH"} and any(token in path for token in (
+        "cart", "basket", "order", "checkout", "payment", "transfer", "coupon", "redeem",
+    )):
+        add("race_condition", reason=
+            "Recon identified a transactional state transition suitable for a policy-bounded duplicate-request invariant check.")
+    if any(token in path for token in ("/session", "/token", "/logout", "/jwt")):
+        add("session", reason=
+            "Recon identified an authentication-session route suitable for lifecycle and invalidation checks.")
+    if "graphql" in path:
+        add("graphql", reason="Recon identified a GraphQL route suitable for bounded schema and authorization checks.")
+    if "socket.io" in path or "websocket" in path:
+        add("websocket", reason="Recon identified a WebSocket transport route suitable for session-bound checks.")
+    if any(token in path for token in ("/ai/", "/chat", "/prompt", "/llm")):
+        add("llm_ai", reason="Recon identified an AI-facing route suitable for bounded trust-boundary checks.")
+    if spa_detected and (path.startswith("/api/") or path.startswith("/rest/")):
+        add("spa_api", identity="unauthenticated", reason=
+            "A public SPA declaration identified this backend route, suitable for a missing-authentication differential.")
+    if "node" in framework or "express" in framework:
+        add("nodejs", reason=
+            "Recon response fingerprinting identified a Node.js-compatible surface for framework-specific checks.")
+    if "access-control-allow-origin" in set(context.get("response_header_names", [])):
+        add("cors", reason="Recon observed a CORS response header suitable for origin and credential differentials.")
+    if any(int(status) >= 500 for status in context.get("http_statuses", []) if isinstance(status, int)):
+        add("exceptional_conditions", reason=
+            "Recon observed a server-error response suitable for a bounded error-disclosure differential.")
+
+    return list(hypotheses.values())[:64]
 
 
 def _persist(conn: sqlite3.Connection, scan_id: str, contexts: list[dict], plan: ReconAttackPlan, *, write_reviews: bool = True) -> None:
@@ -187,7 +382,11 @@ def plan_recon_attack(database: Path, scan_id: str, *, agent: Any, batch_size: i
         scan = conn.execute('SELECT status,finished_at FROM scans WHERE scan_id=?', (scan_id,)).fetchone()
         if scan is None or scan['status'] != 'completed' or not scan['finished_at']:
             raise ValueError('Attack planning requires completed Recon')
-        total = conn.execute('SELECT count(*) FROM endpoints e JOIN origins o ON o.origin_id=e.origin_id JOIN assets a ON a.asset_id=o.asset_id WHERE a.scan_id=? AND e.is_excluded=0', (scan_id,)).fetchone()[0]
+        total = conn.execute(f'''SELECT count(*) FROM endpoints e
+            JOIN origins o ON o.origin_id=e.origin_id
+            JOIN assets a ON a.asset_id=o.asset_id
+            WHERE a.scan_id=? AND {ATTACK_ELIGIBLE_ENDPOINT_SQL}''',
+            (scan_id,)).fetchone()[0]
         reviewed = 0
         if progress is not None:
             progress(0, total)
@@ -281,11 +480,28 @@ commands, browse, or send requests; this step only produces a testing plan.
             for context in batch:
                 endpoint_id = context['endpoint_id']
                 item = accepted_by_id.get(endpoint_id)
-                hypotheses = list(retained.get(endpoint_id, {}).values())
+                merged_hypotheses = dict(retained.get(endpoint_id, {}))
+                baseline_count = 0
                 endpoint_issues = [issue for issue in final_issues if issue.endpoint_id == endpoint_id]
+                # Supplement only a valid, explicit no-hypothesis disposition.
+                # A rejected or partially valid model proposal keeps its
+                # diagnostics and accepted work unchanged; deterministic
+                # inference must never hide a grounding failure.
+                if not merged_hypotheses and item is not None and not endpoint_issues:
+                    for hypothesis in _grounded_baseline_hypotheses(context, skills):
+                        key = _canonical_digest(hypothesis_fields(hypothesis))
+                        if key not in merged_hypotheses and len(merged_hypotheses) < 64:
+                            merged_hypotheses[key] = hypothesis
+                            baseline_count += 1
+                hypotheses = list(merged_hypotheses.values())
                 reason = item.reason if item else 'No evidence-grounded endpoint plan was returned.'
                 if endpoint_issues:
                     reason = safe_text(reason)[:300] + ' Unexecuted proposal: ' + endpoint_issues[0].reason
+                if baseline_count:
+                    reason = safe_text(reason)[:300] + (
+                        f' Added {baseline_count} deterministic hypothesis/hypotheses '
+                        'from endpoint-owned Recon signals.'
+                    )
                 disposition = 'planned' if hypotheses else ('insufficient_evidence' if endpoint_issues or item is None else item.disposition)
                 # The per-response limit is 64. This trusted union can retain independently
                 # validated hypotheses from all three responses without dropping earlier work.

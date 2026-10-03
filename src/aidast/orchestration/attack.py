@@ -67,13 +67,13 @@ class AttackCoordinator:
         with closing(sqlite3.connect(self._db_path)) as conn, conn:
             planning_stage = start_stage_run(conn, scan_id=scan_id, stage='attack')
         try:
-            # Keep each structured planning turn small.  Recon can surface
-            # hundreds of SPA routes; sixteen dense endpoint contexts made a
-            # single model turn exceed the 15-minute idle deadline and lose
-            # the rest of the pipeline.  Each completed batch is durable, so
-            # four endpoints provides frequent progress and bounded retries.
+            # Recon context projection collapses repeated annotations and
+            # observations before this call. Eight endpoints therefore keeps
+            # each structured turn bounded while halving the long sequence of
+            # model startups that previously looked like an infinite load.
+            # Each completed batch remains durable for bounded repair/resume.
             plan_recon_attack(self._db_path, scan_id, agent=self._planning_agent,
-                batch_size=4,
+                batch_size=8,
                 progress=lambda processed, total: self._planning_progress(scan_id, processed, total),
                 stage_run_id=planning_stage,
                 repair_progress=lambda processed, total, attempt, issues: self._planning_progress(

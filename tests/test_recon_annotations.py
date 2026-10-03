@@ -251,6 +251,32 @@ class ObservationTests(unittest.TestCase):
         self.assertEqual(agent.batch_sizes, [25, 5])
         self.assertEqual(progress[-1], (2, 2, 30, 0))
 
+    def test_deferred_tagging_reuses_only_exact_equivalent_black_box_evidence(self):
+        recorder = ObservationRecorder(self.conn, origin_id=self.origin, scan_id='scan')
+        recorder.record('crawler', [
+            {
+                'method': 'GET', 'path': '/same', 'url': 'https://example.com/same',
+                'source': 'crawler', 'discovery_kind': 'http_response',
+                'evidence': {'response_status': 200},
+            }
+            for _ in range(30)
+        ])
+        agent = FakeAgent()
+
+        result = tag_pending_observations(
+            self.conn, scan_id='scan', agent=agent, batch_size=25,
+        )
+
+        self.assertEqual(result, (30, 0))
+        self.assertEqual(agent.batch_sizes, [1])
+        self.assertEqual(
+            self.conn.execute('SELECT count(*) FROM endpoint_annotations').fetchone()[0],
+            30,
+        )
+        self.assertEqual(dict(self.conn.execute(
+            'SELECT model,count(*) FROM annotation_runs GROUP BY model'
+        ).fetchall()), {'codex-cli-default': 1, 'deterministic-equivalent': 1})
+
     def test_proxy_links_endpoint_and_scan_without_guessing_page(self):
         ObservationRecorder(self.conn, origin_id=self.origin, scan_id='scan').record('login', self.items())
         capture = Path(self.temp.name) / 'capture.jsonl'

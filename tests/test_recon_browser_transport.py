@@ -534,6 +534,7 @@ class ReconBrowserTransportTests(unittest.TestCase):
             {"href": None, "routerLink": "/basket"},
             {"href": "https://example.com/#/account", "routerLink": None},
             {"href": None, "routerLink": "/logout"},
+            {"href": "https://example.com/%257B%257Bhref%257D%257D", "routerLink": None},
             {"href": None, "routerLink": "https://outside.example/admin"},
         ]
         with patch.object(driver, "_ensure_page", return_value=page):
@@ -985,6 +986,8 @@ class ReconBrowserTransportTests(unittest.TestCase):
         self.driver._observe_authentication_request(SimpleNamespace(
             method="POST",
             url="https://example.com/rest/user/login?password=private#fragment",
+            headers={"Content-Type": "application/json"},
+            post_data_buffer=b'{"email":"private@example.test","password":"private"}',
         ))
         self.driver._observe_authentication_request(SimpleNamespace(
             method="POST",
@@ -997,6 +1000,11 @@ class ReconBrowserTransportTests(unittest.TestCase):
         self.assertEqual(self.driver.get_http_results(), [])
         passive = self.driver.drain_authentication_observations()
         self.assertEqual(passive[0]["discovery_kind"], "passive_login_observation")
+        self.assertEqual(passive[0]["declared_parameters"], [
+            {"name": "email", "location": "json", "data_type": "string"},
+            {"name": "password", "location": "json", "data_type": "string"},
+        ])
+        self.assertNotIn("private", json.dumps(passive))
         self.assertNotIn("private", json.dumps(self.driver.get_http_results()))
 
     def test_passive_authentication_observation_cannot_use_browser_support_path_bypass(self):

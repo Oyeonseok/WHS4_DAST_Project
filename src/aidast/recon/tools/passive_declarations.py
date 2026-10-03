@@ -309,13 +309,161 @@ def _object_fields(script, span, tokens):
     return result
 
 
+def _declared_value_type(script, span, tokens):
+    """Return only a public request-field type, never its literal value."""
+    begin, end = _trim(script, span, tokens)
+    if begin >= end:
+        return "string"
+    token = tokens.get(begin)
+    if token is not None and token.value is not None:
+        cursor, _ = _trim(script, (token.end, end), tokens)
+        if cursor == end:
+            return "string"
+    expression = script[begin:end].strip()
+    if expression in {"true", "false"}:
+        return "boolean"
+    if re.fullmatch(r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?", expression):
+        return "number"
+    if expression.startswith("["):
+        return "array"
+    if expression.startswith("{"):
+        return "object"
+    return "string"
+
+
+def _unwrap_json_stringify(script, span, tokens):
+    begin, end = _trim(script, span, tokens)
+    match = re.match(r"JSON\s*\.\s*stringify\s*\(", script[begin:end])
+    if match is None:
+        return begin, end
+    opening = begin + match.end() - 1
+    arguments = _arguments(script, opening, tokens)
+    if len(arguments) != 1:
+        return begin, end
+    closing = arguments[-1][1]
+    cursor, _ = _trim(script, (closing + 1, end), tokens)
+    return arguments[0] if cursor == end else (begin, end)
+
+
+def _body_object_fields(script, span, tokens, code, *, call_position):
+    """Resolve a direct or nearby simple object used as a request body.
+
+    This is deliberately lexical: no JavaScript is evaluated, property values
+    are discarded, and a binding must be local to the preceding 12 KiB of the
+    captured public script.
+    """
+    begin, end = _unwrap_json_stringify(script, span, tokens)
+    fields = _object_fields(script, (begin, end), tokens)
+    if fields is not None:
+        return fields
+    begin, end = _trim(script, (begin, end), tokens)
+    name = script[begin:end].strip()
+    if not re.fullmatch(r"[A-Za-z_$][\w$]*", name):
+        return None
+    window_start = max(0, call_position - 12_000)
+    # Minified bundles reuse one-letter variables across adjacent methods. Do
+    # not associate a method argument with an object assigned in an earlier
+    # method. A conservative callable/control block boundary may omit a schema,
+    # but it cannot invent fields for the wrong route.
+    block_pattern = re.compile(
+        r"(?:\bfunction(?:\s+[A-Za-z_$][\w$]*)?\s*\([^{};]{0,512}\)"
+        r"|\b[A-Za-z_$][\w$]*\s*\([^{};]{0,512}\)"
+        r"|(?:\([^{};]{0,512}\)|[A-Za-z_$][\w$]*)\s*=>)\s*\{"
+    )
+    blocks = list(block_pattern.finditer(code, window_start, call_position))
+    if blocks:
+        window_start = max(window_start, blocks[-1].end())
+    assignment = re.compile(
+        rf"(?:\b(?:const|let|var)\s+)?{re.escape(name)}\s*=\s*\{{"
+    )
+    matches = list(assignment.finditer(code, window_start, call_position))
+    if not matches:
+        return None
+    opening = matches[-1].end() - 1
+    arguments = _arguments(script, opening, tokens)
+    if not arguments:
+        return None
+    closing = arguments[-1][1]
+    return _object_fields(script, (opening, closing + 1), tokens)
+
+
+def _body_parameters(script, span, tokens, code, *, call_position):
+    fields = _body_object_fields(
+        script, span, tokens, code, call_position=call_position,
+    )
+    if fields is None:
+        return []
+    return [
+        {
+            "name": name,
+            "location": "json",
+            "data_type": _declared_value_type(script, value_span, tokens),
+        }
+        for name, value_span in fields.items()
+        if _NAME.fullmatch(name)
+    ][:100]
+
+
+def _callsite_body_parameters(script, span, tokens, code, *, call_position):
+    """Link an opaque service body argument to direct object call sites.
+
+    Minified SPA services commonly expose ``resetPassword(e)`` and pass ``e``
+    unchanged to the HTTP client, while the component calls that method with a
+    public object literal. Resolve only long, non-generic method names and
+    discard every literal value.
+    """
+    begin, end = _trim(script, span, tokens)
+    body_name = script[begin:end].strip()
+    if not re.fullmatch(r"[A-Za-z_$][\w$]*", body_name):
+        return []
+    method_headers = re.compile(
+        r"\b(?P<name>[A-Za-z_$][\w$]{5,})\s*\((?P<args>[^(){};]{0,512})\)\s*\{"
+    )
+    candidates = list(method_headers.finditer(
+        code, max(0, call_position - 12_000), call_position,
+    ))
+    if not candidates:
+        return []
+    owner = candidates[-1]
+    method_name = owner["name"]
+    if method_name.casefold() in {
+        "constructor", "subscribe", "request", "create", "delete",
+        "update", "patch", "save", "fetch", "submit",
+    }:
+        return []
+    arguments = [item.strip() for item in owner["args"].split(",")]
+    if body_name not in arguments or any(
+        not re.fullmatch(r"[A-Za-z_$][\w$]*", item) for item in arguments if item
+    ):
+        return []
+
+    result: dict[str, str] = {}
+    callsites = re.compile(rf"\.\s*{re.escape(method_name)}\s*\(\s*\{{")
+    for callsite in islice(callsites.finditer(code), 64):
+        opening = callsite.end() - 1
+        arguments = _arguments(script, opening, tokens)
+        fields = (
+            _object_fields(script, (opening, arguments[-1][1] + 1), tokens)
+            if arguments else None
+        )
+        if fields is None:
+            continue
+        for name, value_span in fields.items():
+            if _NAME.fullmatch(name) and len(result) < 100:
+                result.setdefault(name, _declared_value_type(script, value_span, tokens))
+    return [
+        {"name": name, "location": "json", "data_type": data_type}
+        for name, data_type in result.items()
+    ]
+
+
 def declared_js_routes(script: str, *, document_url: str, base_url: str,
                        target_policy=None, limit: int = MAX_DECLARATIONS) -> list[dict]:
     """Read direct fetch/client methods, Request, axios configs and XHR.open."""
     if limit <= 0:
         return []
     rows = []
-    def add(path, method):
+    def add(path, method, parameters=()):
         if not isinstance(method, str) or method.upper() not in METHODS:
             return
         if isinstance(path, str):
@@ -331,7 +479,8 @@ def declared_js_routes(script: str, *, document_url: str, base_url: str,
         if not isinstance(path, str) or not (path.startswith("/") or re.match(r"^https?://", path, re.I)):
             return
         row = _candidate(path, method, document_url=document_url, base_url=base_url,
-                         target_policy=target_policy, kind="js_http_call", source="adaptive_js")
+                         target_policy=target_policy, kind="js_http_call", source="adaptive_js",
+                         parameters=parameters)
         if row is not None:
             row["evidence"]["source_scripts"] = [document_url]
             rows.append(row)
@@ -396,7 +545,20 @@ def declared_js_routes(script: str, *, document_url: str, base_url: str,
                 path = _bound_path_expression(
                     script, arguments[0], tokens, bindings, call_position=call.start(),
                 )
-            add(path, call["verb"].upper())
+            method = call["verb"].upper()
+            parameters = (
+                _body_parameters(
+                    script, arguments[1], tokens, code, call_position=call.start(),
+                )
+                if method in {"POST", "PUT", "PATCH", "DELETE"} and len(arguments) >= 2
+                else []
+            )
+            if (not parameters and method in {"POST", "PUT", "PATCH", "DELETE"}
+                    and len(arguments) >= 2):
+                parameters = _callsite_body_parameters(
+                    script, arguments[1], tokens, code, call_position=call.start(),
+                )
+            add(path, method, parameters)
             continue
         fields = None
         path = _path_expression(script, arguments[0], tokens)
@@ -427,7 +589,14 @@ def declared_js_routes(script: str, *, document_url: str, base_url: str,
             # leading slash. An absolute URL overrides baseURL.
             if not re.match(r"^(?:[A-Za-z][\w+.-]*:|//)", path):
                 path = prefix.rstrip("/") + "/" + path.lstrip("/")
-        add(path, method)
+        parameters = []
+        if fields is not None and str(method or "").upper() in {"POST", "PUT", "PATCH", "DELETE"}:
+            body_span = fields.get("data") or fields.get("body")
+            if body_span is not None:
+                parameters = _body_parameters(
+                    script, body_span, tokens, code, call_position=call.start(),
+                )
+        add(path, method, parameters)
     return _unique(rows, limit)
 
 

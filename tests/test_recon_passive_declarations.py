@@ -161,6 +161,71 @@ def test_method_aware_js_request_shapes_and_named_route_templates():
     assert all(row["evidence"]["source_scripts"] == [BASE + "assets/main.js"] for row in rows)
 
 
+def test_public_js_request_bodies_contribute_names_and_types_without_values():
+    rows = js('''const login={email:"person@example.test",password:secret,remember:true};
+        client.post('/rest/user/login', login);
+        client.patch('/api/profile', {displayName:name,age:21,tags:[],prefs:{}});
+        fetch('/rest/2fa/verify', {method:'POST',
+          body:JSON.stringify({tmpToken:token,totpToken:code})});
+        axios({url:'/api/pay',method:'POST',data:{amount:1.5,note:'private'}});''')
+
+    by_path = {row["path"]: row for row in rows}
+    assert by_path["/rest/user/login"]["declared_parameters"] == [
+        {"name": "email", "location": "json", "data_type": "string"},
+        {"name": "password", "location": "json", "data_type": "string"},
+        {"name": "remember", "location": "json", "data_type": "boolean"},
+    ]
+    assert by_path["/api/profile"]["declared_parameters"] == [
+        {"name": "displayName", "location": "json", "data_type": "string"},
+        {"name": "age", "location": "json", "data_type": "number"},
+        {"name": "tags", "location": "json", "data_type": "array"},
+        {"name": "prefs", "location": "json", "data_type": "object"},
+    ]
+    assert {item["name"] for item in by_path["/rest/2fa/verify"]["declared_parameters"]} == {
+        "tmpToken", "totpToken",
+    }
+    assert {item["name"] for item in by_path["/api/pay"]["declared_parameters"]} == {
+        "amount", "note",
+    }
+    assert "person@example.test" not in json.dumps(rows)
+    assert "private" not in json.dumps(rows)
+
+
+def test_opaque_service_body_uses_direct_public_object_callsite_fields() -> None:
+    rows = js('''class UserService {
+        resetPassword(e){return this.http.post(this.hostServer +
+          '/rest/user/reset-password', e)}
+      }
+      component.resetPassword({email:privateEmail,answer:privateAnswer,
+        new:privatePassword,repeat:privatePassword});''')
+
+    reset = next(row for row in rows if row["path"] == "/rest/user/reset-password")
+    assert {item["name"] for item in reset["declared_parameters"]} == {
+        "email", "answer", "new", "repeat",
+    }
+    assert "private" not in json.dumps(rows)
+
+
+def test_generic_service_method_does_not_merge_unrelated_callsites() -> None:
+    rows = js('''class Service { save(e){return this.http.post(
+        this.hostServer + '/api/Users', e)} }
+      account.save({email:value}); orders.save({price:value});''')
+
+    assert "declared_parameters" not in next(
+        row for row in rows if row["path"] == "/api/Users"
+    )
+
+
+def test_body_binding_must_be_nearby_simple_object_and_never_executes_code():
+    distant = "payload={accepted:true};" + "x" * 12_001 + ";"
+    rows = js(distant + "client.post('/far',payload);"
+              "client.post('/computed',makePayload());"
+              "client.post('/near',{safe:value,...other});")
+
+    assert keys(rows) == {("POST", "/far"), ("POST", "/computed"), ("POST", "/near")}
+    assert all("declared_parameters" not in row for row in rows)
+
+
 def test_literal_concatenated_urls_keep_declared_methods_and_complete_templates():
     rows = js('''fetch('/catalog/' + record.id + '/history');
         client.post('/payments/' + paymentId + '/capture', payload);

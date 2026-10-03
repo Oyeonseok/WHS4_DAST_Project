@@ -32,6 +32,7 @@ from aidast.core.http_safety import merge_hackerone_identity, sanitize_headers
 from aidast.pipeline.request_profiles import recon_user_agent
 from aidast.core.request_governor import RequestGovernor, GovernorError
 from aidast.validation.execution.credentials import PipelineCredentialResolver
+from aidast.attack.surface import ATTACK_ELIGIBLE_ENDPOINT_SQL
 
 
 MAX_REQUEST_BODY_BYTES = 200_000
@@ -55,6 +56,17 @@ MUTATION_RISK_CLASSES = {
     "application_mutation", "test_resource_create", "test_resource_delete",
     "external_side_effect", "destructive_or_bulk",
 }
+
+
+def _canonical_endpoint_path(path: str) -> str:
+    """Treat an optional terminal slash as one route identity.
+
+    Browsers and framework clients commonly add a terminal slash even when the
+    passive declaration omitted it.  Keep every other path byte significant;
+    if Recon observed both spellings the caller still rejects the ambiguous
+    match because two endpoint ids remain.
+    """
+    return path if path == "/" else path.rstrip("/") or "/"
 
 
 class RequestGuardError(ValueError):
@@ -172,9 +184,12 @@ def _observed_mutation_endpoint(
                  )""",
             (scan_id, method, host, parsed.scheme, port),
         ).fetchall()
+    canonical_path = _canonical_endpoint_path(path)
+    canonical_normalized = _canonical_endpoint_path(normalized)
     matches = [
         endpoint_id for endpoint_id, observed_path, normalized_path in rows
-        if path == observed_path or normalized == normalized_path
+        if canonical_path == _canonical_endpoint_path(observed_path or "/")
+        or canonical_normalized == _canonical_endpoint_path(normalized_path or "/")
     ]
     return matches[0] if len(matches) == 1 else None
 
@@ -201,17 +216,20 @@ def _recon_candidate_endpoint(db_path: Path, *, scan_id: str, url: str, method: 
     _, normalized_path, host, port = _attack_destination(url)
     with closing(sqlite3.connect(db_path)) as conn:
         rows = conn.execute(
-            """SELECT e.endpoint_id
+            f"""SELECT e.endpoint_id,e.normalized_path
                FROM endpoints e
                JOIN origins o ON o.origin_id=e.origin_id
                JOIN assets a ON a.asset_id=o.asset_id
-               WHERE a.scan_id=? AND e.is_excluded=0
+               WHERE a.scan_id=? AND {ATTACK_ELIGIBLE_ENDPOINT_SQL}
                  AND lower(rtrim(o.host,'.'))=? AND o.scheme=? AND o.port=?
-                 AND e.normalized_path=? AND (? IS NULL OR upper(e.method)=?)
+                 AND (? IS NULL OR upper(e.method)=?)
                ORDER BY e.endpoint_id""",
-            (scan_id, host, parsed.scheme, port, normalized_path, method, method),
+            (scan_id, host, parsed.scheme, port, method, method),
         ).fetchall()
-    return rows[0][0] if rows else None
+    expected = _canonical_endpoint_path(normalized_path)
+    matches = [row[0] for row in rows
+               if expected == _canonical_endpoint_path(row[1] or "/")]
+    return matches[0] if len(matches) == 1 else None
 
 
 def _endpoint_provenance(
