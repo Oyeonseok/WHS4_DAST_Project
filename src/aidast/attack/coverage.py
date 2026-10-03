@@ -16,7 +16,9 @@ from urllib.parse import urlsplit
 from aidast.pipeline.live_schema import migrate_live_pipeline_schema
 from aidast.pipeline.lifecycle import create_task
 from aidast.recon.db import new_id, now
+from aidast.validation.contracts.models import ValidationError
 from aidast.validation.execution.credentials import PipelineCredentialResolver
+from aidast.validation.persistence.evidence_policy import sanitize_metadata
 
 
 VULNERABILITY_SKILLS: dict[str, str] = {
@@ -518,13 +520,29 @@ def _task_fixtures(
         (scan_id, f"%.{parameter_name}" if parameter_name else "!never-match!"),
     ).fetchall()
     fixtures = []
+    credential_labels = {
+        str(row[0]) for row in conn.execute(
+            "SELECT label FROM credential_references WHERE scan_id=?", (scan_id,),
+        )
+    }
     for row in rows:
-        value: Any = row["fact_value"]
-        if isinstance(value, str):
-            try:
-                value = json.loads(value)
-            except json.JSONDecodeError:
-                value = value[:1000]
+        value = _safe_fact_value(row["fact_value"])
+        # Preserve only an existing opaque reference label, never credential
+        # material supplied by a fixture under a similarly named field.
+        try:
+            raw = row["fact_value"]
+            original = (
+                json.loads(raw)
+                if isinstance(raw, str) and len(raw.encode("utf-8")) <= 8192
+                else None
+            )
+        except (json.JSONDecodeError, TypeError, RecursionError):
+            original = None
+        if isinstance(original, dict) and isinstance(value, dict):
+            label = original.get("credential_label")
+            if isinstance(label, str) and len(label.encode("utf-8")) <= 256 and label in credential_labels:
+                value["credential_label"] = label
+            value.pop("principal", None)
         fixtures.append({
             "fact_type": str(row["fact_type"]),
             "fact_key": str(row["fact_key"]),
@@ -532,6 +550,25 @@ def _task_fixtures(
             "confidence": float(row["confidence"]),
         })
     return fixtures
+
+
+def _safe_fact_value(raw: Any) -> Any:
+    """Sanitize fact contents as well as their outer classification.
+
+    A shareable fact type/key does not guarantee that nested fields or free
+    text are free of credentials. Reject oversized input without echoing it.
+    """
+    if isinstance(raw, str):
+        if len(raw.encode("utf-8")) > 8192:
+            return {"omitted": "fact exceeds metadata budget"}
+        try:
+            raw = json.loads(raw)
+        except (json.JSONDecodeError, RecursionError):
+            pass
+    try:
+        return sanitize_metadata(raw, max_bytes=2000)
+    except ValidationError:
+        return {"omitted": "fact exceeds safe metadata format or budget"}
 
 
 _SHAREABLE_FACT_TYPES = frozenset({
@@ -579,13 +616,7 @@ def _task_context_facts(
             "authorization", "api_key", "apikey", "private_key",
         )):
             continue
-        value: Any = row["fact_value"]
-        if isinstance(value, str):
-            value = value[:2000]
-            try:
-                value = json.loads(value)
-            except json.JSONDecodeError:
-                pass
+        value = _safe_fact_value(row["fact_value"])
         facts.append({
             "fact_type": str(row["fact_type"]),
             "fact_key": key,

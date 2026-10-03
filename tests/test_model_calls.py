@@ -368,6 +368,34 @@ class ModelCallLogTests(unittest.TestCase):
         self.assertEqual(usage["unattributed"]["total_tokens"], 5)
         self.assertEqual(usage["stages"]["Report"]["unreported_calls"], 1)
 
+    def test_scan_tokens_accumulate_every_unattributed_stage(self) -> None:
+        class Agent:
+            _main_model = "gpt-test"
+
+            @logged_model_call("structured", model_attribute="_main_model")
+            def run(self, *, operation: str, tokens: int | None) -> None:
+                record_session_usage([{"type": "turn.completed", "usage": {
+                    "input_tokens": tokens, "cached_input_tokens": 0,
+                    "output_tokens": tokens,
+                }}])
+
+        with using_model_call_sink(SQLiteModelCallSink(self.root)):
+            for stage, tokens in ((None, 2), ("Other", 3), ("Legacy", 4), ("Other", None)):
+                with model_call_context(scan_id="scan-a", stage=stage):
+                    Agent().run(operation="offline report drafting", tokens=tokens)
+            with model_call_context(scan_id="scan-a", stage="Scope"):
+                Agent().run(operation="Scope collection", tokens=100)
+            with model_call_context(scan_id="scan-b", stage="Other"):
+                Agent().run(operation="offline report drafting", tokens=200)
+
+        usage = read_scan_token_usage(self.root, "scan-a")
+        self.assertEqual(usage["unattributed"], {
+            "input_tokens": 9, "output_tokens": 9, "total_tokens": 18,
+            "measured_calls": 3, "unreported_calls": 1,
+        })
+        self.assertEqual(usage["total"], usage["unattributed"])
+        self.assertTrue(all(bucket["total_tokens"] == 0 for bucket in usage["stages"].values()))
+
     def test_resumed_thread_totals_are_not_counted_twice(self) -> None:
         class Agent:
             _validation_model = "gpt-test"

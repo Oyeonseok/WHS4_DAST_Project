@@ -15,6 +15,8 @@ from aidast.attack.coverage import (
     resolve_abandoned_attack_leads,
     transition_coverage,
     _credential_role,
+    _task_context_facts,
+    _task_fixtures,
 )
 from aidast.attack.db_cli import transition_task
 from aidast.attack.models import AttackStageResult
@@ -451,6 +453,60 @@ def test_coverage_tasks_retain_safe_black_box_facts_across_batches(tmp_path: Pat
         for item in facts
     )
     assert all(item["fact_key"] != "login.access_token" for item in facts)
+
+
+@pytest.mark.parametrize("fact_type", ["owned_test_object", "endpoint_behavior"])
+def test_shareable_fact_contents_do_not_expose_nested_secrets(
+    tmp_path: Path, fact_type: str,
+) -> None:
+    imported = imported_pipeline(tmp_path)
+    with sqlite3.connect(imported.pipeline_database) as conn:
+        conn.row_factory = sqlite3.Row
+        endpoint_id = conn.execute("SELECT endpoint_id FROM endpoints LIMIT 1").fetchone()[0]
+        conn.execute(
+            """INSERT INTO attack_facts
+               (fact_id,scan_id,fact_type,fact_key,fact_value,confidence,source_endpoint_id)
+               VALUES ('fact-nested',?,?,?, ?,1.0,?)""",
+            (imported.scan_id, fact_type, "users.metadata", json.dumps({
+                "object_type": "user_id", "object_id": "owned-fixture",
+                "nested": [{"access_token": "nested-must-not-leak"}],
+                "request_headers": {"X-Custom": "header-must-not-leak"},
+                "response_body": "body-must-not-leak",
+                "note": "Authorization: Bearer text-must-not-leak",
+            }), endpoint_id),
+        )
+        if fact_type == "owned_test_object":
+            facts = _task_fixtures(conn, imported.scan_id, parameter_name="user_id")
+        else:
+            facts = _task_context_facts(
+                conn, imported.scan_id, endpoint_id=endpoint_id, parameter_name="user_id",
+            )
+        assert len(facts) == 1
+        assert facts[0]["fact_value"]["object_type"] == "user_id"
+        assert "must-not-leak" not in json.dumps(facts)
+
+
+def test_owned_fixture_retains_registered_label_without_exposing_principal(tmp_path: Path) -> None:
+    imported = imported_pipeline(tmp_path)
+    with sqlite3.connect(imported.pipeline_database) as conn:
+        conn.row_factory = sqlite3.Row
+        register_credential_reference(
+            conn, scan_id=imported.scan_id, label="user-a",
+            reference_uri="env://TEST_FIXTURE_USER_A", identity_role="authenticated",
+        )
+        conn.execute(
+            """INSERT INTO attack_facts
+               (fact_id,scan_id,fact_type,fact_key,fact_value,confidence)
+               VALUES ('fact-label',?,'owned_test_object','user-a.user_id',?,1.0)""",
+            (imported.scan_id, json.dumps({
+                "credential_label": "user-a", "object_type": "user_id",
+                "principal": "personal-address@example.test", "password": "must-not-leak",
+            })),
+        )
+        value = _task_fixtures(conn, imported.scan_id, parameter_name="user_id")[0]["fact_value"]
+        assert value["credential_label"] == "user-a"
+        assert "principal" not in value
+        assert "must-not-leak" not in json.dumps(value)
 
 
 def test_coverage_task_exposes_all_db_parameters_and_source_context(tmp_path: Path) -> None:

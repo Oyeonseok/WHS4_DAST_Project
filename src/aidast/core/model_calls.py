@@ -454,7 +454,8 @@ def read_scan_token_usage(result_root: Path, scan_id: str) -> dict:
             if any(type(value) is not int or value < 0 for value in values):
                 raise sqlite3.DatabaseError("invalid scan token usage")
             bucket = stages.get(stage, unattributed)
-            bucket.update(zip(_TOKEN_FIELDS, values))
+            for field, value in zip(_TOKEN_FIELDS, values):
+                bucket[field] += value
     total = {field: sum(bucket[field] for bucket in (*stages.values(), unattributed))
              for field in _TOKEN_FIELDS}
     return {
