@@ -32,8 +32,9 @@ impact assertion on the final response. Follow the execution helper workflow in
 
 Persist all state through the configured helpers. A candidate must finish as
 `evidence_collected`, `rejected`, or `inconclusive`; never leave it open. A
-successfully replayed chain remains `proposed` until the later Validation stage,
-while its `chain_executions` row records `succeeded`. Never claim execution
+successfully replayed chain is stored as `demonstrated` by `finish-execution`,
+while its `chain_executions` row records `succeeded`. Validation later decides
+the final case status independently. Never claim execution
 success from old evidence, status code alone, or inference.
 
 Close every task and every lead. Return one JSON object with exactly: `stage`,
