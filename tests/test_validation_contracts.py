@@ -56,7 +56,8 @@ class ValidationContractTests(unittest.TestCase):
 
     def test_impact_boundaries_and_underpowered_predicate(self):
         cases = [((1, 1, 1), (3, "LOW", False)), ((3, 3, 3), (9, "CRITICAL", False)),
-                 ((0, 3, 3), (6, "MEDIUM", True)), ((1, 0, 3), (4, "LOW", True))]
+                 ((0, 3, 3), (6, "MEDIUM", True)), ((1, 0, 2), (3, "LOW", True)),
+                 ((1, 0, 1), (2, "INFO", True))]
         for inputs, expected in cases:
             with self.subTest(inputs=inputs):
                 result = evaluate_impact(*inputs)
@@ -64,6 +65,20 @@ class ValidationContractTests(unittest.TestCase):
         for invalid in ((-1, 1, 1), (4, 1, 1), (True, 1, 1)):
             with self.assertRaises(ValueError):
                 evaluate_impact(*invalid)
+        self.assertFalse(evaluate_impact(
+            1, 0, 2, zero_sensitivity_boundary_confirmation=True,
+        ).underpowered)
+
+    def test_only_opted_in_profiles_confirm_a_zero_sensitivity_boundary(self):
+        from aidast.validation import SkillProfileResolver
+
+        resolver = SkillProfileResolver()
+        self.assertTrue(resolver.resolve(
+            "hunt-sqli"
+        ).profile.zero_sensitivity_boundary_confirmation)
+        self.assertFalse(resolver.resolve(
+            "hunt-source-leak"
+        ).profile.zero_sensitivity_boundary_confirmation)
 
     def test_decision_priority_and_clean_batch_requirement(self):
         engine = DecisionEngine()
@@ -118,6 +133,10 @@ class ValidationContractTests(unittest.TestCase):
             semantic_conflict=True, attack_has_positive_evidence=True, impact=sufficient)), "CONTESTED")
         self.assertEqual(engine.decide(DecisionInput(target_observations=(True, True, True),
                                                           impact=evaluate_impact(0, 3, 3))), "UNDERPOWERED")
+        self.assertEqual(engine.decide(DecisionInput(target_observations=(True, True, True),
+            impact=evaluate_impact(
+                1, 0, 2, zero_sensitivity_boundary_confirmation=True,
+            ))), "CONFIRMED")
         self.assertEqual(engine.decide(DecisionInput(target_observations=(True, True, True),
                                                           impact=sufficient)), "CONFIRMED")
 

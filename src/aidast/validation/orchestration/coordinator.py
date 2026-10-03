@@ -819,6 +819,9 @@ class ValidationCoordinator:
                 assessment.impact_boundary.score,
                 assessment.impact_sensitivity.score,
                 assessment.impact_actor_requirements.score,
+                zero_sensitivity_boundary_confirmation=(
+                    candidate.profile.profile.zero_sensitivity_boundary_confirmation
+                ),
             )
             if (assessment.reproduced is True and impact_before_development.underpowered
                     and allow_impact_hypotheses
@@ -997,7 +1000,12 @@ class ValidationCoordinator:
             assessment.impact_actor_requirements.score,
         )
         from ..core.decision import evaluate_impact
-        impact_result = evaluate_impact(*impact_tuple)
+        impact_result = evaluate_impact(
+            *impact_tuple,
+            zero_sensitivity_boundary_confirmation=(
+                candidate.profile.profile.zero_sensitivity_boundary_confirmation
+            ),
+        )
         contradictory_reproduction = bool(
             assessment.reproduced is False and targets and all(targets)
         )
@@ -1067,6 +1075,9 @@ class ValidationCoordinator:
             case["case_id"], stage_run_id=stage_run_id, expected_version=version,
             status=status, decision=decision, evidence_ids=evidence_ids,
             impact=impact_tuple if status in {"CONFIRMED", "UNDERPOWERED"} else None,
+            zero_sensitivity_boundary_confirmation=(
+                candidate.profile.profile.zero_sensitivity_boundary_confirmation
+            ),
         )
         return True
 

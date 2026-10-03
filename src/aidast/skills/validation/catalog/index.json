@@ -357,7 +357,7 @@
       "skill_path": "library/hunt-sqli/SKILL.md",
       "contract_path": "library/hunt-sqli/contract.json",
       "skill_sha256": "6a3ea3346959b67643803cbbcd635445ba1ba4495b484e387d339899a780fe49",
-      "contract_sha256": "a6f6cc5e7a361deb0a6fe563b9095c1685f7b0aef08830a6384b955fac732b3a"
+      "contract_sha256": "12b93899df521d7cdb4db41b33bdd6eb1221444da180dd2add9377d399656dcc"
     },
     {
       "skill_id": "hunt-ssrf",

@@ -674,7 +674,9 @@ def _credential_role(vuln_class: str, required_role: str) -> str:
     # baseline; the Agent must still send and record both exact controls.
     return (
         "authenticated"
-        if vuln_class in {"idor", "jwt_crypto", "session", "auth_bypass", "cors"}
+        if vuln_class in {
+            "idor", "jwt_crypto", "session", "auth_bypass", "cors", "csrf",
+        }
         else required_role
     )
 

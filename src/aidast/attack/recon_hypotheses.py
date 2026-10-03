@@ -225,6 +225,17 @@ def _grounded_baseline_hypotheses(
     authentication_path = any(token in path for token in (
         "/login", "/signin", "/auth", "/account", "/admin",
     ))
+    protected_resource_path = (
+        (path.startswith("/api/") or path.startswith("/rest/"))
+        and any(token in path for token in (
+            "/profile", "/whoami", "/address", "/basket", "/cart",
+            "/order", "/wallet", "/payment", "/history",
+        ))
+    )
+    semantic_mutation_path = any(token in path for token in (
+        "save", "change", "update", "delete", "erase", "disable",
+        "setup", "verify", "checkout", "payment", "transfer", "redeem",
+    ))
     recovery_path = any(token in path for token in (
         "forgot", "reset-password", "reset_password", "recovery", "recover",
         "security-question", "security_question",
@@ -254,7 +265,7 @@ def _grounded_baseline_hypotheses(
                     if isinstance(status, int))):
         add("api_misconfig", identity="unauthenticated", reason=
             "Recon observed a successful API read suitable for anonymous exposure and response-minimization checks.")
-    if context.get("auth_required") or authentication_path:
+    if context.get("auth_required") or authentication_path or protected_resource_path:
         add("auth_bypass", identity="unauthenticated", reason=
             "Recon identified an authentication or authorization boundary suitable for an anonymous baseline check.")
     if authentication_path and (credential_fields or method == "POST"):
@@ -279,20 +290,23 @@ def _grounded_baseline_hypotheses(
     }:
         add("jwt_crypto", reason=
             "Recon identified a token-bearing surface suitable for format, signature, and claim enforcement checks.")
-    if method in {"POST", "PUT", "PATCH"} and any(token in path for token in (
-        "register", "cart", "basket", "order", "checkout", "payment", "transfer", "loan",
-    )):
-        add("business_logic", reason=
+    if ((method in {"POST", "PUT", "PATCH", "DELETE"} and any(token in path for token in (
+            "register", "cart", "basket", "order", "checkout", "payment", "transfer", "loan",
+        ))) or semantic_mutation_path):
+        add("business_logic", identity="authenticated", reason=
             "Recon identified a state transition in an account or transaction workflow suitable for bounded invariant checks.")
-    if method in {"POST", "PUT", "PATCH", "DELETE"} and context.get("auth_required"):
-        add("csrf", reason=
+    if ((method in {"POST", "PUT", "PATCH", "DELETE"} and context.get("auth_required"))
+            or semantic_mutation_path):
+        add("csrf", identity="authenticated", reason=
             "Recon identified an authenticated state-changing route suitable for origin and anti-CSRF enforcement checks.")
     if method in {"POST", "PUT", "PATCH"} and any(token in path for token in (
         "cart", "basket", "order", "checkout", "payment", "transfer", "coupon", "redeem",
     )):
         add("race_condition", reason=
             "Recon identified a transactional state transition suitable for a policy-bounded duplicate-request invariant check.")
-    if any(token in path for token in ("/session", "/token", "/logout", "/jwt")):
+    if any(token in path for token in (
+        "/session", "/token", "/logout", "/jwt", "/whoami", "/2fa",
+    )):
         add("session", reason=
             "Recon identified an authentication-session route suitable for lifecycle and invalidation checks.")
     if "graphql" in path:
@@ -492,15 +506,34 @@ commands, browse, or send requests; this step only produces a testing plan.
                 merged_hypotheses = dict(retained.get(endpoint_id, {}))
                 baseline_count = 0
                 endpoint_issues = [issue for issue in final_issues if issue.endpoint_id == endpoint_id]
-                # Supplement only a valid, explicit no-hypothesis disposition.
-                # A rejected or partially valid model proposal keeps its
-                # diagnostics and accepted work unchanged; deterministic
-                # inference must never hide a grounding failure.
-                if not merged_hypotheses and item is not None and not endpoint_issues:
+                # Always retain deterministic hypotheses derived from this
+                # endpoint's own black-box Recon evidence.  Model planning is
+                # useful for semantic breadth, but a partial valid response
+                # must not suppress independently grounded inputs or route
+                # signals.  Rejected proposals remain fail-closed so this
+                # supplement cannot hide a grounding error.
+                if item is not None and not endpoint_issues:
+                    semantic_keys = {
+                        (
+                            hypothesis.vuln_class,
+                            hypothesis.injection_location,
+                            hypothesis.parameter_name,
+                            hypothesis.required_identity_role,
+                        )
+                        for hypothesis in merged_hypotheses.values()
+                    }
                     for hypothesis in _grounded_baseline_hypotheses(context, skills):
+                        semantic_key = (
+                            hypothesis.vuln_class,
+                            hypothesis.injection_location,
+                            hypothesis.parameter_name,
+                            hypothesis.required_identity_role,
+                        )
                         key = _canonical_digest(hypothesis_fields(hypothesis))
-                        if key not in merged_hypotheses and len(merged_hypotheses) < 64:
+                        if (semantic_key not in semantic_keys
+                                and len(merged_hypotheses) < 64):
                             merged_hypotheses[key] = hypothesis
+                            semantic_keys.add(semantic_key)
                             baseline_count += 1
                 hypotheses = list(merged_hypotheses.values())
                 reason = item.reason if item else 'No evidence-grounded endpoint plan was returned.'

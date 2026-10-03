@@ -95,6 +95,7 @@ class ValidationProfile(StrictContract):
     control_positive: ProfileControl
     control_negative: ProfileControl
     baseline_samples: int | None = Field(default=None, ge=3, le=20)
+    zero_sensitivity_boundary_confirmation: bool = False
     impact_rules: ProfileImpactRules
     allowed_development_actions: tuple[DevelopmentAction, ...] = Field(max_length=2)
     impact_expansion_paths: tuple[ImpactExpansionPath, ...] = Field(max_length=32)

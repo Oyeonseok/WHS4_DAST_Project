@@ -149,6 +149,24 @@ def test_grounded_baseline_keeps_strong_recon_signals_in_attack_queue(tmp_path):
     assert all('private-value' not in rationale for rationale in rationales)
 
 
+def test_grounded_black_box_hypotheses_supplement_partial_model_plan(tmp_path):
+    from aidast.attack.recon_hypotheses import plan_recon_attack
+    path = pipeline(tmp_path)
+
+    def omit_one_observed_input_class(response, context):
+        row = next(row for row in response['endpoints'] if row['hypotheses'])
+        row['hypotheses'] = [
+            item for item in row['hypotheses'] if item['vuln_class'] == 'sqli'
+        ]
+
+    agent = Planner(omit_one_observed_input_class)
+    plan_recon_attack(path, 'scan', agent=agent)
+    manifest = ensure_coverage_manifest(path, 'scan')
+
+    assert manifest.by_vulnerability == {'sqli': 1, 'xss': 1}
+    assert 'private-value' not in json.dumps(agent.contexts)
+
+
 def test_grounded_baseline_reviews_observed_successful_api_reads_for_exposure():
     from aidast.attack.coverage import hypothesis_skill_catalog
     from aidast.attack.recon_hypotheses import _grounded_baseline_hypotheses
@@ -160,6 +178,33 @@ def test_grounded_baseline_reviews_observed_successful_api_reads_for_exposure():
     }, hypothesis_skill_catalog())
 
     assert 'api_misconfig' in {item.vuln_class for item in hypotheses}
+
+
+@pytest.mark.parametrize(
+    ('path', 'method', 'expected'),
+    [
+        ('/rest/user/whoami', 'GET', {'auth_bypass', 'session'}),
+        ('/rest/order-history', 'GET', {'auth_bypass'}),
+        ('/rest/saveLoginIp', 'GET', {'business_logic', 'csrf'}),
+        ('/rest/2fa/disable', 'POST', {'mfa_bypass', 'session', 'business_logic', 'csrf'}),
+    ],
+)
+def test_grounded_route_semantics_create_black_box_boundary_hypotheses(
+    path, method, expected,
+):
+    from aidast.attack.coverage import hypothesis_skill_catalog
+    from aidast.attack.recon_hypotheses import _grounded_baseline_hypotheses
+
+    hypotheses = _grounded_baseline_hypotheses({
+        'path': path, 'method': method, 'auth_required': False,
+        'http_statuses': [200], 'parameters': [], 'technology_context': {},
+        'response_header_names': [],
+    }, hypothesis_skill_catalog())
+    by_class = {item.vuln_class: item for item in hypotheses}
+
+    assert expected <= set(by_class)
+    for name in expected & {'business_logic', 'csrf'}:
+        assert by_class[name].required_identity_role == 'authenticated'
 
 
 def test_attack_plans_exact_public_client_declarations_but_not_inferred_crud(tmp_path):
@@ -279,7 +324,7 @@ def test_more_than_eight_hypotheses_are_retained(tmp_path):
         first = row['hypotheses'][0]
         row['hypotheses'] = [{**first, 'vuln_class': name} for name in list(VULNERABILITY_SKILLS)[:10]]
     plan_recon_attack(path, 'scan', agent=Planner(change))
-    assert ensure_coverage_manifest(path, 'scan').total == 10
+    assert ensure_coverage_manifest(path, 'scan').total == 12
 
 
 def test_normal_attack_processes_the_whole_endpoint_queue_in_batches_of_eight(tmp_path):
@@ -300,12 +345,12 @@ def test_normal_attack_processes_the_whole_endpoint_queue_in_batches_of_eight(tm
     policy.write_text('{"policies":[]}')
     result = AttackCoordinator(agent=agent, db_path=path, scope_path=scope, policy_path=policy).run('scan')
     assert result.status == 'COMPLETED'
-    assert [len(call['attack_tasks']) for call in agent.calls] == [8, 2]
+    assert [len(call['attack_tasks']) for call in agent.calls] == [8, 4]
     assert all(task.get('endpoint_id') and task.get('coverage_id')
                for call in agent.calls for task in call['attack_tasks'])
     with sqlite3.connect(path) as conn:
-        assert conn.execute('SELECT COUNT(*) FROM attack_tasks').fetchone()[0] == 10
-        assert conn.execute("SELECT COUNT(*) FROM attack_coverage_items WHERE status='unsupported'").fetchone()[0] == 10
+        assert conn.execute('SELECT COUNT(*) FROM attack_tasks').fetchone()[0] == 12
+        assert conn.execute("SELECT COUNT(*) FROM attack_coverage_items WHERE status='unsupported'").fetchone()[0] == 12
 
 
 def test_planner_service_failure_records_a_failed_attack_stage_for_resume(tmp_path):
@@ -438,7 +483,10 @@ def test_prior_finding_does_not_cover_different_parameter_or_identity_hypotheses
     ensure_coverage_manifest(path, 'scan')
     with sqlite3.connect(path) as conn:
         conn.row_factory = sqlite3.Row
-        matched = conn.execute("SELECT * FROM attack_coverage_items WHERE parameter_name='q' AND required_identity_role='unauthenticated'").fetchone()
+        matched = conn.execute(
+            "SELECT * FROM attack_coverage_items WHERE vuln_class='sqli' "
+            "AND parameter_name='q' AND required_identity_role='unauthenticated'"
+        ).fetchone()
         stage = start_stage_run(conn, scan_id='scan', stage='attack')
         from aidast.pipeline.lifecycle import create_task
         task = create_task(conn, stage_run_id=stage, skill_name='hunt-sqli', endpoint_id=endpoint_id, payload={'coverage_id':matched['coverage_id']})
@@ -449,8 +497,16 @@ def test_prior_finding_does_not_cover_different_parameter_or_identity_hypotheses
         if has_http:
             conn.execute("INSERT INTO attack_http_requests(request_id,scan_id,stage_run_id,task_id,policy_id,method,url,request_fingerprint,status,response_status,scheduled_at,endpoint_reference_id,result_json) VALUES ('request','scan',?,?,'policy','GET','https://example.test/search',?,'completed',200,0,?,'{}')", (stage,task,'f'*64,endpoint_id))
         _adopt_existing_findings(conn, 'scan')
-        states = {(row['parameter_name'],row['required_identity_role']):row['status'] for row in conn.execute('SELECT * FROM attack_coverage_items')}
-        assert states == {('q','unauthenticated'): 'candidate' if has_http else 'pending',('q','authenticated'):'pending',('filter','unauthenticated'):'pending'}
+        states = {
+            (row['vuln_class'], row['parameter_name'], row['required_identity_role']): row['status']
+            for row in conn.execute('SELECT * FROM attack_coverage_items')
+        }
+        assert states == {
+            ('sqli', 'q', 'unauthenticated'): 'candidate' if has_http else 'pending',
+            ('sqli', 'q', 'authenticated'): 'pending',
+            ('sqli', 'filter', 'unauthenticated'): 'pending',
+            ('xss', 'q', 'unauthenticated'): 'pending',
+        }
 
 
 def test_a_negative_attempt_without_completed_http_evidence_is_not_tested(tmp_path):
@@ -612,7 +668,9 @@ def test_framework_specific_installed_skill_can_be_planned_without_static_catalo
     plan_recon_attack(path, 'scan', agent=Planner(framework))
     ensure_coverage_manifest(path, 'scan')
     with sqlite3.connect(path) as conn:
-        assert conn.execute('SELECT skill_name FROM attack_coverage_items').fetchall() == [('hunt-nodejs',)]
+        assert conn.execute('SELECT skill_name FROM attack_coverage_items').fetchall() == [
+            ('hunt-nodejs',), ('hunt-sqli',), ('hunt-xss',),
+        ]
 
 
 def test_candidate_only_request_provenance_preserves_method_at_shared_path(tmp_path):
@@ -778,7 +836,7 @@ def test_withdrawal_of_invalid_proposal_preserves_valid_hypotheses(tmp_path):
     agent = Planner(withdraw)
     plan_recon_attack(path, 'scan', agent=agent)
     assert len(agent.contexts) == 2
-    assert ensure_coverage_manifest(path, 'scan').by_vulnerability == {'xss': 1}
+    assert ensure_coverage_manifest(path, 'scan').by_vulnerability == {'sqli': 1, 'xss': 1}
     with sqlite3.connect(path) as conn:
         assert conn.execute('SELECT status FROM attack_planning_diagnostics').fetchall() == [('resolved',)]
         assert 'withdrawn' in conn.execute("SELECT reason FROM attack_endpoint_reviews WHERE status='planned'").fetchone()[0]
@@ -818,7 +876,7 @@ def test_valid_hypotheses_survive_provider_failure_during_correction_and_resume(
             row.update(hypotheses=[], disposition='insufficient_evidence', reason='Unsupported SQLi withdrawn.')
     agent = Planner(withdraw)
     plan_recon_attack(path, 'scan', agent=agent)
-    assert ensure_coverage_manifest(path, 'scan').by_vulnerability == {'xss': 1}
+    assert ensure_coverage_manifest(path, 'scan').by_vulnerability == {'sqli': 1, 'xss': 1}
     assert any(h['vuln_class'] == 'xss' for items in agent.contexts[0]['retained_hypotheses'].values() for h in items)
 
 
@@ -870,10 +928,12 @@ def test_correction_keeps_independently_valid_endpoint_hypothesis_with_invalid_s
     agent = Planner(independent_endpoint)
     plan_recon_attack(path, 'scan', agent=agent)
     assert len(agent.contexts) == 2
-    assert ensure_coverage_manifest(path, 'scan').by_vulnerability == {'sqli': 1}
+    assert ensure_coverage_manifest(path, 'scan').by_vulnerability == {'sqli': 2, 'xss': 1}
     with sqlite3.connect(path) as conn:
         assert conn.execute("SELECT count(*) FROM attack_planning_diagnostics WHERE status='unresolved'").fetchone()[0] == 0
-        assert conn.execute('SELECT injection_location,parameter_name FROM attack_coverage_items').fetchall() == [('endpoint','')]
+        assert sorted(conn.execute(
+            'SELECT injection_location,parameter_name FROM attack_coverage_items'
+        ).fetchall()) == [('endpoint', ''), ('query', 'q'), ('query', 'q')]
 
 
 def test_source_evidence_review_supersedes_old_ordinary_planning_rejections(tmp_path):
