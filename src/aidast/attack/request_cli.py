@@ -24,7 +24,7 @@ import time
 from contextlib import closing
 from pathlib import Path
 from urllib.error import HTTPError
-from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, quote, unquote, urlencode, urlsplit, urlunsplit
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 from uuid import uuid4
 
@@ -47,6 +47,9 @@ SENSITIVE_HEADERS = {
 }
 SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
 _PATH_IDENTIFIER = re.compile(r"/\d+(?=/|$)|/[0-9a-fA-F]{8,}(?=/|$)")
+_PATH_PLACEHOLDER = re.compile(
+    r"^(?::[A-Za-z_$][\w$.-]*|\{[A-Za-z_$][\w$.-]*\})$"
+)
 _HIGH_IMPACT_PATH = re.compile(
     r"(?:^|[-_/])(payments?|billing|checkout|purchases?|transfers?|emails?|sms|"
     r"notifications?|broadcast|webhooks?|invites?)(?:[-_/]|$)",
@@ -67,6 +70,26 @@ def _canonical_endpoint_path(path: str) -> str:
     match because two endpoint ids remain.
     """
     return path if path == "/" else path.rstrip("/") or "/"
+
+
+def _template_path_matches(template: str, concrete: str) -> bool:
+    """Match one concrete URL path to a Recon route without using slot names."""
+    template_parts = [
+        unquote(unquote(part)) for part in _canonical_endpoint_path(template).split("/")
+        if part
+    ]
+    concrete_parts = [
+        unquote(unquote(part)) for part in _canonical_endpoint_path(concrete).split("/")
+        if part
+    ]
+    if len(template_parts) != len(concrete_parts):
+        return False
+    return all(
+        actual not in {"", ".", ".."}
+        if _PATH_PLACEHOLDER.fullmatch(expected)
+        else expected == actual
+        for expected, actual in zip(template_parts, concrete_parts)
+    )
 
 
 class RequestGuardError(ValueError):
@@ -232,9 +255,57 @@ def _recon_candidate_endpoint(db_path: Path, *, scan_id: str, url: str, method: 
     return matches[0] if len(matches) == 1 else None
 
 
+def _task_endpoint_reference(
+    db_path: Path, *, scan_id: str, task_id: str, method: str, url: str,
+) -> tuple[str, str] | None:
+    """Prefer the exact coverage endpoint when its template matches the URL.
+
+    Recon can retain equivalent templates such as ``:id``, ``{id}``, and
+    ``{e}`` from different black-box tools. Global provenance deliberately
+    rejects that ambiguity, but an exhaustive task already binds one of those
+    endpoint IDs. Keep the request and its later attempt on that task-selected
+    identity after independently checking method, origin, path, and Attack
+    eligibility.
+    """
+    parsed = urlsplit(url)
+    host = (parsed.hostname or "").casefold().rstrip(".")
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    with closing(sqlite3.connect(db_path)) as conn:
+        row = conn.execute(
+            f"""SELECT e.endpoint_id,e.normalized_path,
+                       EXISTS (
+                           SELECT 1 FROM endpoint_observations v
+                           WHERE v.endpoint_id=e.endpoint_id
+                             AND v.discovery_kind IN (
+                                 'http_request','http_response',
+                                 'passive_login_observation'
+                             )
+                       ) network_observed
+                FROM attack_tasks t
+                JOIN endpoints e ON e.endpoint_id=t.endpoint_id
+                JOIN origins o ON o.origin_id=e.origin_id
+                JOIN assets a ON a.asset_id=o.asset_id
+                WHERE t.task_id=? AND t.scan_id=? AND a.scan_id=?
+                  AND upper(e.method)=? AND lower(rtrim(o.host,'.'))=?
+                  AND o.scheme=? AND o.port=?
+                  AND {ATTACK_ELIGIBLE_ENDPOINT_SQL}""",
+            (task_id, scan_id, scan_id, method, host, parsed.scheme, port),
+        ).fetchone()
+    if row is None or not _template_path_matches(str(row[1]), parsed.path or "/"):
+        return None
+    return ("network_observed" if row[2] else "recon_candidate", str(row[0]))
+
+
 def _endpoint_provenance(
     db_path: Path, *, scan_id: str, method: str, url: str,
+    task_id: str | None = None,
 ) -> tuple[str, str | None]:
+    if task_id is not None:
+        selected = _task_endpoint_reference(
+            db_path, scan_id=scan_id, task_id=task_id, method=method, url=url,
+        )
+        if selected is not None:
+            return selected
     observed = _observed_mutation_endpoint(
         db_path, scan_id=scan_id, method=method, url=url,
     )
@@ -922,7 +993,7 @@ def guarded_request(
         bindings=item.get("bindings"), url=url, headers=headers, body=body,
     )
     endpoint_provenance, endpoint_reference_id = _endpoint_provenance(
-        db_path, scan_id=scan_id, method=method, url=url,
+        db_path, scan_id=scan_id, method=method, url=url, task_id=task_id,
     )
     if method in SAFE_METHODS:
         if item.get("risk_class", "http_probe") != "http_probe":

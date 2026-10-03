@@ -395,6 +395,59 @@ class AttackRequestGuardTests(unittest.TestCase):
 
             self.assertEqual(request_row, ("network_observed", endpoint_id))
 
+    def test_coverage_task_endpoint_wins_equivalent_template_alias(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            database, policy, payload, stage, task = fixture(root)
+            with closing(sqlite3.connect(database)) as conn, conn:
+                conn.row_factory = sqlite3.Row
+                origin = conn.execute("SELECT origin_id FROM origins").fetchone()[0]
+                observed = db.upsert_endpoint(
+                    conn, origin_id=origin, method="GET", path="/api/Items/1",
+                    normalized_path="/api/Items/:id", source_tool="browser",
+                )
+                conn.execute("""INSERT INTO endpoint_observations
+                    (observation_id,endpoint_id,source_tool,discovery_kind,
+                     observed_url,association_method,observed_at)
+                    VALUES (?,?,?,?,?,?,?)""", (
+                    db.new_id("observation"), observed, "browser", "http_response",
+                    "https://example.test/api/Items/1", "exact", db.now(),
+                ))
+                selected = db.upsert_endpoint(
+                    conn, origin_id=origin, method="GET", path="/api/Items/{e}",
+                    normalized_path="/api/Items/{e}", source_tool="adaptive_js",
+                    verification_status="candidate", is_excluded=True,
+                    exclude_reason="unverified_candidate",
+                )
+                conn.execute("""INSERT INTO endpoint_observations
+                    (observation_id,endpoint_id,source_tool,discovery_kind,
+                     observed_url,association_method,observed_at)
+                    VALUES (?,?,?,?,?,?,?)""", (
+                    db.new_id("observation"), selected, "adaptive_js", "js_http_call",
+                    "https://example.test/api/Items/{e}", "document_declaration", db.now(),
+                ))
+                conn.execute(
+                    "UPDATE attack_tasks SET endpoint_id=? WHERE task_id=?",
+                    (selected, task),
+                )
+            payload.write_text(json.dumps({
+                "method": "GET", "url": "https://example.test/api/Items/1",
+            }), encoding="utf-8")
+
+            with patch("aidast.attack.request_cli.build_opener", return_value=FakeOpener()):
+                result = guarded_request(
+                    database, scan_id="scan", stage_run_id=stage, task_id=task,
+                    policy_path=policy, payload_path=payload,
+                )
+
+            with closing(sqlite3.connect(database)) as conn:
+                provenance = conn.execute(
+                    """SELECT endpoint_provenance,endpoint_reference_id
+                       FROM attack_http_requests WHERE request_id=?""",
+                    (result["request_id"],),
+                ).fetchone()
+            self.assertEqual(provenance, ("recon_candidate", selected))
+
     def test_observed_attack_post_is_allowed_and_records_provenance(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
