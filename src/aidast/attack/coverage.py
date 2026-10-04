@@ -264,6 +264,45 @@ def _source_context(
            ORDER BY an.category,an.tag LIMIT 32""",
         (endpoint_id, annotation_id),
     ).fetchall()
+    declarations: list[dict[str, Any]] = []
+    declaration_seen: set[str] = set()
+    for row in conn.execute(
+        """SELECT source_tool,evidence_json FROM endpoint_observations
+           WHERE endpoint_id=? AND discovery_kind='api_spec_declaration'
+           ORDER BY observation_id LIMIT 16""",
+        (endpoint_id,),
+    ):
+        try:
+            evidence = json.loads(row["evidence_json"] or "{}")
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(evidence, dict):
+            continue
+        declaration: dict[str, Any] = {"source_tool": str(row["source_tool"])[:128]}
+        for key, limit in (("operation_summary", 1000), ("operation_description", 2000)):
+            value = evidence.get(key)
+            if isinstance(value, str) and value.strip():
+                declaration[key] = value[:limit]
+        tags = evidence.get("operation_tags")
+        if isinstance(tags, list):
+            declaration["operation_tags"] = [
+                item[:100] for item in tags[:20] if isinstance(item, str)
+            ]
+        if len(declaration) == 1:
+            continue
+        try:
+            declaration = sanitize_metadata(declaration, max_bytes=4096)
+        except ValidationError:
+            continue
+        fingerprint = json.dumps(
+            declaration, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        )
+        if fingerprint in declaration_seen:
+            continue
+        declaration_seen.add(fingerprint)
+        declarations.append(declaration)
+        if len(declarations) >= 4:
+            break
     return {
         "active_annotation": active,
         "related_annotations": [
@@ -274,6 +313,9 @@ def _source_context(
             }
             for row in related
         ],
+        # Public API prose is untrusted prioritization context.  It can suggest
+        # a concrete differential, but never counts as vulnerability evidence.
+        "public_api_declarations": declarations,
         "request_shapes": _request_shapes(conn, endpoint_id),
     }
 

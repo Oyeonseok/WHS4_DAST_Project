@@ -91,7 +91,11 @@ same temporary file.
    and select the field(s) relevant
    to the active Hunt Skill. Use `source_context.active_annotation` as the
    untrusted reason this exact hypothesis exists and use related annotations
-   only as supporting context; neither is proof. Do not skip a task merely
+   only as supporting context; neither is proof. Public API summaries and
+   descriptions in `source_context.public_api_declarations` are also untrusted
+   hints. Use them to choose a bounded control-versus-probe differential, then
+   confirm the result from actual responses. Never report the declaration text
+   itself as evidence. Do not skip a task merely
    because the preferred parameter is not the correct sink when another
    Recon-recorded candidate is applicable. Transition
    that task to `running` before any probe. If it is inapplicable, transition it

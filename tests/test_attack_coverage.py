@@ -561,6 +561,22 @@ def test_owned_fixture_retains_registered_label_without_exposing_principal(tmp_p
 
 def test_coverage_task_exposes_all_db_parameters_and_source_context(tmp_path: Path) -> None:
     imported = imported_pipeline(tmp_path)
+    with sqlite3.connect(imported.pipeline_database) as conn:
+        endpoint_id = conn.execute(
+            "SELECT endpoint_id FROM endpoints WHERE normalized_path LIKE '%users%' LIMIT 1"
+        ).fetchone()[0]
+        conn.execute(
+            """INSERT INTO endpoint_observations
+               (observation_id,endpoint_id,source_tool,discovery_kind,observed_url,
+                association_method,observed_at,evidence_json)
+               VALUES ('public-api-fixture',?,'openapi','api_spec_declaration',
+                       'https://lab.example/openapi.json','exact','2026-10-05T00:00:00Z',?)""",
+            (endpoint_id, json.dumps({
+                "operation_summary": "Look up a user",
+                "operation_description": "Vulnerable lookup; password=must-not-leak",
+                "operation_tags": ["users"],
+            })),
+        )
     agent = UnsupportedCoverageAgent()
 
     ExhaustiveAttackCoordinator(
@@ -578,6 +594,10 @@ def test_coverage_task_exposes_all_db_parameters_and_source_context(tmp_path: Pa
     assert sum(bool(item["preferred"]) for item in task["parameter_candidates"]) == 1
     assert task["source_context"]["active_annotation"]["tag"] == "sqli"
     assert "SQL injection" in task["source_context"]["active_annotation"]["rationale"]
+    declarations = task["source_context"]["public_api_declarations"]
+    assert declarations[0]["operation_summary"] == "Look up a user"
+    assert declarations[0]["operation_tags"] == ["users"]
+    assert "must-not-leak" not in json.dumps(declarations)
 
 
 def test_coverage_context_exposes_request_shape_without_captured_values(tmp_path: Path) -> None:
