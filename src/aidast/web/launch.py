@@ -926,6 +926,16 @@ class ScanLaunchManager:
                 "SELECT stage_run_id,stage FROM stage_runs WHERE scan_id=? AND status='running' ORDER BY rowid",
                 (scan_id,),
             ).fetchall():
+                if stage == "attack" and "attack_coverage_items" in tables:
+                    # A cancelled task cannot keep its coverage row in the
+                    # running state forever.  Preserve all request evidence and
+                    # reopen only the unfinished items for a later explicit
+                    # resume.
+                    from aidast.attack.coverage import fail_running_coverage
+                    fail_running_coverage(
+                        conn, stage_run_id=stage_run_id,
+                        reason="Attack batch was interrupted by the operator",
+                    )
                 if stage in {"attack", "chaining"} and "attack_http_requests" in tables:
                     conn.execute(
                         """UPDATE attack_http_requests SET status='outcome_unknown',

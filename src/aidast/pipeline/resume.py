@@ -105,7 +105,14 @@ def inspect_resume(result_root: Path, scan_id: str) -> ResumePlan:
         scan = conn.execute(
             "SELECT status,scope_value FROM scans WHERE scan_id=?", (scan_id,)
         ).fetchone()
-        if scan is None or scan[0] not in {"completed", "completed_with_errors"} or scan[1] != scope_id:
+        # An explicit dashboard cancellation after Recon is a resumable
+        # checkpoint.  The cancellation closes the active post-Recon stage and
+        # marks the shared scan row cancelled, but it does not invalidate the
+        # already verified Recon handoff.  Keep requiring that completed Recon
+        # stage below so an interrupted Recon run can never enter Attack.
+        if scan is None or scan[0] not in {
+            "completed", "completed_with_errors", "cancelled",
+        } or scan[1] != scope_id:
             raise ValueError("retry requires a completed approved Recon scan")
         latest: dict[str, tuple[str, str]] = {}
         for stage_run_id, stage, status in conn.execute(
@@ -130,7 +137,9 @@ def inspect_resume(result_root: Path, scan_id: str) -> ResumePlan:
             return ResumePlan(scan_id, scope_id, stage, None, database, scope_path, policy_path,
                               targets, models, program_url)
         stage_run_id, status = previous
-        if status == "failed" or (stage == "attack" and status == "completed" and unfinished_attack):
+        if status in {"failed", "cancelled"} or (
+            stage == "attack" and status == "completed" and unfinished_attack
+        ):
             return ResumePlan(scan_id, scope_id, stage, stage_run_id, database, scope_path, policy_path,
                               targets, models, program_url)
         if status not in ({"completed"} if stage == "attack" else {"completed", "skipped"}):

@@ -894,6 +894,51 @@ def test_opaque_credentials_reopen_only_compatible_auth_blockers(
         ).fetchall() == [("pending", 4)]
 
 
+def test_safe_local_mutation_skipped_without_binding_reopens_for_synthetic_session(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    imported = imported_pipeline(tmp_path)
+    ensure_coverage_manifest(imported.pipeline_database, imported.scan_id)
+    with sqlite3.connect(imported.pipeline_database) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT * FROM attack_coverage_items ORDER BY coverage_id LIMIT 1"
+        ).fetchone()
+        conn.execute(
+            "UPDATE endpoints SET normalized_path='/upload_profile_picture_url' WHERE endpoint_id=?",
+            (row["endpoint_id"],),
+        )
+        stage = start_stage_run(conn, scan_id=imported.scan_id, stage="attack")
+        task = create_task(
+            conn, stage_run_id=stage, skill_name=row["skill_name"],
+            endpoint_id=row["endpoint_id"], payload={"credential_references": []},
+        )
+        transition_coverage(
+            conn, row["coverage_id"], "running", "fixture",
+            stage_run_id=stage, task_id=task,
+        )
+        transition_coverage(
+            conn, row["coverage_id"], "policy_excluded",
+            "no synthetic account binding", stage_run_id=stage, task_id=task,
+        )
+        register_credential_reference(
+            conn, scan_id=imported.scan_id, label="synthetic",
+            reference_uri="env://AIDAST_TEST_SYNTHETIC",
+            identity_role="identity_synthetic",
+        )
+    monkeypatch.setenv(
+        "AIDAST_TEST_SYNTHETIC", '{"Authorization":"Bearer synthetic"}',
+    )
+
+    ensure_coverage_manifest(imported.pipeline_database, imported.scan_id)
+
+    with sqlite3.connect(imported.pipeline_database) as conn:
+        assert conn.execute(
+            "SELECT status FROM attack_coverage_items WHERE coverage_id=?",
+            (row["coverage_id"],),
+        ).fetchone() == ("pending",)
+
+
 def test_unreplayable_candidate_is_requeued_and_not_readopted(tmp_path: Path) -> None:
     imported = imported_pipeline(tmp_path)
     ensure_coverage_manifest(imported.pipeline_database, imported.scan_id)

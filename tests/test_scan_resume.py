@@ -109,6 +109,26 @@ def test_resume_inspection_finds_program_grouped_scan(tmp_path: Path) -> None:
     assert plan.scope_path == tmp_path / "Runs" / "example-platform" / "example-program" / SCAN_ID / "Scope.md"
 
 
+def test_resume_inspection_accepts_explicitly_cancelled_post_recon_stage(tmp_path: Path) -> None:
+    pipeline = _fixture(tmp_path)
+    with sqlite3.connect(pipeline) as conn:
+        conn.execute(
+            "UPDATE scans SET status='cancelled',finished_at=CURRENT_TIMESTAMP WHERE scan_id=?",
+            (SCAN_ID,),
+        )
+        conn.execute(
+            """UPDATE stage_runs SET status='cancelled',finished_at=CURRENT_TIMESTAMP
+               WHERE stage_run_id=(SELECT stage_run_id FROM stage_runs
+                   WHERE scan_id=? AND stage='attack' ORDER BY rowid DESC LIMIT 1)""",
+            (SCAN_ID,),
+        )
+
+    plan = inspect_resume(tmp_path, SCAN_ID)
+
+    assert plan.stage == "attack"
+    assert plan.database == pipeline
+
+
 def test_execute_resume_dispatches_stage_sequence_without_recon(tmp_path: Path) -> None:
     _fixture(tmp_path)
     plan = inspect_resume(tmp_path, SCAN_ID)

@@ -603,6 +603,7 @@ def ensure_coverage_manifest(database: Path, scan_id: str) -> CoverageManifestRe
         _adopt_existing_findings(conn, scan_id)
         reclassify_misclassified_auth_blockers(conn, scan_id)
         requeue_credential_blocked_coverage(conn, scan_id)
+        requeue_safe_session_binding_coverage(conn, scan_id)
         refresh_confirmed_coverage(conn, scan_id)
         total = conn.execute(
             "SELECT count(*) FROM attack_coverage_items WHERE scan_id=?", (scan_id,),
@@ -836,6 +837,71 @@ def requeue_credential_blocked_coverage(
             f"{len(references)} compatible opaque credential references are now available",
             stage_run_id=row["last_stage_run_id"], task_id=row["last_task_id"],
             finding_id=row["finding_id"],
+        )
+        reopened += 1
+    return reopened
+
+
+def requeue_safe_session_binding_coverage(
+    conn: sqlite3.Connection, scan_id: str,
+) -> int:
+    """Reopen safe local mutations skipped before optional sessions were routed.
+
+    Older task payloads could have an empty credential list when Recon marked a
+    declared endpoint unauthenticated.  Only reopen the small reversible set
+    that can use a scanner-created disposable identity.  The old empty payload
+    check prevents a model that still declines a fully bound task from causing
+    an endless retry loop.
+    """
+    rows = conn.execute(
+        """SELECT c.*,e.normalized_path,o.base_url AS origin_url,t.payload_json
+           FROM attack_coverage_items c
+           JOIN endpoints e ON e.endpoint_id=c.endpoint_id
+           JOIN origins o ON o.origin_id=e.origin_id
+           JOIN attack_tasks t ON t.task_id=c.last_task_id
+           WHERE c.scan_id=? AND c.status IN ('policy_excluded','unsupported')""",
+        (scan_id,),
+    ).fetchall()
+    safe_paths = {
+        "/upload_profile_picture", "/upload_profile_picture_url",
+        "/api/ai/chat",
+    }
+    markers = (
+        "no synthetic account binding", "lacks a bound synthetic account",
+        "no credential reference",
+    )
+    reopened = 0
+    for row in rows:
+        if str(row["normalized_path"]).rstrip("/") not in safe_paths:
+            continue
+        reason = str(row["disposition_reason"] or "").casefold()
+        if not any(marker in reason for marker in markers):
+            continue
+        try:
+            old_payload = json.loads(row["payload_json"] or "{}")
+        except json.JSONDecodeError:
+            continue
+        if old_payload.get("credential_references"):
+            continue
+        references = _credential_references(
+            conn, scan_id, "authenticated", available_only=True,
+            origin_url=str(row["origin_url"]),
+        )
+        if not any(ref["identity_role"] == "identity_synthetic" for ref in references):
+            continue
+        _event(
+            conn, row, "pending",
+            "scanner-created same-origin session is now routed to this safe task",
+        )
+        conn.execute(
+            """UPDATE attack_coverage_items
+               SET status='pending',disposition_reason=?,attempt_count=0,
+                   last_stage_run_id=NULL,last_task_id=NULL,updated_at=?
+               WHERE coverage_id=?""",
+            (
+                "scanner-created same-origin session is now routed to this safe task",
+                now(), row["coverage_id"],
+            ),
         )
         reopened += 1
     return reopened
