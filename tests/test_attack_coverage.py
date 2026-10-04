@@ -13,6 +13,7 @@ from aidast.attack.coverage import (
     ensure_coverage_manifest,
     fail_running_coverage,
     requeue_auth_gated_negative_coverage,
+    requeue_redacted_login_differential_coverage,
     requeue_interrupted_coverage,
     requeue_coverage,
     resolve_abandoned_attack_leads,
@@ -1261,6 +1262,84 @@ def test_legacy_anonymous_auth_gate_reopens_once_session_is_available(
     with sqlite3.connect(imported.pipeline_database) as conn:
         conn.row_factory = sqlite3.Row
         assert requeue_auth_gated_negative_coverage(
+            conn, imported.scan_id,
+        ) == 0
+
+
+def test_redacted_login_differential_reopens_once_for_secret_shape_assertion(
+    tmp_path: Path,
+) -> None:
+    imported = imported_pipeline(tmp_path)
+    ensure_coverage_manifest(imported.pipeline_database, imported.scan_id)
+    with sqlite3.connect(imported.pipeline_database) as conn, conn:
+        conn.row_factory = sqlite3.Row
+        coverage = conn.execute(
+            "SELECT * FROM attack_coverage_items WHERE vuln_class='sqli' LIMIT 1"
+        ).fetchone()
+        conn.execute(
+            "UPDATE endpoints SET normalized_path='/login',method='POST' WHERE endpoint_id=?",
+            (coverage["endpoint_id"],),
+        )
+        stage = start_stage_run(conn, scan_id=imported.scan_id, stage="attack")
+        task = create_task(
+            conn, stage_run_id=stage, skill_name=coverage["skill_name"],
+            endpoint_id=coverage["endpoint_id"], payload={},
+        )
+        transition_coverage(
+            conn, coverage["coverage_id"], "running", "fixture",
+            stage_run_id=stage, task_id=task,
+        )
+        transition_coverage(
+            conn, coverage["coverage_id"], "unsupported",
+            "broker redacted the credential marker", stage_run_id=stage, task_id=task,
+        )
+        for suffix, status, outcome in (("true", 200, "inconclusive"), ("false", 401, "negative")):
+            fingerprint = ("a" if suffix == "true" else "b") * 64
+            conn.execute(
+                """INSERT INTO attack_attempts
+                   (attempt_id,scan_id,task_id,skill_name,endpoint_id,
+                    request_fingerprint,response_status,outcome)
+                   VALUES (?,?,?,?,?,?,?,?)""",
+                (
+                    f"attempt-{suffix}", imported.scan_id, task,
+                    coverage["skill_name"], coverage["endpoint_id"],
+                    fingerprint, status, outcome,
+                ),
+            )
+            conn.execute(
+                """INSERT INTO attack_http_requests
+                   (request_id,scan_id,stage_run_id,task_id,policy_id,method,url,
+                    request_fingerprint,status,response_status,scheduled_at,
+                    endpoint_reference_id,result_json)
+                   VALUES (?,?,?,?,?,'POST','https://lab.example/login',?,
+                           'completed',?,0,?,'{"assertions":[]}')""",
+                (
+                    f"request-{suffix}", imported.scan_id, stage, task, "policy",
+                    fingerprint, status, coverage["endpoint_id"],
+                ),
+            )
+        assert requeue_redacted_login_differential_coverage(
+            conn, imported.scan_id,
+        ) == 1
+        assert tuple(conn.execute(
+            "SELECT status FROM attack_coverage_items WHERE coverage_id=?",
+            (coverage["coverage_id"],),
+        ).fetchone()) == ("pending",)
+
+        conn.execute(
+            """UPDATE attack_coverage_items SET status='unsupported',
+               disposition_reason='broker redacted the credential marker',
+               last_stage_run_id=?,last_task_id=? WHERE coverage_id=?""",
+            (stage, task, coverage["coverage_id"]),
+        )
+        conn.execute(
+            """UPDATE attack_http_requests SET result_json=?
+               WHERE request_id='request-true'""",
+            (json.dumps({"assertions": [{
+                "kind": "json_path_nonempty_string", "passed": True,
+            }]}),),
+        )
+        assert requeue_redacted_login_differential_coverage(
             conn, imported.scan_id,
         ) == 0
 

@@ -84,7 +84,10 @@ context before replay; do not treat this missing metadata as a verdict.
 For HTTP findings, each attempt declares path/query
 values, non-secret headers, one JSON or text body, and one to sixteen assertions.
 Supported assertion kinds are `status_equals`, `header_equals`, `body_contains`,
-`json_equals`, `duration_at_least_ms`, and `duration_at_most_ms`.
+`json_equals`, `json_path_nonempty_string`, `duration_at_least_ms`, and
+`duration_at_most_ms`. `json_path_nonempty_string` uses `expected: true` and
+records only boolean/digest metadata, so it can prove that a token or other
+secret-shaped field was issued without retaining its value.
 Preserve the content encoding that produced the Attack evidence. In particular,
 an `application/x-www-form-urlencoded` source request must use an encoded
 `text_body` and the matching `Content-Type`; do not convert it to `json_body`.

@@ -838,6 +838,37 @@ class AttackRequestGuardTests(unittest.TestCase):
                 )
             self.assertEqual(len(opener.calls), 2)
 
+    def test_nonempty_json_assertion_proves_secret_shape_without_persisting_value(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            database, policy, payload, stage, task = fixture(root)
+            secret = "private-issued-token"
+            opener = FakeOpener([json.dumps({"token": secret}).encode()])
+            payload.write_text(json.dumps({
+                "method": "GET", "url": "https://example.test/api/profile",
+                "assertions": [{
+                    "name": "credential-issued",
+                    "kind": "json_path_nonempty_string",
+                    "path": ["token"], "expected": True, "terminal": True,
+                }],
+            }), encoding="utf-8")
+            with patch("aidast.attack.request_cli.build_opener", return_value=opener):
+                result = guarded_request(
+                    database, scan_id="scan", stage_run_id=stage, task_id=task,
+                    policy_path=policy, payload_path=payload,
+                )
+            self.assertTrue(result["assertions"][0]["passed"])
+            self.assertNotIn(secret, json.dumps(result["assertions"]))
+            with closing(sqlite3.connect(database)) as conn:
+                stored = conn.execute(
+                    "SELECT result_json FROM attack_http_requests WHERE request_id=?",
+                    (result["request_id"],),
+                ).fetchone()[0]
+            self.assertNotIn(secret, stored)
+            self.assertEqual(
+                json.loads(stored)["assertions"][0]["actual_sha256"],
+                json.loads(stored)["assertions"][0]["expected_sha256"],
+            )
     def test_allowed_request_is_sent_once_and_durably_charged(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

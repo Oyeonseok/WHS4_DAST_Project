@@ -768,6 +768,9 @@ def _response_metadata(
             actual = status_code
         elif kind == "json_equals":
             actual = _json_path(json_body(), raw.get("path", []))
+        elif kind == "json_path_nonempty_string":
+            value = _json_path(json_body(), raw.get("path", []))
+            actual = isinstance(value, str) and bool(value.strip())
         elif kind == "header_equals":
             header = raw.get("header")
             if not isinstance(header, str):

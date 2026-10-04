@@ -742,6 +742,7 @@ def ensure_coverage_manifest(database: Path, scan_id: str) -> CoverageManifestRe
         requeue_new_disposable_identity_coverage(conn, scan_id)
         requeue_safe_session_binding_coverage(conn, scan_id)
         requeue_auth_gated_negative_coverage(conn, scan_id)
+        requeue_redacted_login_differential_coverage(conn, scan_id)
         refresh_confirmed_coverage(conn, scan_id)
         total = conn.execute(
             "SELECT count(*) FROM attack_coverage_items WHERE scan_id=?", (scan_id,),
@@ -1247,6 +1248,84 @@ def requeue_auth_gated_negative_coverage(
                    last_stage_run_id=NULL,last_task_id=NULL,updated_at=?
                WHERE coverage_id=?""",
             (reason, now(), row["coverage_id"]),
+        )
+        reopened += 1
+    return reopened
+
+
+def requeue_redacted_login_differential_coverage(
+    conn: sqlite3.Connection, scan_id: str,
+) -> int:
+    """Retry legacy login SQLi evidence with the secret-shape assertion.
+
+    Older request helpers exposed no safe predicate for a nonempty returned
+    credential.  A model could observe a repeatable 2xx/401 boolean pair but
+    close it as inconclusive because Validation could not assert the redacted
+    token.  Reopen only that exact shape and only when the old task did not
+    already use ``json_path_nonempty_string``.
+    """
+    rows = conn.execute(
+        """SELECT c.*,e.normalized_path,t.payload_json
+           FROM attack_coverage_items c
+           JOIN endpoints e ON e.endpoint_id=c.endpoint_id
+           JOIN attack_tasks t ON t.task_id=c.last_task_id
+           WHERE c.scan_id=? AND c.status='unsupported'
+             AND c.vuln_class='sqli'
+             AND lower(e.normalized_path) LIKE '%login%'""",
+        (scan_id,),
+    ).fetchall()
+    reopened = 0
+    for row in rows:
+        reason = " ".join(str(row["disposition_reason"] or "").casefold().split())
+        if not (
+            "broker redacted" in reason
+            or "credential marker" in reason
+            or "non-status login success assertion" in reason
+        ):
+            continue
+        request_rows = conn.execute(
+            """SELECT result_json FROM attack_http_requests
+               WHERE scan_id=? AND task_id=? AND status='completed'""",
+            (scan_id, row["last_task_id"]),
+        ).fetchall()
+        used_shape_assertion = False
+        for request in request_rows:
+            try:
+                result = json.loads(request[0] or "{}")
+            except json.JSONDecodeError:
+                continue
+            assertions = result.get("assertions", [])
+            if any(
+                isinstance(item, dict)
+                and item.get("kind") == "json_path_nonempty_string"
+                for item in assertions
+            ):
+                used_shape_assertion = True
+                break
+        if used_shape_assertion:
+            continue
+        statuses = {
+            int(attempt[0]) for attempt in conn.execute(
+                """SELECT response_status FROM attack_attempts
+                   WHERE scan_id=? AND task_id=? AND response_status IS NOT NULL""",
+                (scan_id, row["last_task_id"]),
+            )
+        }
+        if not any(200 <= status < 300 for status in statuses) or not statuses & {401, 403}:
+            continue
+        _event(
+            conn, row, "pending",
+            "secret-shape assertions can now validate the redacted login differential",
+        )
+        conn.execute(
+            """UPDATE attack_coverage_items
+               SET status='pending',disposition_reason=?,attempt_count=0,
+                   last_stage_run_id=NULL,last_task_id=NULL,updated_at=?
+               WHERE coverage_id=?""",
+            (
+                "secret-shape assertions can now validate the redacted login differential",
+                now(), row["coverage_id"],
+            ),
         )
         reopened += 1
     return reopened
