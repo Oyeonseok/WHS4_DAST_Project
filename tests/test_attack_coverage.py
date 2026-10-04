@@ -649,6 +649,34 @@ def test_each_batch_gives_distinct_vulnerability_classes_a_turn(tmp_path: Path) 
     }
 
 
+def test_later_batches_prioritize_classes_without_a_prior_disposition(tmp_path: Path) -> None:
+    imported = imported_pipeline(tmp_path)
+    ensure_coverage_manifest(imported.pipeline_database, imported.scan_id)
+    with sqlite3.connect(imported.pipeline_database) as conn:
+        rows = conn.execute(
+            "SELECT coverage_id FROM attack_coverage_items ORDER BY rowid"
+        ).fetchall()
+        assert len(rows) >= 4
+        assignments = ("auth_bypass", "auth_bypass", "cors", "sqli")
+        for (coverage_id,), vuln_class in zip(rows[:4], assignments, strict=True):
+            conn.execute(
+                "UPDATE attack_coverage_items SET vuln_class=?,skill_name=? "
+                "WHERE coverage_id=?",
+                (vuln_class, f"hunt-{vuln_class.replace('_', '-')}", coverage_id),
+            )
+    agent = UnsupportedCoverageAgent()
+    ExhaustiveAttackCoordinator(
+        agent=agent, db_path=imported.pipeline_database,
+        scope_path=imported.recon_database.parent / "Scope.md",
+        policy_path=imported.recon_database.parent / "TargetPolicy.json",
+        batch_size=1,
+    ).run(imported.scan_id)
+
+    assert agent.calls[0]["attack_tasks"][0]["vuln_class"] == "auth_bypass"
+    assert agent.calls[1]["attack_tasks"][0]["vuln_class"] == "cors"
+    assert agent.calls[2]["attack_tasks"][0]["vuln_class"] == "sqli"
+
+
 def test_exhaustive_interrupt_persists_retryable_recovery_state(tmp_path: Path) -> None:
     imported = imported_pipeline(tmp_path)
 

@@ -1058,7 +1058,12 @@ def claim_coverage_batch(
                       ROW_NUMBER() OVER (
                           PARTITION BY c.status,c.vuln_class
                           ORDER BY e.normalized_path,c.coverage_id
-                      ) AS class_rank
+                      ) AS class_rank,
+                      (SELECT COUNT(*) FROM attack_coverage_items prior
+                       WHERE prior.scan_id=c.scan_id
+                         AND prior.vuln_class=c.vuln_class
+                         AND prior.status NOT IN
+                           ('pending','error_retryable','running')) AS class_completed
                FROM attack_coverage_items c
                JOIN endpoints e ON e.endpoint_id=c.endpoint_id
                JOIN origins o ON o.origin_id=e.origin_id
@@ -1067,7 +1072,7 @@ def claim_coverage_batch(
            )
            SELECT * FROM ranked
            ORDER BY CASE status WHEN 'error_retryable' THEN 0 ELSE 1 END,
-                    class_rank,
+                    class_completed + class_rank,
                     CASE vuln_class
                         WHEN 'brute_force' THEN 90
                         WHEN 'race_condition' THEN 91
