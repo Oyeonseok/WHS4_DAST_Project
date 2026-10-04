@@ -11,6 +11,8 @@ from aidast.attack.coverage import (
     _select_parameter,
     coverage_status,
     ensure_coverage_manifest,
+    fail_running_coverage,
+    requeue_interrupted_coverage,
     requeue_coverage,
     resolve_abandoned_attack_leads,
     transition_coverage,
@@ -183,6 +185,40 @@ def test_manifest_has_one_item_per_source_annotation_and_is_idempotent(tmp_path:
             "SELECT count(DISTINCT endpoint_id || ':' || annotation_id) "
             "FROM attack_coverage_items"
         ).fetchone() == (4,)
+
+
+def test_operator_interruption_releases_coverage_without_retry_isolation(tmp_path: Path) -> None:
+    imported = imported_pipeline(tmp_path)
+    ensure_coverage_manifest(imported.pipeline_database, imported.scan_id)
+    with sqlite3.connect(imported.pipeline_database) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT * FROM attack_coverage_items ORDER BY coverage_id LIMIT 1"
+        ).fetchone()
+        stage = start_stage_run(conn, scan_id=imported.scan_id, stage="attack")
+        task = create_task(
+            conn, stage_run_id=stage, skill_name=row["skill_name"],
+            endpoint_id=row["endpoint_id"], payload={"coverage_id": row["coverage_id"]},
+        )
+        conn.execute(
+            "UPDATE attack_coverage_items SET attempt_count=1 WHERE coverage_id=?",
+            (row["coverage_id"],),
+        )
+        transition_coverage(
+            conn, row["coverage_id"], "running", "claimed",
+            stage_run_id=stage, task_id=task,
+        )
+        fail_running_coverage(
+            conn, stage_run_id=stage, reason="operator interrupted",
+        )
+        assert requeue_interrupted_coverage(
+            conn, stage_run_id=stage, reason="returned after interruption",
+        ) == 1
+        assert tuple(conn.execute(
+            """SELECT status,attempt_count,last_stage_run_id,last_task_id
+               FROM attack_coverage_items WHERE coverage_id=?""",
+            (row["coverage_id"],),
+        ).fetchone()) == ("pending", 0, None, None)
 
 
 def test_coverage_task_cannot_complete_without_a_durable_attempt(tmp_path: Path) -> None:

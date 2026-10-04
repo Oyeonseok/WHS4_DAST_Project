@@ -1396,6 +1396,34 @@ def fail_running_coverage(
         )
 
 
+def requeue_interrupted_coverage(
+    conn: sqlite3.Connection, *, stage_run_id: str, reason: str,
+) -> int:
+    """Return operator-interrupted coverage to the normal pending queue.
+
+    Cancellation is not an Attack failure and should not force each untouched
+    item through the one-at-a-time retry isolation path on the next run.
+    Request and attempt ledgers remain unchanged; only the scheduler lease and
+    the claim attempt consumed by the interrupted batch are released.
+    """
+    rows = conn.execute(
+        """SELECT * FROM attack_coverage_items
+           WHERE last_stage_run_id=? AND status='error_retryable'""",
+        (stage_run_id,),
+    ).fetchall()
+    for row in rows:
+        _event(conn, row, "pending", reason)
+        conn.execute(
+            """UPDATE attack_coverage_items
+               SET status='pending',disposition_reason=?,
+                   attempt_count=MAX(0,attempt_count-1),
+                   last_stage_run_id=NULL,last_task_id=NULL,updated_at=?
+               WHERE coverage_id=?""",
+            (reason, now(), row["coverage_id"]),
+        )
+    return len(rows)
+
+
 def refresh_confirmed_coverage(conn: sqlite3.Connection, scan_id: str) -> int:
     regressed = conn.execute(
         """SELECT c.*,v.current_status FROM attack_coverage_items c

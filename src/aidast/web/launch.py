@@ -931,10 +931,16 @@ class ScanLaunchManager:
                     # running state forever.  Preserve all request evidence and
                     # reopen only the unfinished items for a later explicit
                     # resume.
-                    from aidast.attack.coverage import fail_running_coverage
+                    from aidast.attack.coverage import (
+                        fail_running_coverage, requeue_interrupted_coverage,
+                    )
                     fail_running_coverage(
                         conn, stage_run_id=stage_run_id,
                         reason="Attack batch was interrupted by the operator",
+                    )
+                    requeue_interrupted_coverage(
+                        conn, stage_run_id=stage_run_id,
+                        reason="Operator-interrupted Attack work was returned to the pending queue",
                     )
                 if stage in {"attack", "chaining"} and "attack_http_requests" in tables:
                     conn.execute(
