@@ -66,12 +66,14 @@ def test_bootstrap_persists_three_opaque_sessions_without_secrets(tmp_path: Path
     database, scope, policy, result_root = _fixture(tmp_path)
     counter = {"user": 0}
     secrets_seen: list[str] = []
+    passwords_seen: list[str] = []
 
     def transport(url: str, method: str, payload: dict[str, object] | None) -> dict[str, object]:
         if url.endswith("/api/SecurityQuestions"):
             return {"data": [{"id": 1}]}
         if url.endswith("/api/Users"):
             counter["user"] += 1
+            passwords_seen.append(str(payload["password"]))
             return {"data": {"id": counter["user"]}}
         token = f"header.account-{counter['user']}.signature"
         secrets_seen.append(token)
@@ -90,6 +92,7 @@ def test_bootstrap_persists_three_opaque_sessions_without_secrets(tmp_path: Path
     }
     raw_database = database.read_bytes()
     assert all(secret.encode() not in raw_database for secret in secrets_seen)
+    assert all(secret.encode() not in raw_database for secret in passwords_seen)
     with sqlite3.connect(database) as conn:
         rows = conn.execute(
             "SELECT credential_reference_id,identity_role FROM credential_references ORDER BY identity_role"
@@ -98,6 +101,11 @@ def test_bootstrap_persists_three_opaque_sessions_without_secrets(tmp_path: Path
         assert conn.execute(
             "SELECT count(*) FROM attack_facts WHERE fact_type='owned_test_object'"
         ).fetchone() == (6,)
+        values = [json.loads(row[0]) for row in conn.execute(
+            "SELECT fact_value FROM attack_facts WHERE fact_type='owned_test_object'"
+        )]
+        assert all(value["email"].endswith("@example.invalid") for value in values)
+        assert all(value["login_identifier"] == value["email"] for value in values)
     resolver = PipelineCredentialResolver(
         database, result_root=result_root, browser_sessions=True,
     )
@@ -118,3 +126,52 @@ def test_bootstrap_persists_three_opaque_sessions_without_secrets(tmp_path: Path
         transport=no_more_requests,
     )
     assert repeated["reused"] is True
+
+
+def test_reused_fixture_backfills_public_synthetic_email_aliases(tmp_path: Path) -> None:
+    database, scope, policy, result_root = _fixture(tmp_path)
+    counter = {"user": 0}
+
+    def transport(url: str, method: str, payload: dict[str, object] | None) -> dict[str, object]:
+        if url.endswith("/api/SecurityQuestions"):
+            return {"data": [{"id": 1}]}
+        if url.endswith("/api/Users"):
+            counter["user"] += 1
+            return {"data": {"id": counter["user"]}}
+        return {"authentication": {
+            "token": f"header.account-{counter['user']}.signature",
+            "bid": counter["user"] + 10,
+        }}
+
+    bootstrap_juice_shop(
+        database, scan_id="scan_juice", target_url="http://127.0.0.1:5001/",
+        scope_path=scope, policy_path=policy, result_root=result_root,
+        transport=transport,
+    )
+    with sqlite3.connect(database) as conn:
+        rows = conn.execute(
+            "SELECT fact_id,fact_value FROM attack_facts WHERE fact_type='owned_test_object'"
+        ).fetchall()
+        for fact_id, raw in rows:
+            value = json.loads(raw)
+            value.pop("email")
+            value.pop("login_identifier")
+            conn.execute(
+                "UPDATE attack_facts SET fact_value=? WHERE fact_id=?",
+                (json.dumps(value), fact_id),
+            )
+
+    def no_more_requests(*_args, **_kwargs):
+        raise AssertionError("existing private sessions must be reused")
+
+    assert bootstrap_juice_shop(
+        database, scan_id="scan_juice", target_url="http://127.0.0.1:5001/",
+        scope_path=scope, policy_path=policy, result_root=result_root,
+        transport=no_more_requests,
+    )["reused"] is True
+    with sqlite3.connect(database) as conn:
+        values = [json.loads(row[0]) for row in conn.execute(
+            "SELECT fact_value FROM attack_facts WHERE fact_type='owned_test_object'"
+        )]
+    assert all(value["email"] == value["principal"] for value in values)
+    assert all(value["login_identifier"] == value["email"] for value in values)

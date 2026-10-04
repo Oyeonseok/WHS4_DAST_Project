@@ -120,6 +120,38 @@ def _available_roles(
     return roles
 
 
+def _backfill_public_identity_fields(database: Path, *, scan_id: str) -> int:
+    """Expose only synthetic login identifiers needed to build safe request bodies."""
+    updated = 0
+    with sqlite3.connect(database) as conn, conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """SELECT fact_id,fact_value FROM attack_facts
+               WHERE scan_id=? AND fact_type='owned_test_object'""",
+            (scan_id,),
+        ).fetchall()
+        for row in rows:
+            try:
+                value = json.loads(row["fact_value"])
+            except (TypeError, json.JSONDecodeError):
+                continue
+            principal = value.get("principal") if isinstance(value, dict) else None
+            if (
+                not isinstance(principal, str)
+                or not principal.endswith("@example.invalid")
+                or value.get("email") == principal
+            ):
+                continue
+            value["email"] = principal
+            value["login_identifier"] = principal
+            conn.execute(
+                "UPDATE attack_facts SET fact_value=? WHERE fact_id=?",
+                (json.dumps(value, ensure_ascii=False, sort_keys=True), row["fact_id"]),
+            )
+            updated += 1
+    return updated
+
+
 def bootstrap_juice_shop(
     database: Path, *, scan_id: str, target_url: str,
     scope_path: Path, policy_path: Path, result_root: Path,
@@ -150,6 +182,7 @@ def bootstrap_juice_shop(
         database, scan_id=scan_id, result_root=result_root, target_url=target_url,
     )
     if required_roles <= present:
+        _backfill_public_identity_fields(database, scan_id=scan_id)
         return {
             "credential_reference_count": len(required_roles),
             "owned_test_object_count": 0,
@@ -246,6 +279,8 @@ def bootstrap_juice_shop(
                         "object_id": identity[object_type],
                         "object_type": object_type,
                         "principal": identity["email"],
+                        "email": identity["email"],
+                        "login_identifier": identity["email"],
                         "resource": "account" if object_type == "user_id" else "basket",
                         "disposable": True,
                         "cleanup_allowed": True,
