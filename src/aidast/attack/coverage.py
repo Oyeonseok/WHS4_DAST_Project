@@ -739,6 +739,7 @@ def ensure_coverage_manifest(database: Path, scan_id: str) -> CoverageManifestRe
         _adopt_existing_findings(conn, scan_id)
         reclassify_misclassified_auth_blockers(conn, scan_id)
         requeue_credential_blocked_coverage(conn, scan_id)
+        requeue_new_disposable_identity_coverage(conn, scan_id)
         requeue_safe_session_binding_coverage(conn, scan_id)
         requeue_auth_gated_negative_coverage(conn, scan_id)
         refresh_confirmed_coverage(conn, scan_id)
@@ -1079,6 +1080,91 @@ def requeue_safe_session_binding_coverage(
                WHERE coverage_id=?""",
             (
                 "scanner-created same-origin session is now routed to this safe task",
+                now(), row["coverage_id"],
+            ),
+        )
+        reopened += 1
+    return reopened
+
+
+def requeue_new_disposable_identity_coverage(
+    conn: sqlite3.Connection, scan_id: str,
+) -> int:
+    """Reopen a skipped task after its exact disposable identity is added.
+
+    A task may correctly decline an identity-specific login before the scanner
+    owns an account of that type.  Once a same-origin opaque credential and a
+    non-secret owned-object fact exist, the old result is no longer a policy
+    conclusion.  The prior payload guard makes the migration one-shot if the
+    fully bound task is still inapplicable.
+    """
+    rows = conn.execute(
+        """SELECT c.*,o.base_url AS origin_url,t.payload_json
+           FROM attack_coverage_items c
+           JOIN endpoints e ON e.endpoint_id=c.endpoint_id
+           JOIN origins o ON o.origin_id=e.origin_id
+           JOIN attack_tasks t ON t.task_id=c.last_task_id
+           WHERE c.scan_id=? AND c.status IN ('policy_excluded','unsupported')""",
+        (scan_id,),
+    ).fetchall()
+    reopened = 0
+    for row in rows:
+        reason = " ".join(str(row["disposition_reason"] or "").casefold().split())
+        if "no scanner-created synthetic merchant" not in reason:
+            continue
+        try:
+            old_payload = json.loads(row["payload_json"] or "{}")
+        except json.JSONDecodeError:
+            continue
+        old_roles = {
+            str(item.get("identity_role"))
+            for item in old_payload.get("credential_references", [])
+            if isinstance(item, dict)
+        }
+        if "merchant_synthetic" in old_roles:
+            continue
+        references = _credential_references(
+            conn, scan_id, "authenticated", available_only=True,
+            origin_url=str(row["origin_url"]),
+        )
+        labels = {
+            item["label"] for item in references
+            if item["identity_role"] == "merchant_synthetic"
+        }
+        if not labels:
+            continue
+        has_owned_merchant = False
+        for fact in conn.execute(
+            """SELECT fact_value FROM attack_facts
+               WHERE scan_id=? AND fact_type='owned_test_object'""",
+            (scan_id,),
+        ):
+            try:
+                value = json.loads(fact[0])
+            except (TypeError, json.JSONDecodeError):
+                continue
+            if (
+                isinstance(value, dict)
+                and value.get("credential_label") in labels
+                and value.get("resource") == "merchant"
+                and value.get("disposable") is True
+                and value.get("cleanup_allowed") is True
+            ):
+                has_owned_merchant = True
+                break
+        if not has_owned_merchant:
+            continue
+        _event(
+            conn, row, "pending",
+            "scanner-created merchant identity now satisfies the skipped prerequisite",
+        )
+        conn.execute(
+            """UPDATE attack_coverage_items
+               SET status='pending',disposition_reason=?,attempt_count=0,
+                   last_stage_run_id=NULL,last_task_id=NULL,updated_at=?
+               WHERE coverage_id=?""",
+            (
+                "scanner-created merchant identity now satisfies the skipped prerequisite",
                 now(), row["coverage_id"],
             ),
         )

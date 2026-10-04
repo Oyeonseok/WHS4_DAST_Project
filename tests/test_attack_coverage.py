@@ -1122,6 +1122,83 @@ def test_safe_local_mutation_skipped_without_binding_reopens_for_synthetic_sessi
         ).fetchone() == ("pending",)
 
 
+def test_merchant_login_reopens_after_disposable_merchant_is_bound(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    imported = imported_pipeline(tmp_path)
+    ensure_coverage_manifest(imported.pipeline_database, imported.scan_id)
+    with sqlite3.connect(imported.pipeline_database) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT * FROM attack_coverage_items ORDER BY coverage_id LIMIT 1"
+        ).fetchone()
+        conn.execute(
+            "UPDATE endpoints SET normalized_path='/api/v1/merchants/login' "
+            "WHERE endpoint_id=?", (row["endpoint_id"],),
+        )
+        stage = start_stage_run(conn, scan_id=imported.scan_id, stage="attack")
+        task = create_task(
+            conn, stage_run_id=stage, skill_name=row["skill_name"],
+            endpoint_id=row["endpoint_id"], payload={"credential_references": []},
+        )
+        transition_coverage(
+            conn, row["coverage_id"], "running", "fixture",
+            stage_run_id=stage, task_id=task,
+        )
+        transition_coverage(
+            conn, row["coverage_id"], "policy_excluded",
+            "[policy] no scanner-created synthetic merchant email is supplied",
+            stage_run_id=stage, task_id=task,
+        )
+        register_credential_reference(
+            conn, scan_id=imported.scan_id, label="merchant-fixture",
+            reference_uri="env://AIDAST_TEST_MERCHANT",
+            identity_role="merchant_synthetic",
+        )
+        conn.execute(
+            """INSERT INTO attack_facts
+               (fact_id,scan_id,fact_type,fact_key,fact_value,confidence)
+               VALUES ('merchant-fact',?,'owned_test_object','merchant.email',?,1.0)""",
+            (imported.scan_id, json.dumps({
+                "credential_label": "merchant-fixture", "resource": "merchant",
+                "disposable": True, "cleanup_allowed": True,
+                "value": "scanner@example.invalid",
+            })),
+        )
+    monkeypatch.setenv(
+        "AIDAST_TEST_MERCHANT", '{"Authorization":"Bearer merchant"}',
+    )
+
+    ensure_coverage_manifest(imported.pipeline_database, imported.scan_id)
+
+    with sqlite3.connect(imported.pipeline_database) as conn:
+        assert conn.execute(
+            "SELECT status FROM attack_coverage_items WHERE coverage_id=?",
+            (row["coverage_id"],),
+        ).fetchone() == ("pending",)
+
+    # A fully bound replay that remains inapplicable must not loop forever.
+    with sqlite3.connect(imported.pipeline_database) as conn:
+        conn.execute(
+            """UPDATE attack_coverage_items SET status='policy_excluded',
+               disposition_reason='no scanner-created synthetic merchant email is supplied',
+               last_stage_run_id=?,last_task_id=? WHERE coverage_id=?""",
+            (stage, task, row["coverage_id"]),
+        )
+        conn.execute(
+            "UPDATE attack_tasks SET payload_json=? WHERE task_id=?",
+            (json.dumps({"credential_references": [{
+                "identity_role": "merchant_synthetic",
+            }]}), task),
+        )
+    ensure_coverage_manifest(imported.pipeline_database, imported.scan_id)
+    with sqlite3.connect(imported.pipeline_database) as conn:
+        assert conn.execute(
+            "SELECT status FROM attack_coverage_items WHERE coverage_id=?",
+            (row["coverage_id"],),
+        ).fetchone() == ("policy_excluded",)
+
+
 @pytest.mark.parametrize("terminal_status", ["tested_negative", "unsupported"])
 def test_legacy_anonymous_auth_gate_reopens_once_session_is_available(
     tmp_path: Path, monkeypatch, terminal_status: str,

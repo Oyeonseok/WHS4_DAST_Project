@@ -6,7 +6,11 @@ from pathlib import Path
 
 import pytest
 
-from aidast.benchmarks.vulnbank import VulnBankBootstrapError, bootstrap_vulnbank
+from aidast.benchmarks.vulnbank import (
+    VulnBankBootstrapError,
+    _scope_authorizes_disposable_fixtures,
+    bootstrap_vulnbank,
+)
 from aidast.pipeline.materialize import materialize_pipeline
 from aidast.pipeline.models import HandoffManifest, hash_artifact
 from aidast.recon import db
@@ -49,6 +53,19 @@ def _pipeline(tmp_path: Path) -> tuple[Path, Path, Path]:
         "api_probe": {},
     }]}), encoding="utf-8")
     return pipeline, scope, policy
+
+
+def test_disposable_fixture_authorization_supports_approved_scope_locales() -> None:
+    assert _scope_authorizes_disposable_fixtures(
+        "Bounded testing of scanner-created synthetic accounts and disposable "
+        "local lab fixtures is authorized."
+    )
+    assert _scope_authorizes_disposable_fixtures(
+        "스캐너가 생성한 합성 계정과 일회성 데이터에 한해 폼 제출을 허용합니다."
+    )
+    assert not _scope_authorizes_disposable_fixtures(
+        "Local testing is allowed, but account creation is not approved."
+    )
 
 
 def test_bootstrap_keeps_tokens_out_of_database(tmp_path: Path, monkeypatch) -> None:

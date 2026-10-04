@@ -152,6 +152,24 @@ def _load_policy(path: Path, target_url: str) -> TargetPolicy:
     return matching[0]
 
 
+def _scope_authorizes_disposable_fixtures(scope: str) -> bool:
+    """Recognize the approved local-fixture grant without locale coupling."""
+    normalized = " ".join(scope.casefold().split())
+    english = (
+        "disposable local lab fixtures is authorized" in normalized
+        or (
+            "scanner-created synthetic account" in normalized
+            and "disposable" in normalized
+        )
+    )
+    korean = (
+        "스캐너가 생성한 합성 계정" in scope
+        and "일회성 데이터" in scope
+        and "허용" in scope
+    )
+    return english or korean
+
+
 def _environment_name(scan_id: str, label: str) -> str:
     suffix = scan_id.removeprefix("scan_")[:12].upper()
     return f"AIDAST_VULNBANK_{suffix}_{label.upper().replace('-', '_')}"
@@ -177,7 +195,7 @@ def bootstrap_vulnbank(
     if parsed.scheme not in {"http", "https"} or not loopback:
         raise VulnBankBootstrapError("VulnBank benchmark bootstrap is loopback-only")
     scope = Path(scope_path).read_text(encoding="utf-8")
-    if "disposable local lab fixtures is authorized" not in scope:
+    if not _scope_authorizes_disposable_fixtures(scope):
         raise VulnBankBootstrapError("Scope does not authorize disposable lab fixtures")
     policy = _load_policy(policy_path, target_url)
     for path in (
