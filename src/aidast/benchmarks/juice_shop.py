@@ -56,6 +56,195 @@ def _default_transport(
     return document
 
 
+def _authenticated_transport(
+    url: str, method: str, payload: dict[str, object] | None,
+    headers: dict[str, str],
+) -> dict[str, object]:
+    """Send one fixture request with an opaque session resolved in memory."""
+    request_headers = {
+        "Content-Type": "application/json",
+        "User-Agent": "aidast-lab-bootstrap/1",
+        **headers,
+    }
+    request = Request(
+        url,
+        data=None if payload is None else json.dumps(payload).encode("utf-8"),
+        headers=request_headers,
+        method=method,
+    )
+    try:
+        with urlopen(request, timeout=15) as response:
+            body = response.read(1_000_001)
+    except HTTPError as exc:
+        exc.read(1_000_001)
+        raise JuiceShopBootstrapError(
+            f"authenticated fixture request failed with HTTP {exc.code}"
+        ) from exc
+    if len(body) > 1_000_000:
+        raise JuiceShopBootstrapError("authenticated fixture response exceeded 1 MB")
+    try:
+        document = json.loads(body)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise JuiceShopBootstrapError(
+            "authenticated fixture returned invalid JSON"
+        ) from exc
+    if not isinstance(document, dict):
+        raise JuiceShopBootstrapError(
+            "authenticated fixture returned a non-object JSON response"
+        )
+    return document
+
+
+def _insert_owned_fact(
+    conn: sqlite3.Connection, *, scan_id: str, role: str,
+    credential_label: str, resource: str, object_type: str,
+    object_id: str, extra: dict[str, object] | None = None,
+) -> None:
+    value: dict[str, object] = {
+        "credential_label": credential_label,
+        "object_id": object_id,
+        "object_type": object_type,
+        "resource": resource,
+        "disposable": True,
+        "cleanup_allowed": True,
+    }
+    if extra:
+        value.update(extra)
+    conn.execute(
+        """INSERT INTO attack_facts
+           (fact_id,scan_id,fact_type,fact_key,fact_value,confidence)
+           VALUES (?,?,'owned_test_object',?,?,1.0)
+           ON CONFLICT(scan_id,fact_type,fact_key)
+           DO UPDATE SET fact_value=excluded.fact_value,confidence=1.0""",
+        (
+            new_id("fact"), scan_id, f"{role}.{object_type}",
+            json.dumps(value, ensure_ascii=False, sort_keys=True),
+        ),
+    )
+
+
+def ensure_juice_shop_owned_objects(
+    database: Path, *, scan_id: str, target_url: str, result_root: Path,
+) -> int:
+    """Create address and basket-item fixtures for existing disposable users.
+
+    Secrets stay inside the private browser-session vault. Only IDs belonging
+    to scanner-created accounts and the shape of successful requests are
+    written to Pipeline.db.
+    """
+    resolver = PipelineCredentialResolver(
+        database, result_root=result_root, browser_sessions=True,
+    )
+    with sqlite3.connect(database) as conn:
+        conn.row_factory = sqlite3.Row
+        references = conn.execute(
+            """SELECT credential_reference_id,label,identity_role
+               FROM credential_references WHERE scan_id=?
+               ORDER BY identity_role,label""",
+            (scan_id,),
+        ).fetchall()
+        raw_facts = conn.execute(
+            """SELECT fact_key,fact_value FROM attack_facts
+               WHERE scan_id=? AND fact_type='owned_test_object'""",
+            (scan_id,),
+        ).fetchall()
+    facts: dict[str, dict[str, object]] = {}
+    for row in raw_facts:
+        try:
+            value = json.loads(row["fact_value"])
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if isinstance(value, dict):
+            facts[str(row["fact_key"])] = value
+
+    created = 0
+    for reference in references:
+        role = str(reference["identity_role"])
+        label = str(reference["label"])
+        basket = facts.get(f"{role}.basket_id")
+        if not isinstance(basket, dict) or basket.get("credential_label") != label:
+            continue
+        try:
+            headers = resolver(
+                str(reference["credential_reference_id"]),
+                destination_url=target_url,
+            )
+        except (ImportError, OSError, sqlite3.Error, ValueError):
+            continue
+
+        if f"{role}.address_id" not in facts:
+            try:
+                response = _authenticated_transport(
+                    urljoin(target_url, "/api/Addresss"), "POST",
+                    {
+                        "country": "AIDAST",
+                        "fullName": "AIDAST disposable fixture",
+                        "mobileNum": 1234567890,
+                        "zipCode": "00000",
+                        "streetAddress": "Scanner-owned local fixture",
+                        "city": "Local",
+                        "state": "Test",
+                    },
+                    headers,
+                )
+                data = response.get("data")
+                object_id = data.get("id") if isinstance(data, dict) else None
+                if isinstance(object_id, (str, int)):
+                    with sqlite3.connect(database) as conn, conn:
+                        _insert_owned_fact(
+                            conn, scan_id=scan_id, role=role,
+                            credential_label=label, resource="address",
+                            object_type="address_id", object_id=str(object_id),
+                            extra={
+                                "endpoint": "/api/Addresss",
+                                "create_method": "POST",
+                                "create_fields": [
+                                    "country", "fullName", "mobileNum", "zipCode",
+                                    "streetAddress", "city", "state",
+                                ],
+                            },
+                        )
+                    created += 1
+            except JuiceShopBootstrapError:
+                pass
+
+        if f"{role}.basket_item_id" not in facts:
+            basket_id = basket.get("object_id")
+            if not isinstance(basket_id, (str, int)):
+                continue
+            try:
+                response = _authenticated_transport(
+                    urljoin(target_url, "/api/BasketItems"), "POST",
+                    {
+                        "ProductId": 1,
+                        "BasketId": int(basket_id),
+                        "quantity": 1,
+                    },
+                    headers,
+                )
+                data = response.get("data")
+                object_id = data.get("id") if isinstance(data, dict) else None
+                if isinstance(object_id, (str, int)):
+                    with sqlite3.connect(database) as conn, conn:
+                        _insert_owned_fact(
+                            conn, scan_id=scan_id, role=role,
+                            credential_label=label, resource="basket_item",
+                            object_type="basket_item_id", object_id=str(object_id),
+                            extra={
+                                "parent_resource": "basket",
+                                "parent_object_id": str(basket_id),
+                                "endpoint": "/api/BasketItems",
+                                "create_method": "POST",
+                                "create_fields": ["ProductId", "BasketId", "quantity"],
+                                "product_id": "1",
+                            },
+                        )
+                    created += 1
+            except (JuiceShopBootstrapError, TypeError, ValueError):
+                pass
+    return created
+
+
 def _loopback_origin(target_url: str) -> str:
     parsed = urlsplit(target_url)
     try:
@@ -183,9 +372,20 @@ def bootstrap_juice_shop(
     )
     if required_roles <= present:
         _backfill_public_identity_fields(database, scan_id=scan_id)
+        if transport is None:
+            ensure_juice_shop_owned_objects(
+                database, scan_id=scan_id, target_url=target_url,
+                result_root=result_root,
+            )
+        with sqlite3.connect(database) as conn:
+            fact_count = conn.execute(
+                """SELECT count(*) FROM attack_facts
+                   WHERE scan_id=? AND fact_type='owned_test_object'""",
+                (scan_id,),
+            ).fetchone()[0]
         return {
             "credential_reference_count": len(required_roles),
-            "owned_test_object_count": 0,
+            "owned_test_object_count": fact_count,
             "roles": sorted(required_roles),
             "reused": True,
         }
@@ -298,6 +498,18 @@ def bootstrap_juice_shop(
                         ),
                     )
                     fact_count += 1
+
+    if transport is None:
+        ensure_juice_shop_owned_objects(
+            database, scan_id=scan_id, target_url=target_url,
+            result_root=result_root,
+        )
+        with sqlite3.connect(database) as conn:
+            fact_count = conn.execute(
+                """SELECT count(*) FROM attack_facts
+                   WHERE scan_id=? AND fact_type='owned_test_object'""",
+                (scan_id,),
+            ).fetchone()[0]
 
     return {
         "credential_reference_count": len(required_roles),

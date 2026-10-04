@@ -7,6 +7,7 @@ from pathlib import Path
 from aidast.benchmarks.juice_shop import (
     _scope_authorizes_disposable_fixtures,
     bootstrap_juice_shop,
+    ensure_juice_shop_owned_objects,
 )
 from aidast.pipeline.schema import migrate_pipeline_schema
 from aidast.recon import db
@@ -175,3 +176,55 @@ def test_reused_fixture_backfills_public_synthetic_email_aliases(tmp_path: Path)
         )]
     assert all(value["email"] == value["principal"] for value in values)
     assert all(value["login_identifier"] == value["email"] for value in values)
+
+
+def test_existing_sessions_create_owned_address_and_basket_item_fixtures(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    database, scope, policy, result_root = _fixture(tmp_path)
+    counter = {"user": 0}
+
+    def transport(url: str, method: str, payload: dict[str, object] | None) -> dict[str, object]:
+        if url.endswith("/api/SecurityQuestions"):
+            return {"data": [{"id": 1}]}
+        if url.endswith("/api/Users"):
+            counter["user"] += 1
+            return {"data": {"id": counter["user"]}}
+        return {"authentication": {
+            "token": f"header.account-{counter['user']}.signature",
+            "bid": counter["user"] + 10,
+        }}
+
+    bootstrap_juice_shop(
+        database, scan_id="scan_juice", target_url="http://127.0.0.1:5001/",
+        scope_path=scope, policy_path=policy, result_root=result_root,
+        transport=transport,
+    )
+    object_counter = {"address": 100, "item": 200}
+
+    def authenticated_transport(url, method, payload, headers):
+        assert method == "POST"
+        assert headers["Authorization"].startswith("Bearer ")
+        kind = "address" if url.endswith("/api/Addresss") else "item"
+        object_counter[kind] += 1
+        return {"data": {"id": object_counter[kind]}}
+
+    monkeypatch.setattr(
+        "aidast.benchmarks.juice_shop._authenticated_transport",
+        authenticated_transport,
+    )
+    assert ensure_juice_shop_owned_objects(
+        database, scan_id="scan_juice", target_url="http://127.0.0.1:5001/",
+        result_root=result_root,
+    ) == 6
+    with sqlite3.connect(database) as conn:
+        values = [json.loads(row[0]) for row in conn.execute(
+            "SELECT fact_value FROM attack_facts WHERE fact_type='owned_test_object'"
+        )]
+    resources = [value["resource"] for value in values]
+    assert resources.count("address") == 3
+    assert resources.count("basket_item") == 3
+    assert ensure_juice_shop_owned_objects(
+        database, scan_id="scan_juice", target_url="http://127.0.0.1:5001/",
+        result_root=result_root,
+    ) == 0

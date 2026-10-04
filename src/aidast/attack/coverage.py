@@ -7,7 +7,7 @@ import json
 import re
 import sqlite3
 from urllib.parse import parse_qsl
-from collections import Counter
+from collections import Counter, defaultdict
 from contextlib import closing
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -740,6 +740,7 @@ def ensure_coverage_manifest(database: Path, scan_id: str) -> CoverageManifestRe
         reclassify_misclassified_auth_blockers(conn, scan_id)
         requeue_credential_blocked_coverage(conn, scan_id)
         requeue_new_disposable_identity_coverage(conn, scan_id)
+        requeue_owned_object_coverage(conn, scan_id)
         requeue_safe_session_binding_coverage(conn, scan_id)
         requeue_auth_gated_negative_coverage(conn, scan_id)
         requeue_redacted_login_differential_coverage(conn, scan_id)
@@ -1326,6 +1327,85 @@ def requeue_redacted_login_differential_coverage(
                 "secret-shape assertions can now validate the redacted login differential",
                 now(), row["coverage_id"],
             ),
+        )
+        reopened += 1
+    return reopened
+
+
+def requeue_owned_object_coverage(conn: sqlite3.Connection, scan_id: str) -> int:
+    """Retry object-bound checks after disposable child fixtures are created.
+
+    The previous task payload guard makes this migration one-shot. If a task
+    still cannot run after receiving the exact owned object, its disposition
+    remains final instead of looping forever.
+    """
+    facts_by_resource: dict[str, set[str]] = defaultdict(set)
+    for raw_value, in conn.execute(
+        """SELECT fact_value FROM attack_facts
+           WHERE scan_id=? AND fact_type='owned_test_object'""",
+        (scan_id,),
+    ):
+        try:
+            value = json.loads(raw_value)
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if not isinstance(value, dict) or value.get("disposable") is not True:
+            continue
+        resource = value.get("resource")
+        label = value.get("credential_label")
+        object_id = value.get("object_id")
+        if (
+            isinstance(resource, str) and resource
+            and isinstance(label, str) and label
+            and isinstance(object_id, (str, int))
+        ):
+            facts_by_resource[str(resource)].add(str(label))
+
+    rows = conn.execute(
+        """SELECT c.*,t.payload_json FROM attack_coverage_items c
+           JOIN attack_tasks t ON t.task_id=c.last_task_id
+           WHERE c.scan_id=? AND c.status IN ('unsupported','policy_excluded')""",
+        (scan_id,),
+    ).fetchall()
+    reopened = 0
+    for row in rows:
+        reason = " ".join(str(row["disposition_reason"] or "").casefold().split())
+        resource = None
+        if "address" in reason and any(marker in reason for marker in (
+            "no owned", "no supplied", "no observed", "no captured", "has no observed",
+        )):
+            resource = "address"
+        elif any(marker in reason for marker in ("basketitems", "basket item")) and any(
+            marker in reason for marker in (
+                "no owned", "no supplied", "no captured", "lacks a task-created",
+            )
+        ):
+            resource = "basket_item"
+        if resource is None:
+            continue
+        required = 2 if str(row["vuln_class"]) == "idor" else 1
+        if len(facts_by_resource.get(resource, set())) < required:
+            continue
+        try:
+            old_payload = json.loads(row["payload_json"] or "{}")
+        except json.JSONDecodeError:
+            continue
+        old_resources = {
+            value.get("resource")
+            for fixture in old_payload.get("test_fixtures", [])
+            if isinstance(fixture, dict)
+            and isinstance((value := fixture.get("fact_value")), dict)
+        }
+        if resource in old_resources:
+            continue
+        reason_text = f"scanner-owned disposable {resource} fixtures are now available"
+        _event(conn, row, "pending", reason_text)
+        conn.execute(
+            """UPDATE attack_coverage_items
+               SET status='pending',disposition_reason=?,attempt_count=0,
+                   last_stage_run_id=NULL,last_task_id=NULL,updated_at=?
+               WHERE coverage_id=?""",
+            (reason_text, now(), row["coverage_id"]),
         )
         reopened += 1
     return reopened
