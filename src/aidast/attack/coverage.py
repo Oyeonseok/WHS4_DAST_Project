@@ -1200,6 +1200,7 @@ def _selected_http_evidence(
             return False
         method = conn.execute('SELECT method FROM endpoints WHERE endpoint_id=?', (coverage['endpoint_id'],)).fetchone()[0]
         expected_identity = str(coverage['required_identity_role'])
+        optional_identity_roles: set[str] = set()
         task = conn.execute(
             "SELECT payload_json FROM attack_tasks WHERE task_id=?", (task_id,),
         ).fetchone()
@@ -1212,13 +1213,23 @@ def _selected_http_evidence(
                 rebound = payload.get("required_identity_role")
                 if rebound in {"authenticated", "unauthenticated"}:
                     expected_identity = rebound
+            optional = payload.get("optional_control_identity_roles")
+            if isinstance(optional, list):
+                optional_identity_roles = {
+                    str(role) for role in optional if isinstance(role, str)
+                }
+        allow_anonymous = expected_identity == "unauthenticated"
+        allow_authenticated = (
+            expected_identity == "authenticated"
+            or "authenticated" in optional_identity_roles
+        )
         query += """ AND r.endpoint_reference_id=? AND r.method=? AND (
-            (?='unauthenticated' AND json_extract(r.result_json,'$.credential_reference_id') IS NULL)
-            OR (?='authenticated' AND json_extract(r.result_json,'$.credential_reference_id') IN (
+            (? AND json_extract(r.result_json,'$.credential_reference_id') IS NULL)
+            OR (? AND json_extract(r.result_json,'$.credential_reference_id') IN (
                 SELECT credential_reference_id FROM credential_references WHERE scan_id=?)))"""
         params += (
-            coverage['endpoint_id'], method, expected_identity,
-            expected_identity, coverage['scan_id'],
+            coverage['endpoint_id'], method, allow_anonymous,
+            allow_authenticated, coverage['scan_id'],
         )
     for request in conn.execute(query, params):
         if request_ids is None or request[0] in request_ids:
@@ -1375,6 +1386,11 @@ def claim_coverage_batch(
                 item for item in credential_references
                 if item["identity_role"] == "identity_synthetic"
             ]
+        optional_control_identity_roles = (
+            ["authenticated"]
+            if planned_identity_role == "unauthenticated" and credential_references
+            else []
+        )
         context_facts = _task_context_facts(
             conn, scan_id, endpoint_id=str(row["endpoint_id"]),
             parameter_name=str(row["parameter_name"]),
@@ -1402,6 +1418,7 @@ def claim_coverage_batch(
                 "parameter_candidates": parameter_candidates,
                 "required_identity_role": execution_identity_role,
                 "planned_identity_role": planned_identity_role,
+                "optional_control_identity_roles": optional_control_identity_roles,
                 "credential_references": credential_references,
                 "test_fixtures": test_fixtures,
                 "context_facts": context_facts,
@@ -1430,6 +1447,7 @@ def claim_coverage_batch(
             "parameter_candidates": parameter_candidates,
             "required_identity_role": execution_identity_role,
             "planned_identity_role": planned_identity_role,
+            "optional_control_identity_roles": optional_control_identity_roles,
             "credential_references": credential_references,
             "test_fixtures": test_fixtures,
             "context_facts": context_facts,

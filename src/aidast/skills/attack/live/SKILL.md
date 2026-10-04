@@ -92,6 +92,12 @@ same temporary file.
    the corrected live execution role. Use the corrected role exactly. This
    correction is allowed only for the supplied scanner-created disposable
    local account and does not authorize another endpoint or mutation.
+   If `optional_control_identity_roles` contains `authenticated`, first retain
+   the planned anonymous request as the access-control baseline. When that
+   baseline reaches an authentication gate, use a listed opaque credential as
+   the positive control and continue the same selected input under that role.
+   Record the actual identity role on every attempt. This bounded control is
+   part of the exact task and is not an identity substitution.
    For source-import tasks, inspect every entry in `parameter_candidates`
    and select the field(s) relevant
    to the active Hunt Skill. Use `source_context.active_annotation` as the

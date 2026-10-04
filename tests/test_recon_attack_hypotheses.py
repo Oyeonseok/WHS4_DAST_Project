@@ -675,6 +675,60 @@ def test_negative_coverage_requires_the_selected_endpoint_and_identity(tmp_path,
         assert conn.execute('SELECT status FROM attack_coverage_items WHERE coverage_id=?', (task['coverage_id'],)).fetchone()[0] == expected
 
 
+def test_authenticated_positive_control_counts_for_anonymous_planned_task(tmp_path):
+    from aidast.attack.recon_hypotheses import plan_recon_attack
+    from aidast.attack.coverage import reconcile_coverage_batch
+    from aidast.pipeline.lifecycle import register_credential_reference
+    path = pipeline(tmp_path)
+    plan_recon_attack(path, 'scan', agent=Planner())
+    ensure_coverage_manifest(path, 'scan')
+    with sqlite3.connect(path) as conn:
+        conn.row_factory = sqlite3.Row
+        reference = register_credential_reference(
+            conn, scan_id='scan', label='positive-control',
+            reference_uri='env://AIDAST_POSITIVE_CONTROL',
+            identity_role='authenticated',
+        )
+        stage = start_stage_run(conn, scan_id='scan', stage='attack')
+        task = claim_coverage_batch(
+            conn, scan_id='scan', stage_run_id=stage, batch_size=1,
+        )[0]
+        payload = json.loads(conn.execute(
+            'SELECT payload_json FROM attack_tasks WHERE task_id=?',
+            (task['task_id'],),
+        ).fetchone()[0])
+        assert payload['required_identity_role'] == 'unauthenticated'
+        assert payload['optional_control_identity_roles'] == ['authenticated']
+        conn.execute(
+            "UPDATE attack_tasks SET status='completed' WHERE task_id=?",
+            (task['task_id'],),
+        )
+        conn.execute(
+            """INSERT INTO attack_attempts
+               (attempt_id,scan_id,task_id,endpoint_id,skill_name,
+                request_fingerprint,outcome)
+               VALUES ('auth-negative','scan',?,?,?,?,'negative')""",
+            (task['task_id'], task['endpoint_id'], task['skill_name'], 'a'*64),
+        )
+        conn.execute(
+            """INSERT INTO attack_http_requests
+               (request_id,scan_id,stage_run_id,task_id,policy_id,method,url,
+                request_fingerprint,status,response_status,scheduled_at,
+                endpoint_reference_id,result_json)
+               VALUES ('auth-request','scan',?,?,'policy','GET',
+                       'https://example.test/search',?,'completed',200,0,?,?)""",
+            (
+                stage, task['task_id'], 'a'*64, task['endpoint_id'],
+                json.dumps({'credential_reference_id': reference}),
+            ),
+        )
+        reconcile_coverage_batch(conn, stage_run_id=stage)
+        assert conn.execute(
+            'SELECT status FROM attack_coverage_items WHERE coverage_id=?',
+            (task['coverage_id'],),
+        ).fetchone()[0] == 'tested_negative'
+
+
 def test_dashboard_uses_captured_http_path_even_after_legacy_endpoint_window(tmp_path):
     from aidast.attack.recon_hypotheses import plan_recon_attack
     from aidast.web.projection import DashboardProjector
