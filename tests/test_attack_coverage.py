@@ -588,20 +588,33 @@ def test_owned_fixture_retains_registered_label_without_exposing_principal(tmp_p
 def test_coverage_task_exposes_all_db_parameters_and_source_context(tmp_path: Path) -> None:
     imported = imported_pipeline(tmp_path)
     with sqlite3.connect(imported.pipeline_database) as conn:
-        endpoint_id = conn.execute(
-            "SELECT endpoint_id FROM endpoints WHERE normalized_path LIKE '%users%' LIMIT 1"
-        ).fetchone()[0]
+        endpoint_id, method, normalized_path = conn.execute(
+            """SELECT endpoint_id,method,normalized_path FROM endpoints
+               WHERE normalized_path LIKE '%users%' ORDER BY endpoint_id LIMIT 1"""
+        ).fetchone()
+        conn.execute(
+            """INSERT INTO http_transactions
+               (http_transaction_id,endpoint_id,source,method,url,response_status,
+                response_body,content_type,captured_at)
+               VALUES ('public-api-response',?,'openapi','GET',
+                       'https://lab.example/openapi.json',200,?,
+                       'application/json','2026-10-05T00:00:00Z')""",
+            (endpoint_id, json.dumps({
+                "openapi": "3.0.0",
+                "paths": {normalized_path: {method.lower(): {
+                    "summary": "Look up a user",
+                    "description": "Vulnerable lookup; password=must-not-leak",
+                    "tags": ["users"],
+                }}},
+            })),
+        )
         conn.execute(
             """INSERT INTO endpoint_observations
                (observation_id,endpoint_id,source_tool,discovery_kind,observed_url,
                 association_method,observed_at,evidence_json)
                VALUES ('public-api-fixture',?,'openapi','api_spec_declaration',
                        'https://lab.example/openapi.json','exact','2026-10-05T00:00:00Z',?)""",
-            (endpoint_id, json.dumps({
-                "operation_summary": "Look up a user",
-                "operation_description": "Vulnerable lookup; password=must-not-leak",
-                "operation_tags": ["users"],
-            })),
+            (endpoint_id, "{}"),
         )
     agent = UnsupportedCoverageAgent()
 

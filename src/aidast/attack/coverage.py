@@ -557,6 +557,99 @@ def _source_assisted_scan(conn: sqlite3.Connection, scan_id: str) -> bool:
     return row is not None and str(row[0]) == "source_import"
 
 
+def _backfill_public_api_operation_metadata(
+    conn: sqlite3.Connection, scan_id: str,
+) -> int:
+    """Link operation prose from a captured public OpenAPI document.
+
+    Some Recon producers persisted the full public specification response but
+    only a route marker on each declaration observation.  Recover bounded
+    summary/description/tag fields from that already captured black-box
+    artifact; never read source code or a benchmark answer database.
+    """
+    documents: list[dict[str, Any]] = []
+    for row in conn.execute(
+        """SELECT h.response_body FROM http_transactions h
+           JOIN endpoints e ON e.endpoint_id=h.endpoint_id
+           JOIN origins o ON o.origin_id=e.origin_id
+           JOIN assets a ON a.asset_id=o.asset_id
+           WHERE a.scan_id=? AND h.response_status BETWEEN 200 AND 299
+             AND length(h.response_body) BETWEEN 2 AND 2000000
+             AND (lower(h.url) LIKE '%openapi%.json%'
+                  OR lower(h.url) LIKE '%swagger%.json%')
+           ORDER BY h.captured_at,h.http_transaction_id LIMIT 8""",
+        (scan_id,),
+    ):
+        raw = row[0]
+        if isinstance(raw, bytes):
+            raw = raw.decode("utf-8", errors="replace")
+        try:
+            document = json.loads(raw)
+        except (TypeError, ValueError, RecursionError):
+            continue
+        if isinstance(document, dict) and isinstance(document.get("paths"), dict):
+            documents.append(document)
+    if not documents:
+        return 0
+    updated = 0
+    endpoints = conn.execute(
+        """SELECT e.endpoint_id,e.method,e.normalized_path
+           FROM endpoints e JOIN origins o ON o.origin_id=e.origin_id
+           JOIN assets a ON a.asset_id=o.asset_id WHERE a.scan_id=?""",
+        (scan_id,),
+    ).fetchall()
+    for endpoint in endpoints:
+        operation = None
+        for document in documents:
+            path_item = document["paths"].get(str(endpoint["normalized_path"]))
+            if isinstance(path_item, dict):
+                candidate = path_item.get(str(endpoint["method"]).casefold())
+                if isinstance(candidate, dict):
+                    operation = candidate
+                    break
+        if operation is None:
+            continue
+        addition: dict[str, Any] = {}
+        for key, limit in (("summary", 1000), ("description", 2000)):
+            value = operation.get(key)
+            if isinstance(value, str) and value.strip():
+                addition[f"operation_{key}"] = value[:limit]
+        tags = operation.get("tags")
+        if isinstance(tags, list):
+            addition["operation_tags"] = [
+                item[:100] for item in tags[:20] if isinstance(item, str)
+            ]
+        if not addition:
+            continue
+        try:
+            addition = sanitize_metadata(addition, max_bytes=4096)
+        except ValidationError:
+            continue
+        for observation in conn.execute(
+            """SELECT observation_id,evidence_json FROM endpoint_observations
+               WHERE endpoint_id=? AND discovery_kind='api_spec_declaration'""",
+            (endpoint["endpoint_id"],),
+        ).fetchall():
+            try:
+                evidence = json.loads(observation["evidence_json"] or "{}")
+            except (TypeError, ValueError):
+                evidence = {}
+            if not isinstance(evidence, dict) or all(
+                evidence.get(key) == value for key, value in addition.items()
+            ):
+                continue
+            evidence.update(addition)
+            conn.execute(
+                "UPDATE endpoint_observations SET evidence_json=? WHERE observation_id=?",
+                (
+                    json.dumps(evidence, ensure_ascii=False, sort_keys=True),
+                    observation["observation_id"],
+                ),
+            )
+            updated += 1
+    return updated
+
+
 def ensure_coverage_manifest(database: Path, scan_id: str) -> CoverageManifestResult:
     """Create durable coverage from runtime hypotheses or an explicit source import."""
     with closing(_open_database(database)) as conn, conn:
@@ -565,6 +658,7 @@ def ensure_coverage_manifest(database: Path, scan_id: str) -> CoverageManifestRe
         ).fetchone()
         if scan is None or scan["status"] != "completed" or not scan["finished_at"]:
             raise ValueError("coverage planning requires a completed Recon scan")
+        _backfill_public_api_operation_metadata(conn, scan_id)
         # Preserve the minimum object identifiers already demonstrated by this
         # scan's authenticated UI and successful GET traffic. This closes the
         # Recon-to-Attack handoff without importing a source/benchmark answer.
