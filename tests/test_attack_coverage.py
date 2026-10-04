@@ -51,7 +51,14 @@ def test_jwt_coverage_requests_an_issued_authenticated_token() -> None:
     assert _credential_role("jwt_crypto", "unauthenticated") == "authenticated"
 
 
-@pytest.mark.parametrize("vuln_class", ["session", "auth_bypass", "cors"])
+@pytest.mark.parametrize(
+    "vuln_class",
+    [
+        "session", "auth_bypass", "cors", "sqli", "ssrf", "lfi",
+        "file_upload", "open_redirect", "llm_ai", "business_logic",
+        "race_condition", "xss", "forgot_password",
+    ],
+)
 def test_control_differentials_receive_an_opaque_authenticated_reference(
     vuln_class: str,
 ) -> None:
@@ -872,7 +879,7 @@ def test_opaque_credentials_reopen_only_compatible_auth_blockers(
             "SELECT vuln_class,status,count(*) FROM attack_coverage_items "
             "GROUP BY vuln_class,status ORDER BY vuln_class,status"
         ).fetchall()
-    assert states == [("idor", "blocked_auth", 2), ("sqli", "blocked_auth", 2)]
+    assert states == [("idor", "blocked_auth", 2), ("sqli", "pending", 2)]
 
     with sqlite3.connect(imported.pipeline_database) as conn:
         register_credential_reference(
@@ -884,7 +891,7 @@ def test_opaque_credentials_reopen_only_compatible_auth_blockers(
     with sqlite3.connect(imported.pipeline_database) as conn:
         assert conn.execute(
             "SELECT status,count(*) FROM attack_coverage_items GROUP BY status"
-        ).fetchall() == [("blocked_auth", 2), ("pending", 2)]
+        ).fetchall() == [("pending", 4)]
 
 
 def test_unreplayable_candidate_is_requeued_and_not_readopted(tmp_path: Path) -> None:

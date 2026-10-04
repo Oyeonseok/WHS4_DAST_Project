@@ -663,22 +663,15 @@ def _credential_references(
 
 
 def _credential_role(vuln_class: str, required_role: str) -> str:
-    # IDOR is inherently a cross-identity differential even when the source
-    # route itself was annotated as unauthenticated.
-    # JWT mutation needs a real, opaque benchmark token as its baseline. The
-    # source route may itself be public (for example /login), but testing token
-    # verification without any issued token only creates a false auth blocker.
-    # Session, auth-boundary, and CORS checks also require the opaque issued
-    # session as a positive control even when their selected hypothesis is the
-    # unauthenticated baseline. Supplying the reference does not change that
-    # baseline; the Agent must still send and record both exact controls.
-    return (
-        "authenticated"
-        if vuln_class in {
-            "idor", "jwt_crypto", "session", "auth_bypass", "cors", "csrf",
-        }
-        else required_role
-    )
+    # Recon cannot reliably infer authentication requirements for passive API
+    # declarations and unexecuted mutations.  Give every Attack task the
+    # available same-origin opaque session references as optional controls.
+    # This does not change ``required_identity_role`` or authorize a request:
+    # unauthenticated baselines remain unauthenticated, while the broker still
+    # checks every exact request.  It lets a task bind a supplied synthetic
+    # account when the live endpoint turns out to require login instead of
+    # incorrectly reporting that no safe owned identity exists.
+    return "authenticated"
 
 
 def _task_fixtures(

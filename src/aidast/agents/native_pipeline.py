@@ -969,6 +969,62 @@ Reuse compatible input keys; never invent operator values or confirmations.
         ]
 
     @staticmethod
+    def _synthetic_loopback_auto_approval(
+        *, method: str, origin: str, normalized_path: str,
+        risk_class: str, payload_json: str,
+    ) -> bool:
+        """Approve a narrow reversible mutation on a scanner-created identity."""
+        try:
+            parsed = urlsplit(origin)
+            payload = json.loads(payload_json or "{}")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return False
+        host = (parsed.hostname or "").casefold()
+        if (
+            parsed.scheme not in {"http", "https"}
+            or host not in {"127.0.0.1", "::1", "localhost"}
+            or method not in {"POST", "PUT", "PATCH"}
+            or risk_class != "external_side_effect"
+        ):
+            return False
+        path = normalized_path.casefold()
+        denied = (
+            "/admin", "delete", "password", "forgot", "reset", "transfer",
+            "payment", "charge", "loan",
+        )
+        if any(token in path for token in denied):
+            return False
+        if not any(token in path for token in (
+            "upload_profile", "/profile", "/avatar", "/api/ai/chat",
+        )):
+            return False
+        references = payload.get("credential_references")
+        fixtures = payload.get("test_fixtures")
+        if not isinstance(references, list) or not isinstance(fixtures, list):
+            return False
+        synthetic_labels = {
+            item.get("label") for item in references
+            if isinstance(item, dict)
+            and item.get("identity_role") == "identity_synthetic"
+            and isinstance(item.get("label"), str)
+        }
+        if not synthetic_labels:
+            return False
+        for fixture in fixtures:
+            if not isinstance(fixture, dict) or fixture.get("fact_type") != "owned_test_object":
+                continue
+            value = fixture.get("fact_value")
+            if (
+                isinstance(value, dict)
+                and value.get("credential_label") in synthetic_labels
+                and value.get("disposable") is True
+                and value.get("cleanup_allowed") is True
+                and value.get("resource") == "account"
+            ):
+                return True
+        return False
+
+    @staticmethod
     def _review_pending_attack_authorizations(
         db_path: Path, stage_run_id: str, *, input_fn=None,
     ) -> int:
@@ -981,7 +1037,7 @@ Reuse compatible input keys; never invent operator values or confirmations.
             pending = conn.execute(
                 """SELECT e.envelope_id,e.scan_id,e.task_id,t.skill_name,e.method,
                           e.origin,e.normalized_path,e.provenance_kind,e.max_requests,
-                          e.max_body_bytes,e.risk_class,e.approval_reason
+                          e.max_body_bytes,e.risk_class,e.approval_reason,t.payload_json
                    FROM attack_authorization_envelopes e
                    JOIN attack_tasks t ON t.task_id=e.task_id
                    JOIN stage_runs s ON s.stage_run_id=e.stage_run_id
@@ -995,28 +1051,35 @@ Reuse compatible input keys; never invent operator values or confirmations.
             (
                 envelope_id, scan_id, task_id, skill_name, method, origin,
                 normalized_path, provenance_kind, max_requests, max_body_bytes,
-                risk_class, approval_reason,
+                risk_class, approval_reason, payload_json,
             ) = row
             provenance = (
                 "Recon에서 발견된 경로 후보(해당 메서드는 미관측)"
                 if provenance_kind == "recon_candidate"
                 else "Attack Agent가 새로 제안한 경로"
             )
-            print(
-                "\n[Attack 요청 승인 필요]\n"
-                f"  Skill  : {skill_name}\n"
-                f"  요청   : {method} {origin}{normalized_path}\n"
-                f"  근거   : {provenance}\n"
-                f"  위험   : {risk_class} ({approval_reason})\n"
-                f"  범위   : 현재 task, 최대 {max_requests}회, "
-                f"body {max_body_bytes // 1024} KiB, 15분, redirect 금지",
-                flush=True,
+            auto_approved = CodexMainAgent._synthetic_loopback_auto_approval(
+                method=method, origin=origin, normalized_path=normalized_path,
+                risk_class=risk_class, payload_json=payload_json,
             )
-            try:
-                answer = input_fn("  이 범위만 허용하려면 y, 거부하려면 N: ")
-            except (EOFError, KeyboardInterrupt):
-                answer = "N"
-            approved = str(answer).strip().casefold() == "y"
+            if auto_approved:
+                approved = True
+            else:
+                print(
+                    "\n[Attack 요청 승인 필요]\n"
+                    f"  Skill  : {skill_name}\n"
+                    f"  요청   : {method} {origin}{normalized_path}\n"
+                    f"  근거   : {provenance}\n"
+                    f"  위험   : {risk_class} ({approval_reason})\n"
+                    f"  범위   : 현재 task, 최대 {max_requests}회, "
+                    f"body {max_body_bytes // 1024} KiB, 15분, redirect 금지",
+                    flush=True,
+                )
+                try:
+                    answer = input_fn("  이 범위만 허용하려면 y, 거부하려면 N: ")
+                except (EOFError, KeyboardInterrupt):
+                    answer = "N"
+                approved = str(answer).strip().casefold() == "y"
             now = time.time()
             with closing(sqlite3.connect(db_path, isolation_level=None)) as conn:
                 conn.execute("PRAGMA foreign_keys=ON")
@@ -1054,6 +1117,10 @@ Reuse compatible input keys; never invent operator values or confirmations.
                                     "approval_reason": approval_reason,
                                     "ttl_seconds": 15 * 60,
                                     "redirects_allowed": False,
+                                    "decision_source": (
+                                        "scanner_created_loopback_identity"
+                                        if auto_approved else "operator_prompt"
+                                    ),
                                 }, ensure_ascii=False, sort_keys=True),
                             ),
                         )

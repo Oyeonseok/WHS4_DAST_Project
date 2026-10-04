@@ -245,6 +245,66 @@ class LegacyNativeAttackCoordinatorTests(unittest.TestCase):
 
 
 class NativeAttackMainAgentTests(unittest.TestCase):
+    def test_scanner_created_loopback_profile_mutation_is_auto_approved(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            database = completed_pipeline(Path(temporary))
+            label = "recon-browser:fixture:identity_synthetic"
+            with closing(sqlite3.connect(database)) as conn:
+                stage = start_stage_run(conn, scan_id="scan_native", stage="attack")
+                task = create_task(
+                    conn, stage_run_id=stage, skill_name="hunt-ssrf", payload={
+                        "credential_references": [{
+                            "label": label,
+                            "identity_role": "identity_synthetic",
+                        }],
+                        "test_fixtures": [{
+                            "fact_type": "owned_test_object",
+                            "fact_value": {
+                                "credential_label": label,
+                                "resource": "account",
+                                "disposable": True,
+                                "cleanup_allowed": True,
+                            },
+                        }],
+                    },
+                )
+            transition_task(database, "scan_native", stage, task, "running")
+            with closing(sqlite3.connect(database)) as conn, conn:
+                conn.execute(
+                    """INSERT INTO attack_authorization_envelopes
+                       (envelope_id,scan_id,stage_run_id,task_id,policy_id,
+                        policy_sha256,method,origin,normalized_path,provenance_kind,
+                        risk_class,approval_reason,max_requests,max_body_bytes,
+                        status,requested_at)
+                       VALUES ('envelope_auto','scan_native',?,?, 'policy',?,'POST',
+                               'http://127.0.0.1:5002','/upload_profile_picture_url',
+                               'agent_proposed','external_side_effect','external_side_effect',
+                               3,4096,'pending',1)""",
+                    (stage, task, "a" * 64),
+                )
+
+            def unexpected_prompt(_: str) -> str:
+                raise AssertionError("safe synthetic loopback mutation must not prompt")
+
+            self.assertEqual(
+                CodexMainAgent._review_pending_attack_authorizations(
+                    database, stage, input_fn=unexpected_prompt,
+                ),
+                1,
+            )
+            with closing(sqlite3.connect(database)) as conn:
+                self.assertEqual(conn.execute(
+                    "SELECT status FROM attack_authorization_envelopes"
+                ).fetchone(), ("approved",))
+                details = json.loads(conn.execute(
+                    "SELECT details_json FROM audit_events "
+                    "WHERE event_type='attack.authorization.approved'"
+                ).fetchone()[0])
+            self.assertEqual(
+                details["decision_source"],
+                "scanner_created_loopback_identity",
+            )
+
     def test_attack_authorization_prompt_is_resolved_once_and_audited(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             database = completed_pipeline(Path(temporary))
