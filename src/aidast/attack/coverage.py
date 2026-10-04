@@ -1434,6 +1434,7 @@ def claim_coverage_batch(
                       ) AS public_security_signal,
                       CASE WHEN c.vuln_class IN
                            ('sqli','nosqli','auth_bypass','session','brute_force')
+                           AND e.method IN ('POST','PUT','PATCH')
                            AND (
                              lower(e.normalized_path) LIKE '%/login%'
                              OR lower(e.normalized_path) LIKE '%/signin%'
