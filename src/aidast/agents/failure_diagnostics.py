@@ -28,8 +28,11 @@ _MODEL_POLICY_REFUSAL_MARKERS = (
 
 _MODEL_CAPACITY_MARKERS = (
     "selected model is at capacity",
+    "selected model was at capacity",
     "model is at capacity",
+    "model was at capacity",
     "model capacity is temporarily unavailable",
+    "model capacity was temporarily unavailable",
 )
 
 

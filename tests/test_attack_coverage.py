@@ -956,6 +956,47 @@ def test_transient_model_failure_retries_without_failing_pipeline(
 
 @pytest.mark.parametrize("summary", [
     (
+        "The single Attack Agent failed to start because its selected model "
+        "was at capacity. Database verification found all configured tasks "
+        "pending, with no attempts or HTTP requests for this stage."
+    ),
+    "The selected model is at capacity. Please try a different model.",
+])
+def test_structured_model_capacity_result_retries_without_failing_pipeline(
+    tmp_path: Path, summary: str,
+) -> None:
+    imported = imported_pipeline(tmp_path)
+
+    class StructuredCapacityOnceAgent(UnsupportedCoverageAgent):
+        def run_attack_orchestrator(self, **kwargs):
+            if not self.calls:
+                self.calls.append(kwargs)
+                return AttackStageResult(
+                    status="FAILED", scan_id=kwargs["scan_id"],
+                    db_path=str(kwargs["db_path"]),
+                    stage_run_id=kwargs["stage_run_id"],
+                    attack_agent_ids=["capacity-agent"], summary=summary,
+                )
+            return super().run_attack_orchestrator(**kwargs)
+
+    agent = StructuredCapacityOnceAgent()
+    result = ExhaustiveAttackCoordinator(
+        agent=agent, db_path=imported.pipeline_database,
+        scope_path=imported.recon_database.parent / "Scope.md",
+        policy_path=imported.recon_database.parent / "TargetPolicy.json",
+        batch_size=2,
+    ).run(imported.scan_id)
+
+    assert len(agent.calls) > 1
+    assert result.coverage["by_status"] == {"unsupported": 4}
+    with sqlite3.connect(imported.pipeline_database) as conn:
+        assert conn.execute(
+            "SELECT DISTINCT status FROM stage_runs WHERE stage='attack'"
+        ).fetchall() == [("completed",)]
+
+
+@pytest.mark.parametrize("summary", [
+    (
         "Recon verified completed. The single Attack Agent failed "
         "following a cybersecurity safety rejection."
     ),
