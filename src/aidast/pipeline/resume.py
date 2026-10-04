@@ -155,6 +155,24 @@ def execute_resume(
     validation_factory: Any | None = None,
 ) -> None:
     """Continue from the selected stage through Validation using the same scan ID."""
+    # ``inspect_resume`` has already re-verified the immutable Recon handoff.
+    # Dashboard cancellation marks the shared scan row cancelled even when
+    # Recon finished long before a post-Recon worker was stopped.  Restore that
+    # verified checkpoint before coordinators enforce their completed-Recon
+    # precondition.
+    with closing(sqlite3.connect(plan.database)) as conn, conn:
+        restored = conn.execute(
+            """UPDATE scans SET status='completed'
+               WHERE scan_id=? AND status='cancelled'""",
+            (plan.scan_id,),
+        ).rowcount
+        if restored:
+            from aidast.pipeline.lifecycle import audit_event
+            audit_event(
+                conn, scan_id=plan.scan_id,
+                event_type="scan.post_recon_checkpoint_restored",
+                details={"resume_stage": plan.stage},
+            )
     if plan.stage == "report":
         # Report retries are entirely offline; the CLI drafts from the current
         # verified cases after this function returns.

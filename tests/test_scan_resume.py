@@ -149,6 +149,45 @@ def test_execute_resume_dispatches_stage_sequence_without_recon(tmp_path: Path) 
     assert calls == [("attack", SCAN_ID), ("chaining", SCAN_ID), ("validation", SCAN_ID)]
 
 
+def test_execute_resume_restores_cancelled_recon_checkpoint(tmp_path: Path) -> None:
+    pipeline = _fixture(tmp_path)
+    with sqlite3.connect(pipeline) as conn:
+        conn.execute("UPDATE scans SET status='cancelled' WHERE scan_id=?", (SCAN_ID,))
+        conn.execute(
+            """UPDATE stage_runs SET status='cancelled'
+               WHERE stage_run_id=(SELECT stage_run_id FROM stage_runs
+                   WHERE scan_id=? AND stage='attack' ORDER BY rowid DESC LIMIT 1)""",
+            (SCAN_ID,),
+        )
+    plan = inspect_resume(tmp_path, SCAN_ID)
+
+    class Stage:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def run(self, _scan_id: str) -> None:
+            pass
+
+    with (
+        patch("aidast.orchestration.attack.AttackCoordinator", Stage),
+        patch("aidast.orchestration.chaining.ChainingCoordinator", Stage),
+    ):
+        execute_resume(
+            plan, agent=object(),
+            validation_factory=lambda **kwargs: Stage(**kwargs),
+        )
+
+    with sqlite3.connect(pipeline) as conn:
+        assert conn.execute(
+            "SELECT status FROM scans WHERE scan_id=?", (SCAN_ID,),
+        ).fetchone() == ("completed",)
+        assert conn.execute(
+            """SELECT COUNT(*) FROM audit_events
+               WHERE scan_id=? AND event_type='scan.post_recon_checkpoint_restored'""",
+            (SCAN_ID,),
+        ).fetchone() == (1,)
+
+
 def test_resume_api_starts_existing_scan_once_and_requires_origin(tmp_path: Path) -> None:
     _fixture(tmp_path)
     argv_seen: list[str] = []
