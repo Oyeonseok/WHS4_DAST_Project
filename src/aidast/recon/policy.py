@@ -638,7 +638,8 @@ def validate_policy_for_target(
             raise ValueError("read-only permission cannot authorize active Attack testing")
         if re.search(
             r"security (?:test|testing|assessment)|penetration test|"
-            r"vulnerability (?:test|testing|assessment)|보안 테스트|취약점 테스트|능동",
+            r"vulnerability (?:test|testing|assessment|validation)|"
+            r"보안 (?:테스트|검증)|취약점 (?:테스트|검증)|능동",
             quote,
             re.IGNORECASE,
         ) is None:
