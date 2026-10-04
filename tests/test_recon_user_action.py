@@ -14,14 +14,15 @@ from aidast.recon.tools.user_action import visible_user_action
 BASE = 'https://example.test/'
 
 
-def page_fixture(*, mfa=0, captcha=0, password=0, text='Account settings'):
-    page = Mock(url=BASE + 'account')
+def page_fixture(*, mfa=0, captcha=0, password=0, text='Account settings', path='account', submit_labels=()):
+    page = Mock(url=BASE + path)
     page.is_closed.return_value = False
     def locator(selector):
         result = Mock()
         result.count.return_value = (mfa if 'one-time-code' in selector else captcha if 'iframe' in selector
                                      else password if 'password' in selector else 0)
         result.inner_text.return_value = text
+        result.evaluate_all.return_value = list(submit_labels)
         return result
     page.locator.side_effect = locator
     return page
@@ -30,12 +31,21 @@ def page_fixture(*, mfa=0, captcha=0, password=0, text='Account settings'):
 @pytest.mark.parametrize('options,include_login,expected', [
     ({'mfa': 1}, False, 'mfa_required'), ({'captcha': 1}, False, 'captcha_required'),
     ({'text': 'Verify you are human'}, False, 'captcha_required'),
-    ({'password': 1}, True, 'login_form_visible'), ({'password': 1}, False, None),
+    ({'password': 1, 'path': 'login'}, True, 'login_form_visible'),
+    ({'password': 1, 'submit_labels': ('Sign In',)}, True, 'login_form_visible'),
+    ({'password': 1}, True, None), ({'password': 1}, False, None),
     ({'text': 'Sign in to continue'}, False, 'login_form_visible'),
     ({'text': 'Home Products Sign in Help'}, True, None),
 ])
 def test_explicit_visible_evidence_detects_user_only_ui(options, include_login, expected):
     assert visible_user_action(page_fixture(**options), include_login=include_login) == expected
+
+
+def test_registration_password_form_is_not_misclassified_as_expired_login():
+    assert visible_user_action(
+        page_fixture(password=1, path='register', submit_labels=('Create Account',)),
+        include_login=True,
+    ) is None
 
 
 def test_store_migrates_legacy_login_database_and_keeps_old_default(tmp_path):

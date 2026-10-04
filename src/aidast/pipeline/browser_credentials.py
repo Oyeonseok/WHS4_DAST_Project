@@ -17,6 +17,7 @@ from aidast.recon.tools.playwright_driver import ManualSessionConfig, Playwright
 
 _SCAN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\Z")
 _DIGEST = re.compile(r"[0-9a-f]{24}\Z")
+_IDENTITY_ROLE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\Z")
 _AUTH_COOKIE = re.compile(
     r"(?:^|[._-])(?:session|sessionid|sessid|sid|auth|token|jwt|login|logged_in|access)"
     r"(?:$|[._-])|^(?:PHPSESSID|JSESSIONID)$", re.I,
@@ -34,6 +35,15 @@ def _origin(value: str) -> str:
 
 def _origin_key(value: str) -> str:
     return hashlib.sha256(_origin(value).encode()).hexdigest()[:24]
+
+
+def _session_key(value: str, identity_role: str) -> str:
+    """Return a stable snapshot key while retaining legacy primary paths."""
+    if identity_role == "authenticated":
+        return _origin_key(value)
+    return hashlib.sha256(
+        f"{_origin(value)}\0{identity_role}".encode()
+    ).hexdigest()[:24]
 
 
 def _snapshot_path(result_root: Path, scan_id: str, origin_key: str) -> Path:
@@ -62,9 +72,17 @@ def _has_auth_material(headers: dict[str, str]) -> bool:
 
 def register_browser_session_credentials(
     conn: sqlite3.Connection, *, scan_id: str, result_root: Path,
-    sessions: list[tuple[str, Path, bool]],
+    sessions: list[
+        tuple[str, Path, bool]
+        | tuple[str, Path, bool, str]
+    ],
 ) -> list[dict[str, str]]:
-    """Persist only references for authenticated, same-scan browser snapshots."""
+    """Persist opaque references for authenticated, same-scan browser snapshots.
+
+    A three-item input keeps the original single-account ``authenticated`` role.
+    A four-item input supplies a stable identity role (for example ``identity_b``),
+    allowing two authorized test accounts on the same origin to remain isolated.
+    """
     if not _SCAN.fullmatch(scan_id):
         raise ValueError("invalid scan identifier")
     root = result_root.expanduser().resolve()
@@ -73,18 +91,26 @@ def register_browser_session_credentials(
            WHERE a.scan_id=?""", (scan_id,),
     ).fetchall()
     references: list[dict[str, str]] = []
-    seen_origins: set[str] = set()
-    for origin_url, source, authenticated in sessions:
+    seen_sessions: set[tuple[str, str]] = set()
+    for raw_session in sessions:
+        if len(raw_session) == 3:
+            origin_url, source, authenticated = raw_session
+            identity_role = "authenticated"
+        else:
+            origin_url, source, authenticated, identity_role = raw_session
+        if not isinstance(identity_role, str) or not _IDENTITY_ROLE.fullmatch(identity_role):
+            raise ValueError("invalid browser session identity role")
         if not authenticated:
             continue
         canonical = _origin(origin_url)
-        if canonical in seen_origins:
+        session_key = (canonical, identity_role)
+        if session_key in seen_sessions:
             continue
         matching = [row for row in origins if _origin(str(row[1])) == canonical]
         if not matching:
             raise ValueError("authenticated session has no Recon origin")
         source = Path(source).expanduser().resolve(strict=True)
-        key = _origin_key(origin_url)
+        key = _session_key(origin_url, identity_role)
         destination = _snapshot_path(root, scan_id, key)
         destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         if not destination.parent.resolve().is_relative_to((root / ".aidast_sessions").resolve()):
@@ -120,6 +146,8 @@ def register_browser_session_credentials(
             session_id = str(row[0])
             conn.execute("UPDATE sessions SET auth_state='authenticated' WHERE session_id=?", (session_id,))
         label = f"recon-browser:{origin_id}"
+        if identity_role != "authenticated":
+            label += f":{identity_role}"
         reference_uri = f"vault://aidast-browser-session/{scan_id}/{key}"
         existing = conn.execute(
             """SELECT credential_reference_id,reference_uri FROM credential_references
@@ -130,20 +158,21 @@ def register_browser_session_credentials(
                 raise ValueError("browser credential label is bound to another origin")
             reference_id = str(existing[0])
             conn.execute(
-                """UPDATE credential_references SET session_id=?,identity_role='authenticated'
-                   WHERE credential_reference_id=?""", (session_id, reference_id),
+                """UPDATE credential_references SET session_id=?,identity_role=?
+                   WHERE credential_reference_id=?""",
+                (session_id, identity_role, reference_id),
             )
         else:
             reference_id = register_credential_reference(
                 conn, scan_id=scan_id, session_id=session_id,
-                label=label, identity_role="authenticated", reference_uri=reference_uri,
+                label=label, identity_role=identity_role, reference_uri=reference_uri,
             )
         references.append({
             "credential_reference_id": reference_id,
             "label": label,
-            "identity_role": "authenticated",
+            "identity_role": identity_role,
         })
-        seen_origins.add(canonical)
+        seen_sessions.add(session_key)
     return references
 
 
@@ -164,7 +193,7 @@ class BrowserSessionCredentialBackend:
         scan_id, key = parts
         with sqlite3.connect(self.db_path.resolve().as_uri() + "?mode=ro", uri=True) as conn:
             rows = conn.execute(
-                """SELECT o.base_url FROM credential_references c
+                """SELECT o.base_url,c.label,c.identity_role FROM credential_references c
                    JOIN sessions s ON s.session_id=c.session_id
                    JOIN origins o ON o.origin_id=s.origin_id
                    JOIN assets a ON a.asset_id=o.asset_id
@@ -173,7 +202,12 @@ class BrowserSessionCredentialBackend:
                 (uri, scan_id, scan_id),
             ).fetchall()
         bound_origins = {_origin(str(row[0])) for row in rows}
-        if (len(bound_origins) != 1 or _origin_key(str(rows[0][0])) != key
+        valid_keys = {
+            _origin_key(str(row[0])) if str(row[2]) == "authenticated"
+            else _session_key(str(row[0]), str(row[2]))
+            for row in rows
+        }
+        if (len(bound_origins) != 1 or valid_keys != {key}
                 or destination_url is None or _origin(destination_url) not in bound_origins):
             raise ValueError("browser session reference is not bound to this origin")
         snapshot = _snapshot_path(self.result_root, scan_id, key)

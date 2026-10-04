@@ -34,6 +34,7 @@ def test_authenticated_browser_snapshot_becomes_resolvable_opaque_reference(tmp_
     }]}), encoding="utf-8")
     result_root = tmp_path / "result"
     with sqlite3.connect(database) as conn:
+        conn.row_factory = sqlite3.Row
         refs = register_browser_session_credentials(
             conn, scan_id="scan_auth", result_root=result_root,
             sessions=[("https://example.test/", source, True)],
@@ -211,3 +212,44 @@ def test_repeated_handoff_keeps_same_origin_reference_resolvable(tmp_path: Path)
     assert resolver(first[0]["credential_reference_id"], destination_url="https://example.test/") == {
         "Authorization": "Bearer header.payload.signature",
     }
+
+
+def test_two_identity_sessions_on_one_origin_stay_isolated(tmp_path: Path) -> None:
+    database = _database(tmp_path)
+    sources = []
+    for name, token in (("a", "header.account-a.signature"),
+                        ("b", "header.account-b.signature")):
+        source = tmp_path / f"browser-{name}.json"
+        source.write_text(json.dumps({"cookies": [], "origins": [{
+            "origin": "https://example.test", "localStorage": [
+                {"name": "token", "value": token},
+            ],
+    }]}), encoding="utf-8")
+        sources.append(source)
+    result_root = tmp_path / "result"
+    with sqlite3.connect(database) as conn:
+        conn.row_factory = sqlite3.Row
+        refs = register_browser_session_credentials(
+            conn, scan_id="scan_auth", result_root=result_root,
+            sessions=[
+                ("https://example.test/", sources[0], True, "identity_a"),
+                ("https://example.test/", sources[1], True, "identity_b"),
+            ],
+        )
+        assert [item["identity_role"] for item in refs] == ["identity_a", "identity_b"]
+        assert conn.execute("SELECT COUNT(*) FROM credential_references").fetchone()[0] == 2
+        assert _credential_references(
+            conn, "scan_auth", "authenticated", origin_url="https://example.test/profile",
+        ) == refs
+    resolver = PipelineCredentialResolver(
+        database, result_root=result_root, browser_sessions=True,
+    )
+    headers = [
+        resolver(item["credential_reference_id"], destination_url="https://example.test/profile")
+        for item in refs
+    ]
+    assert headers == [
+        {"Authorization": "Bearer header.account-a.signature"},
+        {"Authorization": "Bearer header.account-b.signature"},
+    ]
+    assert len(list((result_root / ".aidast_sessions").rglob("*.json"))) == 2
