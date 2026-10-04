@@ -1793,6 +1793,7 @@ def discover_endpoints(
     interactive_login: bool = False,
     automatic_login: bool = False,
     browser_context_token: str | None = None,
+    external_auth_handoff: Callable[[dict[str, str]], bool | None] | None = None,
     diagnostic_callback=None,
     authentication_endpoint_callback=None,
 ) -> list[dict]:
@@ -1813,6 +1814,14 @@ def discover_endpoints(
     def diagnose(event, **details):
         if diagnostic_callback is not None:
             diagnostic_callback(event, component="endpoint_discovery", **details)
+
+    def external_tool_headers(headers: dict[str, str]) -> dict[str, str] | None:
+        if mitm_proxy_url and external_auth_handoff is not None:
+            published = external_auth_handoff(headers)
+            if published is False:
+                raise RuntimeError("policy proxy authentication handoff is unavailable")
+            return None
+        return headers
 
     katana_states: dict[str, str] = {}
     katana_error_types: dict[str, str] = {}
@@ -2134,9 +2143,7 @@ def discover_endpoints(
 
                 mode="standard",
 
-                auth_headers=(
-                    auth_headers
-                ),
+                auth_headers=external_tool_headers(auth_headers),
 
                 proxy_url=(
                     mitm_proxy_url
@@ -2180,7 +2187,7 @@ def discover_endpoints(
                 headless_results = discover_with_katana(
                     base_url,
                     mode="headless",
-                    auth_headers=auth_headers,
+                    auth_headers=external_tool_headers(auth_headers),
                     chrome_ws_url=katana_browser.chrome_ws_url if katana_browser else None,
                     proxy_url=mitm_proxy_url,
                     target_policy=target_policy,
@@ -2521,7 +2528,7 @@ def discover_endpoints(
                 ))
                 if recon_model is not None else None
             ),
-            auth_headers=auth_headers,
+            auth_headers=external_tool_headers(auth_headers),
             proxy_url=mitm_proxy_url,
             target_policy=target_policy,
             max_time_seconds=ffuf_max_time_seconds,

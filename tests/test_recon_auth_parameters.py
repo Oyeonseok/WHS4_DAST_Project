@@ -207,6 +207,38 @@ def test_grounded_read_survives_budget_pressure_from_wordlist(monkeypatch):
  assert {'/grounded-read','/schema-read'} <= {r['path'] for r in rows}
 
 
+def test_external_crawlers_receive_auth_through_proxy_handoff_not_argv(monkeypatch):
+ from aidast.recon.tools import endpoint_discovery as discovery
+ from unittest.mock import MagicMock
+ browser=MagicMock()
+ browser.get_http_results.return_value=[]
+ browser.get_websocket_results.return_value=[]
+ browser.get_auth_headers.return_value=AUTH
+ monkeypatch.setattr(discovery,'PlaywrightDriver',lambda *a,**k:browser)
+ monkeypatch.setattr(discovery,'open_katana_browser',lambda *a,**k:None)
+ tool_headers=[]
+ def katana(*args,**kwargs):
+  tool_headers.append(kwargs['auth_headers'])
+  return []
+ def ffuf(*args,**kwargs):
+  tool_headers.append(kwargs['auth_headers'])
+  return []
+ monkeypatch.setattr(discovery,'discover_with_katana',katana)
+ monkeypatch.setattr(discovery,'discover_with_ffuf',ffuf)
+ monkeypatch.setattr(discovery,'discover_api_secondary',lambda *a,**k:[])
+ monkeypatch.setattr(discovery,'discover_adaptive_js_api_candidates',lambda *a,**k:[])
+ monkeypatch.setattr(discovery,'read_observed_recon_responses',lambda *a,**k:[])
+ monkeypatch.setattr(discovery,'read_recent_json_responses',lambda *a,**k:[])
+ monkeypatch.setattr(discovery,'recover_observed_json_gets',lambda *a,**k:[])
+ published=[]
+ discovery.discover_endpoints('https://example.test/',preauthenticated=True,
+   enable_playwright_interaction=False,target_policy=policy(),
+   mitm_proxy_url='http://127.0.0.1:8888',
+   external_auth_handoff=lambda headers: published.append(dict(headers)) or True)
+ assert published and all(headers==AUTH for headers in published)
+ assert tool_headers and all(headers is None for headers in tool_headers)
+
+
 def test_model_evidence_never_contains_embedded_credentials():
  from aidast.recon.tools.ai_patterns import build_pattern_evidence
  script="const token='private-session-value'; fetch('/records'); fetch('/reader?access_token=private-query-value');"

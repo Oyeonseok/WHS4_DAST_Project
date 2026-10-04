@@ -39,7 +39,12 @@ from aidast.scope.models import AssetType
 from aidast.recon.tools.asset_dns_port import run_dnsx, run_naabu, run_nmap, run_subfinder
 from aidast.recon.tools.endpoint_discovery import discover_endpoints, _make_default_session_file
 from aidast.recon.tools.http_probe import ProbeResult, probe
-from aidast.recon.tools.mitm_proxy import ingest_mitm_capture, start_mitmproxy, stop_mitmproxy
+from aidast.recon.tools.mitm_proxy import (
+    ingest_mitm_capture,
+    start_mitmproxy,
+    stop_mitmproxy,
+    update_mitmproxy_auth,
+)
 
 
 class ReconExecutionError(RuntimeError):
@@ -852,6 +857,9 @@ class ReconExecutor:
                 interactive_login=self.interactive_login and session is None,
                 automatic_login=self.automatic_login and session is None,
                 request_headers=self.request_headers,
+                external_auth_handoff=(
+                    lambda headers: update_mitmproxy_auth(proxy_process, headers)
+                ),
                 browser_context_token=browser_context_token,
                 diagnostic_callback=self._diagnostic,
                 authentication_endpoint_callback=(

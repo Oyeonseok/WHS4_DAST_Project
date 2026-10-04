@@ -13,7 +13,12 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from aidast.recon.policy import TargetPolicy
-from aidast.recon.tools.mitm_proxy import _wait_for_proxy_port, start_mitmproxy, stop_mitmproxy
+from aidast.recon.tools.mitm_proxy import (
+    _wait_for_proxy_port,
+    start_mitmproxy,
+    stop_mitmproxy,
+    update_mitmproxy_auth,
+)
 from aidast.scope.models import AssetType
 
 
@@ -146,6 +151,29 @@ class MitmAddonBudgetTests(unittest.TestCase):
         asyncio.run(addon.request(static))
         self.assertEqual(static.metadata["aidast_priority"], 6)
         self.assertTrue(static.metadata["aidast_static_resource"])
+
+    def test_tool_auth_is_injected_from_private_file_only_for_scoped_tools(self):
+        addon = self._addon()
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            auth_path = Path(temporary_dir) / "auth.json"
+            auth_path.write_text(
+                '{"version":1,"headers":{"Authorization":"Bearer private"}}',
+                encoding="utf-8",
+            )
+            auth_path.chmod(0o600)
+            addon.auth_path = auth_path
+            tool = self._flow("/api/me", headers={"X-AIDAST-Source": "ffuf"})
+            asyncio.run(addon.request(tool))
+            self.assertEqual(tool.request.headers["Authorization"], "Bearer private")
+
+            ordinary = self._flow("/api/other")
+            asyncio.run(addon.request(ordinary))
+            self.assertNotIn("Authorization", ordinary.request.headers)
+
+            outside = self._flow("/api/outside", headers={"X-AIDAST-Source": "katana"})
+            outside.request.pretty_url = "https://outside.example/api/outside"
+            asyncio.run(addon.request(outside))
+            self.assertNotIn("Authorization", outside.request.headers)
 
     def test_candidate_probe_marker_is_captured_but_not_forwarded(self):
         addon = self._addon()
@@ -367,10 +395,29 @@ class MitmProxyStartupTests(unittest.TestCase):
             command = popen.call_args.args[0]
             scope_argument = next(item for item in command if item.startswith("scope_file="))
             scope_path = Path(scope_argument.split("=", 1)[1])
+            auth_argument = next(item for item in command if item.startswith("auth_file="))
+            auth_path = Path(auth_argument.split("=", 1)[1])
             self.assertTrue(scope_path.is_file())
+            self.assertTrue(auth_path.is_file())
+            self.assertEqual(auth_path.stat().st_mode & 0o777, 0o600)
+            self.assertTrue(update_mitmproxy_auth(
+                returned, {"Authorization": "Bearer private", "Cookie": "sid=private"}
+            ))
+            self.assertNotIn("Bearer private", " ".join(command))
             stop_mitmproxy(returned)
 
         self.assertFalse(scope_path.exists())
+        self.assertFalse(auth_path.exists())
+
+    def test_proxy_auth_handoff_rejects_header_injection(self) -> None:
+        process = MagicMock()
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            auth_path = Path(temporary_dir) / "auth.json"
+            auth_path.write_text('{"version":1,"headers":{}}', encoding="utf-8")
+            auth_path.chmod(0o600)
+            process._aidast_auth_file = auth_path
+            with self.assertRaisesRegex(ValueError, "invalid"):
+                update_mitmproxy_auth(process, {"Authorization": "ok\r\nHost: outside"})
 
 
 if __name__ == "__main__":

@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import hmac
 import hashlib
+import os
 import runpy
 import time
 from datetime import datetime, timezone
@@ -115,6 +116,9 @@ class ScopeAndCaptureAddon:
         self.enforcement_required = True
         self.governor = RequestGovernor(None)
         self.governor_invalid = False
+        self.auth_path: Path | None = None
+        self._auth_mtime_ns = -1
+        self._auth_headers: dict[str, str] = {}
 
     def load(self, loader) -> None:
         loader.add_option(
@@ -130,6 +134,12 @@ class ScopeAndCaptureAddon:
             typespec=str,
             default="mitm_capture.jsonl",
             help="캡처한 요청/응답을 append하는 JSONL 경로.",
+        )
+        loader.add_option(
+            name="auth_file",
+            typespec=str,
+            default="",
+            help="외부 도구 인증 헤더용 private JSON 경로.",
         )
 
     def configure(self, updated) -> None:
@@ -157,6 +167,61 @@ class ScopeAndCaptureAddon:
 
         if "out_file" in updated and ctx.options.out_file:
             self.out_path = Path(ctx.options.out_file)
+
+        if "auth_file" in updated:
+            self.auth_path = Path(ctx.options.auth_file) if ctx.options.auth_file else None
+            self._auth_mtime_ns = -1
+            self._auth_headers = {}
+
+    def _read_tool_auth(self) -> dict[str, str]:
+        path = self.auth_path
+        if path is None:
+            return {}
+        try:
+            details = path.stat()
+            if details.st_uid != os.geteuid() or details.st_mode & 0o077:
+                raise ValueError("auth_file permissions are not private")
+            if details.st_mtime_ns == self._auth_mtime_ns:
+                return self._auth_headers
+            document = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(document, dict) or document.get("version") != 1:
+                raise ValueError("auth_file version is invalid")
+            headers = document.get("headers")
+            if not isinstance(headers, dict):
+                raise ValueError("auth_file headers are invalid")
+            validated: dict[str, str] = {}
+            forbidden = {
+                "host", "content-length", "transfer-encoding", "connection",
+                "proxy-connection", "upgrade", "te", "trailer",
+                "x-aidast-source", "x-aidast-phase",
+            }
+            for name, value in headers.items():
+                if (not isinstance(name, str) or not isinstance(value, str)
+                        or not name or len(name) > 128
+                        or any(ord(char) <= 32 or ord(char) >= 127
+                               or char in "()<>@,;:\\\"/[]?={}"
+                               for char in name)
+                        or len(value) > 16384 or "\r" in value or "\n" in value
+                        or name.casefold() in forbidden):
+                    raise ValueError("auth_file contains an unsafe header")
+                validated[name] = value
+            self._auth_mtime_ns = details.st_mtime_ns
+            self._auth_headers = validated
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            # Fail closed for authentication handoff.  The request still runs
+            # without credentials and cannot inherit a stale/partially written
+            # secret file.
+            self._auth_mtime_ns = -1
+            self._auth_headers = {}
+        return self._auth_headers
+
+    def _inject_tool_auth(self, request) -> None:
+        headers = self._read_tool_auth()
+        for name, value in headers.items():
+            for existing in list(request.headers):
+                if existing.casefold() == name.casefold():
+                    request.headers.pop(existing, None)
+            request.headers[name] = value
 
     async def request(self, flow: http.HTTPFlow) -> None:
         if not self.scope_loaded:
@@ -204,6 +269,17 @@ class ScopeAndCaptureAddon:
         source_hint = str(flow.request.headers.pop("X-AIDAST-Source", "")).lower()
         flow.metadata["aidast_candidate_probe"] = phase_hint == "candidate_probe"
         method = flow.request.method.upper()
+        boundary_allowed = (
+            host_allowed
+            and not (parsed.username or parsed.password)
+            and parsed.scheme in self.rules.get("allowed_schemes", ["https"])
+            and port in self.rules.get("allowed_ports", [443])
+            and method in allowed_methods
+            and any(self._path_matches(path, prefix) for prefix in allowed_paths)
+            and not any(self._path_matches(path, prefix) for prefix in excluded_paths)
+        )
+        if boundary_allowed and source_hint in {"katana", "ffuf"}:
+            self._inject_tool_auth(flow.request)
         # Prioritize browser API/document traffic over crawler noise. Every
         # forwarded request still consumes the finite total budget, including
         # static resources and duplicates from browser reloads.
@@ -240,15 +316,6 @@ class ScopeAndCaptureAddon:
         flow.metadata["aidast_static_resource"] = is_static
         flow.metadata["aidast_duplicate"] = duplicate
         flow.metadata["aidast_deferred_candidate"] = False
-        boundary_allowed = (
-            host_allowed
-            and not (parsed.username or parsed.password)
-            and parsed.scheme in self.rules.get("allowed_schemes", ["https"])
-            and port in self.rules.get("allowed_ports", [443])
-            and flow.request.method.upper() in allowed_methods
-            and any(self._path_matches(path, prefix) for prefix in allowed_paths)
-            and not any(self._path_matches(path, prefix) for prefix in excluded_paths)
-        )
         request_allowed = bool(boundary_allowed or support_mode)
         counts_against_budget = request_allowed
         # Evaluate against the count that would result if this request is
