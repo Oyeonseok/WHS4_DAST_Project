@@ -527,7 +527,19 @@ class DashboardProjector:
         from aidast.attack.coverage_snapshot import read_coverage_snapshot
         attack_coverage = read_coverage_snapshot(conn, scan_id, include_gaps=False) if stage_name == 'Attack' else None
         if attack_coverage and attack_coverage['total']:
-            progress = round(100 * attack_coverage['resolved'] / attack_coverage['total'])
+            # Planning owns the first fifth of Attack progress.  Once the
+            # durable coverage ledger exists, advance through its terminal
+            # dispositions without ever displaying 100% before the stage is
+            # actually closed.
+            progress = min(
+                99,
+                20 + round(
+                    79 * attack_coverage['resolved'] / attack_coverage['total']
+                ),
+            )
+            if (not attack_coverage['unfinished']
+                    and stage_statuses.get('Attack') in {'completed', 'skipped'}):
+                progress = 100
             if attack_coverage['unfinished'] and stage_statuses.get('Attack') == 'completed':
                 stage_statuses['Attack'] = 'running'
 
@@ -886,6 +898,25 @@ class DashboardProjector:
                             event_type="log.appended", payload={"stage": "Recon", "level": "info",
                                 "message": "Agent work", "message_code": "agent.work", "message_params": details})
                         state["progress"] = max(state["progress"], details["progress"])
+
+        if state["stage"] == "Attack" and state["status"] == "running":
+            work_row = event_conn.execute(
+                """SELECT payload_json FROM web_events WHERE scan_id=?
+                AND event_type='log.appended'
+                AND json_extract(payload_json,'$.message_code')='agent.work'
+                AND json_extract(payload_json,'$.stage')='Attack'
+                ORDER BY event_id DESC LIMIT 1""",
+                (scan_id,),
+            ).fetchone()
+            if work_row:
+                params = _json_object(work_row["payload_json"]).get("message_params", {})
+                processed, total = params.get("processed"), params.get("endpoint_total")
+                if (params.get("step") == "planning"
+                        and type(processed) is int and type(total) is int
+                        and total > 0 and 0 <= processed <= total):
+                    state["progress"] = max(
+                        state["progress"], min(20, round(20 * processed / total))
+                    )
 
         previous_row = event_conn.execute(
             "SELECT state_json FROM web_projection_state WHERE scan_id=?", (scan_id,)

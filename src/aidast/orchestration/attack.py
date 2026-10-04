@@ -329,7 +329,18 @@ class AttackCoordinator:
             raise AttackCoordinatorError("confirmed attempts must link to a finding")
         if result.status == "FAILED":
             reason = result.summary.strip() or "no failure summary"
-            raise AttackBatchFailure(f"native Attack Agent returned FAILED: {reason}")
+            failure = AttackBatchFailure(
+                f"native Attack Agent returned FAILED: {reason}"
+            )
+            normalized = reason.casefold()
+            if any(marker in normalized for marker in (
+                "cybersecurity safety rejection",
+                "flagged for possible cybersecurity risk",
+                "model policy refusal",
+                "safety policy refusal",
+            )):
+                failure.failure_code = "model_policy_refusal"
+            raise failure
         incomplete_tasks = [task_id for task_id, status in task_rows if status not in {"completed", "skipped"}]
         if incomplete_tasks:
             raise AttackCoordinatorError(

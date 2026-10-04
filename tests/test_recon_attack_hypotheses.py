@@ -426,7 +426,9 @@ def test_dashboard_does_not_show_completed_between_coverage_batches(tmp_path):
     snapshot = projector.snapshot('scan')
     assert snapshot['status'] == 'running'
     assert snapshot['stage_statuses']['Attack'] == 'running'
-    assert snapshot['progress'] == 50
+    # Attack planning occupies 0-20%; one of two durable coverage items then
+    # advances halfway through the remaining execution range.
+    assert snapshot['progress'] == 60
 
 
 def test_completed_batch_with_pending_queue_can_resume_normal_attack(tmp_path):

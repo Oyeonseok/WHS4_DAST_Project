@@ -1040,6 +1040,18 @@ def claim_coverage_batch(
     _block_unavailable_authenticated_coverage(
         conn, scan_id=scan_id, stage_run_id=stage_run_id,
     )
+    # A failed mixed batch does not identify which hypothesis triggered the
+    # failure.  Replay retryable work one item at a time so a refusal or
+    # transport failure can be attributed to exactly one black-box test and
+    # unrelated coverage can continue.  Fresh pending work keeps the normal
+    # throughput and vulnerability-class fairness below.
+    has_retryable = bool(conn.execute(
+        """SELECT 1 FROM attack_coverage_items
+           WHERE scan_id=? AND status='error_retryable' AND attempt_count < ?
+           LIMIT 1""",
+        (scan_id, max_attempts),
+    ).fetchone())
+    effective_batch_size = 1 if has_retryable else batch_size
     rows = conn.execute(
         """WITH ranked AS (
                SELECT c.*,e.method,e.normalized_path,o.base_url AS origin_url,
@@ -1063,7 +1075,7 @@ def claim_coverage_batch(
                     END,
                     vuln_class,normalized_path,coverage_id
            LIMIT ?""",
-        (scan_id, max_attempts, batch_size),
+        (scan_id, max_attempts, effective_batch_size),
     ).fetchall()
     claimed: list[dict[str, Any]] = []
     for row in rows:

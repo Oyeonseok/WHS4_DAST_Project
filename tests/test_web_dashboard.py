@@ -809,6 +809,41 @@ def test_task_stages_show_partial_progress_before_completion(tmp_path: Path, sta
     assert projector.snapshot(SCAN_ID)["progress"] == 100
 
 
+def test_attack_planning_events_advance_progress_before_tasks_exist(tmp_path: Path) -> None:
+    database = _fixture(tmp_path)
+    with sqlite3.connect(database) as conn:
+        conn.execute("UPDATE scans SET status='running',finished_at=NULL WHERE scan_id=?", (SCAN_ID,))
+        conn.execute("UPDATE stage_runs SET stage='attack',status='running' WHERE stage_run_id='stage'")
+    projector = DashboardProjector(tmp_path)
+    before = projector.snapshot(SCAN_ID)
+    assert before["progress"] == 0
+    projector.record_event(
+        SCAN_ID,
+        source_key="attack-planning:54",
+        event_type="log.appended",
+        payload={
+            "stage": "Attack",
+            "level": "info",
+            "message": "Agent work",
+            "message_code": "agent.work",
+            "message_params": {
+                "agent": "attack",
+                "step": "planning",
+                "state": "progress",
+                "processed": 54,
+                "endpoint_total": 108,
+            },
+        },
+    )
+    snapshot = projector.snapshot(SCAN_ID)
+    assert snapshot["progress"] == 10
+    assert any(
+        event["type"] == "task.progress.updated"
+        and event["payload"]["progress"] == 10
+        for event in projector.events_after(SCAN_ID, before["last_event_id"])
+    )
+
+
 def test_projection_reads_program_grouped_scan(tmp_path: Path) -> None:
     database = _fixture(tmp_path)
     grouped = tmp_path / "Runs" / "yeswehack" / "example-program" / SCAN_ID

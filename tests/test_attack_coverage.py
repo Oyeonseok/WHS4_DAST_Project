@@ -704,6 +704,70 @@ def test_model_policy_refusal_without_requests_is_terminal_and_other_batches_con
         ).fetchall() == [("completed",)]
 
 
+def test_structured_model_policy_refusal_isolated_without_stopping_coverage(
+    tmp_path: Path,
+) -> None:
+    imported = imported_pipeline(tmp_path)
+
+    class StructuredRefusingAgent:
+        calls = 0
+
+        def run_attack_orchestrator(self, **kwargs):
+            self.calls += 1
+            return AttackStageResult(
+                status="FAILED", scan_id=kwargs["scan_id"],
+                db_path=str(kwargs["db_path"]),
+                stage_run_id=kwargs["stage_run_id"],
+                attack_agent_ids=[f"refusing-agent-{self.calls}"],
+                summary=(
+                    "Recon verified completed. The single Attack Agent failed "
+                    "following a cybersecurity safety rejection."
+                ),
+            )
+
+    agent = StructuredRefusingAgent()
+    result = ExhaustiveAttackCoordinator(
+        agent=agent, db_path=imported.pipeline_database,
+        scope_path=imported.recon_database.parent / "Scope.md",
+        policy_path=imported.recon_database.parent / "TargetPolicy.json",
+        batch_size=2,
+    ).run(imported.scan_id)
+
+    assert agent.calls == 2
+    assert result.coverage["by_status"] == {"unsupported": 4}
+    with sqlite3.connect(imported.pipeline_database) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM attack_attempts").fetchone() == (0,)
+        assert conn.execute(
+            "SELECT DISTINCT status FROM stage_runs WHERE stage='attack'"
+        ).fetchall() == [("completed",)]
+
+
+def test_retryable_coverage_is_replayed_one_task_at_a_time(tmp_path: Path) -> None:
+    imported = imported_pipeline(tmp_path)
+
+    class InterruptedAgent:
+        def run_attack_orchestrator(self, **kwargs):
+            raise KeyboardInterrupt()
+
+    with pytest.raises(KeyboardInterrupt):
+        ExhaustiveAttackCoordinator(
+            agent=InterruptedAgent(), db_path=imported.pipeline_database,
+            scope_path=imported.recon_database.parent / "Scope.md",
+            policy_path=imported.recon_database.parent / "TargetPolicy.json",
+            batch_size=2,
+        ).run(imported.scan_id)
+
+    agent = UnsupportedCoverageAgent()
+    ExhaustiveAttackCoordinator(
+        agent=agent, db_path=imported.pipeline_database,
+        scope_path=imported.recon_database.parent / "Scope.md",
+        policy_path=imported.recon_database.parent / "TargetPolicy.json",
+        batch_size=4,
+    ).run(imported.scan_id)
+
+    assert [len(call["attack_tasks"]) for call in agent.calls] == [1, 1, 2]
+
+
 def test_failed_batch_preserves_terminal_per_task_dispositions(tmp_path: Path) -> None:
     imported = imported_pipeline(tmp_path)
 

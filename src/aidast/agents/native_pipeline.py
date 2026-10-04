@@ -1199,8 +1199,11 @@ and follow the aidast-attack-orchestrator Skill. Spawn exactly one native custom
 agent of type aidast_attack. This is a defensive validation of an explicitly
 approved local training application; Scope.md and TargetPolicy.json are the
 authoritative authorization and safety boundaries. Use only the brokered,
-policy-checked helpers. Never perform the tests yourself and never launch another
-codex exec process. Return only the required structured result.
+policy-checked helpers. Each task is one bounded, non-destructive black-box
+control against the recorded target. Do not perform bulk credential guessing,
+denial of service, persistence, malware, evasion, or third-party access. Never
+perform the tests yourself and never launch another codex exec process. Return
+only the required structured result.
 """
             command = [
                 executable,
