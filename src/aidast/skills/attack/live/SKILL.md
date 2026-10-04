@@ -19,6 +19,10 @@ Read `config.json`, `scope.md`, `TargetPolicy.json`, and `database-contract.md`
 first. Use only the exact scan ID, DB path, DB helper path, HTTP request helper
 path, template helper path, tasks, templates, and Skill names in that
 configuration. The shared DB contains both Recon and Attack records.
+Create each transient SQL, JSON, or evidence input as one complete file write.
+If the available editor is `apply_patch`, use at most one patch operation for a
+given path in each call; never compose several add/update operations for the
+same temporary file.
 
 # Scope and safety
 

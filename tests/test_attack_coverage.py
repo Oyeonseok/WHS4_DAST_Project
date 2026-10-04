@@ -695,7 +695,7 @@ def test_model_policy_refusal_without_requests_is_terminal_and_other_batches_con
         batch_size=2,
     ).run(imported.scan_id)
 
-    assert agent.calls == 2
+    assert agent.calls == 6
     assert result.coverage["by_status"] == {"unsupported": 4}
     with sqlite3.connect(imported.pipeline_database) as conn:
         assert conn.execute("SELECT COUNT(*) FROM attack_attempts").fetchone() == (0,)
@@ -733,7 +733,7 @@ def test_structured_model_policy_refusal_isolated_without_stopping_coverage(
         batch_size=2,
     ).run(imported.scan_id)
 
-    assert agent.calls == 2
+    assert agent.calls == 6
     assert result.coverage["by_status"] == {"unsupported": 4}
     with sqlite3.connect(imported.pipeline_database) as conn:
         assert conn.execute("SELECT COUNT(*) FROM attack_attempts").fetchone() == (0,)

@@ -174,32 +174,40 @@ class ExhaustiveAttackCoordinator:
                     (stage_run_id,),
                 ).fetchone()[0]
                 if not open_leads and not unknown_requests:
-                    reason = (
-                        "Attack model policy refused this bounded task; no HTTP request "
-                        "or unresolved lead was produced, so the task was not tested."
-                    )
                     task_rows = conn.execute(
                         """SELECT task_id,status FROM attack_tasks
                            WHERE stage_run_id=? AND status IN ('pending','running')""",
                         (stage_run_id,),
                     ).fetchall()
+                    isolate_batch = len(task_rows) > 1
+                    reason = (
+                        "Attack model policy refused a multi-task batch before producing "
+                        "HTTP evidence; retry each task independently."
+                        if isolate_batch else
+                        "Attack model policy refused this bounded task; no HTTP request "
+                        "or unresolved lead was produced, so the task was not tested."
+                    )
                     for task in task_rows:
                         transition_task(
                             conn, task["task_id"],
-                            status="skipped" if task["status"] == "pending" else "cancelled",
+                            status=(
+                                "cancelled" if isolate_batch or task["status"] == "running"
+                                else "skipped"
+                            ),
                             error_message=reason,
                         )
-                    coverage_rows = conn.execute(
-                        """SELECT coverage_id,last_task_id FROM attack_coverage_items
-                           WHERE last_stage_run_id=? AND status='running'""",
-                        (stage_run_id,),
-                    ).fetchall()
-                    for coverage in coverage_rows:
-                        transition_coverage(
-                            conn, coverage["coverage_id"], "unsupported", reason,
-                            stage_run_id=stage_run_id,
-                            task_id=coverage["last_task_id"],
-                        )
+                    if not isolate_batch:
+                        coverage_rows = conn.execute(
+                            """SELECT coverage_id,last_task_id FROM attack_coverage_items
+                               WHERE last_stage_run_id=? AND status='running'""",
+                            (stage_run_id,),
+                        ).fetchall()
+                        for coverage in coverage_rows:
+                            transition_coverage(
+                                conn, coverage["coverage_id"], "unsupported", reason,
+                                stage_run_id=stage_run_id,
+                                task_id=coverage["last_task_id"],
+                            )
             # Preserve per-task terminal evidence even when the native
             # orchestrator rejects the batch as a whole (for example,
             # one denied authorization among otherwise completed tasks).

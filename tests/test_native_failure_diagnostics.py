@@ -166,7 +166,7 @@ def test_private_diagnostics_reject_a_symlink_directory(database: Path, tmp_path
 
 @pytest.mark.parametrize("failure_kind,progress", [
     ("nonzero", False), ("nonzero", True), ("jsonl_only", False), ("timeout", False),
-    ("policy", False),
+    ("policy", False), ("policy_event", False),
 ])
 def test_native_failure_captures_outputs_once_and_never_retries(
     database: Path, tmp_path: Path, failure_kind: str, progress: bool,
@@ -175,10 +175,17 @@ def test_native_failure_captures_outputs_once_and_never_retries(
     policy = tmp_path / "TargetPolicy.json"
     scope.write_text("# Offline diagnostic fixture")
     policy.write_text("{}")
-    event_text = '{"type":"turn.failed","error":"private-jsonl-token"}\n'
-    stderr = "" if failure_kind == "jsonl_only" else (
+    event_text = (
+        '{"type":"turn.failed","error":{"message":"This content was flagged '
+        'for possible cybersecurity risk."}}\n'
+        if failure_kind == "policy_event" else
+        '{"type":"turn.failed","error":"private-jsonl-token"}\n'
+    )
+    stderr = "tool editor diagnostic" if failure_kind == "policy_event" else (
+        "" if failure_kind == "jsonl_only" else (
         "This content was flagged for possible cybersecurity risk."
         if failure_kind == "policy" else "detail\n" * 1000 + "private-stderr-token\n"
+        )
     )
 
     def failed_run(command, **kwargs):
@@ -206,7 +213,7 @@ def test_native_failure_captures_outputs_once_and_never_retries(
     record_usage.assert_called_once_with(event_text.splitlines())
     error = caught.value
     assert getattr(error, "failure_code", None) == (
-        "model_policy_refusal" if failure_kind == "policy"
+        "model_policy_refusal" if failure_kind in {"policy", "policy_event"}
         else "timeout" if failure_kind == "timeout" else "nonzero_exit"
     )
     assert error.failure_diagnostics["classification"] == (

@@ -1261,7 +1261,15 @@ only the required structured result.
 
             def failure(message: str, code: str, stderr: str = "", exit_code: int | None = None):
                 error = MainAgentError(message)
-                diagnostic_text = (stderr + "\n" + message).casefold()
+                # Codex can emit a harmless tool diagnostic on stderr and put
+                # the actual terminal policy refusal only in the JSONL event
+                # stream.  Classify from the bounded terminal diagnostic as
+                # well so that a retryable single task cannot fail the whole
+                # pipeline merely because stderr happened to be non-empty.
+                diagnostic_text = (
+                    stderr + "\n" + message + "\n"
+                    + _codex_jsonl_diagnostic(event_text)
+                ).casefold()
                 error.failure_code = (
                     "model_policy_refusal"
                     if "flagged for possible cybersecurity risk" in diagnostic_text
