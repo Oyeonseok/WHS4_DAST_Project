@@ -704,8 +704,18 @@ def test_model_policy_refusal_without_requests_is_terminal_and_other_batches_con
         ).fetchall() == [("completed",)]
 
 
+@pytest.mark.parametrize("summary", [
+    (
+        "Recon verified completed. The single Attack Agent failed "
+        "following a cybersecurity safety rejection."
+    ),
+    (
+        "The single Attack Agent failed because automatic cybersecurity "
+        "review rejected its task. Verified DB state: one pending task."
+    ),
+])
 def test_structured_model_policy_refusal_isolated_without_stopping_coverage(
-    tmp_path: Path,
+    tmp_path: Path, summary: str,
 ) -> None:
     imported = imported_pipeline(tmp_path)
 
@@ -719,10 +729,7 @@ def test_structured_model_policy_refusal_isolated_without_stopping_coverage(
                 db_path=str(kwargs["db_path"]),
                 stage_run_id=kwargs["stage_run_id"],
                 attack_agent_ids=[f"refusing-agent-{self.calls}"],
-                summary=(
-                    "Recon verified completed. The single Attack Agent failed "
-                    "following a cybersecurity safety rejection."
-                ),
+                summary=summary,
             )
 
     agent = StructuredRefusingAgent()

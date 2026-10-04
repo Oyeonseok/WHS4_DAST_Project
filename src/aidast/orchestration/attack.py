@@ -335,6 +335,7 @@ class AttackCoordinator:
             normalized = reason.casefold()
             if any(marker in normalized for marker in (
                 "cybersecurity safety rejection",
+                "cybersecurity review rejected",
                 "flagged for possible cybersecurity risk",
                 "model policy refusal",
                 "safety policy refusal",
