@@ -745,6 +745,7 @@ def ensure_coverage_manifest(database: Path, scan_id: str) -> CoverageManifestRe
         requeue_safe_session_binding_coverage(conn, scan_id)
         requeue_auth_gated_negative_coverage(conn, scan_id)
         requeue_redacted_login_differential_coverage(conn, scan_id)
+        requeue_unprofiled_historical_response_coverage(conn, scan_id)
         refresh_confirmed_coverage(conn, scan_id)
         total = conn.execute(
             "SELECT count(*) FROM attack_coverage_items WHERE scan_id=?", (scan_id,),
@@ -1328,6 +1329,95 @@ def requeue_redacted_login_differential_coverage(
                 "secret-shape assertions can now validate the redacted login differential",
                 now(), row["coverage_id"],
             ),
+        )
+        reopened += 1
+    return reopened
+
+
+def requeue_unprofiled_historical_response_coverage(
+    conn: sqlite3.Connection, scan_id: str,
+) -> int:
+    """Reinspect a prior black-box lead closed from an unprofiled 2xx body.
+
+    Historical runtime coordinates only affect scheduling.  An older Attack
+    worker could request one of those read-only routes, receive a successful
+    response, persist no bounded response assertion, and still close the item
+    as tested-negative.  That is not enough evidence to decide whether the
+    body contains protected records or security metadata.  Reopen that exact
+    case once so the current worker profiles the live body and records a
+    content assertion.  The marker fact prevents a target that is genuinely
+    public or harmless from looping forever.
+    """
+    rows = conn.execute(
+        """SELECT c.*,e.method
+           FROM attack_coverage_items c
+           JOIN endpoints e ON e.endpoint_id=c.endpoint_id
+           WHERE c.scan_id=? AND c.status='tested_negative' AND e.method='GET'
+             AND c.vuln_class IN ('api_misconfig','spa_api','source_leak')
+             AND c.last_task_id IS NOT NULL
+             AND EXISTS (
+                 SELECT 1 FROM attack_facts priority
+                 WHERE priority.scan_id=c.scan_id
+                   AND priority.fact_type='historical_runtime_priority'
+                   AND priority.fact_key=c.coverage_id
+             )
+             AND NOT EXISTS (
+                 SELECT 1 FROM attack_facts marker
+                 WHERE marker.scan_id=c.scan_id
+                   AND marker.fact_type='historical_runtime_reprofiled'
+                   AND marker.fact_key=c.coverage_id
+             )""",
+        (scan_id,),
+    ).fetchall()
+    reopened = 0
+    for row in rows:
+        requests = conn.execute(
+            """SELECT result_json FROM attack_http_requests
+               WHERE scan_id=? AND task_id=? AND endpoint_reference_id=?
+                 AND method='GET' AND status='completed'
+                 AND response_status BETWEEN 200 AND 299""",
+            (scan_id, row["last_task_id"], row["endpoint_id"]),
+        ).fetchall()
+        if not requests:
+            continue
+        assertion_counts: list[int] = []
+        for request in requests:
+            try:
+                result = json.loads(request["result_json"] or "{}")
+            except (TypeError, json.JSONDecodeError):
+                result = {}
+            assertions = result.get("assertions", []) if isinstance(result, dict) else []
+            assertion_counts.append(len(assertions) if isinstance(assertions, list) else 0)
+        if any(assertion_counts):
+            continue
+        reason = (
+            "prior black-box 2xx response had no bounded content assertion; "
+            "reinspect the live body before a negative disposition"
+        )
+        _event(
+            conn, row, "pending", reason,
+            stage_run_id=row["last_stage_run_id"], task_id=row["last_task_id"],
+        )
+        marker_id = "fact_reprofile_" + hashlib.sha256(
+            f"{scan_id}\0{row['coverage_id']}".encode("utf-8")
+        ).hexdigest()[:32]
+        conn.execute(
+            """INSERT OR IGNORE INTO attack_facts
+               (fact_id,scan_id,fact_type,fact_key,fact_value,confidence,
+                source_endpoint_id)
+               VALUES (?,?,'historical_runtime_reprofiled',?,?,1.0,?)""",
+            (
+                marker_id, scan_id, row["coverage_id"],
+                json.dumps({"reason": "unprofiled_2xx_response"}, sort_keys=True),
+                row["endpoint_id"],
+            ),
+        )
+        conn.execute(
+            """UPDATE attack_coverage_items
+               SET status='pending',disposition_reason=?,attempt_count=0,
+                   last_stage_run_id=NULL,last_task_id=NULL,updated_at=?
+               WHERE coverage_id=?""",
+            (reason, now(), row["coverage_id"]),
         )
         reopened += 1
     return reopened

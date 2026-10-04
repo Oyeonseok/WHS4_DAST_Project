@@ -168,6 +168,34 @@ same temporary file.
    reject it solely because the preferred parameter happens to be `password`.
 5. For each running Skill, follow its discovery and confirmation criteria while
    staying inside Scope. A status code by itself never confirms a vulnerability.
+   It also never proves that a successful read is harmless. For an unauthenticated
+   2xx JSON or HTML response from an API, admin-named route, configuration route,
+   memory/content collection, or hint/challenge route, inspect the returned body
+   before choosing a disposition. Do not close the task as negative from status,
+   content type, or response hash alone.
+
+   Treat nested account records containing credential or authentication fields
+   such as `password`, `passwordHash`, `totpSecret`, `deluxeToken`, reset tokens,
+   or security answers as a sensitive unauthenticated disclosure. Treat a locked
+   hint/challenge as exposed only when the live body includes both its locked
+   state and its hint text. Treat application configuration as security-relevant
+   only when the live body exposes recovery, challenge, credential, token, or
+   secret-like configuration; branding and public UI settings alone are not a
+   finding. An exact version from an admin-named route may be recorded as low
+   impact, but never substitute it for a higher-impact exposure on another task.
+
+   When the first response shows a candidate exposure, replay the exact target
+   once with bounded content assertions through the request helper before
+   committing a finding. Prefer field-name and shape assertions such as
+   `body_contains` for a non-secret JSON key, `json_equals` for a public boolean,
+   or `json_path_nonempty_string` for a secret-shaped value. Never place the
+   returned secret value in an assertion, fact, attempt, or finding. For a
+   literal read-only exposure, use the same content assertion against the
+   same-origin nonexistent negative-control path allowed by the database
+   contract. A true negative needs inspected content and a concrete reason why
+   the returned data is intentionally public or contains no protected object or
+   security metadata.
+
    Before a probe, query prior `attack_attempts` across all Attack stage runs.
    Skip an equivalent method, URL, identity role, payload variant, **and
    vulnerability-class task** only when the current task already owns durable

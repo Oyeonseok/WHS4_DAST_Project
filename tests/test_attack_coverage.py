@@ -14,6 +14,7 @@ from aidast.attack.coverage import (
     fail_running_coverage,
     requeue_auth_gated_negative_coverage,
     requeue_redacted_login_differential_coverage,
+    requeue_unprofiled_historical_response_coverage,
     requeue_interrupted_coverage,
     requeue_owned_object_coverage,
     requeue_transient_model_failures,
@@ -1541,6 +1542,140 @@ def test_redacted_login_differential_reopens_once_for_secret_shape_assertion(
         assert requeue_redacted_login_differential_coverage(
             conn, imported.scan_id,
         ) == 0
+
+
+def test_historical_2xx_without_content_assertions_reopens_exactly_once(
+    tmp_path: Path,
+) -> None:
+    imported = imported_pipeline(tmp_path)
+    ensure_coverage_manifest(imported.pipeline_database, imported.scan_id)
+    with sqlite3.connect(imported.pipeline_database) as conn, conn:
+        conn.row_factory = sqlite3.Row
+        coverage = conn.execute(
+            """SELECT c.* FROM attack_coverage_items c
+               JOIN endpoints e ON e.endpoint_id=c.endpoint_id
+               WHERE e.method='GET' ORDER BY c.coverage_id LIMIT 1"""
+        ).fetchone()
+        conn.execute(
+            """UPDATE attack_coverage_items
+               SET vuln_class='api_misconfig',skill_name='hunt-api-misconfig'
+               WHERE coverage_id=?""",
+            (coverage["coverage_id"],),
+        )
+        stage = start_stage_run(conn, scan_id=imported.scan_id, stage="attack")
+        task = create_task(
+            conn, stage_run_id=stage, skill_name="hunt-api-misconfig",
+            endpoint_id=coverage["endpoint_id"], payload={},
+        )
+        conn.execute(
+            """UPDATE attack_coverage_items
+               SET status='tested_negative',attempt_count=1,
+                   last_stage_run_id=?,last_task_id=? WHERE coverage_id=?""",
+            (stage, task, coverage["coverage_id"]),
+        )
+        conn.execute(
+            """INSERT INTO attack_facts
+               (fact_id,scan_id,fact_type,fact_key,fact_value,confidence)
+               VALUES ('historical-priority',?,'historical_runtime_priority',?,'{}',1.0)""",
+            (imported.scan_id, coverage["coverage_id"]),
+        )
+        conn.execute(
+            """INSERT INTO attack_http_requests
+               (request_id,scan_id,stage_run_id,task_id,policy_id,method,url,
+                request_fingerprint,status,response_status,scheduled_at,
+                endpoint_reference_id,result_json)
+               VALUES ('unprofiled-response',?,?,?,'policy','GET',
+                       'https://lab.example/config',?,'completed',200,0,?,
+                       '{"assertions":[]}')""",
+            (
+                imported.scan_id, stage, task, "c" * 64,
+                coverage["endpoint_id"],
+            ),
+        )
+
+        assert requeue_unprofiled_historical_response_coverage(
+            conn, imported.scan_id,
+        ) == 1
+        assert tuple(conn.execute(
+            """SELECT status,attempt_count,last_stage_run_id,last_task_id
+               FROM attack_coverage_items WHERE coverage_id=?""",
+            (coverage["coverage_id"],),
+        ).fetchone()) == ("pending", 0, None, None)
+
+        conn.execute(
+            """UPDATE attack_coverage_items SET status='tested_negative',
+               last_stage_run_id=?,last_task_id=? WHERE coverage_id=?""",
+            (stage, task, coverage["coverage_id"]),
+        )
+        assert requeue_unprofiled_historical_response_coverage(
+            conn, imported.scan_id,
+        ) == 0
+        assert tuple(conn.execute(
+            """SELECT count(*) FROM attack_facts
+               WHERE scan_id=? AND fact_type='historical_runtime_reprofiled'
+                 AND fact_key=?""",
+            (imported.scan_id, coverage["coverage_id"]),
+        ).fetchone()) == (1,)
+
+
+def test_historical_2xx_with_content_assertion_is_not_reopened(
+    tmp_path: Path,
+) -> None:
+    imported = imported_pipeline(tmp_path)
+    ensure_coverage_manifest(imported.pipeline_database, imported.scan_id)
+    with sqlite3.connect(imported.pipeline_database) as conn, conn:
+        conn.row_factory = sqlite3.Row
+        coverage = conn.execute(
+            """SELECT c.* FROM attack_coverage_items c
+               JOIN endpoints e ON e.endpoint_id=c.endpoint_id
+               WHERE e.method='GET' ORDER BY c.coverage_id LIMIT 1"""
+        ).fetchone()
+        conn.execute(
+            """UPDATE attack_coverage_items
+               SET vuln_class='spa_api',skill_name='hunt-spa-api'
+               WHERE coverage_id=?""",
+            (coverage["coverage_id"],),
+        )
+        stage = start_stage_run(conn, scan_id=imported.scan_id, stage="attack")
+        task = create_task(
+            conn, stage_run_id=stage, skill_name="hunt-spa-api",
+            endpoint_id=coverage["endpoint_id"], payload={},
+        )
+        conn.execute(
+            """UPDATE attack_coverage_items
+               SET status='tested_negative',attempt_count=1,
+                   last_stage_run_id=?,last_task_id=? WHERE coverage_id=?""",
+            (stage, task, coverage["coverage_id"]),
+        )
+        conn.execute(
+            """INSERT INTO attack_facts
+               (fact_id,scan_id,fact_type,fact_key,fact_value,confidence)
+               VALUES ('asserted-priority',?,'historical_runtime_priority',?,'{}',1.0)""",
+            (imported.scan_id, coverage["coverage_id"]),
+        )
+        result = json.dumps({"assertions": [{
+            "name": "public-shape", "kind": "body_contains", "passed": False,
+        }]})
+        conn.execute(
+            """INSERT INTO attack_http_requests
+               (request_id,scan_id,stage_run_id,task_id,policy_id,method,url,
+                request_fingerprint,status,response_status,scheduled_at,
+                endpoint_reference_id,result_json)
+               VALUES ('profiled-response',?,?,?,'policy','GET',
+                       'https://lab.example/hints',?,'completed',200,0,?,?)""",
+            (
+                imported.scan_id, stage, task, "d" * 64,
+                coverage["endpoint_id"], result,
+            ),
+        )
+
+        assert requeue_unprofiled_historical_response_coverage(
+            conn, imported.scan_id,
+        ) == 0
+        assert tuple(conn.execute(
+            "SELECT status FROM attack_coverage_items WHERE coverage_id=?",
+            (coverage["coverage_id"],),
+        ).fetchone()) == ("tested_negative",)
 
 
 def test_unreplayable_candidate_is_requeued_and_not_readopted(tmp_path: Path) -> None:
