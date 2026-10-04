@@ -1308,6 +1308,20 @@ def claim_coverage_batch(
     rows = conn.execute(
         """WITH ranked AS (
                SELECT c.*,e.method,e.normalized_path,o.base_url AS origin_url,
+                      EXISTS (
+                          SELECT 1 FROM endpoint_observations api
+                          WHERE api.endpoint_id=c.endpoint_id
+                            AND api.discovery_kind='api_spec_declaration'
+                            AND json_valid(api.evidence_json)
+                            AND (
+                              lower(COALESCE(json_extract(api.evidence_json,'$.operation_summary'),''))
+                                LIKE '%vulnerab%'
+                              OR lower(COALESCE(json_extract(api.evidence_json,'$.operation_description'),''))
+                                LIKE '%vulnerab%'
+                              OR lower(COALESCE(json_extract(api.evidence_json,'$.operation_description'),''))
+                                LIKE '%injection%'
+                            )
+                      ) AS public_security_signal,
                       ROW_NUMBER() OVER (
                           PARTITION BY c.status,c.vuln_class
                           ORDER BY e.normalized_path,c.coverage_id
@@ -1325,6 +1339,7 @@ def claim_coverage_batch(
            )
            SELECT * FROM ranked
            ORDER BY CASE status WHEN 'error_retryable' THEN 0 ELSE 1 END,
+                    public_security_signal DESC,
                     class_completed + class_rank,
                     CASE vuln_class
                         WHEN 'brute_force' THEN 90

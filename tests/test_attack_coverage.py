@@ -20,6 +20,7 @@ from aidast.attack.coverage import (
     _execution_identity_role,
     _task_context_facts,
     _task_fixtures,
+    claim_coverage_batch,
 )
 from aidast.attack.db_cli import transition_task
 from aidast.attack.models import AttackStageResult
@@ -245,6 +246,33 @@ def test_operator_interruption_releases_coverage_without_retry_isolation(tmp_pat
                FROM attack_coverage_items WHERE coverage_id=?""",
             (row["coverage_id"],),
         ).fetchone()) == ("pending", 0, None, None)
+
+
+def test_captured_public_security_declaration_is_scheduled_first(tmp_path: Path) -> None:
+    imported = imported_pipeline(tmp_path)
+    ensure_coverage_manifest(imported.pipeline_database, imported.scan_id)
+    with sqlite3.connect(imported.pipeline_database) as conn:
+        conn.row_factory = sqlite3.Row
+        endpoint_id = conn.execute(
+            "SELECT endpoint_id FROM endpoints ORDER BY endpoint_id DESC LIMIT 1"
+        ).fetchone()[0]
+        conn.execute(
+            """INSERT INTO endpoint_observations
+               (observation_id,endpoint_id,source_tool,discovery_kind,observed_url,
+                association_method,observed_at,evidence_json)
+               VALUES ('priority-public-api',?,'openapi','api_spec_declaration',
+                       'https://lab.example/openapi.json','exact','2026-10-05T00:00:00Z',?)""",
+            (endpoint_id, json.dumps({
+                "operation_description": "Intentionally vulnerable to injection",
+            })),
+        )
+        stage = start_stage_run(conn, scan_id=imported.scan_id, stage="attack")
+        tasks = claim_coverage_batch(
+            conn, scan_id=imported.scan_id, stage_run_id=stage, batch_size=1,
+        )
+
+    assert len(tasks) == 1
+    assert tasks[0]["endpoint_id"] == endpoint_id
 
 
 def test_coverage_task_cannot_complete_without_a_durable_attempt(tmp_path: Path) -> None:
