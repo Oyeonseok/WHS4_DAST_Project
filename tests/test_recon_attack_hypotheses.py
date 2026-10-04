@@ -257,6 +257,38 @@ def test_attack_plans_exact_public_client_declarations_but_not_inferred_crud(tmp
     assert row == (1, 'unverified_candidate')
 
 
+def test_planner_receives_sanitized_public_openapi_operation_metadata(tmp_path):
+    from aidast.attack.recon_hypotheses import plan_recon_attack
+
+    path = pipeline(tmp_path)
+    with sqlite3.connect(path) as conn:
+        origin = conn.execute('SELECT origin_id FROM origins').fetchone()[0]
+        ObservationRecorder(conn, origin_id=origin, scan_id='scan').record('passive', [{
+            'method': 'POST', 'path': '/transfer',
+            'url': 'https://example.test/transfer',
+            'source': 'passive_declaration',
+            'discovery_kind': 'api_spec_declaration',
+            'verification_status': 'candidate', 'traffic_class': 'passive',
+            'evidence': {
+                'operation_summary': 'Transfer funds',
+                'operation_description': 'password=hidden Check transfer invariants.',
+                'operation_tags': ['transactions'],
+            },
+            'declared_parameters': [
+                {'name': 'amount', 'location': 'json', 'data_type': 'number'},
+            ],
+        }])
+
+    agent = Planner()
+    plan_recon_attack(path, 'scan', agent=agent)
+    transfer = next(endpoint for call in agent.contexts for endpoint in call['endpoints']
+                    if endpoint['path'] == '/transfer')
+    declaration = transfer['observations'][0]['declaration_evidence']
+    assert declaration['operation_summary'] == 'Transfer funds'
+    assert 'hidden' not in declaration['operation_description']
+    assert declaration['operation_tags'] == ['transactions']
+
+
 def test_replanning_is_idempotent_and_respects_parameter_identity_variants(tmp_path, monkeypatch):
     from aidast.attack.recon_hypotheses import plan_recon_attack
     path = pipeline(tmp_path)

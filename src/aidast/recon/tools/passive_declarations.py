@@ -994,6 +994,21 @@ def declared_openapi_routes(document: dict, *, document_url: str, base_url: str,
                                      target_policy=target_policy,
                                      kind="api_spec_declaration", parameters=parameters)
                     if row is not None:
+                        # Operation text is public black-box evidence from the
+                        # target. Preserve a bounded copy as an untrusted signal
+                        # for later hypothesis planning; it is never a finding.
+                        summary = operation.get("summary")
+                        description = operation.get("description")
+                        tags = operation.get("tags")
+                        if isinstance(summary, str) and summary.strip():
+                            row["evidence"]["operation_summary"] = summary[:1000]
+                        if isinstance(description, str) and description.strip():
+                            row["evidence"]["operation_description"] = description[:2000]
+                        if isinstance(tags, list):
+                            row["evidence"]["operation_tags"] = [
+                                tag[:100] for tag in tags[:20]
+                                if isinstance(tag, str) and tag.strip()
+                            ]
                         if server_scope_fallback:
                             row["evidence"]["server_scope_fallback"] = True
                         if expanded:

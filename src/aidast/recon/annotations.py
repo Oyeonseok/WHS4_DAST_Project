@@ -124,6 +124,18 @@ def sanitize_evidence(value) -> dict:
     for key in ('html_tag', 'html_attribute', 'content_type'):
         if isinstance(value.get(key), str):
             result[key] = safe_text(value[key])[:200]
+    for key, limit in (
+        ('operation_summary', 500),
+        ('operation_description', 1000),
+    ):
+        if isinstance(value.get(key), str) and value[key].strip():
+            result[key] = safe_text(value[key])[:limit]
+    tags = value.get('operation_tags')
+    if isinstance(tags, list):
+        result['operation_tags'] = [
+            safe_text(tag)[:100] for tag in tags[:20]
+            if isinstance(tag, str) and tag.strip()
+        ]
     if isinstance(value.get('verification_reason'), str):
         result['verification_reason'] = safe_text(value['verification_reason'])[:80]
     if value.get('derivation_rule') in {

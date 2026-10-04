@@ -435,7 +435,9 @@ def test_openapi_all_methods_templates_parameters_and_server_overrides_are_passi
     document = {"openapi": "3.1.0", "servers": [{"url": "/v1"}], "paths": {
         "/users/{user_id}": {"parameters": [{"in": "path", "name": "user_id", "schema": {"type": "integer"}}],
             "get": {"parameters": [{"in": "query", "name": "expand", "required": True}]},
-            "post": {"requestBody": {"content": {"application/json": {"schema": {"properties": {
+            "post": {"summary": "Update user", "description": "Check object ownership.",
+                "tags": ["users", "authorization"],
+                "requestBody": {"content": {"application/json": {"schema": {"properties": {
                 "display_name": {"type": "string"}, "active": {"type": "boolean"}}}}}}}},
         "/items": {"servers": [{"url": "/v2"}], "patch": {}},
         "/ref": {"$ref": "https://outside.test/openapi.json#/paths/~1ref"},
@@ -445,6 +447,9 @@ def test_openapi_all_methods_templates_parameters_and_server_overrides_are_passi
     post = next(row for row in rows if row["method"] == "POST")
     assert {(p["name"], p["location"], p["data_type"]) for p in post["declared_parameters"]} == {
         ("user_id", "path", "integer"), ("display_name", "json", "string"), ("active", "json", "boolean")}
+    assert post["evidence"]["operation_summary"] == "Update user"
+    assert post["evidence"]["operation_description"] == "Check object ownership."
+    assert post["evidence"]["operation_tags"] == ["users", "authorization"]
 
 
 def test_passive_openapi_maps_external_canonical_server_to_document_origin():
