@@ -13,7 +13,8 @@ import httpx
 import pytest
 
 from aidast.agents.failure_diagnostics import (
-    compare_persisted_work, persisted_work_snapshot, preserve_native_failure,
+    compare_persisted_work, is_model_policy_refusal, persisted_work_snapshot,
+    preserve_native_failure,
 )
 from aidast.agents.native_pipeline import CodexMainAgent, MainAgentError
 from aidast.core.codex_process import CodexProcessTimeout
@@ -22,6 +23,21 @@ from aidast.web.server import create_app
 
 SCAN_ID = "scan_fixture"
 STAGE_ID = "stage_fixture"
+
+
+@pytest.mark.parametrize("message", [
+    "This content was flagged for possible cybersecurity risk.",
+    "Automatic cybersecurity review rejected its task.",
+    "Automatic safety review flagged the delegated task for cybersecurity risk.",
+])
+def test_model_policy_refusal_recognizes_transport_and_agent_summaries(message: str) -> None:
+    assert is_model_policy_refusal(message)
+
+
+def test_application_safety_review_is_not_a_model_policy_refusal() -> None:
+    assert not is_model_policy_refusal(
+        "The application safety review flagged a missing transaction control."
+    )
 
 
 @pytest.fixture

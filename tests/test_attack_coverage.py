@@ -713,6 +713,11 @@ def test_model_policy_refusal_without_requests_is_terminal_and_other_batches_con
         "The single Attack Agent failed because automatic cybersecurity "
         "review rejected its task. Verified DB state: one pending task."
     ),
+    (
+        "The single Attack Agent failed because automatic safety review flagged "
+        "the delegated task for cybersecurity risk. Database verification shows "
+        "the task remains pending, with no attempts or HTTP requests committed."
+    ),
 ])
 def test_structured_model_policy_refusal_isolated_without_stopping_coverage(
     tmp_path: Path, summary: str,

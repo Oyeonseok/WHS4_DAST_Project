@@ -22,7 +22,11 @@ from pydantic import BaseModel, ValidationError
 from aidast.auth.codex import CodexAuth, CodexAuthError
 from aidast.core import codex_process
 from aidast.agents.policy_guidance import policy_skill_text, stage_policy_skill
-from aidast.agents.failure_diagnostics import persisted_work_snapshot, preserve_native_failure
+from aidast.agents.failure_diagnostics import (
+    is_model_policy_refusal,
+    persisted_work_snapshot,
+    preserve_native_failure,
+)
 from aidast.scope.exclusions import ResourceClassification
 from aidast.scope.exclusion_binding import classify_with_agent, SCOPE_EXCLUSION_INSTRUCTIONS
 from aidast.core.model_calls import logged_model_call, record_jsonl_usage, record_session_usage
@@ -1272,7 +1276,7 @@ only the required structured result.
                 ).casefold()
                 error.failure_code = (
                     "model_policy_refusal"
-                    if "flagged for possible cybersecurity risk" in diagnostic_text
+                    if is_model_policy_refusal(diagnostic_text)
                     else code
                 )
                 saved = preserve_native_failure(

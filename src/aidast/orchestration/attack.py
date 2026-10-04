@@ -9,6 +9,7 @@ from contextlib import closing
 from pathlib import Path
 
 from aidast.agents.main import CodexMainAgent
+from aidast.agents.failure_diagnostics import is_model_policy_refusal
 from aidast.attack.models import AttackStageResult
 from aidast.attack.skill_selector import (
     available_attack_skill_names,
@@ -332,14 +333,7 @@ class AttackCoordinator:
             failure = AttackBatchFailure(
                 f"native Attack Agent returned FAILED: {reason}"
             )
-            normalized = reason.casefold()
-            if any(marker in normalized for marker in (
-                "cybersecurity safety rejection",
-                "cybersecurity review rejected",
-                "flagged for possible cybersecurity risk",
-                "model policy refusal",
-                "safety policy refusal",
-            )):
+            if is_model_policy_refusal(reason):
                 failure.failure_code = "model_policy_refusal"
             raise failure
         incomplete_tasks = [task_id for task_id, status in task_rows if status not in {"completed", "skipped"}]

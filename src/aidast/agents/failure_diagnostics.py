@@ -18,6 +18,29 @@ from typing import Any
 
 _TABLES = ("attack_tasks", "attack_attempts", "findings")
 
+_MODEL_POLICY_REFUSAL_MARKERS = (
+    "cybersecurity safety rejection",
+    "cybersecurity review rejected",
+    "flagged for possible cybersecurity risk",
+    "model policy refusal",
+    "safety policy refusal",
+)
+
+
+def is_model_policy_refusal(message: str) -> bool:
+    """Recognize bounded model safety refusals across transport summaries."""
+    normalized = message.casefold()
+    if any(marker in normalized for marker in _MODEL_POLICY_REFUSAL_MARKERS):
+        return True
+    # Native sub-agents sometimes paraphrase the transport error instead of
+    # copying it verbatim.  Require both concepts so an ordinary application
+    # safety-review finding is not mistaken for a model refusal.
+    return (
+        "cybersecurity risk" in normalized
+        and "safety review" in normalized
+        and any(marker in normalized for marker in ("flagged", "rejected", "refused"))
+    )
+
 
 def persisted_work_snapshot(database: Path, *, scan_id: str, stage_run_id: str) -> dict[str, Any]:
     """Hash a consistent DB snapshot without retaining captured values or writing."""
