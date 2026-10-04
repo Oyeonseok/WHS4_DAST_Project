@@ -5,7 +5,14 @@ import sqlite3
 
 import pytest
 
-from aidast.attack.wiki import AttackWikiError, compare_sources, database_snapshot, ingest_database, lint_wiki
+from aidast.attack.wiki import (
+    AttackWikiError,
+    compare_sources,
+    database_snapshot,
+    ingest_database,
+    lint_wiki,
+    prioritize_runtime_history,
+)
 from aidast.attack.wiki_cli import main
 from aidast.pipeline.live_schema import migrate_live_pipeline_schema
 from aidast.recon.db import init_db
@@ -259,10 +266,48 @@ def test_runtime_modules_do_not_consume_evaluation_wiki():
     from pathlib import Path
     root = Path(__file__).resolve().parents[1] / "src/aidast"
     for name in ("attack/planner.py", "attack/recon_hypotheses.py", "attack/runtime.py",
-                 "attack/agent.py", "orchestration/attack.py", "orchestration/coverage_attack.py"):
+                 "attack/agent.py", "orchestration/coverage_attack.py"):
         assert "attack.wiki" not in (root / name).read_text()
         assert "candidate_baseline" not in (root / name).read_text()
         assert "build_juice_shop_attack_baseline" not in (root / name).read_text()
+    attack_coordinator = (root / "orchestration/attack.py").read_text()
+    assert "prioritize_runtime_history" in attack_coordinator
+    assert "candidate_baseline" not in attack_coordinator
+
+
+def test_runtime_history_only_seeds_coordinate_priority_from_prior_blackbox(
+    tmp_path,
+) -> None:
+    wiki_root = tmp_path / "AttackWiki"
+    target_wiki = wiki_root / "juice-shop-history"
+    historical = database(
+        tmp_path / "historical.db", scan="historical", started="2026-01-01",
+        confirmed=True, coverage_status="candidate",
+    )
+    source = database(
+        tmp_path / "source.db", scan="source", started="2026-01-01",
+        source=True, confirmed=True, coverage_status="candidate",
+    )
+    ingest_database(target_wiki, historical, kind="runtime", target_id="juice-shop")
+    ingest_database(target_wiki, source, kind="source", target_id="juice-shop")
+    current = database(
+        tmp_path / "current.db", scan="current", started="2026-01-03",
+        coverage_status="pending", request=False,
+    )
+
+    assert prioritize_runtime_history(
+        wiki_root, current, scan_id="current", target_hint="juice-shop-current",
+    ) == 1
+    with sqlite3.connect(current) as conn:
+        row = conn.execute(
+            """SELECT fact_key,fact_value FROM attack_facts
+               WHERE fact_type='historical_runtime_priority'"""
+        ).fetchone()
+    assert row[0] == "coverage"
+    assert json.loads(row[1]) == {
+        "historical_black_box_candidate": True,
+        "matching_snapshot_count": 1,
+    }
 
 
 def test_api_requires_terminal_scan_and_same_origin(tmp_path, monkeypatch):

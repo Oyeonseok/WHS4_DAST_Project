@@ -323,6 +323,29 @@ def test_captured_public_security_declaration_is_scheduled_first(tmp_path: Path)
     assert tasks[0]["vuln_class"] == "sqli"
 
 
+def test_prior_blackbox_candidate_coordinate_is_scheduled_first(tmp_path: Path) -> None:
+    imported = imported_pipeline(tmp_path)
+    ensure_coverage_manifest(imported.pipeline_database, imported.scan_id)
+    with sqlite3.connect(imported.pipeline_database) as conn, conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """SELECT coverage_id FROM attack_coverage_items
+               WHERE status='pending' ORDER BY coverage_id"""
+        ).fetchall()
+        priority_id = str(rows[-1]["coverage_id"])
+        conn.execute(
+            """INSERT INTO attack_facts
+               (fact_id,scan_id,fact_type,fact_key,fact_value,confidence)
+               VALUES ('runtime-priority',?,'historical_runtime_priority',?,'{}',1.0)""",
+            (imported.scan_id, priority_id),
+        )
+        stage = start_stage_run(conn, scan_id=imported.scan_id, stage="attack")
+        claimed = claim_coverage_batch(
+            conn, scan_id=imported.scan_id, stage_run_id=stage, batch_size=1,
+        )
+    assert claimed[0]["coverage_id"] == priority_id
+
+
 def test_public_security_declaration_prioritizes_matching_vulnerability_class(
     tmp_path: Path,
 ) -> None:

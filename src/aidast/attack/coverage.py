@@ -1779,6 +1779,12 @@ def claim_coverage_batch(
                              OR lower(e.normalized_path) LIKE '%/signin%'
                              OR lower(e.normalized_path) LIKE '%/session%'
                            ) THEN 1 ELSE 0 END AS login_security_signal,
+                      EXISTS (
+                          SELECT 1 FROM attack_facts history
+                          WHERE history.scan_id=c.scan_id
+                            AND history.fact_type='historical_runtime_priority'
+                            AND history.fact_key=c.coverage_id
+                      ) AS historical_runtime_signal,
                       ROW_NUMBER() OVER (
                           PARTITION BY c.status,c.vuln_class
                           ORDER BY e.normalized_path,c.coverage_id
@@ -1796,6 +1802,7 @@ def claim_coverage_batch(
            )
            SELECT * FROM ranked
            ORDER BY CASE status WHEN 'error_retryable' THEN 0 ELSE 1 END,
+                    CASE WHEN historical_runtime_signal=1 THEN 0 ELSE 1 END,
                     CASE WHEN public_security_signal=1 OR login_security_signal=1
                          THEN 0 ELSE 1 END,
                     CASE

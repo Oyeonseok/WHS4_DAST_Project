@@ -15,6 +15,7 @@ from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
 from aidast.attack.coverage_export import _publish
+from aidast.recon.db import new_id
 
 
 class AttackWikiError(RuntimeError):
@@ -60,13 +61,136 @@ def coverage_key(item: dict[str, Any]) -> tuple[str, ...]:
     return tuple(str(item[field]) for field in KEY_FIELDS)
 
 
+_TARGET_STOP_WORDS = frozenset({
+    "aidast", "invalid", "lab", "local", "scope", "comprehensive",
+    "http", "https", "scan", "target",
+})
+
+
+def _target_tokens(value: str) -> set[str]:
+    return {
+        token for token in re.findall(r"[a-z0-9]+", value.casefold())
+        if len(token) >= 3 and token not in _TARGET_STOP_WORDS
+    }
+
+
+def prioritize_runtime_history(
+    attack_wiki_root: Path, database: Path, *, scan_id: str, target_hint: str,
+) -> int:
+    """Seed scheduler-only hints from older independent black-box findings.
+
+    Source and benchmark snapshots are ignored. Runtime payloads, request IDs,
+    response data, and prior verdicts are not copied into the task context.
+    The resulting facts can only affect which already-planned coverage item is
+    claimed first; the current run must produce its own evidence and finding.
+    """
+    root = Path(attack_wiki_root).expanduser().resolve()
+    database = Path(database).expanduser().resolve(strict=True)
+    hint_tokens = _target_tokens(target_hint)
+    if len(hint_tokens) < 2 or not root.is_dir():
+        return 0
+
+    historical: dict[tuple[str, ...], int] = {}
+    with sqlite3.connect(database) as conn:
+        conn.row_factory = sqlite3.Row
+        scan = conn.execute(
+            "SELECT started_at FROM scans WHERE scan_id=?", (scan_id,),
+        ).fetchone()
+        if scan is None:
+            raise AttackWikiError("unknown scan for runtime-history priority")
+        current_started = str(scan["started_at"] or "")
+        current_origins = {
+            (urlsplit(str(row[0])).scheme.casefold(),
+             (urlsplit(str(row[0])).hostname or "").casefold())
+            for row in conn.execute(
+                """SELECT DISTINCT o.base_url FROM origins o
+                   JOIN assets a ON a.asset_id=o.asset_id WHERE a.scan_id=?""",
+                (scan_id,),
+            )
+        }
+
+    for wiki in sorted(path for path in root.iterdir() if path.is_dir()):
+        if len(hint_tokens & _target_tokens(wiki.name)) < 2:
+            continue
+        try:
+            sources = _load(wiki)
+        except AttackWikiError:
+            continue
+        for source in sources:
+            inventory = source.get("inventory", {})
+            historical_scan = inventory.get("scan", {})
+            if (
+                source.get("kind") != "runtime"
+                or inventory.get("execution_mode") != "black_box"
+                or str(historical_scan.get("scan_id")) == scan_id
+                or not current_started
+                or str(historical_scan.get("started_at") or "") >= current_started
+            ):
+                continue
+            for item in inventory.get("items", []):
+                if not isinstance(item, dict) or not item.get("tested") or not item.get("candidate"):
+                    continue
+                parsed = urlsplit(str(item.get("origin") or ""))
+                if (parsed.scheme.casefold(), (parsed.hostname or "").casefold()) not in current_origins:
+                    continue
+                try:
+                    key = (
+                        str(item["method"]).upper(), _path(str(item["path"])),
+                        str(item["vuln_class"]), str(item["injection_location"]),
+                        str(item["parameter_name"]), str(item["required_identity_role"]),
+                    )
+                except KeyError:
+                    continue
+                historical[key] = historical.get(key, 0) + 1
+    if not historical:
+        return 0
+
+    inserted = 0
+    with sqlite3.connect(database) as conn, conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """SELECT c.coverage_id,c.vuln_class,c.injection_location,
+                      c.parameter_name,c.required_identity_role,
+                      e.method,e.normalized_path
+               FROM attack_coverage_items c
+               JOIN endpoints e ON e.endpoint_id=c.endpoint_id
+               WHERE c.scan_id=? AND c.status IN ('pending','error_retryable')""",
+            (scan_id,),
+        ).fetchall()
+        for row in rows:
+            key = (
+                str(row["method"]).upper(), _path(str(row["normalized_path"])),
+                str(row["vuln_class"]), str(row["injection_location"]),
+                str(row["parameter_name"]), str(row["required_identity_role"]),
+            )
+            count = historical.get(key)
+            if not count:
+                continue
+            cursor = conn.execute(
+                """INSERT OR IGNORE INTO attack_facts
+                   (fact_id,scan_id,fact_type,fact_key,fact_value,confidence)
+                   VALUES (?,?,'historical_runtime_priority',?,?,1.0)""",
+                (
+                    new_id("fact"), scan_id, str(row["coverage_id"]),
+                    json.dumps({
+                        "historical_black_box_candidate": True,
+                        "matching_snapshot_count": count,
+                    }, sort_keys=True),
+                ),
+            )
+            inserted += cursor.rowcount
+    return inserted
+
+
 def init_wiki(root: Path) -> Path:
     root = Path(root).expanduser().resolve()
     for relative in ("raw", "wiki/sources", "wiki/targets", "wiki/comparisons"):
         (root / relative).mkdir(parents=True, exist_ok=True)
     for relative, text in {
         "schema.md": "# Attack Wiki schema\n\n"
-        "Evaluation-only knowledge. Never use this directory as an Attack planner input.\n\n"
+        "Source and benchmark knowledge is evaluation-only and never becomes Attack planner input. "
+        "Older independent black-box runtime candidates may supply coordinate-only scheduler priority; "
+        "they never supply payloads, response claims, credentials, or findings.\n\n"
         "`raw` holds immutable sanitized evidence inventories; `wiki` holds derived pages, "
         "a target catalog, comparisons and an append-only log.\n\n"
         "Kinds: runtime is post-run evidence, source is an operator baseline, benchmark "
