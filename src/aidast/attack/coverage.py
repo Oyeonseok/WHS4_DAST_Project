@@ -1405,15 +1405,40 @@ def claim_coverage_batch(
                           WHERE api.endpoint_id=c.endpoint_id
                             AND api.discovery_kind='api_spec_declaration'
                             AND json_valid(api.evidence_json)
-                            AND (
-                              lower(COALESCE(json_extract(api.evidence_json,'$.operation_summary'),''))
-                                LIKE '%vulnerab%'
-                              OR lower(COALESCE(json_extract(api.evidence_json,'$.operation_description'),''))
-                                LIKE '%vulnerab%'
-                              OR lower(COALESCE(json_extract(api.evidence_json,'$.operation_description'),''))
-                                LIKE '%injection%'
-                            )
+                            AND CASE c.vuln_class
+                              WHEN 'sqli' THEN
+                                lower(COALESCE(json_extract(api.evidence_json,'$.operation_description'),'')) LIKE '%sql%inject%'
+                                OR lower(COALESCE(json_extract(api.evidence_json,'$.operation_description'),'')) LIKE '%vulnerable to injection%'
+                              WHEN 'nosqli' THEN
+                                lower(COALESCE(json_extract(api.evidence_json,'$.operation_description'),'')) LIKE '%nosql%inject%'
+                              WHEN 'idor' THEN
+                                lower(COALESCE(json_extract(api.evidence_json,'$.operation_description'),'')) LIKE '%idor%'
+                                OR lower(COALESCE(json_extract(api.evidence_json,'$.operation_description'),'')) LIKE '%bola%'
+                                OR lower(COALESCE(json_extract(api.evidence_json,'$.operation_description'),'')) LIKE '%object%authoriz%'
+                              WHEN 'auth_bypass' THEN
+                                lower(COALESCE(json_extract(api.evidence_json,'$.operation_description'),'')) LIKE '%auth%bypass%'
+                                OR lower(COALESCE(json_extract(api.evidence_json,'$.operation_description'),'')) LIKE '%without%auth%'
+                              WHEN 'ssrf' THEN
+                                lower(COALESCE(json_extract(api.evidence_json,'$.operation_description'),'')) LIKE '%ssrf%'
+                                OR lower(COALESCE(json_extract(api.evidence_json,'$.operation_description'),'')) LIKE '%server%side%request%forg%'
+                              WHEN 'xss' THEN
+                                lower(COALESCE(json_extract(api.evidence_json,'$.operation_description'),'')) LIKE '%xss%'
+                                OR lower(COALESCE(json_extract(api.evidence_json,'$.operation_description'),'')) LIKE '%cross%site%script%'
+                              WHEN 'csrf' THEN
+                                lower(COALESCE(json_extract(api.evidence_json,'$.operation_description'),'')) LIKE '%csrf%'
+                                OR lower(COALESCE(json_extract(api.evidence_json,'$.operation_description'),'')) LIKE '%cross%site%request%forg%'
+                              ELSE
+                                lower(COALESCE(json_extract(api.evidence_json,'$.operation_description'),''))
+                                  LIKE '%' || replace(c.vuln_class,'_',' ') || '%'
+                            END
                       ) AS public_security_signal,
+                      CASE WHEN c.vuln_class IN
+                           ('sqli','nosqli','auth_bypass','session','brute_force')
+                           AND (
+                             lower(e.normalized_path) LIKE '%/login%'
+                             OR lower(e.normalized_path) LIKE '%/signin%'
+                             OR lower(e.normalized_path) LIKE '%/session%'
+                           ) THEN 1 ELSE 0 END AS login_security_signal,
                       ROW_NUMBER() OVER (
                           PARTITION BY c.status,c.vuln_class
                           ORDER BY e.normalized_path,c.coverage_id
@@ -1431,7 +1456,14 @@ def claim_coverage_batch(
            )
            SELECT * FROM ranked
            ORDER BY CASE status WHEN 'error_retryable' THEN 0 ELSE 1 END,
-                    public_security_signal DESC,
+                    CASE WHEN public_security_signal=1 OR login_security_signal=1
+                         THEN 0 ELSE 1 END,
+                    CASE
+                      WHEN (public_security_signal=1 OR login_security_signal=1)
+                           AND method='GET' THEN 0
+                      WHEN public_security_signal=1 OR login_security_signal=1 THEN 1
+                      ELSE 2
+                    END,
                     class_completed + class_rank,
                     CASE vuln_class
                         WHEN 'brute_force' THEN 90

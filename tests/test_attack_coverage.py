@@ -274,6 +274,62 @@ def test_captured_public_security_declaration_is_scheduled_first(tmp_path: Path)
 
     assert len(tasks) == 1
     assert tasks[0]["endpoint_id"] == endpoint_id
+    assert tasks[0]["vuln_class"] == "sqli"
+
+
+def test_public_security_declaration_prioritizes_matching_vulnerability_class(
+    tmp_path: Path,
+) -> None:
+    imported = imported_pipeline(tmp_path)
+    ensure_coverage_manifest(imported.pipeline_database, imported.scan_id)
+    with sqlite3.connect(imported.pipeline_database) as conn:
+        conn.row_factory = sqlite3.Row
+        endpoint_id = conn.execute(
+            "SELECT endpoint_id FROM endpoints ORDER BY endpoint_id DESC LIMIT 1"
+        ).fetchone()[0]
+        conn.execute(
+            """INSERT INTO endpoint_observations
+               (observation_id,endpoint_id,source_tool,discovery_kind,observed_url,
+                association_method,observed_at,evidence_json)
+               VALUES ('priority-bola',?,'openapi','api_spec_declaration',
+                       'https://lab.example/openapi.json','exact',
+                       '2026-10-05T00:00:00Z',?)""",
+            (endpoint_id, json.dumps({
+                "operation_description": "Intentionally vulnerable to BOLA",
+            })),
+        )
+        stage = start_stage_run(conn, scan_id=imported.scan_id, stage="attack")
+        tasks = claim_coverage_batch(
+            conn, scan_id=imported.scan_id, stage_run_id=stage, batch_size=1,
+        )
+
+    assert len(tasks) == 1
+    assert tasks[0]["endpoint_id"] == endpoint_id
+    assert tasks[0]["vuln_class"] == "idor"
+
+
+def test_login_injection_is_prioritized_without_a_public_security_hint(
+    tmp_path: Path,
+) -> None:
+    imported = imported_pipeline(tmp_path)
+    ensure_coverage_manifest(imported.pipeline_database, imported.scan_id)
+    with sqlite3.connect(imported.pipeline_database) as conn:
+        conn.row_factory = sqlite3.Row
+        endpoint_id = conn.execute(
+            "SELECT endpoint_id FROM endpoints WHERE method='POST' LIMIT 1"
+        ).fetchone()[0]
+        conn.execute(
+            "UPDATE endpoints SET normalized_path='/login' WHERE endpoint_id=?",
+            (endpoint_id,),
+        )
+        stage = start_stage_run(conn, scan_id=imported.scan_id, stage="attack")
+        tasks = claim_coverage_batch(
+            conn, scan_id=imported.scan_id, stage_run_id=stage, batch_size=1,
+        )
+
+    assert len(tasks) == 1
+    assert tasks[0]["endpoint_id"] == endpoint_id
+    assert tasks[0]["vuln_class"] == "sqli"
 
 
 def test_coverage_task_cannot_complete_without_a_durable_attempt(tmp_path: Path) -> None:
