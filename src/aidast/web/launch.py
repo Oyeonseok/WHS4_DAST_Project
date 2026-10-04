@@ -920,6 +920,10 @@ class ScanLaunchManager:
         except ScanNotFoundError:
             return
         with sqlite3.connect(database) as conn:
+            # Coverage lifecycle helpers address columns by name.  Dashboard
+            # cancellation previously opened the connection with tuple rows,
+            # causing post-Recon cancellation recovery itself to crash.
+            conn.row_factory = sqlite3.Row
             conn.execute("PRAGMA foreign_keys=ON")
             tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
             for stage_run_id, stage in conn.execute(

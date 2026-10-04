@@ -1567,11 +1567,22 @@ def test_scan_completion_log_reports_persisted_report_stage(tmp_path: Path) -> N
     events = projector.stored_events_after(SCAN_ID, 0)
     assert events[-1]["payload"]["stage"] == "Report"
     assert "through Report" in events[-1]["payload"]["message"]
-def test_scan_cancel_terminates_managed_process_and_persists_cancelled_state(tmp_path: Path) -> None:
+def test_scan_cancel_terminates_managed_process_and_persists_cancelled_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     database = _fixture(tmp_path)
     with sqlite3.connect(database) as conn:
         conn.execute("UPDATE scans SET status='running',finished_at=NULL WHERE scan_id=?", (SCAN_ID,))
-        conn.execute("UPDATE stage_runs SET status='running',finished_at=NULL WHERE scan_id=?", (SCAN_ID,))
+        conn.execute("UPDATE stage_runs SET stage='attack',status='running',finished_at=NULL WHERE scan_id=?", (SCAN_ID,))
+        conn.execute("CREATE TABLE attack_coverage_items (coverage_id TEXT)")
+    helper_row_factories: list[object] = []
+
+    def coverage_helper(conn: sqlite3.Connection, **_kwargs: object) -> int:
+        helper_row_factories.append(conn.row_factory)
+        return 0
+
+    monkeypatch.setattr("aidast.attack.coverage.fail_running_coverage", coverage_helper)
+    monkeypatch.setattr("aidast.attack.coverage.requeue_interrupted_coverage", coverage_helper)
     projector = DashboardProjector(tmp_path)
     manager = ScanLaunchManager(tmp_path, projector, project_root=tmp_path)
     finished = threading.Event()
@@ -1608,6 +1619,7 @@ def test_scan_cancel_terminates_managed_process_and_persists_cancelled_state(tmp
     with sqlite3.connect(database) as conn:
         assert conn.execute("SELECT status FROM scans WHERE scan_id=?", (SCAN_ID,)).fetchone()[0] == "cancelled"
         assert conn.execute("SELECT status FROM stage_runs WHERE scan_id=?", (SCAN_ID,)).fetchone()[0] == "cancelled"
+    assert helper_row_factories == [sqlite3.Row, sqlite3.Row]
     assert [log["payload"]["message_code"] for log in projector.stored_events_after(SCAN_ID, 0)
             if log["type"] == "log.appended"][-2:] == ["pipeline.cancel_requested", "pipeline.cancelled"]
     with pytest.raises(ValueError, match="no active process"):
