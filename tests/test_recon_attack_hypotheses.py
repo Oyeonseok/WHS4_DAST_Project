@@ -75,6 +75,9 @@ def test_normal_tags_create_parameter_bound_hypotheses_and_account_for_unknowns(
             ('query', 'q', 'unauthenticated'), ('query', 'q', 'unauthenticated')]
         assert conn.execute('PRAGMA foreign_key_check').fetchall() == []
     assert 'private-value' not in json.dumps(agent.contexts)
+    ordinary_observation = agent.contexts[0]['endpoints'][0]['observations'][0]
+    assert 'discovery_kind' not in ordinary_observation
+    assert 'evidence_json' not in ordinary_observation
 
 
 def test_black_box_planning_never_consumes_source_or_benchmark_answers(tmp_path):

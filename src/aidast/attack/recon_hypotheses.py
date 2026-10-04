@@ -98,7 +98,8 @@ def _contexts(conn: sqlite3.Connection, scan_id: str) -> Iterator[dict[str, Any]
         for observation in raw_observations:
             observation['observed_url'] = safe_url(observation['observed_url'] or '')
             declaration_evidence = {}
-            if observation.get('discovery_kind') == 'api_spec_declaration':
+            discovery_kind = observation.pop('discovery_kind', '')
+            if discovery_kind == 'api_spec_declaration':
                 try:
                     stored_evidence = json.loads(observation.pop('evidence_json') or '{}')
                 except (TypeError, ValueError):
