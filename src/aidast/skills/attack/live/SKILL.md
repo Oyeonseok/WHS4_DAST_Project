@@ -87,6 +87,11 @@ same temporary file.
    do not substitute another input or identity. Other applicable inputs and
    identities have independent coverage items. Source-import tasks retain
    their broader parameter-candidate behavior described below.
+   When a task also contains `planned_identity_role`, Recon originally planned
+   that role from passive evidence and the task's `required_identity_role` is
+   the corrected live execution role. Use the corrected role exactly. This
+   correction is allowed only for the supplied scanner-created disposable
+   local account and does not authorize another endpoint or mutation.
    For source-import tasks, inspect every entry in `parameter_candidates`
    and select the field(s) relevant
    to the active Hunt Skill. Use `source_context.active_annotation` as the

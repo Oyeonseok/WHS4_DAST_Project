@@ -17,6 +17,7 @@ from aidast.attack.coverage import (
     resolve_abandoned_attack_leads,
     transition_coverage,
     _credential_role,
+    _execution_identity_role,
     _task_context_facts,
     _task_fixtures,
 )
@@ -65,6 +66,31 @@ def test_control_differentials_receive_an_opaque_authenticated_reference(
     vuln_class: str,
 ) -> None:
     assert _credential_role(vuln_class, "unauthenticated") == "authenticated"
+
+
+def test_safe_local_mutation_rebinds_passive_identity_to_disposable_account() -> None:
+    references = [{
+        "credential_reference_id": "credref-synthetic",
+        "label": "synthetic",
+        "identity_role": "identity_synthetic",
+    }]
+    fixtures = [{
+        "fact_type": "owned_test_object",
+        "fact_value": {
+            "credential_label": "synthetic", "resource": "account",
+            "disposable": True, "cleanup_allowed": True,
+        },
+    }]
+    assert _execution_identity_role(
+        method="POST", normalized_path="/upload_profile_picture_url",
+        planned_role="unauthenticated", credential_references=references,
+        test_fixtures=fixtures,
+    ) == "authenticated"
+    assert _execution_identity_role(
+        method="POST", normalized_path="/transfer",
+        planned_role="unauthenticated", credential_references=references,
+        test_fixtures=fixtures,
+    ) == "unauthenticated"
 
 
 def test_brute_force_prefers_verifier_secret_over_replacement_password() -> None:
@@ -587,7 +613,7 @@ def test_coverage_task_exposes_all_db_parameters_and_source_context(tmp_path: Pa
     ).run(imported.scan_id)
 
     task = next(item for item in agent.calls[0]["attack_tasks"]
-                if item["vuln_class"] == "sqli")
+                if item["vuln_class"] == "sqli" and item["endpoint_id"] == endpoint_id)
     assert {(item["location"], item["name"]) for item in task["parameter_candidates"]} == {
         ("json", "display_name"), ("path", "user_id"), ("query", "q"),
     }

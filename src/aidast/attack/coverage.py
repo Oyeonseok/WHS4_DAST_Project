@@ -717,6 +717,48 @@ def _credential_role(vuln_class: str, required_role: str) -> str:
     return "authenticated"
 
 
+def _execution_identity_role(
+    *, method: str, normalized_path: str, planned_role: str,
+    credential_references: list[dict[str, str]],
+    test_fixtures: list[dict[str, Any]],
+) -> str:
+    """Bind a passive anonymous declaration to a safe disposable identity.
+
+    API specifications often omit authentication metadata.  For a narrow
+    reversible local mutation, an anonymous task that has a same-origin
+    scanner-created account should execute as authenticated instead of being
+    skipped after the live endpoint returns 401.  The original planned role is
+    retained separately on the task for auditability.
+    """
+    if (
+        planned_role != "unauthenticated"
+        or method not in {"POST", "PUT", "PATCH"}
+        or normalized_path.rstrip("/") not in {
+            "/upload_profile_picture", "/upload_profile_picture_url",
+            "/api/ai/chat",
+        }
+    ):
+        return planned_role
+    synthetic_labels = {
+        item.get("label") for item in credential_references
+        if item.get("identity_role") == "identity_synthetic"
+    }
+    if not synthetic_labels:
+        return planned_role
+    for fixture in test_fixtures:
+        value = fixture.get("fact_value")
+        if (
+            fixture.get("fact_type") == "owned_test_object"
+            and isinstance(value, dict)
+            and value.get("credential_label") in synthetic_labels
+            and value.get("resource") == "account"
+            and value.get("disposable") is True
+            and value.get("cleanup_allowed") is True
+        ):
+            return "authenticated"
+    return planned_role
+
+
 def _task_fixtures(
     conn: sqlite3.Connection, scan_id: str, *, parameter_name: str,
 ) -> list[dict[str, Any]]:
@@ -1063,11 +1105,27 @@ def _selected_http_evidence(
         if attempt['endpoint_id'] != coverage['endpoint_id']:
             return False
         method = conn.execute('SELECT method FROM endpoints WHERE endpoint_id=?', (coverage['endpoint_id'],)).fetchone()[0]
+        expected_identity = str(coverage['required_identity_role'])
+        task = conn.execute(
+            "SELECT payload_json FROM attack_tasks WHERE task_id=?", (task_id,),
+        ).fetchone()
+        if task is not None:
+            try:
+                payload = json.loads(task[0] or "{}")
+            except json.JSONDecodeError:
+                payload = {}
+            if payload.get("planned_identity_role") == expected_identity:
+                rebound = payload.get("required_identity_role")
+                if rebound in {"authenticated", "unauthenticated"}:
+                    expected_identity = rebound
         query += """ AND r.endpoint_reference_id=? AND r.method=? AND (
             (?='unauthenticated' AND json_extract(r.result_json,'$.credential_reference_id') IS NULL)
             OR (?='authenticated' AND json_extract(r.result_json,'$.credential_reference_id') IN (
                 SELECT credential_reference_id FROM credential_references WHERE scan_id=?)))"""
-        params += (coverage['endpoint_id'], method, coverage['required_identity_role'], coverage['required_identity_role'], coverage['scan_id'])
+        params += (
+            coverage['endpoint_id'], method, expected_identity,
+            expected_identity, coverage['scan_id'],
+        )
     for request in conn.execute(query, params):
         if request_ids is None or request[0] in request_ids:
             return True
@@ -1195,6 +1253,19 @@ def claim_coverage_batch(
         test_fixtures = _task_fixtures(
             conn, scan_id, parameter_name=str(row["parameter_name"]),
         )
+        planned_identity_role = str(row["required_identity_role"])
+        execution_identity_role = _execution_identity_role(
+            method=str(row["method"]),
+            normalized_path=str(row["normalized_path"]),
+            planned_role=planned_identity_role,
+            credential_references=credential_references,
+            test_fixtures=test_fixtures,
+        )
+        if execution_identity_role != planned_identity_role:
+            credential_references = [
+                item for item in credential_references
+                if item["identity_role"] == "identity_synthetic"
+            ]
         context_facts = _task_context_facts(
             conn, scan_id, endpoint_id=str(row["endpoint_id"]),
             parameter_name=str(row["parameter_name"]),
@@ -1220,7 +1291,8 @@ def claim_coverage_batch(
                 "injection_location": row["injection_location"],
                 "parameter_name": row["parameter_name"],
                 "parameter_candidates": parameter_candidates,
-                "required_identity_role": row["required_identity_role"],
+                "required_identity_role": execution_identity_role,
+                "planned_identity_role": planned_identity_role,
                 "credential_references": credential_references,
                 "test_fixtures": test_fixtures,
                 "context_facts": context_facts,
@@ -1247,7 +1319,8 @@ def claim_coverage_batch(
             "injection_location": row["injection_location"],
             "parameter_name": row["parameter_name"],
             "parameter_candidates": parameter_candidates,
-            "required_identity_role": row["required_identity_role"],
+            "required_identity_role": execution_identity_role,
+            "planned_identity_role": planned_identity_role,
             "credential_references": credential_references,
             "test_fixtures": test_fixtures,
             "context_facts": context_facts,
