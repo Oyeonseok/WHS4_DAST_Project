@@ -15,6 +15,7 @@ from aidast.attack.coverage import (
     requeue_auth_gated_negative_coverage,
     requeue_redacted_login_differential_coverage,
     requeue_interrupted_coverage,
+    requeue_owned_object_coverage,
     requeue_coverage,
     resolve_abandoned_attack_leads,
     transition_coverage,
@@ -1118,6 +1119,57 @@ def test_unauthenticated_word_is_not_misclassified_as_auth_blocker(tmp_path: Pat
     assert coverage_status(
         imported.pipeline_database, imported.scan_id,
     ).by_status == {"unsupported": 4}
+
+
+def test_owned_address_fixtures_reopen_old_no_evidence_terminal_item(
+    tmp_path: Path,
+) -> None:
+    imported = imported_pipeline(tmp_path)
+    ensure_coverage_manifest(imported.pipeline_database, imported.scan_id)
+    with sqlite3.connect(imported.pipeline_database) as conn, conn:
+        conn.row_factory = sqlite3.Row
+        stage = start_stage_run(conn, scan_id=imported.scan_id, stage="attack")
+        task = claim_coverage_batch(
+            conn, scan_id=imported.scan_id, stage_run_id=stage, batch_size=1,
+        )[0]
+        conn.execute(
+            "UPDATE endpoints SET normalized_path='/api/Addresss/{e}' WHERE endpoint_id=?",
+            (task["endpoint_id"],),
+        )
+        conn.execute(
+            """UPDATE attack_coverage_items
+               SET status='error_terminal',attempt_count=3,
+                   disposition_reason='retry limit reached without terminal evidence'
+               WHERE coverage_id=?""",
+            (task["coverage_id"],),
+        )
+        for index, label in enumerate(("fixture-a", "fixture-b"), 1):
+            register_credential_reference(
+                conn, scan_id=imported.scan_id, label=label,
+                reference_uri=f"env://AIDAST_FIXTURE_{index}",
+                identity_role="authenticated",
+            )
+            conn.execute(
+                """INSERT INTO attack_facts
+                   (fact_id,scan_id,fact_type,fact_key,fact_value,confidence)
+                   VALUES (?,?, 'owned_test_object',?,?,1.0)""",
+                (
+                    f"address-{index}", imported.scan_id,
+                    f"fixture-{index}.address_id",
+                    json.dumps({
+                        "credential_label": label,
+                        "resource": "address",
+                        "object_id": str(index),
+                        "disposable": True,
+                    }),
+                ),
+            )
+        assert requeue_owned_object_coverage(conn, imported.scan_id) == 1
+        row = conn.execute(
+            "SELECT status,attempt_count FROM attack_coverage_items WHERE coverage_id=?",
+            (task["coverage_id"],),
+        ).fetchone()
+        assert tuple(row) == ("pending", 0)
 
 
 def test_opaque_credentials_reopen_only_compatible_auth_blockers(

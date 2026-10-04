@@ -1419,6 +1419,11 @@ def requeue_owned_object_coverage(conn: sqlite3.Connection, scan_id: str) -> int
     remains final instead of looping forever.
     """
     facts_by_resource: dict[str, set[str]] = defaultdict(set)
+    credential_labels = {
+        str(row[0]) for row in conn.execute(
+            "SELECT label FROM credential_references WHERE scan_id=?", (scan_id,),
+        )
+    }
     for raw_value, in conn.execute(
         """SELECT fact_value FROM attack_facts
            WHERE scan_id=? AND fact_type='owned_test_object'""",
@@ -1435,30 +1440,38 @@ def requeue_owned_object_coverage(conn: sqlite3.Connection, scan_id: str) -> int
         object_id = value.get("object_id")
         if (
             isinstance(resource, str) and resource
-            and isinstance(label, str) and label
+            and isinstance(label, str) and label in credential_labels
             and isinstance(object_id, (str, int))
         ):
             facts_by_resource[str(resource)].add(str(label))
 
     rows = conn.execute(
-        """SELECT c.*,t.payload_json FROM attack_coverage_items c
+        """SELECT c.*,t.payload_json,e.normalized_path FROM attack_coverage_items c
            JOIN attack_tasks t ON t.task_id=c.last_task_id
-           WHERE c.scan_id=? AND c.status IN ('unsupported','policy_excluded')""",
+           JOIN endpoints e ON e.endpoint_id=c.endpoint_id
+           WHERE c.scan_id=? AND c.status IN
+             ('unsupported','policy_excluded','error_retryable','error_terminal')""",
         (scan_id,),
     ).fetchall()
     reopened = 0
     for row in rows:
         reason = " ".join(str(row["disposition_reason"] or "").casefold().split())
+        path = str(row["normalized_path"] or "").casefold()
+        no_evidence = "without terminal evidence" in reason or "without terminal coverage evidence" in reason
         resource = None
-        if "address" in reason and any(marker in reason for marker in (
-            "no owned", "no supplied", "no observed", "no captured", "has no observed",
-        )):
+        if (
+            "address" in reason
+            and any(marker in reason for marker in (
+                "no owned", "no supplied", "no observed", "no captured", "has no observed",
+            ))
+        ) or ("/api/addresss" in path and no_evidence):
             resource = "address"
-        elif any(marker in reason for marker in ("basketitems", "basket item")) and any(
-            marker in reason for marker in (
+        elif (
+            any(marker in reason for marker in ("basketitems", "basket item"))
+            and any(marker in reason for marker in (
                 "no owned", "no supplied", "no captured", "lacks a task-created",
-            )
-        ):
+            ))
+        ) or ("/api/basketitems" in path and no_evidence):
             resource = "basket_item"
         if resource is None:
             continue
