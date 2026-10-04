@@ -322,6 +322,9 @@ def test_login_injection_is_prioritized_without_a_public_security_hint(
             "UPDATE endpoints SET normalized_path='/login' WHERE endpoint_id=?",
             (endpoint_id,),
         )
+        conn.execute(
+            "UPDATE endpoints SET normalized_path='/login' WHERE method='GET'",
+        )
         stage = start_stage_run(conn, scan_id=imported.scan_id, stage="attack")
         tasks = claim_coverage_batch(
             conn, scan_id=imported.scan_id, stage_run_id=stage, batch_size=1,
