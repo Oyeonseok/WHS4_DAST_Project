@@ -1371,12 +1371,12 @@ def requeue_transient_model_failures(
     from aidast.agents.failure_diagnostics import is_model_capacity_error
 
     rows = conn.execute(
-        """SELECT c.*,s.error_message AS stage_error
+        """SELECT c.*,s.error_message AS stage_error,
+                  t.error_message AS task_error
            FROM attack_coverage_items c
            JOIN attack_tasks t ON t.task_id=c.last_task_id
            JOIN stage_runs s ON s.stage_run_id=c.last_stage_run_id
            WHERE c.scan_id=? AND c.status IN ('error_retryable','error_terminal')
-             AND s.status='failed'
              AND NOT EXISTS (
                  SELECT 1 FROM attack_attempts a WHERE a.task_id=t.task_id
              )
@@ -1387,7 +1387,9 @@ def requeue_transient_model_failures(
     ).fetchall()
     reopened = 0
     for row in rows:
-        error = str(row["stage_error"] or "")
+        error = "\n".join(filter(None, (
+            str(row["stage_error"] or ""), str(row["task_error"] or ""),
+        )))
         normalized = error.casefold()
         if not (
             is_model_capacity_error(error)
@@ -2101,7 +2103,8 @@ def requeue_interrupted_coverage(
     """
     rows = conn.execute(
         """SELECT * FROM attack_coverage_items
-           WHERE last_stage_run_id=? AND status='error_retryable'""",
+           WHERE last_stage_run_id=?
+             AND status IN ('error_retryable','error_terminal')""",
         (stage_run_id,),
     ).fetchall()
     for row in rows:

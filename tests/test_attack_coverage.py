@@ -16,6 +16,7 @@ from aidast.attack.coverage import (
     requeue_redacted_login_differential_coverage,
     requeue_interrupted_coverage,
     requeue_owned_object_coverage,
+    requeue_transient_model_failures,
     requeue_coverage,
     resolve_abandoned_attack_leads,
     transition_coverage,
@@ -217,7 +218,10 @@ def test_manifest_has_one_item_per_source_annotation_and_is_idempotent(tmp_path:
         ).fetchone() == (4,)
 
 
-def test_operator_interruption_releases_coverage_without_retry_isolation(tmp_path: Path) -> None:
+@pytest.mark.parametrize("attempt_count", [1, 3])
+def test_operator_interruption_releases_coverage_without_retry_isolation(
+    tmp_path: Path, attempt_count: int,
+) -> None:
     imported = imported_pipeline(tmp_path)
     ensure_coverage_manifest(imported.pipeline_database, imported.scan_id)
     with sqlite3.connect(imported.pipeline_database) as conn:
@@ -231,8 +235,8 @@ def test_operator_interruption_releases_coverage_without_retry_isolation(tmp_pat
             endpoint_id=row["endpoint_id"], payload={"coverage_id": row["coverage_id"]},
         )
         conn.execute(
-            "UPDATE attack_coverage_items SET attempt_count=1 WHERE coverage_id=?",
-            (row["coverage_id"],),
+            "UPDATE attack_coverage_items SET attempt_count=? WHERE coverage_id=?",
+            (attempt_count, row["coverage_id"]),
         )
         transition_coverage(
             conn, row["coverage_id"], "running", "claimed",
@@ -248,7 +252,47 @@ def test_operator_interruption_releases_coverage_without_retry_isolation(tmp_pat
             """SELECT status,attempt_count,last_stage_run_id,last_task_id
                FROM attack_coverage_items WHERE coverage_id=?""",
             (row["coverage_id"],),
-        ).fetchone()) == ("pending", 0, None, None)
+        ).fetchone()) == ("pending", attempt_count - 1, None, None)
+
+
+def test_task_level_capacity_failure_reopens_without_evidence_attempt(
+    tmp_path: Path,
+) -> None:
+    imported = imported_pipeline(tmp_path)
+    ensure_coverage_manifest(imported.pipeline_database, imported.scan_id)
+    with sqlite3.connect(imported.pipeline_database) as conn, conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT * FROM attack_coverage_items ORDER BY coverage_id LIMIT 1"
+        ).fetchone()
+        stage = start_stage_run(conn, scan_id=imported.scan_id, stage="attack")
+        task = create_task(
+            conn, stage_run_id=stage, skill_name=row["skill_name"],
+            endpoint_id=row["endpoint_id"], payload={"coverage_id": row["coverage_id"]},
+        )
+        conn.execute(
+            """UPDATE attack_tasks SET status='cancelled',finished_at=CURRENT_TIMESTAMP,
+                      error_message='Attack model capacity was temporarily unavailable'
+               WHERE task_id=?""",
+            (task,),
+        )
+        conn.execute(
+            """UPDATE stage_runs SET status='completed',finished_at=CURRENT_TIMESTAMP
+               WHERE stage_run_id=?""",
+            (stage,),
+        )
+        conn.execute(
+            """UPDATE attack_coverage_items
+               SET status='error_terminal',attempt_count=3,
+                   disposition_reason='retry limit reached without terminal evidence',
+                   last_stage_run_id=?,last_task_id=? WHERE coverage_id=?""",
+            (stage, task, row["coverage_id"]),
+        )
+        assert requeue_transient_model_failures(conn, imported.scan_id) == 1
+        assert tuple(conn.execute(
+            "SELECT status,attempt_count FROM attack_coverage_items WHERE coverage_id=?",
+            (row["coverage_id"],),
+        ).fetchone()) == ("pending", 0)
 
 
 def test_captured_public_security_declaration_is_scheduled_first(tmp_path: Path) -> None:
