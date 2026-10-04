@@ -1275,9 +1275,13 @@ approved local training application; Scope.md and TargetPolicy.json are the
 authoritative authorization and safety boundaries. Use only the brokered,
 policy-checked helpers. Each task is one bounded, non-destructive black-box
 control against the recorded target. Do not perform bulk credential guessing,
-denial of service, persistence, malware, evasion, or third-party access. Never
-perform the tests yourself and never launch another codex exec process. Return
-only the required structured result.
+denial of service, persistence on an existing or non-disposable identity,
+malware, evasion, or third-party access. When Scope explicitly authorizes
+scanner-created synthetic accounts on a disposable loopback lab, creating one
+fresh scanner-owned synthetic administrator is fixture creation, not prohibited
+persistence; never modify or delete an existing administrator. Never perform
+the tests yourself and never launch another codex exec process. Return only the
+required structured result.
 """
             command = [
                 executable,

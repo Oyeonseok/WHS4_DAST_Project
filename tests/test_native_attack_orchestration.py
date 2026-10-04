@@ -460,6 +460,10 @@ class NativeAttackMainAgentTests(unittest.TestCase):
                 self.assertIn('model = "gpt-6-luna"', agent_config)
                 self.assertIn("$aidast-policy", agent_config)
                 self.assertIn("$aidast-policy", kwargs["input"])
+                self.assertIn(
+                    "fresh scanner-owned synthetic administrator",
+                    kwargs["input"],
+                )
                 self.assertTrue((work / ".agents/skills/aidast-policy/SKILL.md").is_file())
                 self.assertIn("Sensitive data", (work / "TargetPolicy.json").read_text())
                 self.assertEqual((work / "scope.md").read_bytes(), scope.read_bytes())
