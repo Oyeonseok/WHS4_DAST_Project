@@ -13,6 +13,7 @@ from aidast.attack.coverage import (
     coverage_status,
     ensure_coverage_manifest,
     reconcile_coverage_batch,
+    release_unattempted_coverage,
     resolve_abandoned_attack_leads,
     transition_coverage,
 )
@@ -181,6 +182,15 @@ class ExhaustiveAttackCoordinator:
                         conn, task["task_id"], status="cancelled",
                         error_message=reason,
                     )
+                release_unattempted_coverage(
+                    conn, stage_run_id=stage_run_id, reason=reason,
+                )
+                if model_capacity:
+                    activate_fallback = getattr(
+                        self.agent, "activate_attack_fallback_model", None,
+                    )
+                    if callable(activate_fallback):
+                        activate_fallback()
             if policy_refusal:
                 open_leads = conn.execute(
                     """SELECT COUNT(*) FROM attack_attempts a

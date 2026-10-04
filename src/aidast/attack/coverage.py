@@ -739,6 +739,7 @@ def ensure_coverage_manifest(database: Path, scan_id: str) -> CoverageManifestRe
         _adopt_existing_findings(conn, scan_id)
         reclassify_misclassified_auth_blockers(conn, scan_id)
         requeue_credential_blocked_coverage(conn, scan_id)
+        requeue_transient_model_failures(conn, scan_id)
         requeue_new_disposable_identity_coverage(conn, scan_id)
         requeue_owned_object_coverage(conn, scan_id)
         requeue_safe_session_binding_coverage(conn, scan_id)
@@ -1327,6 +1328,84 @@ def requeue_redacted_login_differential_coverage(
                 "secret-shape assertions can now validate the redacted login differential",
                 now(), row["coverage_id"],
             ),
+        )
+        reopened += 1
+    return reopened
+
+
+def release_unattempted_coverage(
+    conn: sqlite3.Connection, *, stage_run_id: str, reason: str,
+) -> int:
+    """Release model-failed leases that produced no request or attempt."""
+    rows = conn.execute(
+        """SELECT c.* FROM attack_coverage_items c
+           WHERE c.last_stage_run_id=? AND c.status='running'
+             AND NOT EXISTS (
+                 SELECT 1 FROM attack_attempts a WHERE a.task_id=c.last_task_id
+             )
+             AND NOT EXISTS (
+                 SELECT 1 FROM attack_http_requests r WHERE r.task_id=c.last_task_id
+             )""",
+        (stage_run_id,),
+    ).fetchall()
+    for row in rows:
+        _event(
+            conn, row, "pending", reason,
+            stage_run_id=stage_run_id, task_id=row["last_task_id"],
+        )
+        conn.execute(
+            """UPDATE attack_coverage_items
+               SET status='pending',disposition_reason=?,
+                   attempt_count=MAX(0,attempt_count-1),
+                   last_stage_run_id=NULL,last_task_id=NULL,updated_at=?
+               WHERE coverage_id=?""",
+            (reason, now(), row["coverage_id"]),
+        )
+    return len(rows)
+
+
+def requeue_transient_model_failures(
+    conn: sqlite3.Connection, scan_id: str,
+) -> int:
+    """Repair old terminal coverage created by a no-work model outage."""
+    from aidast.agents.failure_diagnostics import is_model_capacity_error
+
+    rows = conn.execute(
+        """SELECT c.*,s.error_message AS stage_error
+           FROM attack_coverage_items c
+           JOIN attack_tasks t ON t.task_id=c.last_task_id
+           JOIN stage_runs s ON s.stage_run_id=c.last_stage_run_id
+           WHERE c.scan_id=? AND c.status IN ('error_retryable','error_terminal')
+             AND s.status='failed'
+             AND NOT EXISTS (
+                 SELECT 1 FROM attack_attempts a WHERE a.task_id=t.task_id
+             )
+             AND NOT EXISTS (
+                 SELECT 1 FROM attack_http_requests r WHERE r.task_id=t.task_id
+             )""",
+        (scan_id,),
+    ).fetchall()
+    reopened = 0
+    for row in rows:
+        error = str(row["stage_error"] or "")
+        normalized = error.casefold()
+        if not (
+            is_model_capacity_error(error)
+            or "no-progress deadline" in normalized
+            or "idle timeout" in normalized
+        ):
+            continue
+        reason = "transient model outage produced no Attack evidence; retry with fallback"
+        _event(
+            conn, row, "pending", reason,
+            stage_run_id=row["last_stage_run_id"], task_id=row["last_task_id"],
+        )
+        conn.execute(
+            """UPDATE attack_coverage_items
+               SET status='pending',disposition_reason=?,attempt_count=0,
+                   last_stage_run_id=NULL,last_task_id=NULL,updated_at=?
+               WHERE coverage_id=?""",
+            (reason, now(), row["coverage_id"]),
         )
         reopened += 1
     return reopened

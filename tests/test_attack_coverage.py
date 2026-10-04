@@ -968,6 +968,12 @@ def test_structured_model_capacity_result_retries_without_failing_pipeline(
     imported = imported_pipeline(tmp_path)
 
     class StructuredCapacityOnceAgent(UnsupportedCoverageAgent):
+        fallback_activated = False
+
+        def activate_attack_fallback_model(self):
+            self.fallback_activated = True
+            return True
+
         def run_attack_orchestrator(self, **kwargs):
             if not self.calls:
                 self.calls.append(kwargs)
@@ -988,6 +994,8 @@ def test_structured_model_capacity_result_retries_without_failing_pipeline(
     ).run(imported.scan_id)
 
     assert len(agent.calls) > 1
+    assert agent.fallback_activated is True
+    assert len(agent.calls[1]["attack_tasks"]) == 2
     assert result.coverage["by_status"] == {"unsupported": 4}
     with sqlite3.connect(imported.pipeline_database) as conn:
         assert conn.execute(
