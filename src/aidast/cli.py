@@ -57,7 +57,12 @@ from aidast.pipeline.model_settings import (
     MODEL_SETTINGS_FILE, ScanModelChoices, scan_model_settings_path, write_scan_model_choices,
 )
 from aidast.paths import RESULT_ROOT
-from aidast.core.model_calls import SQLiteModelCallSink, model_call_context, using_model_call_sink
+from aidast.core.model_calls import (
+    SQLiteModelCallSink,
+    close_abandoned_model_calls,
+    model_call_context,
+    using_model_call_sink,
+)
 from aidast.reporting import (
     CaseReportAgent,
     CaseReportError,
@@ -2580,6 +2585,7 @@ def _run_resume(args: argparse.Namespace, *, report_writer: object | None = None
         # model record, and restore the private record from a verified handoff.
         write_scan_model_choices(scan_model_settings_path(args.result_root, plan.scan_id),
                                  scan_id=plan.scan_id, models=plan.models)
+        close_abandoned_model_calls(args.result_root, plan.scan_id)
     except (OSError, ValueError, sqlite3.Error) as exc:
         raise MainAgentError(f"scan cannot resume: {exc}") from exc
     print(f"Resuming {plan.scan_id} from {plan.stage}", flush=True)

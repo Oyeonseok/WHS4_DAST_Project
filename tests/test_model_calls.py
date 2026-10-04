@@ -14,7 +14,9 @@ from fastapi.testclient import TestClient
 from pydantic import BaseModel
 
 from aidast.core.model_calls import (
+    ModelCallEvent,
     SQLiteModelCallSink,
+    close_abandoned_model_calls,
     logged_model_call,
     model_call_context,
     read_model_call_events,
@@ -34,6 +36,29 @@ class ModelCallLogTests(unittest.TestCase):
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
         self.database = self.root / "logs" / "CodexCalls.db"
+
+    def test_resume_closes_abandoned_started_calls_append_only(self) -> None:
+        sink = SQLiteModelCallSink(self.root)
+        sink.append(ModelCallEvent(
+            call_id='a' * 32, state='started',
+            occurred_at='2026-01-01T00:00:00+00:00',
+            scan_id='scan-1', stage='Attack', stage_run_id='stage-1',
+            task_id=None, case_id=None, scope_job_id=None,
+            operation_code='attack_orchestrator',
+            invocation_kind='attack_orchestrator', requested_model='gpt-6-sol',
+            elapsed_ms=None, error_code=None, input_tokens=None,
+            cached_input_tokens=None, output_tokens=None,
+            usage_status='not_captured', input_summary={'task_count': 8},
+            result_summary={},
+        ))
+
+        self.assertEqual(close_abandoned_model_calls(self.root, 'scan-1'), 1)
+        self.assertEqual(close_abandoned_model_calls(self.root, 'scan-1'), 0)
+        events, _ = read_model_call_events(self.root)
+        self.assertEqual([event['state'] for event in events], ['error', 'started'])
+        self.assertEqual(events[0]['error_code'], 'agent_error')
+        self.assertEqual(events[0]['usage_status'], 'absent')
+        self.assertEqual(events[0]['input_summary'], {'task_count': 8})
 
     def test_scope_policy_call_records_safe_work_summary_and_clears_scan_linkage(self) -> None:
         class Result(BaseModel):

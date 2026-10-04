@@ -414,6 +414,71 @@ def read_model_call_events(
     return events, next_before
 
 
+def close_abandoned_model_calls(result_root: Path, scan_id: str) -> int:
+    """Append terminal errors for calls left open by a dead scan process.
+
+    Resume invokes this only after the persisted pipeline has established that
+    the prior worker is no longer active.  History stays append-only: the
+    original ``started`` row is retained and a matching terminal row records
+    the interruption without inventing token usage.
+    """
+    if not isinstance(scan_id, str) or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", scan_id):
+        raise ValueError("invalid scan identifier")
+    database = Path(result_root) / "logs" / "CodexCalls.db"
+    if not database.is_file():
+        return 0
+    closed = 0
+    finished_at = datetime.now(UTC)
+    with sqlite3.connect(database, timeout=3) as conn:
+        conn.row_factory = sqlite3.Row
+        conn.executescript(_SCHEMA)
+        rows = conn.execute(
+            """SELECT started.* FROM codex_call_events started
+               WHERE started.scan_id=? AND started.state='started'
+                 AND NOT EXISTS (
+                     SELECT 1 FROM codex_call_events terminal
+                     WHERE terminal.call_id=started.call_id
+                       AND terminal.state IN ('success','error')
+                 )
+               ORDER BY started.event_id""",
+            (scan_id,),
+        ).fetchall()
+        for row in rows:
+            try:
+                began_at = datetime.fromisoformat(str(row["occurred_at"]))
+                elapsed_ms = max(0, int((finished_at - began_at).total_seconds() * 1000))
+                input_summary = json.loads(row["input_summary"] or "{}")
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+            event = ModelCallEvent(
+                call_id=str(row["call_id"]), state="error",
+                occurred_at=finished_at.isoformat(),
+                scan_id=scan_id, stage=row["stage"],
+                stage_run_id=row["stage_run_id"], task_id=row["task_id"],
+                case_id=row["case_id"], scope_job_id=row["scope_job_id"],
+                operation_code=str(row["operation_code"]),
+                invocation_kind=str(row["invocation_kind"]),
+                requested_model=row["requested_model"], elapsed_ms=elapsed_ms,
+                error_code="agent_error", input_tokens=None,
+                cached_input_tokens=None, output_tokens=None,
+                usage_status="absent", input_summary=input_summary,
+                result_summary={},
+            )
+            data = {name: getattr(event, name) for name in _FIELDS}
+            _validate_row(data)
+            values = tuple(
+                json.dumps(data[name]) if name in _SUMMARY_KEYS else data[name]
+                for name in _FIELDS
+            )
+            cursor = conn.execute(
+                f"INSERT OR IGNORE INTO codex_call_events ({','.join(_FIELDS)}) "
+                f"VALUES ({','.join('?' for _ in _FIELDS)})",
+                values,
+            )
+            closed += cursor.rowcount
+    return closed
+
+
 _SCAN_STAGES = ("Recon", "Attack", "Chaining", "Validation", "Report")
 _TOKEN_FIELDS = (
     "input_tokens", "output_tokens", "total_tokens", "measured_calls", "unreported_calls",
