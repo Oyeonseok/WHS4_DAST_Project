@@ -23,6 +23,7 @@ from aidast.auth.codex import CodexAuth, CodexAuthError
 from aidast.core import codex_process
 from aidast.agents.policy_guidance import policy_skill_text, stage_policy_skill
 from aidast.agents.failure_diagnostics import (
+    is_model_capacity_error,
     is_model_policy_refusal,
     persisted_work_snapshot,
     preserve_native_failure,
@@ -973,7 +974,14 @@ Reuse compatible input keys; never invent operator values or confirmations.
         *, method: str, origin: str, normalized_path: str,
         risk_class: str, payload_json: str,
     ) -> bool:
-        """Approve a narrow reversible mutation on a scanner-created identity."""
+        """Approve a bounded mutation against an owned disposable loopback fixture.
+
+        The web launcher has no terminal on which to answer an authorization
+        prompt. Local benchmark tasks carry approved credential references and
+        owned disposable fixtures in their durable payload, so those bindings
+        form the non-interactive approval boundary. DELETE remains interactive
+        because its exact resource ownership needs separate proof.
+        """
         try:
             parsed = urlsplit(origin)
             payload = json.loads(payload_json or "{}")
@@ -984,19 +992,13 @@ Reuse compatible input keys; never invent operator values or confirmations.
             parsed.scheme not in {"http", "https"}
             or host not in {"127.0.0.1", "::1", "localhost"}
             or method not in {"POST", "PUT", "PATCH"}
-            or risk_class != "external_side_effect"
+            or risk_class not in {
+                "application_mutation", "test_resource_create",
+                "external_side_effect",
+            }
         ):
             return False
-        path = normalized_path.casefold()
-        denied = (
-            "/admin", "delete", "password", "forgot", "reset", "transfer",
-            "payment", "charge", "loan",
-        )
-        if any(token in path for token in denied):
-            return False
-        if not any(token in path for token in (
-            "upload_profile", "/profile", "/avatar", "/api/ai/chat",
-        )):
+        if not normalized_path.startswith("/"):
             return False
         references = payload.get("credential_references")
         fixtures = payload.get("test_fixtures")
@@ -1344,6 +1346,8 @@ only the required structured result.
                 error.failure_code = (
                     "model_policy_refusal"
                     if is_model_policy_refusal(diagnostic_text)
+                    else "model_capacity"
+                    if is_model_capacity_error(diagnostic_text)
                     else code
                 )
                 saved = preserve_native_failure(

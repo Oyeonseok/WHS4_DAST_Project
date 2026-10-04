@@ -11,7 +11,10 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from aidast.agents.main import CodexMainAgent
-from aidast.agents.native_pipeline import _bind_pipeline_database_reference
+from aidast.agents.native_pipeline import (
+    CodexMainAgent as NativePipelineAgent,
+    _bind_pipeline_database_reference,
+)
 from aidast.attack.db_cli import (
     commit_attempt, commit_finding, query, resolve_attempt, transition_task,
 )
@@ -304,6 +307,58 @@ class NativeAttackMainAgentTests(unittest.TestCase):
                 details["decision_source"],
                 "scanner_created_loopback_identity",
             )
+
+    def test_owned_loopback_high_impact_post_is_auto_approved(self) -> None:
+        payload = json.dumps({
+            "credential_references": [{
+                "label": "fixture:identity_synthetic",
+                "identity_role": "identity_synthetic",
+            }],
+            "test_fixtures": [{
+                "fact_type": "owned_test_object",
+                "fact_value": {
+                    "credential_label": "fixture:identity_synthetic",
+                    "resource": "account",
+                    "disposable": True,
+                    "cleanup_allowed": True,
+                },
+            }],
+        })
+        for path in ("/api/v3/forgot-password", "/admin/create_admin", "/api/payments"):
+            with self.subTest(path=path):
+                self.assertTrue(NativePipelineAgent._synthetic_loopback_auto_approval(
+                    method="POST", origin="http://127.0.0.1:5002",
+                    normalized_path=path, risk_class="external_side_effect",
+                    payload_json=payload,
+                ))
+
+    def test_owned_loopback_auto_approval_keeps_destructive_boundaries(self) -> None:
+        payload = json.dumps({
+            "credential_references": [{
+                "label": "fixture:identity_synthetic",
+                "identity_role": "identity_synthetic",
+            }],
+            "test_fixtures": [{
+                "fact_type": "owned_test_object",
+                "fact_value": {
+                    "credential_label": "fixture:identity_synthetic",
+                    "resource": "account",
+                    "disposable": True,
+                    "cleanup_allowed": True,
+                },
+            }],
+        })
+        cases = (
+            ("DELETE", "http://127.0.0.1:5002", "test_resource_delete"),
+            ("POST", "https://example.test", "external_side_effect"),
+            ("POST", "http://127.0.0.1:5002", "destructive_or_bulk"),
+        )
+        for method, origin, risk_class in cases:
+            with self.subTest(method=method, origin=origin, risk_class=risk_class):
+                self.assertFalse(NativePipelineAgent._synthetic_loopback_auto_approval(
+                    method=method, origin=origin, normalized_path="/api/resource",
+                    risk_class=risk_class, payload_json=payload,
+                ))
 
     def test_attack_authorization_prompt_is_resolved_once_and_audited(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

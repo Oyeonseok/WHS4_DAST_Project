@@ -13,8 +13,8 @@ import httpx
 import pytest
 
 from aidast.agents.failure_diagnostics import (
-    compare_persisted_work, is_model_policy_refusal, persisted_work_snapshot,
-    preserve_native_failure,
+    compare_persisted_work, is_model_capacity_error, is_model_policy_refusal,
+    persisted_work_snapshot, preserve_native_failure,
 )
 from aidast.agents.native_pipeline import CodexMainAgent, MainAgentError
 from aidast.core.codex_process import CodexProcessTimeout
@@ -38,6 +38,13 @@ def test_application_safety_review_is_not_a_model_policy_refusal() -> None:
     assert not is_model_policy_refusal(
         "The application safety review flagged a missing transaction control."
     )
+
+
+def test_model_capacity_error_is_distinct_from_application_capacity() -> None:
+    assert is_model_capacity_error(
+        "Selected model is at capacity. Please try a different model."
+    )
+    assert not is_model_capacity_error("request governor has no remaining capacity")
 
 
 @pytest.fixture
@@ -182,7 +189,7 @@ def test_private_diagnostics_reject_a_symlink_directory(database: Path, tmp_path
 
 @pytest.mark.parametrize("failure_kind,progress", [
     ("nonzero", False), ("nonzero", True), ("jsonl_only", False), ("timeout", False),
-    ("policy", False), ("policy_event", False),
+    ("policy", False), ("policy_event", False), ("capacity", False),
 ])
 def test_native_failure_captures_outputs_once_and_never_retries(
     database: Path, tmp_path: Path, failure_kind: str, progress: bool,
@@ -198,6 +205,8 @@ def test_native_failure_captures_outputs_once_and_never_retries(
         '{"type":"turn.failed","error":"private-jsonl-token"}\n'
     )
     stderr = "tool editor diagnostic" if failure_kind == "policy_event" else (
+        "Selected model is at capacity. Please try a different model."
+        if failure_kind == "capacity" else
         "" if failure_kind == "jsonl_only" else (
         "This content was flagged for possible cybersecurity risk."
         if failure_kind == "policy" else "detail\n" * 1000 + "private-stderr-token\n"
@@ -230,6 +239,7 @@ def test_native_failure_captures_outputs_once_and_never_retries(
     error = caught.value
     assert getattr(error, "failure_code", None) == (
         "model_policy_refusal" if failure_kind in {"policy", "policy_event"}
+        else "model_capacity" if failure_kind == "capacity"
         else "timeout" if failure_kind == "timeout" else "nonzero_exit"
     )
     assert error.failure_diagnostics["classification"] == (

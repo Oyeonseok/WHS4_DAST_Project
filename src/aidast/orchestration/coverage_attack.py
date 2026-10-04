@@ -138,7 +138,9 @@ class ExhaustiveAttackCoordinator:
                 raise
             except BaseException as exc:
                 can_continue = self._recover_failed_batch(stage_run_id, exc)
-                if getattr(exc, "failure_code", None) == "model_policy_refusal" and can_continue:
+                if getattr(exc, "failure_code", None) in {
+                    "model_policy_refusal", "model_capacity",
+                } and can_continue:
                     continue
                 raise
         return self._finish_result(scan_id, stages)
@@ -159,6 +161,22 @@ class ExhaustiveAttackCoordinator:
             conn.row_factory = sqlite3.Row
             conn.execute("PRAGMA foreign_keys=ON")
             policy_refusal = getattr(exc, "failure_code", None) == "model_policy_refusal"
+            model_capacity = getattr(exc, "failure_code", None) == "model_capacity"
+            if model_capacity:
+                task_rows = conn.execute(
+                    """SELECT task_id,status FROM attack_tasks
+                       WHERE stage_run_id=? AND status IN ('pending','running')""",
+                    (stage_run_id,),
+                ).fetchall()
+                reason = (
+                    "Attack model capacity was temporarily unavailable; "
+                    "retry this coverage item in a fresh bounded batch."
+                )
+                for task in task_rows:
+                    transition_task(
+                        conn, task["task_id"], status="cancelled",
+                        error_message=reason,
+                    )
             if policy_refusal:
                 open_leads = conn.execute(
                     """SELECT COUNT(*) FROM attack_attempts a
@@ -235,7 +253,7 @@ class ExhaustiveAttackCoordinator:
             ).fetchone()[0]
             can_continue = not (open_leads or unknown_requests or incomplete_tasks)
             recoverable = (
-                isinstance(exc, AttackBatchFailure) or policy_refusal
+                isinstance(exc, AttackBatchFailure) or policy_refusal or model_capacity
             ) and can_continue
             row = conn.execute(
                 "SELECT status FROM stage_runs WHERE stage_run_id=?",

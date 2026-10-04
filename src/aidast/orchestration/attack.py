@@ -9,7 +9,7 @@ from contextlib import closing
 from pathlib import Path
 
 from aidast.agents.main import CodexMainAgent
-from aidast.agents.failure_diagnostics import is_model_policy_refusal
+from aidast.agents.failure_diagnostics import is_model_capacity_error, is_model_policy_refusal
 from aidast.attack.models import AttackStageResult
 from aidast.attack.skill_selector import (
     available_attack_skill_names,
@@ -404,6 +404,8 @@ class AttackCoordinator:
             )
             if is_model_policy_refusal(reason):
                 failure.failure_code = "model_policy_refusal"
+            elif is_model_capacity_error(reason):
+                failure.failure_code = "model_capacity"
             raise failure
         incomplete_tasks = [task_id for task_id, status in task_rows if status not in {"completed", "skipped"}]
         if incomplete_tasks:

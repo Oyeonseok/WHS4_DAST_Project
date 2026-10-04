@@ -26,6 +26,12 @@ _MODEL_POLICY_REFUSAL_MARKERS = (
     "safety policy refusal",
 )
 
+_MODEL_CAPACITY_MARKERS = (
+    "selected model is at capacity",
+    "model is at capacity",
+    "model capacity is temporarily unavailable",
+)
+
 
 def is_model_policy_refusal(message: str) -> bool:
     """Recognize bounded model safety refusals across transport summaries."""
@@ -40,6 +46,12 @@ def is_model_policy_refusal(message: str) -> bool:
         and "safety review" in normalized
         and any(marker in normalized for marker in ("flagged", "rejected", "refused"))
     )
+
+
+def is_model_capacity_error(message: str) -> bool:
+    """Recognize transient model-capacity failures without matching app limits."""
+    normalized = message.casefold()
+    return any(marker in normalized for marker in _MODEL_CAPACITY_MARKERS)
 
 
 def persisted_work_snapshot(database: Path, *, scan_id: str, stage_run_id: str) -> dict[str, Any]:

@@ -923,6 +923,36 @@ def test_model_policy_refusal_without_requests_is_terminal_and_other_batches_con
         ).fetchall() == [("completed",)]
 
 
+def test_transient_model_capacity_retries_without_failing_pipeline(tmp_path: Path) -> None:
+    imported = imported_pipeline(tmp_path)
+
+    class CapacityOnceAgent(UnsupportedCoverageAgent):
+        def run_attack_orchestrator(self, **kwargs):
+            if not self.calls:
+                self.calls.append(kwargs)
+                error = RuntimeError(
+                    "Selected model is at capacity. Please try a different model."
+                )
+                error.failure_code = "model_capacity"
+                raise error
+            return super().run_attack_orchestrator(**kwargs)
+
+    agent = CapacityOnceAgent()
+    result = ExhaustiveAttackCoordinator(
+        agent=agent, db_path=imported.pipeline_database,
+        scope_path=imported.recon_database.parent / "Scope.md",
+        policy_path=imported.recon_database.parent / "TargetPolicy.json",
+        batch_size=2,
+    ).run(imported.scan_id)
+
+    assert len(agent.calls) > 1
+    assert result.coverage["by_status"] == {"unsupported": 4}
+    with sqlite3.connect(imported.pipeline_database) as conn:
+        assert conn.execute(
+            "SELECT DISTINCT status FROM stage_runs WHERE stage='attack'"
+        ).fetchall() == [("completed",)]
+
+
 @pytest.mark.parametrize("summary", [
     (
         "Recon verified completed. The single Attack Agent failed "
