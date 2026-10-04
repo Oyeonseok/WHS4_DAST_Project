@@ -65,6 +65,7 @@ class AttackCoordinator:
                 WHERE scan_id=? AND stage='attack' ORDER BY rowid DESC LIMIT 1""", (scan_id,)).fetchone()
             if prior and (prior[1] in {'pending', 'running'} or (prior[1] == 'completed' and not attack_work_unfinished(conn, scan_id))):
                 raise AttackCoordinatorError(f'Attack stage already exists for this scan: {prior[0]} ({prior[1]})')
+        self._bootstrap_local_juice_shop_fixtures(scan_id)
         with closing(sqlite3.connect(self._db_path)) as conn, conn:
             planning_stage = start_stage_run(conn, scan_id=scan_id, stage='attack')
         try:
@@ -115,6 +116,74 @@ class AttackCoordinator:
             db_path=str(self._db_path), stage_run_id=completion_stage,
             finding_ids=list(result.finding_ids), attack_agent_ids=list(result.attack_agent_ids),
             summary=f"Endpoint hypothesis coverage: {result.coverage['total']} dispositions across {result.batches} batches; {result.coverage['by_status']}")
+
+    def _bootstrap_local_juice_shop_fixtures(self, scan_id: str) -> None:
+        """Provision private disposable sessions when the approved Scope permits it.
+
+        This fixture is deliberately limited to an explicit loopback Juice Shop
+        Scope. A setup failure is audited and leaves ordinary anonymous Attack
+        coverage available; it does not turn a recoverable account prerequisite
+        into a pipeline failure.
+        """
+        try:
+            scope = self._scope_path.read_text(encoding="utf-8")
+        except OSError:
+            return
+        if "juice shop" not in scope.casefold():
+            return
+        root_value = os.environ.get("AIDAST_RESULT_ROOT")
+        if root_value:
+            result_root = Path(root_value).expanduser().resolve()
+        else:
+            attack_root = next(
+                (parent for parent in self._db_path.parents if parent.name == "AttackRuns"),
+                None,
+            )
+            if attack_root is None:
+                return
+            result_root = attack_root.parent
+        try:
+            with closing(sqlite3.connect(self._db_path)) as conn:
+                targets = [
+                    str(row[0]) for row in conn.execute(
+                        """SELECT DISTINCT o.base_url FROM origins o
+                           JOIN assets a ON a.asset_id=o.asset_id
+                           WHERE a.scan_id=? ORDER BY o.base_url""",
+                        (scan_id,),
+                    )
+                ]
+            if len(targets) != 1:
+                return
+            from aidast.benchmarks.juice_shop import bootstrap_juice_shop
+
+            result = bootstrap_juice_shop(
+                self._db_path, scan_id=scan_id, target_url=targets[0],
+                scope_path=self._scope_path, policy_path=self._policy_path,
+                result_root=result_root,
+            )
+            event_type = "benchmark.fixture_reused" if result["reused"] else "benchmark.fixture_created"
+            details = {
+                "target": "owasp-juice-shop",
+                "credential_reference_count": result["credential_reference_count"],
+                "owned_test_object_count": result["owned_test_object_count"],
+            }
+        except Exception as exc:
+            event_type = "benchmark.fixture_unavailable"
+            details = {
+                "target": "owasp-juice-shop",
+                "error_type": type(exc).__name__,
+            }
+        try:
+            from aidast.pipeline.lifecycle import audit_event
+
+            with closing(sqlite3.connect(self._db_path)) as conn, conn:
+                audit_event(
+                    conn, scan_id=scan_id, event_type=event_type, details=details,
+                )
+        except (OSError, sqlite3.Error, ValueError):
+            # The fixture is optional and its absence is represented later by
+            # blocked_auth coverage rather than an Attack coordinator crash.
+            return
 
     @staticmethod
     def _planning_progress(scan_id: str, processed: int, total: int, *, repair_attempt: int | None = None, issue_count: int = 0) -> None:
