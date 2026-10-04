@@ -70,6 +70,7 @@ from aidast.scope.paths import identify_program
 
 
 ModelT = TypeVar("ModelT", bound=BaseModel)
+ATTACK_IDLE_TIMEOUT_SECONDS = 360
 
 EXECUTABLE_WEB_ASSET_TYPES = frozenset(
     {
@@ -1370,6 +1371,10 @@ only the required structured result.
                             input="$aidast-policy\n\n" + policy_skill_text() + "\n\n" + prompt,
                             stdout=events,
                             timeout=self._timeout_seconds,
+                            idle_timeout=min(
+                                ATTACK_IDLE_TIMEOUT_SECONDS,
+                                self._timeout_seconds,
+                            ),
                         )
                     finally:
                         events.seek(0)

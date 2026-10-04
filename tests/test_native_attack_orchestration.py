@@ -438,6 +438,7 @@ class NativeAttackMainAgentTests(unittest.TestCase):
 
             def fake_run(command, **kwargs):
                 self.assertEqual(kwargs["timeout"], 6100)
+                self.assertEqual(kwargs["idle_timeout"], 360)
                 work = Path(command[command.index("--cd") + 1])
                 self.assertNotIn("--ephemeral", command)
                 self.assertEqual(

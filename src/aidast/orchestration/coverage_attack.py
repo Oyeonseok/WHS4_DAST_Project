@@ -139,7 +139,7 @@ class ExhaustiveAttackCoordinator:
             except BaseException as exc:
                 can_continue = self._recover_failed_batch(stage_run_id, exc)
                 if getattr(exc, "failure_code", None) in {
-                    "model_policy_refusal", "model_capacity",
+                    "model_policy_refusal", "model_capacity", "timeout",
                 } and can_continue:
                     continue
                 raise
@@ -162,7 +162,8 @@ class ExhaustiveAttackCoordinator:
             conn.execute("PRAGMA foreign_keys=ON")
             policy_refusal = getattr(exc, "failure_code", None) == "model_policy_refusal"
             model_capacity = getattr(exc, "failure_code", None) == "model_capacity"
-            if model_capacity:
+            model_timeout = getattr(exc, "failure_code", None) == "timeout"
+            if model_capacity or model_timeout:
                 task_rows = conn.execute(
                     """SELECT task_id,status FROM attack_tasks
                        WHERE stage_run_id=? AND status IN ('pending','running')""",
@@ -170,6 +171,9 @@ class ExhaustiveAttackCoordinator:
                 ).fetchall()
                 reason = (
                     "Attack model capacity was temporarily unavailable; "
+                    if model_capacity else
+                    "Attack model stopped after the bounded no-progress deadline; "
+                ) + (
                     "retry this coverage item in a fresh bounded batch."
                 )
                 for task in task_rows:
@@ -253,7 +257,8 @@ class ExhaustiveAttackCoordinator:
             ).fetchone()[0]
             can_continue = not (open_leads or unknown_requests or incomplete_tasks)
             recoverable = (
-                isinstance(exc, AttackBatchFailure) or policy_refusal or model_capacity
+                isinstance(exc, AttackBatchFailure) or policy_refusal
+                or model_capacity or model_timeout
             ) and can_continue
             row = conn.execute(
                 "SELECT status FROM stage_runs WHERE stage_run_id=?",

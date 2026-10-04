@@ -923,17 +923,18 @@ def test_model_policy_refusal_without_requests_is_terminal_and_other_batches_con
         ).fetchall() == [("completed",)]
 
 
-def test_transient_model_capacity_retries_without_failing_pipeline(tmp_path: Path) -> None:
+@pytest.mark.parametrize("failure_code", ["model_capacity", "timeout"])
+def test_transient_model_failure_retries_without_failing_pipeline(
+    tmp_path: Path, failure_code: str,
+) -> None:
     imported = imported_pipeline(tmp_path)
 
     class CapacityOnceAgent(UnsupportedCoverageAgent):
         def run_attack_orchestrator(self, **kwargs):
             if not self.calls:
                 self.calls.append(kwargs)
-                error = RuntimeError(
-                    "Selected model is at capacity. Please try a different model."
-                )
-                error.failure_code = "model_capacity"
+                error = RuntimeError("transient model execution failure")
+                error.failure_code = failure_code
                 raise error
             return super().run_attack_orchestrator(**kwargs)
 
