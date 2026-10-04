@@ -740,6 +740,7 @@ def ensure_coverage_manifest(database: Path, scan_id: str) -> CoverageManifestRe
         reclassify_misclassified_auth_blockers(conn, scan_id)
         requeue_credential_blocked_coverage(conn, scan_id)
         requeue_safe_session_binding_coverage(conn, scan_id)
+        requeue_auth_gated_negative_coverage(conn, scan_id)
         refresh_confirmed_coverage(conn, scan_id)
         total = conn.execute(
             "SELECT count(*) FROM attack_coverage_items WHERE scan_id=?", (scan_id,),
@@ -1080,6 +1081,86 @@ def requeue_safe_session_binding_coverage(
                 "scanner-created same-origin session is now routed to this safe task",
                 now(), row["coverage_id"],
             ),
+        )
+        reopened += 1
+    return reopened
+
+
+def requeue_auth_gated_negative_coverage(
+    conn: sqlite3.Connection, scan_id: str,
+) -> int:
+    """Reopen legacy anonymous conclusions that stopped at an auth gate.
+
+    Older Attack payloads did not carry an optional authenticated control for
+    hypotheses planned as unauthenticated. A 401/403 response could therefore
+    become a durable negative or unsupported result even though the selected
+    input was never exercised behind the gate. Reopen only those legacy tasks,
+    and only after a usable same-origin opaque session exists. New payloads
+    carry ``optional_control_identity_roles``, making this migration one-shot.
+    """
+    rows = conn.execute(
+        """SELECT c.*,e.method,o.base_url AS origin_url,t.payload_json
+           FROM attack_coverage_items c
+           JOIN endpoints e ON e.endpoint_id=c.endpoint_id
+           JOIN origins o ON o.origin_id=e.origin_id
+           JOIN attack_tasks t ON t.task_id=c.last_task_id
+           WHERE c.scan_id=? AND c.required_identity_role='unauthenticated'
+             AND c.status IN ('tested_negative','unsupported')""",
+        (scan_id,),
+    ).fetchall()
+    reopened = 0
+    for row in rows:
+        try:
+            payload = json.loads(row["payload_json"] or "{}")
+        except (TypeError, json.JSONDecodeError):
+            continue
+        optional = payload.get("optional_control_identity_roles")
+        if isinstance(optional, list) and "authenticated" in optional:
+            continue
+        requests = conn.execute(
+            """SELECT response_status,result_json
+               FROM attack_http_requests
+               WHERE scan_id=? AND task_id=? AND endpoint_reference_id=?
+                 AND method=? AND status='completed'
+                 AND response_status IS NOT NULL""",
+            (
+                scan_id, row["last_task_id"], row["endpoint_id"],
+                row["method"],
+            ),
+        ).fetchall()
+        if not requests or any(
+            int(request["response_status"]) not in {401, 403}
+            for request in requests
+        ):
+            continue
+        authenticated_request = False
+        for request in requests:
+            try:
+                result = json.loads(request["result_json"] or "{}")
+            except (TypeError, json.JSONDecodeError):
+                result = {}
+            if isinstance(result, dict) and result.get("credential_reference_id"):
+                authenticated_request = True
+                break
+        if authenticated_request:
+            continue
+        references = _credential_references(
+            conn, scan_id, "authenticated", available_only=True,
+            origin_url=str(row["origin_url"]),
+        )
+        if not references:
+            continue
+        reason = (
+            "usable same-origin session is now available for the authenticated "
+            "control omitted by the legacy task"
+        )
+        _event(conn, row, "pending", reason)
+        conn.execute(
+            """UPDATE attack_coverage_items
+               SET status='pending',disposition_reason=?,attempt_count=0,
+                   last_stage_run_id=NULL,last_task_id=NULL,updated_at=?
+               WHERE coverage_id=?""",
+            (reason, now(), row["coverage_id"]),
         )
         reopened += 1
     return reopened

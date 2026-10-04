@@ -135,7 +135,14 @@ same temporary file.
    pass it to the trusted request helper as `credential_reference_id`. Never
    resolve it yourself, place a token/cookie in `headers`, or print a resolved
    value. Prefer two distinct listed references for IDOR differentials. When
-   only one reference exists, a read-only IDOR test may instead compare a
+   a read-only IDOR task supplies two owner-bound objects and their matching
+   credential labels, run the complete ownership matrix: A reads A and B reads
+   B as positive controls, then A reads B and B reads A as cross-owner probes.
+   Compare stable response structure and object-specific fields or hashes; a
+   shared 200 status alone is not proof. A cross-owner response that matches
+   the corresponding owner's positive control is evidence of unauthorized
+   object access. Keep all opaque credential values hidden. When only one
+   reference exists, a read-only IDOR test may instead compare a
    supplied `owned_test_object` with a distinct `observed_reference_object`
    collected by black-box Recon. Never use that single-identity exception for
    a mutation, and never guess the foreign identifier.

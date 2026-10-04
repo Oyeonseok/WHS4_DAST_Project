@@ -12,6 +12,7 @@ from aidast.attack.coverage import (
     coverage_status,
     ensure_coverage_manifest,
     fail_running_coverage,
+    requeue_auth_gated_negative_coverage,
     requeue_interrupted_coverage,
     requeue_coverage,
     resolve_abandoned_attack_leads,
@@ -1060,6 +1061,72 @@ def test_safe_local_mutation_skipped_without_binding_reopens_for_synthetic_sessi
             "SELECT status FROM attack_coverage_items WHERE coverage_id=?",
             (row["coverage_id"],),
         ).fetchone() == ("pending",)
+
+
+@pytest.mark.parametrize("terminal_status", ["tested_negative", "unsupported"])
+def test_legacy_anonymous_auth_gate_reopens_once_session_is_available(
+    tmp_path: Path, monkeypatch, terminal_status: str,
+) -> None:
+    imported = imported_pipeline(tmp_path)
+    ensure_coverage_manifest(imported.pipeline_database, imported.scan_id)
+    with sqlite3.connect(imported.pipeline_database) as conn, conn:
+        conn.row_factory = sqlite3.Row
+        coverage = conn.execute(
+            "SELECT * FROM attack_coverage_items ORDER BY coverage_id LIMIT 1"
+        ).fetchone()
+        stage = start_stage_run(conn, scan_id=imported.scan_id, stage="attack")
+        task = create_task(
+            conn, stage_run_id=stage, skill_name=coverage["skill_name"],
+            endpoint_id=coverage["endpoint_id"], payload={},
+        )
+        conn.execute(
+            """UPDATE attack_coverage_items
+               SET status=?,attempt_count=1,last_stage_run_id=?,last_task_id=?
+               WHERE coverage_id=?""",
+            (terminal_status, stage, task, coverage["coverage_id"]),
+        )
+        method = conn.execute(
+            "SELECT method FROM endpoints WHERE endpoint_id=?",
+            (coverage["endpoint_id"],),
+        ).fetchone()[0]
+        conn.execute(
+            """INSERT INTO attack_http_requests
+               (request_id,scan_id,stage_run_id,task_id,policy_id,method,url,
+                request_fingerprint,status,response_status,scheduled_at,
+                endpoint_reference_id,result_json)
+               VALUES ('auth-gate',?,?,?,?,?,'https://lab.example/gated',
+                       ?,'completed',401,0,?,'{}')""",
+            (
+                imported.scan_id, stage, task, "policy", method, "f" * 64,
+                coverage["endpoint_id"],
+            ),
+        )
+        register_credential_reference(
+            conn, scan_id=imported.scan_id, label="user-a",
+            reference_uri="env://AIDAST_TEST_AUTH_GATE",
+            identity_role="authenticated",
+        )
+    monkeypatch.setenv(
+        "AIDAST_TEST_AUTH_GATE", '{"Authorization":"Bearer test-a"}',
+    )
+
+    with sqlite3.connect(imported.pipeline_database) as conn, conn:
+        conn.row_factory = sqlite3.Row
+        assert requeue_auth_gated_negative_coverage(
+            conn, imported.scan_id,
+        ) == 1
+        assert tuple(conn.execute(
+            """SELECT status,attempt_count,last_stage_run_id,last_task_id
+               FROM attack_coverage_items WHERE coverage_id=?""",
+            (coverage["coverage_id"],),
+        ).fetchone()) == ("pending", 0, None, None)
+
+    ensure_coverage_manifest(imported.pipeline_database, imported.scan_id)
+    with sqlite3.connect(imported.pipeline_database) as conn:
+        conn.row_factory = sqlite3.Row
+        assert requeue_auth_gated_negative_coverage(
+            conn, imported.scan_id,
+        ) == 0
 
 
 def test_unreplayable_candidate_is_requeued_and_not_readopted(tmp_path: Path) -> None:
