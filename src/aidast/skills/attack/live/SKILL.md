@@ -141,7 +141,13 @@ same temporary file.
    Compare stable response structure and object-specific fields or hashes; a
    shared 200 status alone is not proof. A cross-owner response that matches
    the corresponding owner's positive control is evidence of unauthorized
-   object access. Keep all opaque credential values hidden. When only one
+   object access. In particular, when the two owner controls have distinct,
+   non-empty response hashes and the matrix is `A-cross == B-own` plus
+   `B-cross == A-own`, treat that as a confirmed cross-owner routing
+   differential. Do not downgrade that exact matrix to inconclusive merely
+   because the broker redacts response values. Build the replay assertions
+   from observed JSON fields and supplied fixture values, without retaining
+   private response data. Keep all opaque credential values hidden. When only one
    reference exists, a read-only IDOR test may instead compare a
    supplied `owned_test_object` with a distinct `observed_reference_object`
    collected by black-box Recon. Never use that single-identity exception for
