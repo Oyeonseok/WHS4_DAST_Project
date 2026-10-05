@@ -1352,8 +1352,9 @@ def requeue_unprofiled_historical_response_coverage(
         """SELECT c.*,e.method
            FROM attack_coverage_items c
            JOIN endpoints e ON e.endpoint_id=c.endpoint_id
-           WHERE c.scan_id=? AND c.status='tested_negative' AND e.method='GET'
-             AND c.vuln_class IN ('api_misconfig','spa_api','source_leak')
+           WHERE c.scan_id=?
+             AND c.status IN ('tested_negative','unsupported')
+             AND e.method='GET'
              AND c.last_task_id IS NOT NULL
              AND EXISTS (
                  SELECT 1 FROM attack_facts priority

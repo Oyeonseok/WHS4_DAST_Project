@@ -1544,8 +1544,9 @@ def test_redacted_login_differential_reopens_once_for_secret_shape_assertion(
         ) == 0
 
 
+@pytest.mark.parametrize("terminal_status", ["tested_negative", "unsupported"])
 def test_historical_2xx_without_content_assertions_reopens_exactly_once(
-    tmp_path: Path,
+    tmp_path: Path, terminal_status: str,
 ) -> None:
     imported = imported_pipeline(tmp_path)
     ensure_coverage_manifest(imported.pipeline_database, imported.scan_id)
@@ -1569,9 +1570,9 @@ def test_historical_2xx_without_content_assertions_reopens_exactly_once(
         )
         conn.execute(
             """UPDATE attack_coverage_items
-               SET status='tested_negative',attempt_count=1,
+               SET status=?,attempt_count=1,
                    last_stage_run_id=?,last_task_id=? WHERE coverage_id=?""",
-            (stage, task, coverage["coverage_id"]),
+            (terminal_status, stage, task, coverage["coverage_id"]),
         )
         conn.execute(
             """INSERT INTO attack_facts
@@ -1603,9 +1604,9 @@ def test_historical_2xx_without_content_assertions_reopens_exactly_once(
         ).fetchone()) == ("pending", 0, None, None)
 
         conn.execute(
-            """UPDATE attack_coverage_items SET status='tested_negative',
+            """UPDATE attack_coverage_items SET status=?,
                last_stage_run_id=?,last_task_id=? WHERE coverage_id=?""",
-            (stage, task, coverage["coverage_id"]),
+            (terminal_status, stage, task, coverage["coverage_id"]),
         )
         assert requeue_unprofiled_historical_response_coverage(
             conn, imported.scan_id,

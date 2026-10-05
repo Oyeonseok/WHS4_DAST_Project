@@ -154,7 +154,7 @@ def prioritize_runtime_history(
                       e.method,e.normalized_path
                FROM attack_coverage_items c
                JOIN endpoints e ON e.endpoint_id=c.endpoint_id
-               WHERE c.scan_id=? AND c.status IN ('pending','error_retryable')""",
+               WHERE c.scan_id=? AND c.status NOT IN ('candidate','confirmed','running')""",
             (scan_id,),
         ).fetchall()
         for row in rows:

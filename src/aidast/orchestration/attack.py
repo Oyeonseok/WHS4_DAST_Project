@@ -202,6 +202,9 @@ class AttackCoordinator:
             return
         target_hint = relative.parts[1]
         try:
+            from aidast.attack.coverage import (
+                requeue_unprofiled_historical_response_coverage,
+            )
             from aidast.attack.wiki import prioritize_runtime_history
             from aidast.pipeline.lifecycle import audit_event
 
@@ -210,10 +213,17 @@ class AttackCoordinator:
                 scan_id=scan_id, target_hint=target_hint,
             )
             with closing(sqlite3.connect(self._db_path)) as conn, conn:
+                conn.row_factory = sqlite3.Row
+                reprofiled = requeue_unprofiled_historical_response_coverage(
+                    conn, scan_id,
+                )
                 audit_event(
                     conn, scan_id=scan_id,
                     event_type="attack.runtime_history_prioritized",
-                    details={"coverage_count": count},
+                    details={
+                        "coverage_count": count,
+                        "unprofiled_terminal_count": reprofiled,
+                    },
                 )
         except (OSError, sqlite3.Error, ValueError):
             # Runtime history is an optional ordering hint. The independently

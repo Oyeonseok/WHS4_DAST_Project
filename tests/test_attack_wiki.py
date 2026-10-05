@@ -310,6 +310,31 @@ def test_runtime_history_only_seeds_coordinate_priority_from_prior_blackbox(
     }
 
 
+def test_runtime_history_can_prioritize_a_terminal_false_negative(
+    tmp_path,
+) -> None:
+    wiki_root = tmp_path / "AttackWiki"
+    target_wiki = wiki_root / "juice-shop-history"
+    historical = database(
+        tmp_path / "historical.db", scan="historical", started="2026-01-01",
+        confirmed=True, coverage_status="candidate",
+    )
+    ingest_database(target_wiki, historical, kind="runtime", target_id="juice-shop")
+    current = database(
+        tmp_path / "current.db", scan="current", started="2026-01-03",
+        coverage_status="unsupported", request=False,
+    )
+
+    assert prioritize_runtime_history(
+        wiki_root, current, scan_id="current", target_hint="juice-shop-current",
+    ) == 1
+    with sqlite3.connect(current) as conn:
+        assert conn.execute(
+            """SELECT fact_key FROM attack_facts
+               WHERE fact_type='historical_runtime_priority'"""
+        ).fetchone() == ("coverage",)
+
+
 def test_api_requires_terminal_scan_and_same_origin(tmp_path, monkeypatch):
     from fastapi.testclient import TestClient
     from aidast.web.server import create_app
