@@ -76,9 +76,26 @@ class ValidationContractTests(unittest.TestCase):
         self.assertTrue(resolver.resolve(
             "hunt-sqli"
         ).profile.zero_sensitivity_boundary_confirmation)
+        self.assertTrue(resolver.resolve(
+            "hunt-auth-bypass"
+        ).profile.zero_sensitivity_boundary_confirmation)
         self.assertFalse(resolver.resolve(
             "hunt-source-leak"
         ).profile.zero_sensitivity_boundary_confirmation)
+
+    def test_sensitivity_only_claim_conflict_narrows_impact_without_contesting_existence(self):
+        from aidast.validation.orchestration.coordinator import _material_claim_conflict
+
+        base = dict(
+            case_id="case", blind_assessment_sha256="a" * 64,
+            attack_claim_sha256="b" * 64, alignment="conflicting",
+            validation_evidence_ids=("validation",), attack_evidence_ids=("attack",),
+            reason="Validation reproduced the mechanism with narrower impact.",
+        )
+        sensitivity = ClaimComparison(**base, conflict_axes=("sensitivity",))
+        boundary = ClaimComparison(**base, conflict_axes=("boundary",))
+        self.assertFalse(_material_claim_conflict(sensitivity))
+        self.assertTrue(_material_claim_conflict(boundary))
 
     def test_decision_priority_and_clean_batch_requirement(self):
         engine = DecisionEngine()

@@ -15,6 +15,7 @@ from ..contracts.models import BlindCase
 from ..contracts.models import ReproductionObservation
 from .request_broker import (ValidationCredentialError, ValidationPolicyRejection,
                              ValidationRequestBroker)
+from .credentials import credential_unsupported_reason
 from ..contracts.runtime_contract import (HttpRuntimeContract, evaluate_http_response,
                                render_http_request, _json_path)
 
@@ -49,12 +50,13 @@ class HttpReproductionPort:
             return "http_runtime_contract_missing"
         if blind_case.credential_references and self.credential_resolver is None:
             return "credential_resolver_missing"
-        resolver_preflight = getattr(self.credential_resolver, "unsupported_reason", None)
-        if callable(resolver_preflight):
-            for reference in blind_case.credential_references:
-                reason = resolver_preflight(reference)
-                if reason is not None:
-                    return reason
+        for reference in blind_case.credential_references:
+            reason = credential_unsupported_reason(
+                self.credential_resolver, reference,
+                destination_url=blind_case.endpoint,
+            )
+            if reason is not None:
+                return reason
         return None
 
     def execute(self, blind_case: BlindCase, *, attempt_kind: str, batch_no: int,

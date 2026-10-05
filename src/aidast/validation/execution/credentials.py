@@ -146,3 +146,32 @@ class KeyringCredentialBackend:
         if secret is None:
             raise ValueError("keyring credential is unavailable")
         return secret
+
+
+def resolve_credential_headers(
+    resolver: Callable[[str], Mapping[str, str]], reference: str, *,
+    destination_url: str,
+) -> Mapping[str, str]:
+    """Resolve a credential while preserving a vault reference's origin binding.
+
+    Ordinary injected resolvers retain their one-argument interface.  The native
+    pipeline resolver receives the concrete destination so browser snapshots can
+    never be replayed to a different origin.
+    """
+    if isinstance(resolver, PipelineCredentialResolver):
+        return resolver(reference, destination_url=destination_url)
+    return resolver(reference)
+
+
+def credential_unsupported_reason(
+    resolver: Callable[[str], Mapping[str, str]] | None, reference: str, *,
+    destination_url: str,
+) -> str | None:
+    if resolver is None:
+        return "credential_resolver_missing"
+    preflight = getattr(resolver, "unsupported_reason", None)
+    if not callable(preflight):
+        return None
+    if isinstance(resolver, PipelineCredentialResolver):
+        return preflight(reference, destination_url=destination_url)
+    return preflight(reference)

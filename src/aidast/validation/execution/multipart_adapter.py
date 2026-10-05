@@ -19,7 +19,7 @@ from ..contracts.multipart_contract import MultipartRuntimeContract, encode_mult
 from ..contracts.runtime_contract import evaluate_http_response
 from ..persistence.evidence_policy import sanitize_metadata
 from .http_deadline import DeadlineHttpTransport, MultipartResponseIncompleteError, read_complete_response
-from .credentials import PipelineCredentialResolver
+from .credentials import PipelineCredentialResolver, resolve_credential_headers
 from .request_broker import _NoRedirect  # Compatibility for configured injected openers.
 from .transport_broker import (
     TransportDispatchResult, TransportOperationSpec, ValidationTransportBroker,
@@ -142,7 +142,9 @@ class MultipartReproductionPort:
                     blind_case, "credential_reference_unavailable", blocker_axis="identity_auth",
                 )
             try:
-                raw_headers = self.credential_resolver(reference)
+                raw_headers = resolve_credential_headers(
+                    self.credential_resolver, reference, destination_url=url,
+                )
                 headers = self._merge_credential_headers(headers, raw_headers)
             except (ImportError, OSError, KeyError, ValueError, sqlite3.Error):
                 return self._blocked(

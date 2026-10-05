@@ -19,6 +19,7 @@ from ..contracts.models import ReproductionObservation
 from .request_broker import (ValidationCredentialError, ValidationPolicyRejection,
                              ValidationRequestBroker)
 from ..contracts.runtime_contract import evaluate_http_response, render_http_request
+from .credentials import credential_unsupported_reason
 
 
 class ChainReproductionPort:
@@ -56,13 +57,14 @@ class ChainReproductionPort:
                 return f"chain_terminal_{reason}"
         if any(step.credential_references for step in runtime.steps) and self.credential_resolver is None:
             return "credential_resolver_missing"
-        preflight = getattr(self.credential_resolver, "unsupported_reason", None)
-        if callable(preflight):
-            for step in runtime.steps:
-                for reference in step.credential_references:
-                    reason = preflight(reference)
-                    if reason is not None:
-                        return reason
+        for step in runtime.steps:
+            for reference in step.credential_references:
+                reason = credential_unsupported_reason(
+                    self.credential_resolver, reference,
+                    destination_url=step.endpoint,
+                )
+                if reason is not None:
+                    return reason
         return None
 
     def execute(self, blind_case: BlindCase, *, attempt_kind: str, batch_no: int,

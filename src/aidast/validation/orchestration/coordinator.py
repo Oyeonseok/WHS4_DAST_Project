@@ -60,6 +60,19 @@ class PolicyProvider(Protocol):
     def __call__(self, endpoint: str, method: str) -> TargetPolicy: ...
 
 
+def _material_claim_conflict(comparison: ClaimComparison) -> bool:
+    """Return whether an Attack/Validation disagreement contests existence.
+
+    Validation owns the final impact score.  A sensitivity-only disagreement
+    therefore narrows that score while a class or boundary disagreement still
+    requires the separate CONTESTED outcome.
+    """
+    return (
+        comparison.alignment == "conflicting"
+        and any(axis != "sensitivity" for axis in comparison.conflict_axes)
+    )
+
+
 def _impact_planning_context(candidate: ValidatedCandidate,
                              observations: tuple[dict[str, Any], ...], *,
                              verified_preconditions: tuple[dict[str, Any], ...] = (),
@@ -1040,7 +1053,10 @@ class ValidationCoordinator:
             development_used=development_used, target_observations=targets,
             target_outcomes=tuple(item["outcome"] for item in observations
                                   if item["attempt_kind"] == "target"),
-            semantic_conflict=comparison.alignment == "conflicting",
+            # A sensitivity-only disagreement narrows the demonstrated impact;
+            # it does not negate a freshly reproduced mechanism.  Boundary and
+            # vulnerability-class conflicts remain contested.
+            semantic_conflict=_material_claim_conflict(comparison),
             attack_has_positive_evidence=bool(comparison.attack_evidence_ids), impact=impact_result,
         ))
         if status == "DEVELOPING":
@@ -1050,6 +1066,9 @@ class ValidationCoordinator:
             "claim_comparison": comparison.model_dump(mode="json"),
             "evidence_ids": evidence_ids,
         }
+        if (comparison.alignment == "conflicting"
+                and comparison.conflict_axes == ("sensitivity",)):
+            decision["claim_impact_narrowed_by_validation"] = True
         if contradictory_reproduction:
             decision["blind_replay_consistency"] = "assessment_denied_positive_replay"
         if development_unavailable_reason is not None:

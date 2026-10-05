@@ -19,7 +19,7 @@ from ..contracts.grpc_contract import (
 )
 from ..contracts.models import BlindCase, ReproductionObservation, canonical_json, canonical_sha256
 from ..persistence.evidence_policy import sanitize_metadata
-from .credentials import PipelineCredentialResolver
+from .credentials import PipelineCredentialResolver, resolve_credential_headers
 from .transport_broker import (
     TransportDispatchResult, TransportOperationSpec, ValidationTransportBroker, ValidationTransportError,
 )
@@ -131,7 +131,10 @@ class GrpcReproductionPort:
             if self.credential_resolver is None:
                 return self._blocked(blind_case, "credential_reference_unavailable")
             try:
-                raw = self.credential_resolver(reference)
+                raw = resolve_credential_headers(
+                    self.credential_resolver, reference,
+                    destination_url=attempt.endpoint,
+                )
             except (ImportError, OSError, KeyError, ValueError, sqlite3.Error):
                 return self._blocked(blind_case, "credential_reference_unavailable")
             except Exception:

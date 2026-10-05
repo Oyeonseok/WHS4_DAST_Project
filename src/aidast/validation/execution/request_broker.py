@@ -22,6 +22,7 @@ from aidast.core.request_governor import RequestGovernor, GovernorError
 
 from ..contracts.models import BlindCase
 from ..contracts.models import canonical_sha256
+from .credentials import resolve_credential_headers
 
 
 class ValidationRequestError(ValueError):
@@ -134,7 +135,9 @@ class ValidationRequestBroker:
             if self.credential_resolver is None:
                 raise ValidationCredentialError("credential references require a trusted resolver")
             try:
-                resolved = self.credential_resolver(reference)
+                resolved = resolve_credential_headers(
+                    self.credential_resolver, reference, destination_url=url,
+                )
             except (OSError, ValueError) as exc:
                 raise ValidationCredentialError("credential reference resolution failed") from exc
             if not isinstance(resolved, Mapping) or any(not isinstance(k, str) or not isinstance(v, str)

@@ -25,7 +25,7 @@ from ..contracts.websocket_contract import (
     json_bytes, policy_url,
 )
 from ..persistence.evidence_policy import sanitize_metadata
-from .credentials import PipelineCredentialResolver
+from .credentials import PipelineCredentialResolver, resolve_credential_headers
 from .transport_broker import (
     TransportDispatchResult, TransportOperationSpec, ValidationTransportBroker,
     ValidationTransportError,
@@ -144,7 +144,9 @@ class WebSocketReproductionPort:
             if self.credential_resolver is None:
                 return self._blocked(blind_case, "credential_reference_unavailable")
             try:
-                raw_headers = self.credential_resolver(reference)
+                raw_headers = resolve_credential_headers(
+                    self.credential_resolver, reference, destination_url=url,
+                )
             except (ImportError, OSError, KeyError, ValueError, sqlite3.Error):
                 return self._blocked(blind_case, "credential_reference_unavailable")
             except Exception:

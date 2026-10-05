@@ -1716,6 +1716,7 @@ class ValidationCoordinatorTests(unittest.TestCase):
             coordinator.impact_development_port, NativeImpactDevelopmentPort,
         )
         self.assertIsNotNone(coordinator.prerequisite_resolver.policy_provider)
+        self.assertIn("vault", coordinator.reproduction.http.credential_resolver.backends)
         from aidast.validation.orchestration.replay_preparation import CodexReplayPreparer
         self.assertIsInstance(coordinator.replay_preparer, CodexReplayPreparer)
 
