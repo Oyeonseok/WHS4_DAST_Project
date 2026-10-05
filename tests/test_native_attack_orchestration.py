@@ -86,6 +86,51 @@ def completed_pipeline(root: Path) -> Path:
 
 
 class LegacyNativeAttackCoordinatorTests(unittest.TestCase):
+    def test_vulnbank_web_scan_bootstraps_disposable_identities(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            database = completed_pipeline(root)
+            with sqlite3.connect(database) as conn:
+                conn.execute("UPDATE assets SET identifier='http://127.0.0.1:5002/',asset_type='URL'")
+                conn.execute(
+                    """UPDATE origins SET scheme='http',host='127.0.0.1',port=5002,
+                       base_url='http://127.0.0.1:5002/'"""
+                )
+            scope = root / "Scope.md"
+            policy = root / "TargetPolicy.json"
+            scope.write_text(
+                "# VulnBank\n스캐너가 생성한 합성 계정과 일회성 데이터에 한해 허용합니다.",
+                encoding="utf-8",
+            )
+            policy.write_text("{}", encoding="utf-8")
+            coordinator = AttackCoordinator(
+                agent=FakeNativeMain(), db_path=database,
+                scope_path=scope, policy_path=policy,
+            )
+            result = {
+                "credential_reference_count": 5,
+                "owned_test_object_count": 8,
+                "benchmark_fixture_count": 2,
+            }
+            with patch(
+                "aidast.benchmarks.vulnbank.bootstrap_vulnbank",
+                return_value=result,
+            ) as bootstrap:
+                coordinator._bootstrap_local_vulnbank_fixtures("scan_native")
+            bootstrap.assert_called_once_with(
+                database.resolve(), scan_id="scan_native",
+                target_url="http://127.0.0.1:5002/",
+                scope_path=scope.resolve(), policy_path=policy.resolve(),
+            )
+            with sqlite3.connect(database) as conn:
+                details = json.loads(conn.execute(
+                    """SELECT details_json FROM audit_events
+                       WHERE scan_id='scan_native'
+                         AND event_type='benchmark.fixture_created'"""
+                ).fetchone()[0])
+            self.assertEqual(details["target"], "vulnbank")
+            self.assertEqual(details["credential_reference_count"], 5)
+
     def test_authenticated_credential_reference_is_bound_to_attack_tasks(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

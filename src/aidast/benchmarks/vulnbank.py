@@ -230,8 +230,10 @@ def bootstrap_vulnbank(
     )
     nonce = secrets.token_hex(5)
     identities: list[dict[str, str]] = []
-    for label, extra_fields in (
-        ("user-a", {}), ("user-b", {}), ("admin-a", {"is_admin": True}),
+    for label, role, extra_fields in (
+        ("user-a", "authenticated", {}),
+        ("user-b", "identity_b", {}),
+        ("admin-a", "identity_synthetic", {"is_admin": True}),
     ):
         username = f"aidast_{label.replace('-', '')}_{nonce}_{secrets.token_hex(2)}"
         password = secrets.token_urlsafe(18)
@@ -248,7 +250,7 @@ def bootstrap_vulnbank(
         if not all(isinstance(value, (str, int)) for value in (token, account, user_id)):
             raise VulnBankBootstrapError("user fixture response omitted token or owned object")
         identities.append({
-            "label": label, "role": label, "token": str(token),
+            "label": label, "role": role, "token": str(token),
             "principal": username, "account_number": str(account),
             "user_id": str(user_id),
         })
@@ -308,7 +310,10 @@ def bootstrap_vulnbank(
                 raise VulnBankBootstrapError("admin fixture page omitted the owned loan ID")
             user_a["loan_id"] = match.group("loan_id")
 
-    for label in ("merchant-a", "merchant-b"):
+    for label, role in (
+        ("merchant-a", "merchant_synthetic"),
+        ("merchant-b", "merchant_b"),
+    ):
         email = f"aidast-{label}-{nonce}-{secrets.token_hex(2)}@example.invalid"
         result = send(urljoin(target_url, "/api/v1/merchants/register"), {
             "name": f"AIDAST {label}", "email": email,
@@ -320,7 +325,7 @@ def bootstrap_vulnbank(
         if not isinstance(token, str) or not isinstance(merchant_id, (str, int)):
             raise VulnBankBootstrapError("merchant fixture response omitted token or object ID")
         identities.append({
-            "label": label, "role": label, "token": token,
+            "label": label, "role": role, "token": token,
             "principal": email, "merchant_id": str(merchant_id),
         })
 
@@ -388,6 +393,15 @@ def bootstrap_vulnbank(
                     "object_id": identity[object_type],
                     "object_type": object_type,
                     "principal": identity["principal"],
+                    "identity_role": identity["role"],
+                    "resource": (
+                        "merchant" if object_type == "merchant_id"
+                        else "virtual_card" if object_type == "card_id"
+                        else "loan" if object_type == "loan_id"
+                        else "account"
+                    ),
+                    "disposable": True,
+                    "cleanup_allowed": True,
                 }, ensure_ascii=False, sort_keys=True)
                 conn.execute(
                     """INSERT INTO attack_facts

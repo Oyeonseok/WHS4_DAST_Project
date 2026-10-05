@@ -98,7 +98,22 @@ def test_bootstrap_keeps_tokens_out_of_database(tmp_path: Path, monkeypatch) -> 
             "SELECT count(*) FROM credential_references WHERE reference_uri LIKE 'env://%'"
         ).fetchone() == (5,)
         assert conn.execute(
+            "SELECT label,identity_role FROM credential_references ORDER BY label"
+        ).fetchall() == [
+            ("admin-a", "identity_synthetic"),
+            ("merchant-a", "merchant_synthetic"),
+            ("merchant-b", "merchant_b"),
+            ("user-a", "authenticated"),
+            ("user-b", "identity_b"),
+        ]
+        assert conn.execute(
             "SELECT count(*) FROM attack_facts WHERE fact_type='owned_test_object'"
+        ).fetchone() == (8,)
+        assert conn.execute(
+            """SELECT count(*) FROM attack_facts
+               WHERE fact_type='owned_test_object'
+                 AND json_extract(fact_value,'$.disposable')=1
+                 AND json_extract(fact_value,'$.cleanup_allowed')=1"""
         ).fetchone() == (8,)
 
     repeated = bootstrap_vulnbank(

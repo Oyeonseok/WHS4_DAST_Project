@@ -214,11 +214,12 @@ class CodexMainAgent:
         self._python_executable = python_executable or stable_executable
 
     def activate_attack_fallback_model(self) -> bool:
-        """Use the configured main model after an Attack-model capacity outage."""
-        if not self._main_model or self._main_model == self._attack_model:
-            return False
-        self._attack_model = self._main_model
-        return True
+        """Use another configured model after an Attack capacity outage."""
+        for candidate in (self._main_model, self._validation_model):
+            if candidate and candidate != self._attack_model:
+                self._attack_model = candidate
+                return True
+        return False
 
     def select_policy_references(self, page_text, candidates):
         return select_with_agent(self, page_text, candidates)

@@ -1359,6 +1359,11 @@ def test_model_timeout_with_partial_lead_closes_lead_and_continues(
         "was at capacity. Database verification found all configured tasks "
         "pending, with no attempts or HTTP requests for this stage."
     ),
+    (
+        "The single Attack Agent failed when its model reached capacity. "
+        "Database verification found pending tasks and no unknown request "
+        "outcomes. The batch is incomplete."
+    ),
     "The selected model is at capacity. Please try a different model.",
 ])
 def test_structured_model_capacity_result_retries_without_failing_pipeline(

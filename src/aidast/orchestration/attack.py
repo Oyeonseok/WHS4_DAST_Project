@@ -66,6 +66,7 @@ class AttackCoordinator:
             if prior and (prior[1] in {'pending', 'running'} or (prior[1] == 'completed' and not attack_work_unfinished(conn, scan_id))):
                 raise AttackCoordinatorError(f'Attack stage already exists for this scan: {prior[0]} ({prior[1]})')
         self._bootstrap_local_juice_shop_fixtures(scan_id)
+        self._bootstrap_local_vulnbank_fixtures(scan_id)
         with closing(sqlite3.connect(self._db_path)) as conn, conn:
             planning_stage = start_stage_run(conn, scan_id=scan_id, stage='attack')
         try:
@@ -184,6 +185,63 @@ class AttackCoordinator:
         except (OSError, sqlite3.Error, ValueError):
             # The fixture is optional and its absence is represented later by
             # blocked_auth coverage rather than an Attack coordinator crash.
+            return
+
+    def _bootstrap_local_vulnbank_fixtures(self, scan_id: str) -> None:
+        """Provision disposable loopback VulnBank identities for web scans.
+
+        The bootstrap uses only approved black-box registration and login
+        endpoints. Tokens remain in process memory behind opaque credential
+        references; Pipeline.db receives roles and owned object IDs only.
+        Running it on resume refreshes those process-bound references.
+        """
+        try:
+            scope = self._scope_path.read_text(encoding="utf-8")
+        except OSError:
+            return
+        normalized_scope = scope.casefold().replace("-", "").replace("_", "")
+        if "vulnbank" not in normalized_scope:
+            return
+        try:
+            with closing(sqlite3.connect(self._db_path)) as conn:
+                targets = [
+                    str(row[0]) for row in conn.execute(
+                        """SELECT DISTINCT o.base_url FROM origins o
+                           JOIN assets a ON a.asset_id=o.asset_id
+                           WHERE a.scan_id=? ORDER BY o.base_url""",
+                        (scan_id,),
+                    )
+                ]
+            if len(targets) != 1:
+                return
+            from aidast.benchmarks.vulnbank import bootstrap_vulnbank
+
+            result = bootstrap_vulnbank(
+                self._db_path, scan_id=scan_id, target_url=targets[0],
+                scope_path=self._scope_path, policy_path=self._policy_path,
+            )
+            event_type = "benchmark.fixture_created"
+            details = {
+                "target": "vulnbank",
+                "credential_reference_count": result["credential_reference_count"],
+                "owned_test_object_count": result["owned_test_object_count"],
+                "benchmark_fixture_count": result["benchmark_fixture_count"],
+            }
+        except Exception as exc:
+            event_type = "benchmark.fixture_unavailable"
+            details = {
+                "target": "vulnbank",
+                "error_type": type(exc).__name__,
+            }
+        try:
+            from aidast.pipeline.lifecycle import audit_event
+
+            with closing(sqlite3.connect(self._db_path)) as conn, conn:
+                audit_event(
+                    conn, scan_id=scan_id, event_type=event_type, details=details,
+                )
+        except (OSError, sqlite3.Error, ValueError):
+            # Fixture setup remains optional for non-benchmark targets.
             return
 
     def _prioritize_runtime_history(self, scan_id: str) -> None:

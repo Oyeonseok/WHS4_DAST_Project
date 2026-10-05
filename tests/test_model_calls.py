@@ -637,6 +637,20 @@ class ModelCallLogTests(unittest.TestCase):
             ("scan-1", "case-1"), ("scan-2", None), ("scan-1", "case-1"),
         ])
 
+    def test_attack_capacity_fallback_uses_distinct_configured_validation_model(self) -> None:
+        from aidast.agents.main import CodexMainAgent
+        from aidast.agents.native_pipeline import CodexMainAgent as NativeAgent
+
+        for adapter in (CodexMainAgent, NativeAgent):
+            with self.subTest(adapter=adapter.__module__):
+                agent = adapter(
+                    main_model="gpt-6-sol",
+                    attack_model="gpt-6-sol",
+                    validation_model="gpt-5.6-sol",
+                )
+                self.assertTrue(agent.activate_attack_fallback_model())
+                self.assertEqual(agent._attack_model, "gpt-5.6-sol")
+
     def test_console_entrypoint_enables_store_without_changing_programmatic_main(self) -> None:
         from aidast import cli
 

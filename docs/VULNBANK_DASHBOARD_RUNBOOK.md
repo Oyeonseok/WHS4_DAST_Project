@@ -1,13 +1,13 @@
 # VulnBank 웹 대시보드 운영 가이드
 
-이 문서는 로컬 VulnBank(`http://127.0.0.1:5001/`)를 웹 대시보드에서 정찰부터 보고서까지 실행하고, 종료 후 81개 소스 기준과 독립적으로 비교하는 절차를 정리합니다. 81개 중 90% 이상의 통과 기준은 **메서드+경로 일치 73개 이상**입니다.
+이 문서는 로컬 VulnBank(`http://127.0.0.1:5002/`)를 웹 대시보드에서 정찰부터 보고서까지 실행하고, 종료 후 81개 소스 기준과 독립적으로 비교하는 절차를 정리합니다. 81개 중 90% 이상의 통과 기준은 **메서드+경로 일치 73개 이상**입니다.
 
 현재 10~20회 반복 실행이 모두 통과했다고 가정하지 않습니다. 아래의 반복 검증 조건을 다 충족한 후에만 운영 검증 완료로 판정합니다.
 
 ## 실행 전 확인
 
-1. 대시보드 `http://127.0.0.1:8000/`와 VulnBank `http://127.0.0.1:5001/`에 접속합니다.
-2. **Scopes / Programs**에서 VulnBank의 실행 대상이 `http://127.0.0.1:5001/`로 승인되어 있는지 확인합니다.
+1. 대시보드 `http://127.0.0.1:8000/`와 VulnBank `http://127.0.0.1:5002/`에 접속합니다.
+2. **Scopes / Programs**에서 VulnBank의 실행 대상이 `http://127.0.0.1:5002/`로 승인되어 있는지 확인합니다.
 3. 81개 기준 `Recon.db`는 `source`로 출처가 표시된 상태여야 합니다. 이 기준 DB는 실행 중 정찰 입력으로 사용하지 않고 종료 후 비교에만 사용합니다.
 4. 스캔과 기준 DB가 같은 VulnBank commit 또는 릴리스인지 확인합니다. 서로 다른 배포를 같은 논리 대상 ID로 묶지 않습니다.
 
@@ -20,26 +20,26 @@
 | 화면 필드 | 설정값 |
 | --- | --- |
 | Verified Scope | 승인된 로컬 VulnBank Scope |
-| Recon model | `gpt-6.1-sol` |
-| Attack model | `gpt-5.6-sol` (공격 가설 계획과 Chaining에도 적용됨) |
+| Recon model | `gpt-5.6-sol` |
+| Attack model | `gpt-6-sol` (공격 가설 계획과 Chaining에도 적용됨) |
 | Validation model | `gpt-6-sol` |
-| Report model | `gpt-6.1-sol` |
-| Targets | `http://127.0.0.1:5001/` 하나만 선택 |
+| Report model | `gpt-5.6-sol` |
+| Targets | `http://127.0.0.1:5002/` 하나만 선택 |
 | Execution profile | `Focused discovery` |
-| 공유 스캔 요청 예산 | `500` |
-| Requests per second | `0.5` |
+| 공유 스캔 요청 예산 | `2000` |
+| Requests per second | `1.0` |
 | Concurrency | `2` |
-| Timeout seconds | `15` |
-| Maximum depth | `2` |
-| 추가 경로 탐색 **전체** 시간 | `60` 초 |
-| Tag batch size | `200` |
+| Timeout seconds | `20` |
+| Maximum depth | `3` |
+| 추가 경로 탐색 **전체** 시간 | `150` 초 |
+| Tag batch size | `25` |
 | Login behavior | 기본 반복 검증은 `No login prompt` |
 
-`60`초는 루트별 제한이 아니라 모든 ffuf 루트가 함께 소비하는 전체 제한입니다. 요청 속도와 예산은 Recon·Attack·Validation에 공통으로 적용되므로 Scope에 표시된 상한을 넘지 말아야 합니다.
+`150`초는 루트별 제한이 아니라 모든 ffuf 루트가 함께 소비하는 전체 제한입니다. 요청 속도와 예산은 Recon·Attack·Validation에 공통으로 적용되므로 Scope에 표시된 상한을 넘지 말아야 합니다.
 
-모델은 단계별로 다르게 선택해야 합니다. 신규 VulnBank 실행에서 `gpt-6.1-sol` Native Attack은 모델 서비스의 cybersecurity-risk 필터로 거절되었고, `gpt-6-sol`도 인증 우회·송금 작업이 함께 포함된 후속 배치에서 같은 필터에 걸렸습니다. 동일한 정책·대상·8개 작업 배치를 `gpt-5.6-sol`로 재실행했을 때 단계와 작업 상태가 정상 완료되었습니다. **Attack model**은 엔드포인트별 공격 가설 계획과 Chaining에도 재사용되므로 모두 `gpt-5.6-sol`로 실행합니다. Recon과 Report는 `gpt-6.1-sol`을 유지합니다.
+`scan_7399cae6593b4c6484739cdac1295550`과 같은 모델 분할은 Recon·Report에 `gpt-5.6-sol`, Attack·Chaining·Validation에 `gpt-6-sol`을 사용합니다. Attack 모델이 일시적으로 capacity에 도달하면 남은 배치만 닫고 이미 선택된 다른 모델인 `gpt-5.6-sol`로 전환합니다. 완료된 finding과 요청 증거는 유지됩니다.
 
-이 거절은 타임아웃이나 일시적 DB 잠금이 아니라 현재 모델 접근 계층의 정책 결정입니다. 거절된 모델 선택을 그대로 재시도해도 해제되지 않으며, `gpt-5.6-sol`로 설정한 새 스캔을 시작해야 합니다.
+로컬 VulnBank Scope는 Attack 시작 전에 승인된 등록·로그인 API만 사용해 일회용 사용자 A/B, 합성 사용자, 합성 상인 세션과 소유 객체를 자동 준비합니다. 토큰은 프로세스 메모리의 불투명 참조로만 전달되며 DB와 보고서에는 저장되지 않습니다. 따라서 다중 사용자 IDOR와 인증 우회 검증을 위해 사용자가 두 계정을 번갈아 로그인할 필요가 없습니다.
 
 보호된 화면을 포함한 별도 인증 실행은 **Login behavior**를 `Open runtime browser`로 선택합니다. 반복 결과를 비교할 때는 비로그인 실행과 인증 실행을 같은 집합으로 계산하지 않습니다.
 
@@ -87,7 +87,7 @@ AI가 로그인, MFA, CAPTCHA 또는 접근 확인처럼 사람의 UI 조작이 
 
 - Recon에서 실패하면 **정찰부터 다시 스캔**으로 새 scan ID를 만듭니다. 부분 Recon DB를 성공 결과로 취급하지 않습니다.
 - Attack, Chaining, Validation에서 일시적 실행 오류가 발생하면 **실패 단계부터 재실행**을 누릅니다. 완료된 Recon과 저장된 모델 선택을 그대로 사용하고 처음 완료되지 않은 후속 단계부터 계속합니다.
-- 활동 기록에 Attack의 cybersecurity-risk 필터 거절이 표시된 경우는 **실패 단계부터 재실행**을 누르지 않습니다. 재개는 저장된 모델 선택을 그대로 불러와 같은 계층 제한에 다시 거절됩니다. **정찰부터 다시 스캔**으로 새 scan ID를 만들고 Attack을 `gpt-5.6-sol`로 선택합니다.
+- 일시적 model capacity 또는 다중 작업의 모델 정책 거절은 현재 배치에서 격리되어야 하며 전체 파이프라인을 실패시키지 않아야 합니다. 예전 코드로 시작한 프로세스가 이 사유로 종료됐다면 업데이트된 코드에서 **실패 단계부터 재실행**을 눌러 완료된 Recon과 finding을 유지한 채 계속합니다.
 - Report에서 실패하면 **보고서만 다시 생성**을 누릅니다. 이 작업은 Recon, Attack, Chaining, Validation을 반복하지 않고 타깃에 새 요청을 보내지 않은 채 현재 검증 결과에서 보고서만 다시 생성합니다.
 - `cancelled`는 재개 대상이 아닙니다. 필요하면 새 scan ID로 다시 시작합니다.
 
