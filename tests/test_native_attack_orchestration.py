@@ -479,6 +479,13 @@ class NativeAttackMainAgentTests(unittest.TestCase):
                 self.assertTrue(
                     (work / ".agents/skills/aidast-live-attack/SKILL.md").is_file()
                 )
+                live_skill = (
+                    work / ".agents/skills/aidast-live-attack/SKILL.md"
+                ).read_text(encoding="utf-8")
+                self.assertIn(
+                    "black-box source-disclosure evidence",
+                    live_skill,
+                )
                 self.assertTrue((work / "tools/request_cli.py").is_file())
                 self.assertTrue((work / "tools/template_cli.py").is_file())
                 self.assertTrue(

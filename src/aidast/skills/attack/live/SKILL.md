@@ -35,6 +35,12 @@ same temporary file.
 - Prefer non-destructive proof. A Hunt Skill never overrides Scope or policy.
 - Never print or persist live cookies, bearer tokens, passwords, or API keys.
   Redact secret values from stored evidence.
+- A black-box or source-assistance restriction forbids reading the target's
+  repository, local files, container filesystem, or server implementation as
+  execution input. It does not forbid requesting an in-scope HTTP endpoint and
+  evaluating source text or implementation details returned by that endpoint.
+  Treat such a response as black-box source-disclosure evidence; do not mark
+  the task policy-excluded merely because the response itself contains source.
 - Never send target traffic with curl, wget, Invoke-WebRequest, a browser,
   sockets, Python networking, or any transport other than the configured HTTP
   request helper or deterministic template helper. Both reserve the durable
