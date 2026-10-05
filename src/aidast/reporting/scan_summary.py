@@ -158,10 +158,18 @@ def write_scan_summary(
     active = (snapshot["scan"]["status"] in {"pending", "running"}
               or any(item["status"] in {"pending", "running"}
                      for item in latest_stages))
+    drafted_rows = [item for item in report_rows if item.get("status") == "drafted"]
+    drafted_cases = len({
+        str(item["case_id"]) for item in drafted_rows if item.get("case_id")
+    })
     summary = {"schema_version": "1.0", "scan_id": scan_id,
                "execution_status": "partial" if incomplete else "in_progress" if active else "completed",
                **snapshot, "latest_stages": latest_stages,
                "reports": report_rows, "errors": issue_rows,
+               "report_counts": {
+                   "finding_cases": drafted_cases,
+                   "localized_drafts": len(drafted_rows),
+               },
                "conclusion": "Only current confirmed Validation cases can produce finding reports. "
                              "Empty or incomplete results do not establish the absence of vulnerabilities."}
     encoded = json.dumps(summary, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
@@ -177,11 +185,11 @@ def write_scan_summary(
             raise ReportError("existing scan summary is invalid") from exc
         if not isinstance(previous, dict) or previous.get("scan_id") != scan_id:
             raise ReportError("existing scan summary belongs to a different scan")
-    drafted = sum(item.get("status") == "drafted" for item in report_rows)
     markdown = ["# 스캔 실행 보고서", "", f"- 스캔: {_markdown_text(scan_id)}",
                 f"- 실행 상태: {summary['execution_status']}",
                 f"- DB에 기록된 현재 확정 상태 사례: {summary['validation']['current_confirmed']}",
-                f"- 생성된 취약점 보고서: {drafted}", "", "## 수집 결과", ""]
+                f"- 생성된 취약점 보고서: {drafted_cases}",
+                f"- 생성된 언어별 보고서 초안: {len(drafted_rows)}", "", "## 수집 결과", ""]
     markdown.extend(f"- {name}: {count}" for name, count in summary["inventory"].items())
     if summary["recon_quality"]:
         markdown.extend(["", "## 정찰 품질", ""])

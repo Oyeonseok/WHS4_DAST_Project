@@ -150,6 +150,13 @@ def test_model_generation_is_bounded_parallel_and_persisted_in_stable_order(case
         ("c_case", "ko"), ("c_case", "en"),
     ]
     assert results.errors == []
+    assert results.summary["report_counts"] == {
+        "finding_cases": 3,
+        "localized_drafts": 6,
+    }
+    summary_markdown = (output_for(case) / "ScanSummary.md").read_text()
+    assert "생성된 취약점 보고서: 3" in summary_markdown
+    assert "생성된 언어별 보고서 초안: 6" in summary_markdown
 
 
 def test_invalid_draft_is_diagnostic_without_publishing_a_finding(case):
