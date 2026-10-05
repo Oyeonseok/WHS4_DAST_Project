@@ -762,6 +762,7 @@ def ensure_coverage_manifest(database: Path, scan_id: str) -> CoverageManifestRe
         requeue_unreplayable_candidates(conn, scan_id)
         _adopt_existing_findings(conn, scan_id)
         reclassify_misclassified_auth_blockers(conn, scan_id)
+        requeue_black_box_source_disclosure_coverage(conn, scan_id)
         requeue_credential_blocked_coverage(conn, scan_id)
         requeue_transient_model_failures(conn, scan_id)
         requeue_new_disposable_identity_coverage(conn, scan_id)
@@ -1523,6 +1524,45 @@ def requeue_transient_model_failures(
                    last_stage_run_id=NULL,last_task_id=NULL,updated_at=?
                WHERE coverage_id=?""",
             (reason, now(), row["coverage_id"]),
+        )
+        reopened += 1
+    return reopened
+
+
+def requeue_black_box_source_disclosure_coverage(
+    conn: sqlite3.Connection, scan_id: str,
+) -> int:
+    """Retry safe HTTP disclosures excluded as if they were white-box input."""
+    rows = conn.execute(
+        """SELECT c.*,e.method
+           FROM attack_coverage_items c
+           JOIN endpoints e ON e.endpoint_id=c.endpoint_id
+           WHERE c.scan_id=? AND c.status='policy_excluded'
+             AND c.skill_name='hunt-source-leak'
+             AND e.method IN ('GET','HEAD')""",
+        (scan_id,),
+    ).fetchall()
+    reopened = 0
+    for row in rows:
+        reason = str(row["disposition_reason"] or "").casefold()
+        if "source" not in reason or not any(marker in reason for marker in (
+            "server source", "source snippet", "http response",
+        )):
+            continue
+        retry_reason = (
+            "in-scope HTTP disclosure is black-box response evidence after "
+            "source-policy clarification"
+        )
+        _event(
+            conn, row, "pending", retry_reason,
+            stage_run_id=row["last_stage_run_id"], task_id=row["last_task_id"],
+        )
+        conn.execute(
+            """UPDATE attack_coverage_items
+               SET status='pending',disposition_reason=?,attempt_count=0,
+                   last_stage_run_id=NULL,last_task_id=NULL,updated_at=?
+               WHERE coverage_id=?""",
+            (retry_reason, now(), row["coverage_id"]),
         )
         reopened += 1
     return reopened

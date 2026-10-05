@@ -17,6 +17,7 @@ from aidast.attack.coverage import (
     requeue_unprofiled_historical_response_coverage,
     requeue_interrupted_coverage,
     requeue_owned_object_coverage,
+    requeue_black_box_source_disclosure_coverage,
     requeue_transient_model_failures,
     requeue_coverage,
     resolve_abandoned_attack_leads,
@@ -895,6 +896,42 @@ def test_terminal_coverage_can_be_explicitly_requeued_without_deleting_evidence(
             "SELECT count(*) FROM attack_coverage_events WHERE next_status='pending'"
         ).fetchone() == (4,)
         assert conn.execute("SELECT count(*) FROM attack_tasks").fetchone() == (4,)
+
+
+def test_black_box_http_source_disclosure_is_requeued_after_policy_clarification(
+    tmp_path: Path,
+) -> None:
+    imported = imported_pipeline(tmp_path)
+    ensure_coverage_manifest(imported.pipeline_database, imported.scan_id)
+    with sqlite3.connect(imported.pipeline_database) as conn, conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            """SELECT c.coverage_id FROM attack_coverage_items c
+               JOIN endpoints e ON e.endpoint_id=c.endpoint_id
+               WHERE c.scan_id=? AND e.method='GET' LIMIT 1""",
+            (imported.scan_id,),
+        ).fetchone()
+        assert row is not None
+        conn.execute(
+            """UPDATE attack_coverage_items
+               SET status='policy_excluded',skill_name='hunt-source-leak',
+                   disposition_reason=? WHERE coverage_id=?""",
+            (
+                "[policy] Source snippet endpoint would expose running server "
+                "source; Scope prohibits use of server source during execution.",
+                row["coverage_id"],
+            ),
+        )
+        assert requeue_black_box_source_disclosure_coverage(
+            conn, imported.scan_id,
+        ) == 1
+        repaired = conn.execute(
+            """SELECT status,disposition_reason FROM attack_coverage_items
+               WHERE coverage_id=?""",
+            (row["coverage_id"],),
+        ).fetchone()
+        assert repaired["status"] == "pending"
+        assert "black-box response evidence" in repaired["disposition_reason"]
 
 
 def test_disruptive_rate_and_concurrency_classes_are_scheduled_last(tmp_path: Path) -> None:
