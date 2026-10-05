@@ -486,6 +486,7 @@ class NativeAttackMainAgentTests(unittest.TestCase):
                     "black-box source-disclosure evidence",
                     live_skill,
                 )
+                self.assertIn("recovery phrases or mnemonic seeds", live_skill)
                 self.assertTrue((work / "tools/request_cli.py").is_file())
                 self.assertTrue((work / "tools/template_cli.py").is_file())
                 self.assertTrue(

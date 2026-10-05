@@ -119,6 +119,13 @@ same temporary file.
    directly from `pending` to `skipped` with a short reason that identifies one
    of: missing authentication identity, TargetPolicy/Scope exclusion, or an
    unsupported safe test contract.
+   For a safe unauthenticated collection read, inspect nested response fields
+   for secrets and credential-derived material, including password hashes,
+   recovery phrases or mnemonic seeds, reset tokens, MFA secrets, private keys,
+   and security answers. A stable anonymous response that exposes such material
+   is direct confidentiality evidence; it does not require a state-changing
+   exploit. Repeat the read for stability and persist only hashes, assertions,
+   field paths, and redacted evidence rather than the secret value.
    Perform this applicability pass first for the whole bounded batch. Transition
    obvious blockers immediately; do not invent credentials, seed objects,
    forbidden brute-force traffic, external callbacks, or unsafe mutation
