@@ -223,6 +223,54 @@ def test_execute_resume_uses_durable_validation_owner_after_upstream_retry(
     assert resumed == ["validation-during-resume"]
 
 
+def test_execute_resume_finishes_each_failed_validation_owner_in_order(
+    tmp_path: Path,
+) -> None:
+    pipeline = _fixture(tmp_path)
+    with sqlite3.connect(pipeline) as conn:
+        conn.execute(
+            "UPDATE stage_runs SET status='completed',finished_at=CURRENT_TIMESTAMP "
+            "WHERE stage='attack'"
+        )
+        for ordinal in (1, 2):
+            finding_id = f"finding-owner-{ordinal}"
+            stage_id = f"validation-owner-{ordinal}"
+            conn.execute(
+                """INSERT INTO findings
+                   (finding_id,scan_id,endpoint_id,vuln_type,severity,title)
+                   VALUES (?,?,'login','test','LOW',?)""",
+                (finding_id, SCAN_ID, f"Owner {ordinal}"),
+            )
+            stage = start_stage_run(
+                conn, scan_id=SCAN_ID, stage="validation", stage_run_id=stage_id,
+            )
+            conn.execute(
+                """INSERT INTO validation_cases
+                   (case_id,scan_id,target_kind,finding_id,latest_stage_run_id,
+                    processing_phase,state_version)
+                   VALUES (?,?, 'finding',?,?, 'interrupted',1)""",
+                (f"case-owner-{ordinal}", SCAN_ID, finding_id, stage),
+            )
+            finish_stage_run(conn, stage, status="failed", error_message="fixture")
+
+    plan = inspect_resume(tmp_path, SCAN_ID)
+    resumed: list[str] = []
+
+    class ValidationStage:
+        def resume(self, stage_run_id: str) -> None:
+            resumed.append(stage_run_id)
+
+        def run(self, _scan_id: str) -> None:
+            raise AssertionError("a new Validation run must not be started")
+
+    execute_resume(
+        plan, validation_factory=lambda **_kwargs: ValidationStage(),
+    )
+
+    assert plan.stage_run_id == "validation-owner-1"
+    assert resumed == ["validation-owner-1", "validation-owner-2"]
+
+
 def test_execute_resume_dispatches_stage_sequence_without_recon(tmp_path: Path) -> None:
     _fixture(tmp_path)
     plan = inspect_resume(tmp_path, SCAN_ID)
