@@ -17,6 +17,7 @@ from aidast.validation import (
     EligibilityAssessment,
     EligibilityRequest,
 )
+from aidast.validation.contracts.eligibility import ConditionalEligibilityContext
 
 
 def request_fixture(**overrides: object) -> EligibilityRequest:
@@ -145,6 +146,45 @@ Authorization is limited to this intentionally vulnerable training target.
     assert result.eligibility == "ELIGIBLE"
     assert result.scope_quote == allowed
     assert result.replay_allowed is True
+    fake._run_structured.assert_not_called()
+
+
+def test_dashboard_local_lab_scope_is_deterministic_with_policy_notes_and_post_replay():
+    fake = Mock()
+    runner = CodexEligibilityRunner(fake)
+    allowed = (
+        "이 로컬 일회성 VulnBank 컨테이너의 블랙박스 능동 취약점 테스트 및 "
+        "검증을 위해 GET, HEAD, OPTIONS, POST, PUT, PATCH, DELETE 요청을 허용합니다."
+    )
+    scope = f"""# Scope: AI DAST Local Lab: vuln-bank-5002
+> Source: https://lab.aidast.invalid/vuln-bank-5002
+| Type | Asset | Eligibility | Maximum severity | Description |
+|---|---|---|---|---|
+| URL | http://127.0.0.1:5002/ | eligible | critical | local lab |
+## Allowed activities
+- {allowed}
+## Safe harbor
+이 승인 기록은 위 loopback 자산의 로컬 교육용 평가에만 적용됩니다.
+## Ambiguities requiring review
+
+- 명시된 내용 없음.
+"""
+    conditional = ConditionalEligibilityContext(
+        assessment_id="assessment", output_sha256="b" * 64,
+        required_impact=({
+            "condition": "A controlled cross-account read is observed.",
+            "evidence_needed": "Fresh bounded replay evidence.",
+        },),
+    )
+    result = runner.assess(request_fixture(
+        scope_markdown=scope, endpoint="http://127.0.0.1:5002/check_balance/1",
+        method="GET", phase="post_replay", policy_guidance="Keep mutations synthetic.",
+        conditional_context=conditional,
+    ))
+    assert result.eligibility == "ELIGIBLE"
+    assert result.phase == "post_replay"
+    assert result.scope_quote == allowed
+    assert result.evidence_refs == ("evidence",)
     fake._run_structured.assert_not_called()
 
 

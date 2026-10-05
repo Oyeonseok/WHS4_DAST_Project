@@ -39,7 +39,7 @@ class CodexEligibilityRunner:
     def assess(
         self, request: EligibilityRequest, correction: str | None = None,
     ) -> EligibilityAssessment:
-        local = self._explicit_local_lab_assessment(request) if not request.policy_guidance else None
+        local = self._explicit_local_lab_assessment(request)
         if local is not None:
             return local
         candidate = request.model_dump(mode="json")
@@ -97,8 +97,6 @@ If several rules matter, quote one applicable excerpt and discuss the others in 
         request: EligibilityRequest,
     ) -> EligibilityAssessment | None:
         """Deterministically honor the generated, explicit loopback-lab policy."""
-        if request.phase != "preflight":
-            return None
         try:
             parsed_endpoint = urlsplit(request.endpoint)
             host = parsed_endpoint.hostname
@@ -122,13 +120,34 @@ If several rules matter, quote one applicable excerpt and discuss the others in 
             "## Ambiguities requiring review\n\n- 명시된 내용 없음.",
             allowed_quote,
         )
-        if any(fragment not in scope for fragment in required_fragments):
-            return None
-        allowed_methods = {"GET", "HEAD", "OPTIONS", "POST"}
-        scope_quote = allowed_quote
-        if benchmark_quote in scope:
-            allowed_methods.update({"PUT", "PATCH", "DELETE"})
-            scope_quote = benchmark_quote
+        if all(fragment in scope for fragment in required_fragments):
+            allowed_methods = {"GET", "HEAD", "OPTIONS", "POST"}
+            scope_quote = allowed_quote
+            if benchmark_quote in scope:
+                allowed_methods.update({"PUT", "PATCH", "DELETE"})
+                scope_quote = benchmark_quote
+        else:
+            # Dashboard-created local labs use the same strict authorization
+            # structure with a Korean program description.  Recognize only the
+            # generated loopback form, including its explicit safe harbor and
+            # no-ambiguity declaration, so policy notes do not unnecessarily
+            # route an already explicit authorization decision through an LLM.
+            korean_quote = next((
+                line[2:] for line in scope.splitlines()
+                if line.startswith("- 이 로컬 일회성 ")
+                and "블랙박스 능동 취약점 테스트 및 검증을 위해 " in line
+                and "GET, HEAD, OPTIONS, POST, PUT, PATCH, DELETE 요청을 허용합니다." in line
+            ), None)
+            korean_fragments = (
+                "# Scope: AI DAST Local Lab:",
+                "> Source: https://lab.aidast.invalid/",
+                "이 승인 기록은 위 loopback 자산의 로컬 교육용 평가에만 적용됩니다.",
+                "## Ambiguities requiring review\n\n- 명시된 내용 없음.",
+            )
+            if korean_quote is None or any(fragment not in scope for fragment in korean_fragments):
+                return None
+            allowed_methods = {"GET", "HEAD", "OPTIONS", "POST", "PUT", "PATCH", "DELETE"}
+            scope_quote = korean_quote
         if request.method.upper() not in allowed_methods:
             return None
         origin = f"{parsed_endpoint.scheme}://{parsed_endpoint.netloc}/"
@@ -145,8 +164,8 @@ If several rules matter, quote one applicable excerpt and discuss the others in 
             required_impact=(),
             replay_allowed=True,
             reason=(
-                "The exact loopback asset is marked eligible and the requested "
-                "method is explicitly authorized for non-destructive testing."
+                "The exact disposable loopback asset is marked eligible, has no "
+                "unresolved scope ambiguity, and explicitly authorizes the requested method."
             ),
             evidence_refs=request.evidence_refs,
         )
