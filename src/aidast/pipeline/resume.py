@@ -43,6 +43,31 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _resumable_validation_stage(
+    conn: sqlite3.Connection, scan_id: str,
+) -> str | None:
+    """Return the failed Validation run that still owns unfinished cases."""
+    tables = {
+        str(row[0]) for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )
+    }
+    if "validation_cases" not in tables:
+        return None
+    rows = conn.execute(
+        """SELECT DISTINCT v.latest_stage_run_id
+           FROM validation_cases v
+           JOIN stage_runs s ON s.stage_run_id=v.latest_stage_run_id
+           WHERE v.scan_id=? AND v.processing_phase IN ('queued','interrupted')
+             AND s.stage='validation' AND s.status='failed'
+           ORDER BY v.latest_stage_run_id""",
+        (scan_id,),
+    ).fetchall()
+    if len(rows) > 1:
+        raise ValueError("scan has multiple failed Validation runs with resumable cases")
+    return str(rows[0][0]) if rows else None
+
+
 def inspect_resume(result_root: Path, scan_id: str) -> ResumePlan:
     """Validate the original approved handoff and select the first unfinished stage."""
     if not _SCAN_ID.fullmatch(scan_id):
@@ -124,11 +149,21 @@ def inspect_resume(result_root: Path, scan_id: str) -> ResumePlan:
             raise ValueError("retry requires a completed Recon stage")
         from aidast.attack.coverage_snapshot import attack_work_unfinished
         unfinished_attack = attack_work_unfinished(conn, scan_id)
+        resumable_validation_stage = _resumable_validation_stage(conn, scan_id)
         targets = tuple(
             str(row[0]) for row in conn.execute(
                 "SELECT DISTINCT identifier FROM assets WHERE scan_id=? ORDER BY identifier",
                 (scan_id,),
             )
+        )
+
+    # Once Validation owns queued or interrupted cases, resume that exact
+    # failed run. A residual Attack review gap must not start new upstream
+    # stages and then collide with the durable Validation cases.
+    if resumable_validation_stage is not None:
+        return ResumePlan(
+            scan_id, scope_id, "validation", resumable_validation_stage,
+            database, scope_path, policy_path, targets, models, program_url,
         )
 
     for stage in ("attack", "chaining", "validation", "report"):
@@ -202,7 +237,11 @@ def execute_resume(
         build_native_validation_coordinator(db_path=plan.database, policy_path=plan.policy_path,
                                              validation_model=plan.models.validation_model)
     )
-    if plan.stage == "validation" and plan.stage_run_id:
-        coordinator.resume(plan.stage_run_id)
+    validation_stage_run_id = plan.stage_run_id if plan.stage == "validation" else None
+    if validation_stage_run_id is None:
+        with closing(sqlite3.connect(plan.database)) as conn:
+            validation_stage_run_id = _resumable_validation_stage(conn, plan.scan_id)
+    if validation_stage_run_id is not None:
+        coordinator.resume(validation_stage_run_id)
     else:
         coordinator.run(plan.scan_id)

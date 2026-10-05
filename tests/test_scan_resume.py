@@ -129,6 +129,100 @@ def test_resume_inspection_accepts_explicitly_cancelled_post_recon_stage(tmp_pat
     assert plan.database == pipeline
 
 
+def test_resume_prioritizes_failed_validation_cases_over_residual_attack_gap(
+    tmp_path: Path,
+) -> None:
+    pipeline = _fixture(tmp_path)
+    with sqlite3.connect(pipeline) as conn:
+        conn.execute(
+            "UPDATE stage_runs SET status='completed',finished_at=CURRENT_TIMESTAMP "
+            "WHERE stage='attack'"
+        )
+        chaining = start_stage_run(
+            conn, scan_id=SCAN_ID, stage="chaining", stage_run_id="chain-completed",
+        )
+        finish_stage_run(conn, chaining, status="completed")
+        conn.execute(
+            """INSERT INTO findings
+               (finding_id,scan_id,endpoint_id,vuln_type,severity,title)
+               VALUES ('finding-resume',?, 'login','test','LOW','Resume fixture')""",
+            (SCAN_ID,),
+        )
+        validation = start_stage_run(
+            conn, scan_id=SCAN_ID, stage="validation",
+            stage_run_id="validation-interrupted",
+        )
+        conn.execute(
+            """INSERT INTO validation_cases
+               (case_id,scan_id,target_kind,finding_id,latest_stage_run_id,
+                processing_phase,state_version)
+               VALUES ('case-resume',?,'finding','finding-resume',?, 'interrupted',1)""",
+            (SCAN_ID, validation),
+        )
+        finish_stage_run(conn, validation, status="failed", error_message="fixture")
+
+    plan = inspect_resume(tmp_path, SCAN_ID)
+
+    assert plan.stage == "validation"
+    assert plan.stage_run_id == "validation-interrupted"
+
+
+def test_execute_resume_uses_durable_validation_owner_after_upstream_retry(
+    tmp_path: Path,
+) -> None:
+    pipeline = _fixture(tmp_path)
+    plan = inspect_resume(tmp_path, SCAN_ID)
+    resumed: list[str] = []
+
+    class Stage:
+        def __init__(self, name: str, **_kwargs: object) -> None:
+            self.name = name
+
+        def run(self, scan_id: str) -> None:
+            if self.name != "chaining":
+                return
+            with sqlite3.connect(pipeline) as conn:
+                conn.execute(
+                    """INSERT INTO findings
+                       (finding_id,scan_id,endpoint_id,vuln_type,severity,title)
+                       VALUES ('finding-during-resume',?,'login','test','LOW','Resume fixture')""",
+                    (scan_id,),
+                )
+                validation = start_stage_run(
+                    conn, scan_id=scan_id, stage="validation",
+                    stage_run_id="validation-during-resume",
+                )
+                conn.execute(
+                    """INSERT INTO validation_cases
+                       (case_id,scan_id,target_kind,finding_id,latest_stage_run_id,
+                        processing_phase,state_version)
+                       VALUES ('case-during-resume',?,'finding','finding-during-resume',?,
+                               'interrupted',1)""",
+                    (scan_id, validation),
+                )
+                finish_stage_run(
+                    conn, validation, status="failed", error_message="fixture",
+                )
+
+    class ValidationStage:
+        def resume(self, stage_run_id: str) -> None:
+            resumed.append(stage_run_id)
+
+        def run(self, _scan_id: str) -> None:
+            raise AssertionError("a new Validation run must not be started")
+
+    with (
+        patch("aidast.orchestration.attack.AttackCoordinator", lambda **kwargs: Stage("attack", **kwargs)),
+        patch("aidast.orchestration.chaining.ChainingCoordinator", lambda **kwargs: Stage("chaining", **kwargs)),
+    ):
+        execute_resume(
+            plan, agent=object(),
+            validation_factory=lambda **_kwargs: ValidationStage(),
+        )
+
+    assert resumed == ["validation-during-resume"]
+
+
 def test_execute_resume_dispatches_stage_sequence_without_recon(tmp_path: Path) -> None:
     _fixture(tmp_path)
     plan = inspect_resume(tmp_path, SCAN_ID)
