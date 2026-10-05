@@ -192,6 +192,23 @@ class ValidationRuntimeContractTests(unittest.TestCase):
         self.assertEqual(contract.negative_control.identity_mode, "anonymous")
         self.assertNotIn("identity_mode", contract.target.model_dump(mode="json"))
 
+    def test_attempt_can_select_one_declared_credential_role(self):
+        raw = legacy_contract_document()
+        raw["target"] = {**raw["target"], "credential_roles": ["identity_a"]}
+        contract = validate_runtime_contract(raw)
+        self.assertEqual(contract.target.credential_roles, ("identity_a",))
+        self.assertEqual(
+            contract.target.model_dump(mode="json")["credential_roles"],
+            ["identity_a"],
+        )
+        with self.assertRaises(ValueError):
+            validate_runtime_contract({
+                **raw,
+                "target": {
+                    **raw["target"], "identity_mode": "anonymous",
+                },
+            })
+
     def test_unknown_explicit_runtime_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "unsupported runtime kind"):
             validate_runtime_contract({"runtime_kind": "raw", "schema_version": 1})

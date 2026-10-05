@@ -1228,6 +1228,43 @@ class ValidationCoordinatorTests(unittest.TestCase):
                     case_id="case", scan_id="scan", finding_id="finding",
                 )
 
+    def test_candidate_gate_rejects_runtime_credential_role_not_declared_by_finding(self):
+        from aidast.validation import canonical_sha256, validate_runtime_contract
+
+        def attempt(variant, *, roles=None):
+            value = {
+                "request": {"path_parameters": {"id": 1},
+                            "query_parameters": {"variant": variant}},
+                "assertions": [{
+                    "assertion_id": "private", "kind": "body_contains",
+                    "expected": "private-record",
+                }],
+            }
+            if roles is not None:
+                value["credential_roles"] = roles
+            return value
+
+        runtime = validate_runtime_contract({
+            "schema_version": 1,
+            "target": attempt("target", roles=["identity_b"]),
+            "positive_control": attempt("baseline"),
+            "negative_control": attempt("inert"),
+        }).model_dump(mode="json")
+        with db.connect(self.path) as conn:
+            conn.execute("DROP TRIGGER finding_reproduction_specs_no_update")
+            conn.execute(
+                """UPDATE finding_reproduction_specs
+                   SET runtime_contract_json=?,runtime_contract_sha256=?
+                   WHERE finding_id='finding'""",
+                (json.dumps(runtime, sort_keys=True, separators=(",", ":")),
+                 canonical_sha256(runtime)),
+            )
+            conn.commit()
+            with self.assertRaisesRegex(CandidateIntegrityError, "runtime_identity_roles"):
+                CandidateIntegrityGate(conn).validate_finding(
+                    case_id="case", scan_id="scan", finding_id="finding",
+                )
+
     def test_candidate_gate_rejects_development_contract_hash_mismatch(self):
         from aidast.validation import DevelopmentRuntimeContract
 

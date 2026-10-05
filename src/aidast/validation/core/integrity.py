@@ -170,6 +170,11 @@ class CandidateIntegrityGate:
         if (not isinstance(roles, list) or len(roles) != len(set(roles))
                 or any(not isinstance(role, str) or not role for role in roles)):
             raise CandidateIntegrityError("identity_roles")
+        if runtime_contract is not None and hasattr(runtime, "for_attempt"):
+            for attempt_kind in ("target", "positive_control", "negative_control"):
+                selected = getattr(runtime.for_attempt(attempt_kind), "credential_roles", None)
+                if selected is not None and any(role not in roles for role in selected):
+                    raise CandidateIntegrityError("runtime_identity_roles")
         if any(
             role not in roles
             for action in development_actions for role in action.credential_roles

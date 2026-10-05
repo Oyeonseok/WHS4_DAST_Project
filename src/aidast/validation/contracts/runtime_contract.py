@@ -119,6 +119,7 @@ class HttpAttemptContract(StrictContract):
     request: HttpRequestTemplate
     assertions: tuple[ResponseAssertion, ...] = Field(min_length=1, max_length=16)
     identity_mode: Literal["case", "anonymous"] = "case"
+    credential_roles: tuple[str, ...] | None = Field(default=None, max_length=16)
     endpoint_template: str | None = Field(default=None, min_length=1, max_length=4096)
 
     @model_serializer(mode="wrap")
@@ -126,11 +127,13 @@ class HttpAttemptContract(StrictContract):
         document = handler(self)
         if self.identity_mode == "case":
             document.pop("identity_mode", None)
+        if self.credential_roles is None:
+            document.pop("credential_roles", None)
         if self.endpoint_template is None:
             document.pop("endpoint_template", None)
         return document
 
-    @field_validator("assertions", mode="before")
+    @field_validator("assertions", "credential_roles", mode="before")
     @classmethod
     def json_array_assertions(cls, value: Any) -> Any:
         """Accept persisted JSON arrays while keeping the validated contract immutable."""
@@ -141,6 +144,13 @@ class HttpAttemptContract(StrictContract):
         identifiers = [item.assertion_id for item in self.assertions]
         if len(identifiers) != len(set(identifiers)):
             raise ValueError("runtime assertion IDs must be unique within an attempt")
+        if self.credential_roles is not None:
+            if (not self.credential_roles
+                    or len(self.credential_roles) != len(set(self.credential_roles))
+                    or any(not role or len(role) > 256 for role in self.credential_roles)):
+                raise ValueError("runtime credential roles must be unique non-empty identifiers")
+            if self.identity_mode == "anonymous":
+                raise ValueError("anonymous attempts cannot select credential roles")
         if self.endpoint_template is not None:
             parsed = urlsplit(self.endpoint_template)
             decoded = unquote(parsed.path)

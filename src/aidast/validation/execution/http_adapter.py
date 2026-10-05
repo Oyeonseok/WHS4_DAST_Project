@@ -82,13 +82,28 @@ class HttpReproductionPort:
             url, headers, data = render_http_request(endpoint, attempt.request)
         else:
             url, headers, data = self.request_builder(blind_case, attempt_kind, batch_no, ordinal)
+        selected_references = None
+        if runtime is not None:
+            runtime_attempt = runtime.for_attempt(attempt_kind)
+            if runtime_attempt.identity_mode == "anonymous":
+                selected_references = ()
+            elif runtime_attempt.credential_roles is not None:
+                by_role = dict(zip(
+                    blind_case.required_identity_roles,
+                    blind_case.credential_references,
+                ))
+                try:
+                    selected_references = tuple(
+                        by_role[role] for role in runtime_attempt.credential_roles
+                    )
+                except KeyError as exc:
+                    raise ValueError("runtime credential role is unavailable") from exc
         broker = ValidationRequestBroker(
             db_path=db_path, scan_id=scan_id, stage_run_id=stage_run_id,
             case_id=case_id, attempt_id=attempt_id, blind_case=blind_case,
             policy=policy, transport=self.transport,
             credential_resolver=self.credential_resolver,
-            credential_references=(() if runtime is not None
-                                   and runtime.for_attempt(attempt_kind).identity_mode == "anonymous" else None),
+            credential_references=selected_references,
             request_boundary=((blind_case.method, url) if runtime is not None
                               and runtime.for_attempt(attempt_kind).endpoint_template is not None else None),
         )

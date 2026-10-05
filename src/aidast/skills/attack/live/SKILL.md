@@ -152,6 +152,15 @@ same temporary file.
    supplied `owned_test_object` with a distinct `observed_reference_object`
    collected by black-box Recon. Never use that single-identity exception for
    a mutation, and never guess the foreign identifier.
+   For a mutation IDOR, first prove ownership with an exact read-only owner
+   request when the target exposes one. Declare both identities in
+   `required_identity_roles`, select only the attacker role in each mutation
+   attempt with `credential_roles`, and include the owner read as a bounded
+   `prepare_second_test_identity_state` development action using only the owner
+   role. Its assertion must identify the supplied owned object by a stable
+   non-secret field. If no independent owner read or state assertion exists,
+   keep the lead inconclusive; success from two identities on the vulnerable
+   mutation endpoint alone does not establish ownership.
    `test_fixtures` are non-secret Recon/Pipeline facts bound to this task. Use
    their exact object IDs and matching `credential_label` instead of claiming a
    seed object is missing. Never treat a fixture fact as proof of a

@@ -187,6 +187,37 @@ class ValidationRequestBrokerTests(unittest.TestCase):
         self.assertIsNone(calls[1].get_header("Authorization"))
         self.assertIsNone(calls[1].get_header("Cookie"))
 
+    def test_each_attempt_can_select_one_identity_without_header_collision(self):
+        calls, resolutions = [], []
+        proof = [{"assertion_id": "effect", "kind": "body_contains", "expected": "ok"}]
+        runtime = HttpRuntimeContract.model_validate({
+            "schema_version": 1,
+            "target": {"request": {"path_parameters": {"id": 7}}, "assertions": proof,
+                       "credential_roles": ["identity_a"]},
+            "positive_control": {"request": {"path_parameters": {"id": 7}}, "assertions": proof,
+                                 "credential_roles": ["identity_b"]},
+            "negative_control": {"request": {"path_parameters": {"id": 7}}, "assertions": proof,
+                                 "identity_mode": "anonymous"},
+        })
+        blind = self.blind.model_copy(update={
+            "required_identity_roles": ("identity_a", "identity_b"),
+            "credential_references": ("credential-a", "credential-b"),
+            "runtime_contract": runtime.model_dump(mode="json"),
+        })
+        def resolve(reference):
+            resolutions.append(reference)
+            return {"Authorization": "Bearer " + reference}
+        def transport(request, timeout):
+            calls.append(request.get_header("Authorization"))
+            return Response()
+        port = HttpReproductionPort(transport=transport, credential_resolver=resolve)
+        for kind in ("target", "positive_control", "negative_control"):
+            port.execute(blind, attempt_kind=kind, batch_no=1, ordinal=1,
+                         attempt_id=self.attempt, db_path=self.path, scan_id="scan",
+                         stage_run_id=self.stage, case_id="case", policy=self.policy)
+        self.assertEqual(resolutions, ["credential-a", "credential-b"])
+        self.assertEqual(calls, ["Bearer credential-a", "Bearer credential-b", None])
+
     def test_read_only_negative_control_uses_bounded_same_origin_endpoint(self):
         calls = []
         proof = [{"assertion_id": "effect", "kind": "body_contains", "expected": "secret"}]

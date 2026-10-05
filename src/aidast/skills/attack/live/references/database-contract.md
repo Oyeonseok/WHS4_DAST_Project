@@ -306,6 +306,14 @@ and let the trusted Validation runtime resolve their opaque references. Browser,
 OOB, and multi-step findings may omit this HTTP-only contract until their
 dedicated runtime contract is available.
 
+When a finding requires more than one test identity, an HTTP attempt may add
+`credential_roles`, selecting a non-empty subset of `required_identity_roles`.
+Use this for an owner control and a separate attacker target; never merge two
+session credentials into one request. For example, the owner control can select
+`["identity_b"]` while the target selects `["identity_a"]`. An anonymous
+attempt must continue to use `identity_mode: "anonymous"` and cannot select a
+credential role.
+
 `reproduction` may also include one immutable `development_contract` when
 Attack knows the exact prerequisite request needed to recover from an objective
 Validation blocker:
