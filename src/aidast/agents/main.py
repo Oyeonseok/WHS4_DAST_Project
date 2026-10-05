@@ -18,6 +18,7 @@ from uuid import uuid4
 from pydantic import BaseModel, ValidationError
 
 from aidast.auth.codex import CodexAuth, CodexAuthError
+from aidast.agents.errors import AgentInvocationError
 from aidast.core import codex_process
 from aidast.agents.policy_guidance import policy_skill_text, stage_policy_skill
 from aidast.scope.exclusions import ResourceClassification
@@ -105,7 +106,7 @@ def _codex_output_schema(model_type: type[BaseModel]) -> dict:
     return schema
 
 
-class MainAgentError(RuntimeError):
+class MainAgentError(AgentInvocationError):
     """Public failure message with optional private, bounded CLI diagnostics."""
 
     def __init__(

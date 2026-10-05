@@ -12,6 +12,7 @@ from pydantic import ValidationError as PydanticValidationError
 
 from aidast.pipeline.lifecycle import finish_stage_run, resume_validation_stage_run, start_stage_run
 from aidast.recon.policy import TargetPolicy
+from aidast.agents.errors import AgentInvocationError
 from aidast.agents.policy_guidance import policy_guidance_context
 
 from ..core.decision import DecisionEngine, DecisionInput
@@ -44,6 +45,10 @@ if TYPE_CHECKING:
 
 class ValidationCoordinatorError(RuntimeError):
     pass
+
+
+class ValidationAgentUnavailable(ValidationCoordinatorError):
+    """A bounded model retry could not produce a Validation decision."""
 
 
 class ValidationAgentRunner(Protocol):
@@ -727,6 +732,13 @@ class ValidationCoordinator:
             else:
                 try:
                     assessment = self._assessment(blind_view, tuple(observations), policy=policy)
+                except ValidationAgentUnavailable:
+                    repo.finalize(
+                        case["case_id"], stage_run_id=stage_run_id, expected_version=version,
+                        status="INCONCLUSIVE", decision={"reason": "agent_unavailable",
+                        "phase": "blind_assessment"}, evidence_ids=evidence_ids,
+                    )
+                    return True
                 except ValidationCoordinatorError:
                     repo.finalize(
                         case["case_id"], stage_run_id=stage_run_id, expected_version=version,
@@ -761,6 +773,15 @@ class ValidationCoordinator:
                         return True
                     try:
                         assessment = self._assessment(blind_view, tuple(observations), policy=policy)
+                    except ValidationAgentUnavailable:
+                        repo.finalize(
+                            case["case_id"], stage_run_id=stage_run_id,
+                            expected_version=version, status="INCONCLUSIVE",
+                            decision={"reason": "agent_unavailable",
+                            "phase": "post_development_blind_assessment"},
+                            evidence_ids=evidence_ids,
+                        )
+                        return True
                     except ValidationCoordinatorError:
                         repo.finalize(
                             case["case_id"], stage_run_id=stage_run_id, expected_version=version,
@@ -882,6 +903,13 @@ class ValidationCoordinator:
                 comparison = self._comparison(
                     claim, assessment.model_dump(mode="json"), blind_view=blind_view, policy=policy,
                 )
+            except ValidationAgentUnavailable:
+                repo.finalize(
+                    case["case_id"], stage_run_id=stage_run_id, expected_version=version,
+                    status="INCONCLUSIVE", decision={"reason": "agent_unavailable",
+                    "phase": "claim_comparison"}, evidence_ids=evidence_ids,
+                )
+                return True
             except ValidationCoordinatorError:
                 repo.finalize(
                     case["case_id"], stage_run_id=stage_run_id, expected_version=version,
@@ -914,6 +942,14 @@ class ValidationCoordinator:
                         validation_evidence_ids=evidence_ids,
                         attack_evidence_ids=claim["attack_evidence_ids"],
                     )
+                except ValidationAgentUnavailable:
+                    repo.finalize(
+                        case["case_id"], stage_run_id=stage_run_id,
+                        expected_version=version, status="INCONCLUSIVE",
+                        decision={"reason": "agent_unavailable",
+                        "phase": "claim_comparison"}, evidence_ids=evidence_ids,
+                    )
+                    return True
                 except ValidationCoordinatorError:
                     repo.finalize(
                         case["case_id"], stage_run_id=stage_run_id, expected_version=version,
@@ -2076,15 +2112,24 @@ class ValidationCoordinator:
         if self.agent.agent_id not in self._used_agent_ids:
             self._used_agent_ids.append(self.agent.agent_id)
         correction = initial_correction
-        for attempt in range(2):
+        schema_attempt = 0
+        invocation_attempt = 0
+        while True:
             try:
                 raw = getattr(self.agent, method)(first, second, correction=correction)
                 return raw if isinstance(raw, model) else model.model_validate(raw)
+            except AgentInvocationError as exc:
+                if invocation_attempt == 0:
+                    invocation_attempt += 1
+                    continue
+                raise ValidationAgentUnavailable(
+                    f"Agent {method} unavailable after retry"
+                ) from exc
             except (PydanticValidationError, TypeError, ValueError):
-                if attempt:
+                if schema_attempt:
                     raise ValidationCoordinatorError(f"Agent {method} output failed schema correction") from None
+                schema_attempt += 1
                 correction = "The previous object failed schema validation; correct only invalid fields."
-        raise AssertionError("unreachable")
 
     def _close_owned_agent(self) -> None:
         for impact_agent in self._impact_agents:

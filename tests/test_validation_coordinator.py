@@ -9,6 +9,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from aidast.agents.errors import AgentInvocationError
 from aidast.pipeline.lifecycle import create_task, finish_stage_run, start_stage_run, transition_task
 from aidast.pipeline.live_schema import migrate_live_pipeline_schema
 from aidast.recon import db
@@ -529,6 +530,54 @@ class ValidationCoordinatorTests(unittest.TestCase):
         self.assertEqual(len(agent.corrections), 2)
         self.assertIsNone(agent.corrections[0])
         self.assertIn("attack_evidence", agent.corrections[1])
+
+    def test_transient_agent_invocation_failure_retries_same_validation_pass(self):
+        class TransientAgent(FakeAgent):
+            def __init__(self):
+                self.compare_calls = 0
+
+            def compare(self, claim, assessment, correction=None):
+                self.compare_calls += 1
+                if self.compare_calls == 1:
+                    raise AgentInvocationError("model process exited without diagnostics")
+                return super().compare(claim, assessment, correction)
+
+        agent = TransientAgent()
+        result = ValidationCoordinator(
+            db_path=self.path, agent=agent, reproduction=FakePort(),
+            policy_provider=lambda endpoint, method: self.policy,
+        ).run("scan")
+
+        self.assertEqual(result.summary["statuses"], {"CONFIRMED": 1})
+        self.assertEqual(agent.compare_calls, 2)
+
+    def test_repeated_agent_invocation_failure_finishes_case_inconclusive(self):
+        class UnavailableAgent(FakeAgent):
+            def __init__(self):
+                self.compare_calls = 0
+
+            def compare(self, claim, assessment, correction=None):
+                self.compare_calls += 1
+                raise AgentInvocationError("model process exited without diagnostics")
+
+        agent = UnavailableAgent()
+        result = ValidationCoordinator(
+            db_path=self.path, agent=agent, reproduction=FakePort(),
+            policy_provider=lambda endpoint, method: self.policy,
+        ).run("scan")
+
+        self.assertEqual(result.summary["statuses"], {"INCONCLUSIVE": 1})
+        self.assertEqual(agent.compare_calls, 2)
+        with db.connect(self.path) as conn:
+            stage_status = conn.execute(
+                "SELECT status FROM stage_runs WHERE stage='validation'"
+            ).fetchone()[0]
+            decision = json.loads(conn.execute(
+                "SELECT decision_json FROM validation_cases"
+            ).fetchone()[0])
+        self.assertEqual(stage_status, "completed")
+        self.assertEqual(decision["reason"], "agent_unavailable")
+        self.assertEqual(decision["phase"], "claim_comparison")
 
     def test_repeated_foreign_comparison_reference_isolated_to_case(self):
         class ForeignReferenceAgent(FakeAgent):
