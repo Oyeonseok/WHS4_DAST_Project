@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import sqlite3
 import tempfile
 import uuid
@@ -183,6 +184,68 @@ PRAGMA user_version=2;
 """
 
 
+def _initialize_report_database(
+    target: Path, *, source_path: Path, output: Path, source: dict[str, Any],
+    case_id: str, context: dict[str, Any], replace: bool,
+) -> None:
+    """Create a prepared report database and publish it atomically."""
+    handle, name = tempfile.mkstemp(prefix=".report-", suffix=".db", dir=output)
+    os.close(handle)
+    staging = Path(name)
+    try:
+        with closing(sqlite3.connect(staging)) as conn:
+            conn.executescript(_SCHEMA)
+            conn.execute("INSERT INTO report_runs VALUES (?,?,?,?,?,?,?,?)", (
+                "report_" + uuid.uuid4().hex,
+                os.path.relpath(source_path, output), source["scan_id"],
+                case_id, source["decision_sha256"], context["context_sha256"],
+                canonical_json(context), datetime.now(timezone.utc).isoformat(),
+            ))
+            conn.commit()
+        if replace:
+            os.replace(staging, target)
+        else:
+            os.link(staging, target)
+    finally:
+        staging.unlink(missing_ok=True)
+
+
+def _archive_stale_report(
+    output: Path, *, previous: dict[str, Any], target: Path,
+) -> None:
+    """Keep the previous immutable draft outside dashboard discovery paths."""
+    from .runtime import ReportError
+
+    if target != output / "Report.db":
+        raise ReportError("stale report archive target is outside its report directory")
+    revision = str(previous.get("context_sha256") or "unknown")
+    archive = output / "History" / revision
+    archive.mkdir(parents=True, exist_ok=True)
+    names = {
+        "Report.db": "Snapshot.db",
+        "Report.context.json": "Snapshot.context.json",
+        "Report.schema.json": "Snapshot.schema.json",
+        "Report.language.json": "Snapshot.language.json",
+        "Report.json": "Snapshot.json",
+        "Report.md": "Snapshot.md",
+    }
+    for source_name, archive_name in names.items():
+        source_file = output / source_name
+        destination = archive / archive_name
+        if not source_file.is_file() or destination.exists():
+            continue
+        handle, name = tempfile.mkstemp(prefix=".archive-", dir=archive)
+        os.close(handle)
+        staging = Path(name)
+        try:
+            shutil.copy2(source_file, staging)
+            os.replace(staging, destination)
+        finally:
+            staging.unlink(missing_ok=True)
+    if not (archive / "Snapshot.db").is_file():
+        raise ReportError("stale report archive could not preserve the previous database")
+
+
 def _load(path: Path, *, verify_source: bool = True) -> tuple[dict, dict, dict | None, bool]:
     from .runtime import PLATFORMS, ReportError, _path, _sha
 
@@ -278,24 +341,33 @@ def prepare_case_report(pipeline_db: Path, output_dir: Path, *, platform: str, c
     output.mkdir(parents=True, exist_ok=True)
     target = output / "Report.db"
     if target.exists():
-        _, previous, _, _ = _load(target)
+        _, previous, _, stale = _load(target)
         if previous != context:
-            raise ReportError("existing report belongs to a different case, decision, or platform")
+            previous_source = previous.get("source", {})
+            same_owner = (
+                previous.get("platform") == platform
+                and previous_source.get("scan_id") == source["scan_id"]
+                and previous_source.get("case_id") == case_id
+            )
+            if not stale or not same_owner:
+                raise ReportError(
+                    "existing report belongs to a different case, decision, or platform"
+                )
+            _archive_stale_report(output, previous=previous, target=target)
+            _initialize_report_database(
+                target, source_path=source_path, output=output, source=source,
+                case_id=case_id, context=context, replace=True,
+            )
+            for stale_artifact in (
+                "Report.context.json", "Report.schema.json",
+                "Report.md", "Report.json", "Report.language.json",
+            ):
+                (output / stale_artifact).unlink(missing_ok=True)
     else:
-        handle, name = tempfile.mkstemp(prefix=".report-", suffix=".db", dir=output)
-        os.close(handle)
-        staging = Path(name)
-        try:
-            with closing(sqlite3.connect(staging)) as conn:
-                conn.executescript(_SCHEMA)
-                conn.execute("INSERT INTO report_runs VALUES (?,?,?,?,?,?,?,?)", (
-                    "report_" + uuid.uuid4().hex, os.path.relpath(source_path, output), source["scan_id"],
-                    case_id, source["decision_sha256"], context["context_sha256"], canonical_json(context),
-                    datetime.now(timezone.utc).isoformat()))
-                conn.commit()
-            os.link(staging, target)
-        finally:
-            staging.unlink(missing_ok=True)
+        _initialize_report_database(
+            target, source_path=source_path, output=output, source=source,
+            case_id=case_id, context=context, replace=False,
+        )
     from .runtime import _publish
     _publish(output / "Report.context.json", canonical_json(context) + "\n")
     schema = ReportDraft.model_json_schema()

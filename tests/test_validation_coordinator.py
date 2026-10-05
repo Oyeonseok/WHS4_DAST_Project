@@ -470,6 +470,30 @@ class ValidationCoordinatorTests(unittest.TestCase):
         eligibility_patch.start()
         self.addCleanup(eligibility_patch.stop)
 
+    def test_foreign_blind_reference_is_repaired_once_without_failing_stage(self):
+        class RepairingAssessmentAgent(FakeAgent):
+            def __init__(inner):
+                inner.corrections = []
+
+            def assess(inner, blind_case, observations, correction=None):
+                inner.corrections.append(correction)
+                result = super().assess(blind_case, observations, correction)
+                if correction is None:
+                    result["evidence_ids"] = (*result["evidence_ids"], "foreign")
+                return result
+
+        agent = RepairingAssessmentAgent()
+        result = ValidationCoordinator(
+            db_path=self.path, agent=agent, reproduction=FakePort(),
+            policy_provider=lambda endpoint, method: self.policy,
+        ).run("scan")
+
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(result.summary["statuses"], {"CONFIRMED": 1})
+        self.assertEqual(len(agent.corrections), 2)
+        self.assertIsNone(agent.corrections[0])
+        self.assertIn("outside this replay batch", agent.corrections[1])
+
     def test_applicable_policy_precaution_can_stop_replay_without_replacing_scope(self):
         self.policy = self.policy.model_copy(update={"policy_notes": ["Sensitive data: use owned data only"]})
         class PrecautionAgent(FakeEligibilityAgent):

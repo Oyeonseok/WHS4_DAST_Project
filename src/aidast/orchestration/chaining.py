@@ -94,6 +94,31 @@ class ChainingCoordinator:
                     stage_run_id=stage_run_id,
                     summary="No Attack-proven findings were available for chaining.",
                 )
+            prior_finding_ids = set()
+            if prior is not None and prior[1] in {"completed", "skipped"}:
+                prior_finding_ids = {
+                    str(row[0]) for row in conn.execute(
+                        """SELECT json_extract(payload_json,'$.source_finding_id')
+                           FROM attack_tasks t
+                           JOIN stage_runs s ON s.stage_run_id=t.stage_run_id
+                           WHERE s.scan_id=? AND s.stage='chaining'
+                             AND s.status IN ('completed','skipped')
+                             AND t.skill_name='chain' AND json_valid(t.payload_json)
+                             AND json_type(t.payload_json,'$.source_finding_id')='text'""",
+                        (scan_id,),
+                    )
+                }
+            current_finding_ids = {str(row[0]) for row in findings}
+            if current_finding_ids and current_finding_ids <= prior_finding_ids:
+                finish_stage_run(conn, stage_run_id, status="skipped")
+                return ChainingStageResult(
+                    status="SKIPPED", scan_id=scan_id, db_path=str(self._db_path),
+                    stage_run_id=stage_run_id,
+                    summary=(
+                        "The latest Attack stage added no proven finding; prior "
+                        "chaining coverage remains current."
+                    ),
+                )
             chain_tasks = []
             for finding_id, endpoint_id, vuln_type, title in findings:
                 task_id = create_task(

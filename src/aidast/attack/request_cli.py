@@ -724,6 +724,7 @@ def _response_metadata(
         raise RequestGuardError("assertions must be a bounded list")
     body_text = response_body.decode("utf-8", errors="replace")
     parsed_body: object | None = None
+    parsed_engineio_open: object | None = None
 
     def json_body() -> object:
         nonlocal parsed_body
@@ -733,6 +734,22 @@ def _response_metadata(
             except json.JSONDecodeError as exc:
                 raise RequestGuardError("response body is not valid JSON") from exc
         return parsed_body
+
+    def engineio_open_body() -> object:
+        nonlocal parsed_engineio_open
+        if parsed_engineio_open is None:
+            # Engine.IO polling starts its OPEN packet with packet type ``0``
+            # followed by a JSON object.  Parse only that documented envelope;
+            # never treat later Socket.IO frames as generic JSON.
+            if not body_text.startswith("0"):
+                raise RequestGuardError("response body is not an Engine.IO OPEN packet")
+            try:
+                parsed_engineio_open = json.loads(body_text[1:])
+            except json.JSONDecodeError as exc:
+                raise RequestGuardError(
+                    "Engine.IO OPEN packet does not contain valid JSON"
+                ) from exc
+        return parsed_engineio_open
 
     header_map = {
         str(name).casefold(): str(value) for name, value in response_headers.items()
@@ -746,6 +763,8 @@ def _response_metadata(
             raise RequestGuardError("capture names are invalid or duplicated")
         if source == "json_body":
             value = _json_path(json_body(), raw.get("path", []))
+        elif source == "engineio_open_json":
+            value = _json_path(engineio_open_body(), raw.get("path", []))
         elif source == "header":
             header = raw.get("header")
             if not isinstance(header, str) or header.casefold() not in header_map:
@@ -797,6 +816,9 @@ def _response_metadata(
             raw["name"]: ({
                 "source_kind": "json_path", "source_path": raw["path"],
             } if raw["source"] == "json_body" else {
+                "source_kind": "engineio_open_json_path",
+                "source_path": raw["path"],
+            } if raw["source"] == "engineio_open_json" else {
                 "source_kind": "response_header", "source_path": [raw["header"]],
             }) for raw in raw_captures
         },

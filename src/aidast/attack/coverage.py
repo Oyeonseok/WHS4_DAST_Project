@@ -769,8 +769,11 @@ def ensure_coverage_manifest(database: Path, scan_id: str) -> CoverageManifestRe
         requeue_owned_object_coverage(conn, scan_id)
         requeue_safe_session_binding_coverage(conn, scan_id)
         requeue_auth_gated_negative_coverage(conn, scan_id)
+        reclassify_explicit_auth_denial_coverage(conn, scan_id)
         requeue_redacted_login_differential_coverage(conn, scan_id)
         requeue_unprofiled_historical_response_coverage(conn, scan_id)
+        requeue_deterministic_engineio_coverage(conn, scan_id)
+        requeue_orphaned_running_coverage(conn, scan_id)
         refresh_confirmed_coverage(conn, scan_id)
         total = conn.execute(
             "SELECT count(*) FROM attack_coverage_items WHERE scan_id=?", (scan_id,),
@@ -1116,6 +1119,125 @@ def requeue_safe_session_binding_coverage(
     return reopened
 
 
+def requeue_deterministic_engineio_coverage(
+    conn: sqlite3.Connection, scan_id: str,
+) -> int:
+    """Reopen exact Socket.IO parameters once after deterministic support lands.
+
+    A model cannot safely carry a transient Engine.IO ``sid`` between guarded
+    requests, so older runs correctly left these items unsupported.  The
+    deterministic executor now performs a fresh OPEN, binds that capture to an
+    inert root CONNECT when needed, and checks a forged-session rejection.
+    Only routes whose EIO version was already observed by black-box Recon are
+    eligible.  A durable marker prevents repeated reopening if the live target
+    later stops satisfying that contract.
+    """
+    rows = conn.execute(
+        """SELECT c.*,e.origin_id,e.normalized_path,e.method
+           FROM attack_coverage_items c
+           JOIN endpoints e ON e.endpoint_id=c.endpoint_id
+           WHERE c.scan_id=? AND c.status='unsupported'
+             AND c.skill_name='hunt-websocket'
+             AND c.vuln_class='websocket'
+             AND c.injection_location='query'
+             AND lower(c.parameter_name) IN ('eio','transport','t')
+             AND lower(rtrim(e.normalized_path,'/')) LIKE '%/socket.io'
+             AND NOT EXISTS (
+                 SELECT 1 FROM attack_facts marker
+                 WHERE marker.scan_id=c.scan_id
+                   AND marker.fact_type='engineio_deterministic_requeue_v2'
+                   AND marker.fact_key=c.coverage_id
+             )""",
+        (scan_id,),
+    ).fetchall()
+    reopened = 0
+    for row in rows:
+        observed_urls = conn.execute(
+            """SELECT h.url FROM http_transactions h
+               JOIN endpoints observed ON observed.endpoint_id=h.endpoint_id
+               WHERE observed.origin_id=? AND observed.normalized_path=?
+               ORDER BY h.captured_at DESC LIMIT 128""",
+            (row["origin_id"], row["normalized_path"]),
+        ).fetchall()
+        versions = {
+            value
+            for item in observed_urls
+            for name, value in parse_qsl(
+                urlsplit(str(item["url"])).query, keep_blank_values=True,
+            )
+            if name.casefold() == "eio" and value in {"3", "4"}
+        }
+        if len(versions) != 1:
+            continue
+        reason = (
+            "observed Engine.IO version can now use a fresh deterministic "
+            "session-binding probe"
+        )
+        _event(
+            conn, row, "pending", reason,
+            stage_run_id=row["last_stage_run_id"], task_id=row["last_task_id"],
+        )
+        marker_id = "fact_engineio_requeue_v2_" + hashlib.sha256(
+            f"v2\0{scan_id}\0{row['coverage_id']}".encode("utf-8")
+        ).hexdigest()[:32]
+        conn.execute(
+            """INSERT INTO attack_facts
+               (fact_id,scan_id,fact_type,fact_key,fact_value,confidence,
+                source_endpoint_id)
+               VALUES (?,?,'engineio_deterministic_requeue_v2',?,?,1.0,?)""",
+            (
+                marker_id, scan_id, row["coverage_id"],
+                json.dumps({"observed_eio": next(iter(versions))}, sort_keys=True),
+                row["endpoint_id"],
+            ),
+        )
+        conn.execute(
+            """UPDATE attack_coverage_items
+               SET status='pending',disposition_reason=?,attempt_count=0,
+                   last_stage_run_id=NULL,last_task_id=NULL,updated_at=?
+               WHERE coverage_id=?""",
+            (reason, now(), row["coverage_id"]),
+        )
+        reopened += 1
+    return reopened
+
+
+def requeue_orphaned_running_coverage(
+    conn: sqlite3.Connection, scan_id: str,
+) -> int:
+    """Release scheduler leases owned by a terminal Attack stage.
+
+    The outer pipeline marks an interrupted stage and its unfinished tasks
+    terminal even if an exception happens before batch reconciliation.  Such a
+    task can never resume in place, so retaining ``running`` on its coverage
+    item makes the scan permanently unschedulable.
+    """
+    rows = conn.execute(
+        """SELECT c.* FROM attack_coverage_items c
+           JOIN stage_runs s ON s.stage_run_id=c.last_stage_run_id
+           LEFT JOIN attack_tasks t ON t.task_id=c.last_task_id
+           WHERE c.scan_id=? AND c.status='running'
+             AND s.stage='attack' AND s.status IN ('failed','cancelled')
+             AND (t.task_id IS NULL OR t.status NOT IN ('pending','running'))""",
+        (scan_id,),
+    ).fetchall()
+    reason = "terminal Attack stage lease was released for a fresh bounded retry"
+    for row in rows:
+        _event(
+            conn, row, "pending", reason,
+            stage_run_id=row["last_stage_run_id"], task_id=row["last_task_id"],
+        )
+        conn.execute(
+            """UPDATE attack_coverage_items
+               SET status='pending',disposition_reason=?,
+                   attempt_count=MAX(0,attempt_count-1),
+                   last_stage_run_id=NULL,last_task_id=NULL,updated_at=?
+               WHERE coverage_id=?""",
+            (reason, now(), row["coverage_id"]),
+        )
+    return len(rows)
+
+
 def requeue_new_disposable_identity_coverage(
     conn: sqlite3.Connection, scan_id: str,
 ) -> int:
@@ -1279,6 +1401,62 @@ def requeue_auth_gated_negative_coverage(
         )
         reopened += 1
     return reopened
+
+
+def reclassify_explicit_auth_denial_coverage(
+    conn: sqlite3.Connection, scan_id: str,
+) -> int:
+    """Treat an exact anonymous 401/403 as a tested auth-bypass negative.
+
+    Some model runs conservatively label an explicit authentication denial as
+    inconclusive. For an unauthenticated auth-bypass hypothesis the denial is
+    the expected bounded negative control. This requires a durable exact
+    attempt and completed HTTP evidence; route names alone prove nothing.
+    """
+    rows = conn.execute(
+        """SELECT c.*,e.method FROM attack_coverage_items c
+           JOIN endpoints e ON e.endpoint_id=c.endpoint_id
+           WHERE c.scan_id=? AND c.status='unsupported'
+             AND c.vuln_class='auth_bypass'
+             AND c.required_identity_role='unauthenticated'
+             AND c.last_task_id IS NOT NULL AND c.last_stage_run_id IS NOT NULL""",
+        (scan_id,),
+    ).fetchall()
+    updated = 0
+    for row in rows:
+        attempts = conn.execute(
+            """SELECT attempt_id,endpoint_id,request_fingerprint,response_status,
+                      identity_role,outcome
+               FROM attack_attempts
+               WHERE scan_id=? AND task_id=? AND outcome='inconclusive'
+                 AND identity_role='unauthenticated' AND response_status IN (401,403)
+               ORDER BY created_at,attempt_id""",
+            (scan_id, row["last_task_id"]),
+        ).fetchall()
+        if not any(
+            _selected_http_evidence(
+                conn, row, attempt, str(row["last_stage_run_id"]),
+                str(row["last_task_id"]), exact=True,
+            )
+            for attempt in attempts
+        ):
+            continue
+        reason = (
+            "exact unauthenticated request received an explicit authentication "
+            "denial; auth-bypass hypothesis was tested negative"
+        )
+        _event(
+            conn, row, "tested_negative", reason,
+            stage_run_id=row["last_stage_run_id"], task_id=row["last_task_id"],
+        )
+        conn.execute(
+            """UPDATE attack_coverage_items
+               SET status='tested_negative',disposition_reason=?,updated_at=?
+               WHERE coverage_id=?""",
+            (reason, now(), row["coverage_id"]),
+        )
+        updated += 1
+    return updated
 
 
 def requeue_redacted_login_differential_coverage(
@@ -2027,6 +2205,7 @@ def claim_coverage_batch(
                 "coverage_id": row["coverage_id"],
                 "vuln_class": row["vuln_class"],
                 "method": row["method"],
+                "origin_url": row["origin_url"],
                 "normalized_path": row["normalized_path"],
                 "injection_location": row["injection_location"],
                 "parameter_name": row["parameter_name"],
@@ -2056,6 +2235,7 @@ def claim_coverage_batch(
             "coverage_id": row["coverage_id"],
             "vuln_class": row["vuln_class"],
             "method": row["method"],
+            "origin_url": row["origin_url"],
             "normalized_path": row["normalized_path"],
             "injection_location": row["injection_location"],
             "parameter_name": row["parameter_name"],
@@ -2159,7 +2339,8 @@ def reconcile_coverage_batch(
     ).fetchall()
     for row in rows:
         attempts = conn.execute(
-            """SELECT attempt_id,outcome,finding_id,request_fingerprint,endpoint_id,resolution_reason FROM attack_attempts
+            """SELECT attempt_id,outcome,finding_id,request_fingerprint,endpoint_id,
+                      response_status,identity_role,resolution_reason FROM attack_attempts
                WHERE scan_id=? AND task_id=? ORDER BY created_at,attempt_id""",
             (row["scan_id"], row["last_task_id"]),
         ).fetchall()
@@ -2187,9 +2368,18 @@ def reconcile_coverage_batch(
                 stage_run_id=stage_run_id, task_id=row["last_task_id"],
                 finding_id=finding_ids[0],
             )
-        elif task_status == "completed" and negative_http_evidence and outcomes <= {
-            "negative", "rejected",
-        }:
+        elif task_status == "completed" and negative_http_evidence and (
+            outcomes <= {"negative", "rejected"}
+            or (
+                row["vuln_class"] == "auth_bypass"
+                and row["required_identity_role"] == "unauthenticated"
+                and any(
+                    item["identity_role"] == "unauthenticated"
+                    and item["response_status"] in {401, 403}
+                    for item in selected_attempts
+                )
+            )
+        ):
             transition_coverage(
                 conn, row["coverage_id"], "tested_negative",
                 "Attack completed with terminal negative evidence",

@@ -135,7 +135,10 @@ If several rules matter, quote one applicable excerpt and discuss the others in 
             korean_quote = next((
                 line[2:] for line in scope.splitlines()
                 if line.startswith("- 이 로컬 일회성 ")
-                and "블랙박스 능동 취약점 테스트 및 검증을 위해 " in line
+                and any(phrase in line for phrase in (
+                    "블랙박스 능동 취약점 테스트 및 검증을 위해 ",
+                    "블랙박스 취약점 테스트 및 검증을 위해 ",
+                ))
                 and "GET, HEAD, OPTIONS, POST, PUT, PATCH, DELETE 요청을 허용합니다." in line
             ), None)
             korean_fragments = (

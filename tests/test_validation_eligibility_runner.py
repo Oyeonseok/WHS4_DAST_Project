@@ -149,11 +149,14 @@ Authorization is limited to this intentionally vulnerable training target.
     fake._run_structured.assert_not_called()
 
 
-def test_dashboard_local_lab_scope_is_deterministic_with_policy_notes_and_post_replay():
+@pytest.mark.parametrize("activity", ["블랙박스 능동 취약점", "블랙박스 취약점"])
+def test_dashboard_local_lab_scope_is_deterministic_with_policy_notes_and_post_replay(
+    activity: str,
+):
     fake = Mock()
     runner = CodexEligibilityRunner(fake)
     allowed = (
-        "이 로컬 일회성 VulnBank 컨테이너의 블랙박스 능동 취약점 테스트 및 "
+        f"이 로컬 일회성 VulnBank 컨테이너의 {activity} 테스트 및 "
         "검증을 위해 GET, HEAD, OPTIONS, POST, PUT, PATCH, DELETE 요청을 허용합니다."
     )
     scope = f"""# Scope: AI DAST Local Lab: vuln-bank-5002

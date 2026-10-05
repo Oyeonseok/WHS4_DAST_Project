@@ -13,10 +13,13 @@ from aidast.attack.coverage import (
     ensure_coverage_manifest,
     fail_running_coverage,
     requeue_auth_gated_negative_coverage,
+    reclassify_explicit_auth_denial_coverage,
+    requeue_deterministic_engineio_coverage,
     requeue_redacted_login_differential_coverage,
     requeue_unprofiled_historical_response_coverage,
     requeue_interrupted_coverage,
     requeue_owned_object_coverage,
+    requeue_orphaned_running_coverage,
     requeue_black_box_source_disclosure_coverage,
     requeue_transient_model_failures,
     requeue_coverage,
@@ -60,6 +63,209 @@ def test_imported_information_disclosure_uses_general_evidence_workflow() -> Non
 
 def test_jwt_coverage_requests_an_issued_authenticated_token() -> None:
     assert _credential_role("jwt_crypto", "unauthenticated") == "authenticated"
+
+
+@pytest.mark.parametrize(('method', 'expected_calls'), [('GET', 2), ('POST', 3)])
+def test_engineio_coverage_uses_fresh_bound_sid_and_forged_sid_control(
+    tmp_path: Path, monkeypatch, method: str, expected_calls: int,
+) -> None:
+    imported = imported_pipeline(tmp_path)
+    scope = imported.recon_database.parent / 'Scope.md'
+    policy = imported.recon_database.parent / 'TargetPolicy.json'
+    with sqlite3.connect(imported.pipeline_database) as conn:
+        endpoint_id = conn.execute(
+            'SELECT endpoint_id FROM endpoints ORDER BY endpoint_id LIMIT 1'
+        ).fetchone()[0]
+        stage = start_stage_run(conn, scan_id=imported.scan_id, stage='attack')
+        task_id = create_task(
+            conn, stage_run_id=stage, skill_name='hunt-websocket',
+            endpoint_id=endpoint_id,
+        )
+
+    sid = 'fresh-transient-sid'
+    captured_payloads = []
+
+    def fake_request(*args, payload_path, **kwargs):
+        payload = json.loads(Path(payload_path).read_text())
+        captured_payloads.append(payload)
+        if len(captured_payloads) == 1:
+            return {
+                'request_id': 'open-request', 'request_fingerprint': 'a' * 64,
+                'status': 200, 'url': payload['url'],
+                'response_body': f'0{{"sid":"{sid}"}}',
+                'captures': {'engineio_sid': sid},
+                'assertions': [{'passed': True}],
+            }
+        if method == 'POST' and len(captured_payloads) == 2:
+            return {
+                'request_id': 'connect-request',
+                'request_fingerprint': 'b' * 64, 'status': 200,
+                'url': payload['url'], 'response_body': 'ok',
+                'captures': {}, 'assertions': [{'passed': True}],
+            }
+        return {
+            'request_id': 'reject-request', 'request_fingerprint': 'c' * 64,
+            'status': 400, 'url': payload['url'],
+            'response_body': '{"code":1,"message":"Session ID unknown"}',
+            'captures': {},
+            'assertions': [{'passed': True}, {'passed': True}],
+        }
+
+    monkeypatch.setattr(
+        ExhaustiveAttackCoordinator, '_observed_engineio_version',
+        lambda self, endpoint: '4',
+    )
+    monkeypatch.setattr(
+        'aidast.orchestration.coverage_attack.guarded_request', fake_request,
+    )
+    coordinator = ExhaustiveAttackCoordinator(
+        agent=object(), db_path=imported.pipeline_database,
+        scope_path=scope, policy_path=policy,
+    )
+    remaining = coordinator._execute_deterministic_engineio(
+        scan_id=imported.scan_id, stage_run_id=stage, tasks=[{
+            'task_id': task_id, 'endpoint_id': endpoint_id,
+            'skill_name': 'hunt-websocket', 'vuln_class': 'websocket',
+            'method': method, 'normalized_path': '/socket.io',
+            'origin_url': 'https://lab.example',
+            'injection_location': 'query', 'parameter_name': 'transport',
+        }],
+    )
+
+    assert remaining == []
+    assert len(captured_payloads) == expected_calls
+    assert captured_payloads[0]['captures'][0]['source'] == 'engineio_open_json'
+    if method == 'POST':
+        assert captured_payloads[1]['bindings'][0]['value'] == sid
+        assert captured_payloads[1]['body'] == '40'
+    assert 'aidast-invalid-' in captured_payloads[-1]['url']
+    with sqlite3.connect(imported.pipeline_database) as conn:
+        assert conn.execute(
+            'SELECT status FROM attack_tasks WHERE task_id=?', (task_id,),
+        ).fetchone() == ('completed',)
+        attempt = conn.execute(
+            'SELECT outcome,payload_variant,url FROM attack_attempts WHERE task_id=?',
+            (task_id,),
+        ).fetchone()
+    assert attempt == (
+        'negative', 'engineio-session-binding-transport',
+        'https://lab.example/socket.io?EIO=%5BREDACTED%5D&transport=%5BREDACTED%5D&sid=%5BREDACTED%5D&t=%5BREDACTED%5D',
+    )
+
+
+def test_engineio_executor_preserves_observed_trailing_slash(tmp_path: Path) -> None:
+    imported = imported_pipeline(tmp_path)
+    with sqlite3.connect(imported.pipeline_database) as conn, conn:
+        endpoint_id = conn.execute(
+            "SELECT endpoint_id FROM endpoints ORDER BY endpoint_id LIMIT 1"
+        ).fetchone()[0]
+        conn.execute(
+            "UPDATE endpoints SET normalized_path='/socket.io' WHERE endpoint_id=?",
+            (endpoint_id,),
+        )
+        conn.execute(
+            """INSERT INTO http_transactions
+               (http_transaction_id,endpoint_id,source,method,url)
+               VALUES ('observed-open',?,'browser','GET',
+                       'https://lab.example/socket.io/?EIO=4&transport=polling&t=x')""",
+            (endpoint_id,),
+        )
+    coordinator = ExhaustiveAttackCoordinator(
+        agent=object(), db_path=imported.pipeline_database,
+        scope_path=imported.recon_database.parent / "Scope.md",
+        policy_path=imported.recon_database.parent / "TargetPolicy.json",
+    )
+
+    assert coordinator._observed_engineio_base_url(endpoint_id) == (
+        "https://lab.example/socket.io/"
+    )
+
+
+def test_engineio_coverage_reopens_exact_observed_parameters_only_once(
+    tmp_path: Path,
+) -> None:
+    imported = imported_pipeline(tmp_path)
+    ensure_coverage_manifest(imported.pipeline_database, imported.scan_id)
+    with sqlite3.connect(imported.pipeline_database) as conn, conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT coverage_id,endpoint_id FROM attack_coverage_items "
+            "ORDER BY coverage_id LIMIT 1"
+        ).fetchone()
+        conn.execute(
+            "UPDATE endpoints SET method='GET',normalized_path='/socket.io' "
+            "WHERE endpoint_id=?", (row["endpoint_id"],),
+        )
+        conn.execute(
+            """UPDATE attack_coverage_items
+               SET status='unsupported',skill_name='hunt-websocket',
+                   vuln_class='websocket',injection_location='query',
+                   parameter_name='transport'
+               WHERE coverage_id=?""",
+            (row["coverage_id"],),
+        )
+        conn.execute(
+            """INSERT INTO http_transactions
+               (http_transaction_id,endpoint_id,source,method,url)
+               VALUES ('http_engineio',?,'browser','GET',
+                       'https://lab.example/socket.io?EIO=4&transport=polling')""",
+            (row["endpoint_id"],),
+        )
+
+        assert requeue_deterministic_engineio_coverage(
+            conn, imported.scan_id,
+        ) == 1
+        assert conn.execute(
+            "SELECT status FROM attack_coverage_items WHERE coverage_id=?",
+            (row["coverage_id"],),
+        ).fetchone()[0] == "pending"
+        conn.execute(
+            "UPDATE attack_coverage_items SET status='unsupported' "
+            "WHERE coverage_id=?", (row["coverage_id"],),
+        )
+        assert requeue_deterministic_engineio_coverage(
+            conn, imported.scan_id,
+        ) == 0
+
+
+def test_terminal_attack_stage_releases_orphaned_running_coverage(
+    tmp_path: Path,
+) -> None:
+    imported = imported_pipeline(tmp_path)
+    ensure_coverage_manifest(imported.pipeline_database, imported.scan_id)
+    with sqlite3.connect(imported.pipeline_database) as conn, conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT * FROM attack_coverage_items ORDER BY coverage_id LIMIT 1"
+        ).fetchone()
+        stage = start_stage_run(conn, scan_id=imported.scan_id, stage="attack")
+        task = create_task(
+            conn, stage_run_id=stage, skill_name=row["skill_name"],
+            endpoint_id=row["endpoint_id"],
+        )
+        transition_coverage(
+            conn, row["coverage_id"], "running", "claimed",
+            stage_run_id=stage, task_id=task,
+        )
+        conn.execute(
+            "UPDATE attack_coverage_items SET attempt_count=1 WHERE coverage_id=?",
+            (row["coverage_id"],),
+        )
+        conn.execute(
+            "UPDATE attack_tasks SET status='cancelled',finished_at=CURRENT_TIMESTAMP "
+            "WHERE task_id=?", (task,),
+        )
+        conn.execute(
+            "UPDATE stage_runs SET status='failed',finished_at=CURRENT_TIMESTAMP "
+            "WHERE stage_run_id=?", (stage,),
+        )
+
+        assert requeue_orphaned_running_coverage(conn, imported.scan_id) == 1
+        assert tuple(conn.execute(
+            """SELECT status,attempt_count,last_stage_run_id,last_task_id
+               FROM attack_coverage_items WHERE coverage_id=?""",
+            (row["coverage_id"],),
+        ).fetchone()) == ("pending", 0, None, None)
 
 
 @pytest.mark.parametrize(
@@ -324,6 +530,7 @@ def test_captured_public_security_declaration_is_scheduled_first(tmp_path: Path)
     assert len(tasks) == 1
     assert tasks[0]["endpoint_id"] == endpoint_id
     assert tasks[0]["vuln_class"] == "sqli"
+    assert tasks[0]["origin_url"] == "https://lab.example"
 
 
 def test_prior_blackbox_candidate_coordinate_is_scheduled_first(tmp_path: Path) -> None:
@@ -1585,6 +1792,80 @@ def test_legacy_anonymous_auth_gate_reopens_once_session_is_available(
     with sqlite3.connect(imported.pipeline_database) as conn:
         conn.row_factory = sqlite3.Row
         assert requeue_auth_gated_negative_coverage(
+            conn, imported.scan_id,
+        ) == 0
+
+
+def test_exact_anonymous_auth_denial_is_a_tested_bypass_negative(
+    tmp_path: Path,
+) -> None:
+    imported = imported_pipeline(tmp_path)
+    ensure_coverage_manifest(imported.pipeline_database, imported.scan_id)
+    with sqlite3.connect(imported.pipeline_database) as conn, conn:
+        conn.row_factory = sqlite3.Row
+        coverage = conn.execute(
+            "SELECT * FROM attack_coverage_items ORDER BY coverage_id LIMIT 1"
+        ).fetchone()
+        method = conn.execute(
+            "SELECT method FROM endpoints WHERE endpoint_id=?",
+            (coverage["endpoint_id"],),
+        ).fetchone()[0]
+        stage = start_stage_run(conn, scan_id=imported.scan_id, stage="attack")
+        task = create_task(
+            conn, stage_run_id=stage, skill_name="hunt-auth-bypass",
+            endpoint_id=coverage["endpoint_id"],
+            payload={"planned_identity_role": "unauthenticated"},
+        )
+        conn.execute(
+            """UPDATE attack_tasks SET status='completed',
+                      started_at=CURRENT_TIMESTAMP,finished_at=CURRENT_TIMESTAMP
+               WHERE task_id=?""",
+            (task,),
+        )
+        conn.execute(
+            """UPDATE attack_coverage_items
+               SET status='unsupported',vuln_class='auth_bypass',
+                   skill_name='hunt-auth-bypass',
+                   required_identity_role='unauthenticated',
+                   last_stage_run_id=?,last_task_id=?
+               WHERE coverage_id=?""",
+            (stage, task, coverage["coverage_id"]),
+        )
+        fingerprint = "1" * 64
+        conn.execute(
+            """INSERT INTO attack_http_requests
+               (request_id,scan_id,stage_run_id,task_id,policy_id,method,url,
+                request_fingerprint,status,response_status,scheduled_at,
+                endpoint_reference_id,result_json)
+               VALUES ('auth-denial',?,?,?,?,?,'https://lab.example/gated',
+                       ?,'completed',401,0,?,'{}')""",
+            (
+                imported.scan_id, stage, task, "policy", method, fingerprint,
+                coverage["endpoint_id"],
+            ),
+        )
+        conn.execute(
+            """INSERT INTO attack_attempts
+               (attempt_id,scan_id,task_id,skill_name,endpoint_id,
+                request_fingerprint,method,url,identity_role,payload_variant,
+                response_status,outcome)
+               VALUES ('attempt-auth-denial',?,?, 'hunt-auth-bypass',?,?,?,
+                       'https://lab.example/gated','unauthenticated','anonymous',
+                       401,'inconclusive')""",
+            (
+                imported.scan_id, task, coverage["endpoint_id"],
+                fingerprint, method,
+            ),
+        )
+
+        assert reclassify_explicit_auth_denial_coverage(
+            conn, imported.scan_id,
+        ) == 1
+        assert conn.execute(
+            "SELECT status FROM attack_coverage_items WHERE coverage_id=?",
+            (coverage["coverage_id"],),
+        ).fetchone()[0] == "tested_negative"
+        assert reclassify_explicit_auth_denial_coverage(
             conn, imported.scan_id,
         ) == 0
 

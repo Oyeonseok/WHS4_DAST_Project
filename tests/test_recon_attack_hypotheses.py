@@ -170,6 +170,47 @@ def test_grounded_black_box_hypotheses_supplement_partial_model_plan(tmp_path):
     assert 'private-value' not in json.dumps(agent.contexts)
 
 
+def test_grounded_planner_upgrade_supplements_completed_plan_without_model(tmp_path):
+    from aidast.attack.recon_hypotheses import (
+        plan_recon_attack, supplement_grounded_hypotheses,
+    )
+
+    path = pipeline(tmp_path)
+    agent = Planner()
+    plan_recon_attack(path, 'scan', agent=agent)
+    with sqlite3.connect(path) as conn:
+        endpoint_id, observation_id = conn.execute(
+            """SELECT e.endpoint_id,o.observation_id
+               FROM endpoints e JOIN endpoint_observations o
+                 ON o.endpoint_id=e.endpoint_id
+               WHERE e.normalized_path='/opaque' LIMIT 1"""
+        ).fetchone()
+        conn.execute(
+            "UPDATE endpoints SET normalized_path='/rest/saveLoginIp',"
+            "path='/rest/saveLoginIp' WHERE endpoint_id=?",
+            (endpoint_id,),
+        )
+        conn.execute(
+            "UPDATE endpoint_observations SET observed_url="
+            "'https://example.test/rest/saveLoginIp' WHERE observation_id=?",
+            (observation_id,),
+        )
+
+    added = supplement_grounded_hypotheses(path, 'scan')
+    repeated = supplement_grounded_hypotheses(path, 'scan')
+
+    assert added >= 1
+    assert repeated == 0
+    with sqlite3.connect(path) as conn:
+        assert conn.execute(
+            """SELECT count(*) FROM endpoint_annotations n
+               JOIN endpoint_observations o ON o.observation_id=n.observation_id
+               WHERE o.endpoint_id=? AND n.category='attack_hypothesis'
+                 AND n.tag='auth_bypass'""",
+            (endpoint_id,),
+        ).fetchone()[0] == 1
+
+
 def test_grounded_baseline_reviews_observed_successful_api_reads_for_exposure():
     from aidast.attack.coverage import hypothesis_skill_catalog
     from aidast.attack.recon_hypotheses import _grounded_baseline_hypotheses
@@ -208,6 +249,63 @@ def test_grounded_route_semantics_create_black_box_boundary_hypotheses(
     assert expected <= set(by_class)
     for name in expected & {'business_logic', 'csrf'}:
         assert by_class[name].required_identity_role == 'authenticated'
+
+
+def test_state_boundary_and_observed_access_denial_create_auth_bypass_controls():
+    from aidast.attack.coverage import hypothesis_skill_catalog
+    from aidast.attack.recon_hypotheses import _grounded_baseline_hypotheses
+
+    save_login = _grounded_baseline_hypotheses({
+        'path': '/rest/saveLoginIp', 'method': 'GET', 'auth_required': False,
+        'access_statuses': ['authentication_required'], 'http_statuses': [401],
+        'parameters': [], 'technology_context': {}, 'response_header_names': [],
+    }, hypothesis_skill_catalog())
+    change_password = _grounded_baseline_hypotheses({
+        'path': '/rest/user/change-password', 'method': 'GET',
+        'auth_required': False, 'access_statuses': ['authentication_required'],
+        'http_statuses': [401], 'technology_context': {},
+        'response_header_names': [], 'parameters': [{
+            'name': 'current', 'location': 'query', 'role': 'unknown',
+            'data_type': 'string', 'is_identifier': False,
+        }],
+    }, hypothesis_skill_catalog())
+
+    assert any(
+        item.vuln_class == 'auth_bypass'
+        and (item.injection_location, item.parameter_name) == ('endpoint', '')
+        and item.required_identity_role == 'unauthenticated'
+        for item in save_login
+    )
+    assert any(
+        item.vuln_class == 'auth_bypass'
+        and (item.injection_location, item.parameter_name) == ('query', 'current')
+        and item.required_identity_role == 'unauthenticated'
+        for item in change_password
+    )
+
+
+@pytest.mark.parametrize('method', ['GET', 'POST'])
+def test_socketio_transport_inputs_keep_exact_websocket_coverage(method):
+    from aidast.attack.coverage import hypothesis_skill_catalog
+    from aidast.attack.recon_hypotheses import _grounded_baseline_hypotheses
+
+    hypotheses = _grounded_baseline_hypotheses({
+        'path': '/socket.io', 'method': method, 'auth_required': False,
+        'http_statuses': [200], 'technology_context': {},
+        'response_header_names': [], 'parameters': [
+            {'name': name, 'location': 'query', 'role': 'unknown',
+             'data_type': 'string', 'is_identifier': False}
+            for name in ('EIO', 'transport', 't', 'sid')
+        ],
+    }, hypothesis_skill_catalog())
+
+    exact = {
+        (item.injection_location, item.parameter_name)
+        for item in hypotheses if item.vuln_class == 'websocket'
+    }
+    assert {('endpoint', ''), ('query', 'EIO'), ('query', 'transport'),
+            ('query', 't')} <= exact
+    assert ('query', 'sid') not in exact
 
 
 def test_attack_plans_exact_public_client_declarations_but_not_inferred_crud(tmp_path):

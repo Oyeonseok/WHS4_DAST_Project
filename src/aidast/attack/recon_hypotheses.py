@@ -94,16 +94,22 @@ def _contexts(conn: sqlite3.Connection, scan_id: str) -> Iterator[dict[str, Any]
             WHERE endpoint_id=? ORDER BY observation_id LIMIT 128""", (endpoint_id,),
         )]
         observations = []
+        access_statuses: set[str] = set()
         observation_kinds = set()
         for observation in raw_observations:
             observation['observed_url'] = safe_url(observation['observed_url'] or '')
             declaration_evidence = {}
             discovery_kind = observation.pop('discovery_kind', '')
+            try:
+                stored_evidence = json.loads(observation.pop('evidence_json') or '{}')
+            except (TypeError, ValueError):
+                stored_evidence = {}
+            access_status = str(stored_evidence.get('access_status') or '').casefold()
+            if access_status in {
+                'authentication_required', 'authorization_required', 'access_denied',
+            }:
+                access_statuses.add(access_status)
             if discovery_kind == 'api_spec_declaration':
-                try:
-                    stored_evidence = json.loads(observation.pop('evidence_json') or '{}')
-                except (TypeError, ValueError):
-                    stored_evidence = {}
                 for key in ('operation_summary', 'operation_description'):
                     if isinstance(stored_evidence.get(key), str):
                         declaration_evidence[key] = safe_text(stored_evidence[key])
@@ -113,8 +119,6 @@ def _contexts(conn: sqlite3.Connection, scan_id: str) -> Iterator[dict[str, Any]
                         safe_text(tag)[:100] for tag in tags[:20]
                         if isinstance(tag, str)
                     ]
-            else:
-                observation.pop('evidence_json', None)
             if declaration_evidence:
                 observation['declaration_evidence'] = declaration_evidence
             kind = (
@@ -144,7 +148,7 @@ def _contexts(conn: sqlite3.Connection, scan_id: str) -> Iterator[dict[str, Any]
             'parameters': conn.execute('SELECT count(*) FROM parameters WHERE endpoint_id=?', (endpoint_id,)).fetchone()[0],
             'observations': conn.execute('SELECT count(*) FROM endpoint_observations WHERE endpoint_id=?', (endpoint_id,)).fetchone()[0],
         }
-        yield {
+        context = {
             'endpoint_id': endpoint_id, 'method': endpoint['method'],
             'path': safe_url(endpoint['normalized_path']), 'origin': safe_url(endpoint['base_url']),
             'auth_required': bool(endpoint['auth_required']),
@@ -157,6 +161,13 @@ def _contexts(conn: sqlite3.Connection, scan_id: str) -> Iterator[dict[str, Any]
             'evidence_truncated': any(evidence_counts[key] > len(value) for key, value in
                 [('annotations', annotations), ('parameters', parameters), ('observations', observations)]),
         }
+        # Keep the stable evidence digest unchanged for the common case. This
+        # optional signal appears only when Recon actually observed an access
+        # boundary, so planner upgrades do not force unrelated endpoints
+        # through the model again on resume.
+        if access_statuses:
+            context['access_statuses'] = sorted(access_statuses)
+        yield context
 
 
 def _validate(plan: ReconAttackPlan, contexts: list[dict], skills: dict[str, str]) -> None:
@@ -270,7 +281,11 @@ def _grounded_baseline_hypotheses(
     captcha_path = "captcha" in path
     credential_fields = bool(parameter_names & {
         "email", "username", "user", "password", "pass", "pin", "code",
-        "otp", "token", "totptoken", "totp_token",
+        "otp", "token", "totptoken", "totp_token", "current",
+        "current_password", "currentpassword",
+    })
+    access_boundary = bool(set(context.get("access_statuses", [])) & {
+        "authentication_required", "authorization_required", "access_denied",
     })
 
     if method in {"GET", "HEAD", "OPTIONS"} and any(token in path for token in (
@@ -289,9 +304,21 @@ def _grounded_baseline_hypotheses(
                     if isinstance(status, int))):
         add("api_misconfig", identity="unauthenticated", reason=
             "Recon observed a successful API read suitable for anonymous exposure and response-minimization checks.")
-    if context.get("auth_required") or authentication_path or protected_resource_path:
+    if (context.get("auth_required") or authentication_path
+            or protected_resource_path or semantic_mutation_path or access_boundary):
         add("auth_bypass", identity="unauthenticated", reason=
-            "Recon identified an authentication or authorization boundary suitable for an anonymous baseline check.")
+            "Recon identified an authentication, authorization, or account-state boundary suitable for an anonymous baseline check.")
+        for parameter in context.get("parameters", []):
+            name = str(parameter.get("name") or "")
+            folded = name.casefold().replace("-", "_")
+            location = str(parameter.get("location") or "")
+            if folded in {
+                "current", "current_password", "currentpassword", "password",
+                "pass", "pin", "code", "otp", "token", "totptoken",
+                "totp_token",
+            }:
+                add("auth_bypass", location, name, identity="unauthenticated", reason=
+                    "Recon recorded a security-context input on an access-controlled state boundary suitable for an anonymous rejection check.")
     if authentication_path and (credential_fields or method == "POST"):
         add("brute_force", identity="unauthenticated", reason=
             "Recon identified a credential-verification transition suitable for a small bounded rate-limit differential.")
@@ -337,6 +364,13 @@ def _grounded_baseline_hypotheses(
         add("graphql", reason="Recon identified a GraphQL route suitable for bounded schema and authorization checks.")
     if "socket.io" in path or "websocket" in path:
         add("websocket", reason="Recon identified a WebSocket transport route suitable for session-bound checks.")
+        for parameter in context.get("parameters", []):
+            name = str(parameter.get("name") or "")
+            folded = name.casefold().replace("-", "_")
+            location = str(parameter.get("location") or "")
+            if location == "query" and folded in {"eio", "transport", "t"}:
+                add("websocket", location, name, reason=
+                    "Recon observed this Engine.IO transport-control input, suitable for a bounded handshake and origin/session differential.")
     if any(token in path for token in ("/ai/", "/chat", "/prompt", "/llm")):
         add("llm_ai", reason="Recon identified an AI-facing route suitable for bounded trust-boundary checks.")
     if spa_detected and (path.startswith("/api/") or path.startswith("/rest/")):
@@ -418,6 +452,80 @@ def _retained_hypotheses(conn: sqlite3.Connection, scan_id: str, batch: list[dic
             _validate(ReconAttackPlan.model_construct(endpoints=[item]), [context], skills)
             retained[context['endpoint_id']] = {_canonical_digest(hypothesis_fields(h)): h for h in hypotheses}
     return retained
+
+
+def supplement_grounded_hypotheses(database: Path, scan_id: str) -> int:
+    """Add newly supported deterministic hypotheses to a completed plan.
+
+    This is intentionally independent of the model planner so a software
+    upgrade can make already-captured black-box evidence actionable on resume.
+    Existing hypotheses, attempts, and dispositions remain untouched. The
+    caller still has to materialize and execute new coverage normally.
+    """
+    skills = hypothesis_skill_catalog()
+    added = 0
+    with closing(_open_database(database)) as conn:
+        # Source-assisted imports already carry their explicit benchmark/source
+        # hypotheses. Keep this updater confined to ordinary black-box plans so
+        # it cannot expand a source-import contract or mix planning modes.
+        if _source_assisted_scan(conn, scan_id):
+            return 0
+        for context in _contexts(conn, scan_id):
+            # A deterministic supplement must never hide or route around a
+            # model grounding failure for this endpoint. The normal bounded
+            # correction loop owns unresolved diagnostics first.
+            if conn.execute(
+                """SELECT 1 FROM attack_planning_diagnostics
+                   WHERE scan_id=? AND endpoint_id=?
+                     AND status IN ('rejected','unresolved') LIMIT 1""",
+                (scan_id, context['endpoint_id']),
+            ).fetchone():
+                continue
+            semantic_keys: set[tuple[str, str, str, str]] = set()
+            for row in conn.execute(
+                """SELECT n.rationale FROM endpoint_annotations n
+                   JOIN endpoint_observations o
+                     ON o.observation_id=n.observation_id
+                   JOIN annotation_runs r
+                     ON r.annotation_run_id=n.annotation_run_id
+                   WHERE o.endpoint_id=? AND r.scan_id=?
+                     AND n.category='attack_hypothesis'""",
+                (context['endpoint_id'], scan_id),
+            ):
+                try:
+                    metadata = json.loads(row['rationale'])
+                    semantic_keys.add((
+                        str(metadata['vuln_class']),
+                        str(metadata['injection_location']),
+                        str(metadata['parameter_name']),
+                        str(metadata['required_identity_role']),
+                    ))
+                except (KeyError, TypeError, ValueError):
+                    continue
+            additions = []
+            for hypothesis in _grounded_baseline_hypotheses(context, skills):
+                key = (
+                    hypothesis.vuln_class, hypothesis.injection_location,
+                    hypothesis.parameter_name, hypothesis.required_identity_role,
+                )
+                if key in semantic_keys or len(semantic_keys) >= 64:
+                    continue
+                semantic_keys.add(key)
+                additions.append(hypothesis)
+            if not additions:
+                continue
+            plan = ReconAttackPlan.model_construct(endpoints=[
+                EndpointHypotheses.model_construct(
+                    endpoint_id=context['endpoint_id'], disposition='planned',
+                    reason='New deterministic hypotheses from existing endpoint-owned Recon evidence.',
+                    hypotheses=additions,
+                )
+            ])
+            _validate(plan, [context], skills)
+            with conn:
+                _persist(conn, scan_id, [context], plan, write_reviews=False)
+            added += len(additions)
+    return added
 
 
 def plan_recon_attack(database: Path, scan_id: str, *, agent: Any, batch_size: int = 16, progress=None, repair_progress=None, stage_run_id: str | None = None) -> dict:
@@ -616,5 +724,9 @@ commands, browse, or send requests; this step only produces a testing plan.
             plan_batch(pending)
         if progress is not None:
             progress(reviewed, total)
+        # Ensure planner-rule upgrades are also applied to endpoints whose
+        # evidence digest was already reviewed and therefore skipped above.
+        # This second pass is idempotent and never imports Wiki/source answers.
+        supplement_grounded_hypotheses(database, scan_id)
         counts = dict(conn.execute('SELECT status,count(*) FROM attack_endpoint_reviews WHERE scan_id=? GROUP BY status', (scan_id,)))
         return {'total_endpoints': total, 'by_status': counts}

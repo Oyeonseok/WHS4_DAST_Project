@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import sqlite3
+import tempfile
 from contextlib import closing
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from aidast.attack.coverage import (
     claim_coverage_batch,
@@ -19,6 +23,10 @@ from aidast.attack.coverage import (
     transition_coverage,
 )
 from aidast.attack.template_loader import template_ids_for_skill
+from aidast.attack.db_cli import (
+    commit_attempt, transition_task as transition_attack_task,
+)
+from aidast.attack.request_cli import RequestGuardError, guarded_request
 from aidast.orchestration.attack import AttackBatchFailure, AttackCoordinator, AttackCoordinatorError
 from aidast.pipeline.lifecycle import finish_stage_run, start_stage_run, transition_task
 
@@ -91,6 +99,19 @@ class ExhaustiveAttackCoordinator:
                     "unfinished coverage items remain but none are schedulable"
                 )
             stages.append(stage_run_id)
+            tasks = self._execute_deterministic_engineio(
+                scan_id=scan_id, stage_run_id=stage_run_id, tasks=tasks,
+            )
+            if not tasks:
+                with closing(sqlite3.connect(self.db_path)) as conn, conn:
+                    conn.row_factory = sqlite3.Row
+                    conn.execute("PRAGMA foreign_keys=ON")
+                    reconcile_coverage_batch(
+                        conn, stage_run_id=stage_run_id,
+                        retry_limit=self.retry_limit,
+                    )
+                    finish_stage_run(conn, stage_run_id, status="completed")
+                continue
             selected_skills = tuple(dict.fromkeys(task["skill_name"] for task in tasks))
             reasons = {
                 skill: ("exhaustive Recon DB coverage item",)
@@ -146,6 +167,240 @@ class ExhaustiveAttackCoordinator:
                     continue
                 raise
         return self._finish_result(scan_id, stages)
+
+    @staticmethod
+    def _with_query(url: str, **values: str) -> str:
+        parsed = urlsplit(url)
+        pairs = [
+            (name, value) for name, value in parse_qsl(
+                parsed.query, keep_blank_values=True,
+            ) if name not in values
+        ]
+        pairs.extend(values.items())
+        return urlunsplit((
+            parsed.scheme, parsed.netloc, parsed.path or "/",
+            urlencode(pairs), "",
+        ))
+
+    def _observed_engineio_version(self, endpoint_id: str) -> str | None:
+        """Return one Recon-observed polling protocol version for this route."""
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            row = conn.execute(
+                "SELECT origin_id,normalized_path FROM endpoints WHERE endpoint_id=?",
+                (endpoint_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            urls = [
+                str(item[0]) for item in conn.execute(
+                    """SELECT h.url FROM http_transactions h
+                       JOIN endpoints e ON e.endpoint_id=h.endpoint_id
+                       WHERE e.origin_id=? AND e.normalized_path=?
+                       ORDER BY h.captured_at DESC LIMIT 128""",
+                    row,
+                )
+            ]
+        versions = {
+            value
+            for url in urls
+            for name, value in parse_qsl(urlsplit(url).query, keep_blank_values=True)
+            if name.casefold() == "eio" and value in {"3", "4"}
+        }
+        return next(iter(versions)) if len(versions) == 1 else None
+
+    def _observed_engineio_base_url(self, endpoint_id: str) -> str | None:
+        """Preserve the exact observed route spelling, including trailing slash."""
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            row = conn.execute(
+                "SELECT origin_id,normalized_path FROM endpoints WHERE endpoint_id=?",
+                (endpoint_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            urls = [
+                str(item[0]) for item in conn.execute(
+                    """SELECT h.url FROM http_transactions h
+                       JOIN endpoints e ON e.endpoint_id=h.endpoint_id
+                       WHERE e.origin_id=? AND e.normalized_path=?
+                       ORDER BY h.captured_at DESC LIMIT 128""",
+                    row,
+                )
+            ]
+        for url in urls:
+            parsed = urlsplit(url)
+            query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+            if query.get("EIO") in {"3", "4"} and query.get("transport") == "polling":
+                return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
+        return None
+
+    @staticmethod
+    def _engineio_task(task: dict[str, Any]) -> bool:
+        return (
+            task.get("skill_name") == "hunt-websocket"
+            and str(task.get("normalized_path") or "").casefold().rstrip("/")
+            .endswith("/socket.io")
+            and str(task.get("vuln_class") or "") == "websocket"
+            and str(task.get("injection_location") or "") == "query"
+            and str(task.get("parameter_name") or "").casefold()
+            in {"eio", "transport", "t"}
+            and str(task.get("method") or "").upper() in {"GET", "POST"}
+        )
+
+    def _execute_deterministic_engineio(
+        self, *, scan_id: str, stage_run_id: str,
+        tasks: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Execute the safe Engine.IO session-binding contract without a model.
+
+        The OPEN sid is transient and is cryptographically bound by the request
+        helper to the following root CONNECT request. Only its hash reaches the
+        durable request ledger. A forged sid rejection is the negative security
+        control; a successful OPEN or CONNECT alone is never a finding.
+        """
+        remaining: list[dict[str, Any]] = []
+        for task in tasks:
+            if not self._engineio_task(task):
+                remaining.append(task)
+                continue
+            version = self._observed_engineio_version(str(task["endpoint_id"]))
+            if version is None:
+                remaining.append(task)
+                continue
+            task_id = str(task["task_id"])
+            endpoint_id = str(task["endpoint_id"])
+            method = str(task["method"]).upper()
+            base_url = self._observed_engineio_base_url(endpoint_id) or (
+                str(task["origin_url"]).rstrip("/")
+                + "/" + str(task["normalized_path"]).lstrip("/")
+            )
+            marker = hashlib.sha256(task_id.encode()).hexdigest()[:12]
+            opened_url = self._with_query(
+                base_url, EIO=version, transport="polling", t=f"aidast-{marker}",
+            )
+            fake_sid = f"aidast-invalid-{marker}"
+            transition_attack_task(
+                self.db_path, scan_id, stage_run_id, task_id, "running",
+            )
+            try:
+                with tempfile.TemporaryDirectory(prefix="aidast-engineio-") as temporary:
+                    payload_path = Path(temporary) / "request.json"
+
+                    def send(payload: dict[str, Any]) -> dict[str, Any]:
+                        payload_path.write_text(
+                            json.dumps(payload, ensure_ascii=False), encoding="utf-8",
+                        )
+                        return guarded_request(
+                            self.db_path, scan_id=scan_id,
+                            stage_run_id=stage_run_id, task_id=task_id,
+                            policy_path=self.policy_path, payload_path=payload_path,
+                        )
+
+                    opened = send({
+                        "method": "GET", "url": opened_url,
+                        "captures": [{
+                            "name": "engineio_sid",
+                            "source": "engineio_open_json", "path": ["sid"],
+                        }],
+                        "assertions": [{
+                            "name": "engineio-open", "kind": "body_contains",
+                            "expected": '"sid"', "terminal": True,
+                        }],
+                    })
+                    sid = str(opened["captures"]["engineio_sid"])
+                    if method == "POST":
+                        connected_url = self._with_query(
+                            opened_url, sid=sid, t=f"aidast-{marker}-connect",
+                        )
+                        send({
+                            "method": "POST", "url": connected_url,
+                            "headers": {
+                                "Content-Type": "text/plain;charset=UTF-8",
+                            },
+                            "body": "40", "risk_class": "application_mutation",
+                            "bindings": [{
+                                "name": "engineio_sid",
+                                "source_request_id": opened["request_id"],
+                                "capture_name": "engineio_sid", "value": sid,
+                                "target_kind": "query_parameter",
+                                "target_path": ["sid"],
+                            }],
+                            "assertions": [{
+                                "name": "root-connect-accepted",
+                                "kind": "body_contains", "expected": "ok",
+                                "terminal": True,
+                            }],
+                        })
+                    rejected_url = self._with_query(
+                        opened_url, sid=fake_sid, t=f"aidast-{marker}-reject",
+                    )
+                    rejected = send({
+                        "method": method, "url": rejected_url,
+                        **({
+                            "headers": {
+                                "Content-Type": "text/plain;charset=UTF-8",
+                            },
+                            "body": "40", "risk_class": "application_mutation",
+                        } if method == "POST" else {}),
+                        "assertions": [
+                            {
+                                "name": "unknown-session-status",
+                                "kind": "status_equals", "expected": 400,
+                                "terminal": True,
+                            },
+                            {
+                                "name": "unknown-session-body",
+                                "kind": "body_contains",
+                                "expected": "Session ID unknown", "terminal": True,
+                            },
+                        ],
+                    })
+                    negative = (
+                        rejected["status"] == 400
+                        and all(item["passed"] for item in rejected["assertions"])
+                    )
+                    attempt_path = Path(temporary) / "attempt.json"
+                    attempt_path.write_text(json.dumps({
+                        "task_id": task_id, "endpoint_id": endpoint_id,
+                        "skill_name": "hunt-websocket",
+                        "request_fingerprint": rejected["request_fingerprint"],
+                        "method": method, "url": rejected["url"],
+                        "identity_role": "unauthenticated",
+                        "payload_variant": (
+                            "engineio-session-binding-"
+                            + str(task["parameter_name"]).casefold()
+                        ),
+                        "response_status": rejected["status"],
+                        "response_signature": hashlib.sha256(
+                            rejected["response_body"].encode("utf-8")
+                        ).hexdigest(),
+                        "outcome": "negative" if negative else "inconclusive",
+                    }, ensure_ascii=False), encoding="utf-8")
+                    commit_attempt(self.db_path, scan_id, attempt_path)
+                transition_attack_task(
+                    self.db_path, scan_id, stage_run_id, task_id, "completed",
+                )
+            except Exception as exc:
+                controlled_guard_failure = isinstance(exc, RequestGuardError)
+                reason = (
+                    "[evidence] deterministic Engine.IO session-binding probe "
+                    "could not complete: "
+                    + (
+                        str(exc)[:300]
+                        if controlled_guard_failure
+                        else f"internal {type(exc).__name__}"
+                    )
+                )
+                transition_attack_task(
+                    self.db_path, scan_id, stage_run_id, task_id,
+                    (
+                        "skipped"
+                        if controlled_guard_failure
+                        and "outcome is unknown" not in str(exc)
+                        else "failed"
+                    ),
+                    reason,
+                )
+        return remaining
 
     def _recover_failed_batch(
         self, stage_run_id: str, exc: BaseException,

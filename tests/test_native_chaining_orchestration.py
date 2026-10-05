@@ -132,7 +132,7 @@ class NativeChainingCoordinatorTests(unittest.TestCase):
             self.assertEqual(result.status, "SKIPPED")
             self.assertEqual(main.calls, [])
 
-    def test_completed_chaining_reruns_only_after_a_new_attack_stage(self) -> None:
+    def test_completed_chaining_skips_after_negative_only_attack_stage(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             database, _ = completed_attack_pipeline(root)
@@ -156,8 +156,13 @@ class NativeChainingCoordinatorTests(unittest.TestCase):
                 )
                 finish_stage_run(conn, attack_stage, status="completed")
 
-            self.assertEqual(coordinator.run("scan_chain").status, "COMPLETED")
-            self.assertEqual(len(main.calls), 2)
+            self.assertEqual(coordinator.run("scan_chain").status, "SKIPPED")
+            self.assertEqual(len(main.calls), 1)
+            with closing(sqlite3.connect(database)) as conn:
+                self.assertEqual(conn.execute(
+                    "SELECT status FROM stage_runs WHERE stage='chaining' "
+                    "ORDER BY rowid DESC LIMIT 1"
+                ).fetchone(), ("skipped",))
 
     def test_agent_must_resolve_every_candidate(self) -> None:
         class OpenCandidateMain(FakeChainingMain):

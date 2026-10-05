@@ -729,9 +729,16 @@ class ValidationCoordinator:
                     "WHERE case_id=? AND stage_run_id=? LIMIT 1",
                     (case["case_id"], stage_run_id),
                 ).fetchone())
+                self._validate_assessment_refs(
+                    assessment, case["case_id"], evidence_ids, observations,
+                )
             else:
                 try:
-                    assessment = self._assessment(blind_view, tuple(observations), policy=policy)
+                    assessment = self._validated_assessment(
+                        blind_view, tuple(observations),
+                        case_id=case["case_id"], evidence_ids=evidence_ids,
+                        policy=policy,
+                    )
                 except ValidationAgentUnavailable:
                     repo.finalize(
                         case["case_id"], stage_run_id=stage_run_id, expected_version=version,
@@ -746,7 +753,6 @@ class ValidationCoordinator:
                         "phase": "blind_assessment"}, evidence_ids=evidence_ids,
                     )
                     return True
-            self._validate_assessment_refs(assessment, case["case_id"], evidence_ids, observations)
             if sealed_preimpact is None:
                 development_used = False
             if sealed_preimpact is None and assessment.blocker_axis in {
@@ -772,7 +778,11 @@ class ValidationCoordinator:
                     if stop_incomplete_replay(observations, evidence_ids):
                         return True
                     try:
-                        assessment = self._assessment(blind_view, tuple(observations), policy=policy)
+                        assessment = self._validated_assessment(
+                            blind_view, tuple(observations),
+                            case_id=case["case_id"], evidence_ids=evidence_ids,
+                            policy=policy,
+                        )
                     except ValidationAgentUnavailable:
                         repo.finalize(
                             case["case_id"], stage_run_id=stage_run_id,
@@ -790,9 +800,6 @@ class ValidationCoordinator:
                             evidence_ids=evidence_ids,
                         )
                         return True
-                    self._validate_assessment_refs(
-                        assessment, case["case_id"], evidence_ids, observations
-                    )
             raw_axes = [assessment.impact_boundary.score,
                         assessment.impact_sensitivity.score,
                         assessment.impact_actor_requirements.score]
@@ -1708,8 +1715,51 @@ class ValidationCoordinator:
         )
 
     def _assessment(self, blind: dict[str, Any], observations: tuple[dict[str, Any], ...],
-                    *, policy: TargetPolicy | None = None) -> BlindAssessment:
-        return self._agent_call("assess", blind, observations, model=BlindAssessment, policy=policy)
+                    *, policy: TargetPolicy | None = None,
+                    correction: str | None = None) -> BlindAssessment:
+        return self._agent_call(
+            "assess", blind, observations, model=BlindAssessment, policy=policy,
+            initial_correction=correction,
+        )
+
+    def _validated_assessment(
+        self, blind: dict[str, Any], observations: tuple[dict[str, Any], ...],
+        *, case_id: str, evidence_ids: list[str],
+        policy: TargetPolicy | None = None,
+    ) -> BlindAssessment:
+        """Obtain one batch-bound assessment with one semantic repair turn."""
+        assessment = self._assessment(blind, observations, policy=policy)
+        try:
+            self._validate_assessment_refs(
+                assessment, case_id, evidence_ids, list(observations),
+            )
+            return assessment
+        except ValidationCoordinatorError:
+            target_ids = [
+                item["attempt_id"] for item in observations
+                if item["attempt_kind"] == "target"
+            ]
+            control_ids = [
+                item["attempt_id"] for item in observations
+                if item["attempt_kind"] != "target"
+            ]
+            correction = (
+                "The previous object cited IDs outside this replay batch. "
+                f"Use case_id={case_id!r}; evidence_ids must be a subset of "
+                f"{list(evidence_ids)!r}; target_attempt_ids must equal "
+                f"{target_ids!r}; control_attempt_ids must equal "
+                f"{control_ids!r}. Every nested impact-axis evidence_ids list "
+                "must also use only the supplied evidence IDs. Keep the "
+                "evidence-based conclusion unchanged except where an invalid "
+                "reference forced an unsupported claim."
+            )
+            repaired = self._assessment(
+                blind, observations, policy=policy, correction=correction,
+            )
+            self._validate_assessment_refs(
+                repaired, case_id, evidence_ids, list(observations),
+            )
+            return repaired
 
     def _develop_impact(
         self, repo: ValidationRepository, candidate: ValidatedCandidate,

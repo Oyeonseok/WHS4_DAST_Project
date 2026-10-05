@@ -291,6 +291,35 @@ def test_execute_resume_dispatches_stage_sequence_without_recon(tmp_path: Path) 
     assert calls == [("attack", SCAN_ID), ("chaining", SCAN_ID), ("validation", SCAN_ID)]
 
 
+def test_execute_resume_reuses_current_validation_after_negative_only_attack(
+    tmp_path: Path,
+) -> None:
+    _fixture(tmp_path)
+    plan = inspect_resume(tmp_path, SCAN_ID)
+    calls: list[tuple[str, str]] = []
+
+    class Stage:
+        def __init__(self, name: str, **_kwargs: object) -> None:
+            self.name = name
+
+        def run(self, scan_id: str) -> None:
+            calls.append((self.name, scan_id))
+
+    with (
+        patch("aidast.orchestration.attack.AttackCoordinator", lambda **kwargs: Stage("attack", **kwargs)),
+        patch("aidast.orchestration.chaining.ChainingCoordinator", lambda **kwargs: Stage("chaining", **kwargs)),
+        patch("aidast.pipeline.resume._current_validation_covers_attack_results", return_value=True),
+    ):
+        execute_resume(
+            plan, agent=object(),
+            validation_factory=lambda **_kwargs: (_ for _ in ()).throw(
+                AssertionError("current Validation must be reused")
+            ),
+        )
+
+    assert calls == [("attack", SCAN_ID), ("chaining", SCAN_ID)]
+
+
 def test_execute_resume_restores_cancelled_recon_checkpoint(tmp_path: Path) -> None:
     pipeline = _fixture(tmp_path)
     with sqlite3.connect(pipeline) as conn:

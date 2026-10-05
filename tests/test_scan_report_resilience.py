@@ -87,6 +87,42 @@ def test_writer_failure_preserves_other_cases_and_safe_retry(case):
     assert retried.summary["latest_stages"][-1]["status"] == "completed"
 
 
+def test_completed_scan_replaces_stale_same_case_report_and_archives_revision(case):
+    evidence = case.complete()
+
+    class Writer:
+        def write(self, context):
+            return case.draft(context, evidence)
+
+    output = output_for(case)
+    first, = generate_scan_reports(
+        case.path, output, scan_id="scan", platform="hackerone", writer=Writer(),
+    )
+    first_db = Path(first["report_db"])
+    with sqlite3.connect(first_db) as conn:
+        first_context = json.loads(conn.execute(
+            "SELECT context_json FROM report_runs"
+        ).fetchone()[0])
+
+    # A new current eligibility record changes the source binding while the
+    # scan, case, platform, and validated decision remain the same.
+    case.eligibility()
+    complete_validation(case)
+    retried, = generate_scan_reports(
+        case.path, output, scan_id="scan", platform="hackerone", writer=Writer(),
+    )
+
+    assert retried["report_id"] != first["report_id"]
+    assert retried["stale"] is False
+    archive = (
+        first_db.parent / "History" / first_context["context_sha256"]
+        / "Snapshot.db"
+    )
+    assert archive.is_file()
+    assert first_db.is_file()
+    assert Path(retried["report_path"]).is_file()
+
+
 def test_locale_writer_failure_does_not_discard_other_locale(case):
     evidence = case.complete()
     complete_validation(case)

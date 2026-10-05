@@ -188,6 +188,25 @@ same temporary file.
    baseline even when the annotated route also has password fields. Evaluate
    the token behavior expressed by the exact task and source context; do not
    reject it solely because the preferred parameter happens to be `password`.
+
+   For an observed Socket.IO/Engine.IO polling route, treat the transport
+   handshake as a short protocol sequence instead of reusing an expired `sid`.
+   A GET or POST `websocket` task may first send one safe GET to the same
+   observed path with the Recon-recorded `EIO` value and
+   `transport=polling`. For a POST task this GET is a same-path protocol
+   precondition, not coverage for another endpoint. Capture `sid` from the
+   leading Engine.IO OPEN packet with
+   `{"name":"engineio_sid","source":"engineio_open_json","path":["sid"]}`.
+   Then bind that exact transient value into the POST query using
+   `target_kind=query_parameter`, send only the observed inert root CONNECT
+   frame `40`, and optionally perform one same-session GET to inspect the ack.
+   Include the selected `t` or `transport` parameter exactly when the task is
+   parameter-bound. Never reuse a Recon-captured sid, guess a namespace or
+   event frame, or persist the captured sid; the broker stores only its hash.
+   A successful OPEN/CONNECT sequence proves that the test reached the
+   protocol. It is not a finding by itself. Use the Hunt Skill's origin,
+   identity, room, and data-impact criteria for findings, and record a negative
+   only after the applicable bounded differential rejects unauthorized access.
 5. For each running Skill, follow its discovery and confirmation criteria while
    staying inside Scope. A status code by itself never confirms a vulnerability.
    It also never proves that a successful read is harmless. For an unauthenticated

@@ -838,6 +838,64 @@ class AttackRequestGuardTests(unittest.TestCase):
                 )
             self.assertEqual(len(opener.calls), 2)
 
+    def test_engineio_open_sid_is_captured_and_bound_without_persistence(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            database, policy, payload, stage, task = fixture(
+                root, max_requests=3, attack_methods=["GET", "POST"],
+            )
+            sid = "ephemeral-engineio-session"
+            opener = FakeOpener([
+                (f'0{{"sid":"{sid}","upgrades":["websocket"]}}').encode(),
+                b'ok',
+            ])
+            with patch("aidast.attack.request_cli.build_opener", return_value=opener):
+                payload.write_text(json.dumps({
+                    "method": "GET",
+                    "url": "https://example.test/api/socket.io/?EIO=4&transport=polling",
+                    "captures": [{
+                        "name": "engineio_sid", "source": "engineio_open_json",
+                        "path": ["sid"],
+                    }],
+                }), encoding="utf-8")
+                opened = guarded_request(
+                    database, scan_id="scan", stage_run_id=stage, task_id=task,
+                    policy_path=policy, payload_path=payload,
+                )
+                payload.write_text(json.dumps({
+                    "method": "POST",
+                    "url": (
+                        "https://example.test/api/socket.io/"
+                        f"?EIO=4&transport=polling&sid={sid}"
+                    ),
+                    "headers": {"Content-Type": "text/plain;charset=UTF-8"},
+                    "body": "40",
+                    "risk_class": "application_mutation",
+                    "bindings": [{
+                        "name": "engineio_sid",
+                        "source_request_id": opened["request_id"],
+                        "capture_name": "engineio_sid", "value": sid,
+                        "target_kind": "query_parameter", "target_path": ["sid"],
+                    }],
+                }), encoding="utf-8")
+                connected = guarded_request(
+                    database, scan_id="scan", stage_run_id=stage, task_id=task,
+                    policy_path=policy, payload_path=payload,
+                )
+
+            self.assertEqual(connected["status"], 200)
+            with closing(sqlite3.connect(database)) as conn:
+                stored = conn.execute(
+                    "SELECT result_json FROM attack_http_requests WHERE request_id=?",
+                    (opened["request_id"],),
+                ).fetchone()[0]
+            self.assertNotIn(sid, stored)
+            metadata = json.loads(stored)
+            self.assertEqual(
+                metadata["capture_contracts"]["engineio_sid"],
+                {"source_kind": "engineio_open_json_path", "source_path": ["sid"]},
+            )
+
     def test_nonempty_json_assertion_proves_secret_shape_without_persisting_value(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

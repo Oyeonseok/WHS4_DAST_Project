@@ -66,6 +66,44 @@ def _resumable_validation_stages(
     return tuple(str(row[0]) for row in rows)
 
 
+def _current_validation_covers_attack_results(
+    database: Path, scan_id: str,
+) -> bool:
+    """Return whether every current Attack result already has a final decision."""
+    with closing(sqlite3.connect(database)) as conn:
+        targets = {
+            ("finding", str(row[0])) for row in conn.execute(
+                """SELECT DISTINCT f.finding_id FROM findings f
+                   WHERE f.scan_id=? AND f.status IN ('unreviewed','confirmed')
+                     AND EXISTS (
+                         SELECT 1 FROM attack_attempts a
+                         WHERE a.finding_id=f.finding_id AND a.outcome='confirmed'
+                     )""",
+                (scan_id,),
+            )
+        }
+        targets.update(
+            ("chain", str(row[0])) for row in conn.execute(
+                """SELECT chain_id FROM finding_chains
+                   WHERE scan_id=? AND status='demonstrated'""",
+                (scan_id,),
+            )
+        )
+        if not targets:
+            return False
+        covered = {
+            (str(row[0]), str(row[1])) for row in conn.execute(
+                """SELECT target_kind,COALESCE(finding_id,chain_id)
+                   FROM validation_cases
+                   WHERE scan_id=? AND processing_phase='completed'
+                     AND current_status IS NOT NULL
+                     AND decision_stage_run_id=latest_stage_run_id""",
+                (scan_id,),
+            )
+        }
+        return targets <= covered
+
+
 def inspect_resume(result_root: Path, scan_id: str) -> ResumePlan:
     """Validate the original approved handoff and select the first unfinished stage."""
     if not _SCAN_ID.fullmatch(scan_id):
@@ -228,6 +266,21 @@ def execute_resume(
             agent=main_agent, db_path=plan.database,
             scope_path=plan.scope_path, policy_path=plan.policy_path,
         ).run(plan.scan_id)
+    with closing(sqlite3.connect(plan.database)) as conn:
+        validation_stage_run_ids = _resumable_validation_stages(conn, plan.scan_id)
+    if (
+        not validation_stage_run_ids
+        and plan.stage in {"attack", "chaining"}
+        and _current_validation_covers_attack_results(plan.database, plan.scan_id)
+    ):
+        with closing(sqlite3.connect(plan.database)) as conn, conn:
+            from aidast.pipeline.lifecycle import audit_event
+            audit_event(
+                conn, scan_id=plan.scan_id,
+                event_type="validation.current_results_reused",
+                details={"resume_stage": plan.stage},
+            )
+        return
     coordinator = (
         validation_factory(db_path=plan.database, policy_path=plan.policy_path,
                            validation_model=plan.models.validation_model)
@@ -235,8 +288,6 @@ def execute_resume(
         build_native_validation_coordinator(db_path=plan.database, policy_path=plan.policy_path,
                                              validation_model=plan.models.validation_model)
     )
-    with closing(sqlite3.connect(plan.database)) as conn:
-        validation_stage_run_ids = _resumable_validation_stages(conn, plan.scan_id)
     if not validation_stage_run_ids and plan.stage == "validation" and plan.stage_run_id:
         validation_stage_run_ids = (plan.stage_run_id,)
     if validation_stage_run_ids:
