@@ -20,6 +20,7 @@ from aidast.attack.coverage import (
     requeue_transient_model_failures,
     requeue_coverage,
     resolve_abandoned_attack_leads,
+    resolve_interrupted_stage_leads,
     transition_coverage,
     _credential_role,
     _execution_identity_role,
@@ -462,6 +463,41 @@ def test_abandoned_stage_lead_is_preserved_as_inconclusive(tmp_path: Path) -> No
 
     assert row[0] == "inconclusive"
     assert "coverage retry" in row[1]
+    assert row[2]
+
+
+def test_interrupted_running_stage_lead_is_closed_for_fresh_retry(
+    tmp_path: Path,
+) -> None:
+    imported = imported_pipeline(tmp_path)
+    with sqlite3.connect(imported.pipeline_database) as conn:
+        endpoint_id = conn.execute(
+            "SELECT endpoint_id FROM endpoints ORDER BY endpoint_id LIMIT 1"
+        ).fetchone()[0]
+        stage_run_id = start_stage_run(
+            conn, scan_id=imported.scan_id, stage="attack",
+        )
+        task_id = create_task(
+            conn, stage_run_id=stage_run_id, skill_name="hunt-sqli",
+        )
+        conn.execute(
+            """INSERT INTO attack_attempts
+               (attempt_id,scan_id,task_id,skill_name,endpoint_id,
+                request_fingerprint,outcome)
+               VALUES ('attempt-interrupted',?,?,?,?,?,'lead')""",
+            (imported.scan_id, task_id, "hunt-sqli", endpoint_id, "b" * 64),
+        )
+        assert resolve_interrupted_stage_leads(
+            conn, stage_run_id=stage_run_id,
+            reason="model deadline requires fresh replay",
+        ) == 1
+        row = conn.execute(
+            """SELECT outcome,resolution_reason,resolved_at
+               FROM attack_attempts WHERE attempt_id='attempt-interrupted'"""
+        ).fetchone()
+
+    assert row[0] == "inconclusive"
+    assert row[1] == "model deadline requires fresh replay"
     assert row[2]
 
 
@@ -1018,6 +1054,56 @@ def test_transient_model_failure_retries_without_failing_pipeline(
     assert len(agent.calls) > 1
     assert result.coverage["by_status"] == {"unsupported": 4}
     with sqlite3.connect(imported.pipeline_database) as conn:
+        assert conn.execute(
+            "SELECT DISTINCT status FROM stage_runs WHERE stage='attack'"
+        ).fetchall() == [("completed",)]
+
+
+def test_model_timeout_with_partial_lead_closes_lead_and_continues(
+    tmp_path: Path,
+) -> None:
+    imported = imported_pipeline(tmp_path)
+
+    class PartialLeadTimeoutAgent(UnsupportedCoverageAgent):
+        def run_attack_orchestrator(self, **kwargs):
+            if not self.calls:
+                self.calls.append(kwargs)
+                task = kwargs["attack_tasks"][0]
+                transition_task(
+                    kwargs["db_path"], kwargs["scan_id"],
+                    kwargs["stage_run_id"], task["task_id"], "running",
+                )
+                with sqlite3.connect(kwargs["db_path"]) as conn:
+                    conn.execute(
+                        """INSERT INTO attack_attempts
+                           (attempt_id,scan_id,task_id,skill_name,endpoint_id,
+                            request_fingerprint,outcome)
+                           VALUES ('partial-timeout-lead',?,?,?,?,?,'lead')""",
+                        (
+                            kwargs["scan_id"], task["task_id"],
+                            task["skill_name"], task["endpoint_id"], "e" * 64,
+                        ),
+                    )
+                error = RuntimeError("bounded model idle timeout")
+                error.failure_code = "timeout"
+                raise error
+            return super().run_attack_orchestrator(**kwargs)
+
+    agent = PartialLeadTimeoutAgent()
+    result = ExhaustiveAttackCoordinator(
+        agent=agent, db_path=imported.pipeline_database,
+        scope_path=imported.recon_database.parent / "Scope.md",
+        policy_path=imported.recon_database.parent / "TargetPolicy.json",
+        batch_size=2,
+    ).run(imported.scan_id)
+
+    assert len(agent.calls) > 1
+    assert result.coverage["unfinished"] == 0
+    with sqlite3.connect(imported.pipeline_database) as conn:
+        assert conn.execute(
+            """SELECT outcome,resolved_at IS NOT NULL FROM attack_attempts
+               WHERE attempt_id='partial-timeout-lead'"""
+        ).fetchone() == ("inconclusive", 1)
         assert conn.execute(
             "SELECT DISTINCT status FROM stage_runs WHERE stage='attack'"
         ).fetchall() == [("completed",)]

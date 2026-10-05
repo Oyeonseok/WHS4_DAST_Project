@@ -15,6 +15,7 @@ from aidast.attack.coverage import (
     reconcile_coverage_batch,
     release_unattempted_coverage,
     resolve_abandoned_attack_leads,
+    resolve_interrupted_stage_leads,
     transition_coverage,
 )
 from aidast.attack.template_loader import template_ids_for_skill
@@ -184,6 +185,13 @@ class ExhaustiveAttackCoordinator:
                     )
                 release_unattempted_coverage(
                     conn, stage_run_id=stage_run_id, reason=reason,
+                )
+                resolve_interrupted_stage_leads(
+                    conn, stage_run_id=stage_run_id,
+                    reason=(
+                        "bounded Attack model invocation ended before this lead "
+                        "was promoted; fresh coverage retry must reproduce it"
+                    ),
                 )
                 if model_capacity:
                     activate_fallback = getattr(

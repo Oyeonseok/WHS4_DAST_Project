@@ -162,6 +162,30 @@ def resolve_abandoned_attack_leads(
     return cursor.rowcount
 
 
+def resolve_interrupted_stage_leads(
+    conn: sqlite3.Connection, *, stage_run_id: str, reason: str,
+) -> int:
+    """Close provisional leads when a bounded model invocation disappears.
+
+    The HTTP evidence remains immutable and the owning coverage is retried in
+    a fresh task.  Closing only the interpretation prevents a partial model
+    timeout from leaving the whole pipeline permanently incomplete.
+    """
+    if not reason.strip():
+        raise ValueError("interrupted lead resolution requires a reason")
+    cursor = conn.execute(
+        """UPDATE attack_attempts
+           SET outcome='inconclusive',resolution_reason=?,
+               resolved_at=CURRENT_TIMESTAMP
+           WHERE outcome='lead' AND finding_id IS NULL AND resolved_at IS NULL
+             AND task_id IN (
+                 SELECT task_id FROM attack_tasks WHERE stage_run_id=?
+             )""",
+        (reason, stage_run_id),
+    )
+    return cursor.rowcount
+
+
 def _select_parameter(
     vuln_class: str, parameters: Iterable[sqlite3.Row]
 ) -> tuple[str, str]:
