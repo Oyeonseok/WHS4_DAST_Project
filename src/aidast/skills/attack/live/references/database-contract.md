@@ -73,6 +73,15 @@ candidate and submit it as another guarded request only if needed.
 `lead_attempt_ids`; the helper atomically changes them to `confirmed` and links
 them to the finding. It also requires exactly one `reproduction` object:
 
+Each evidence item uses the compact shape below. Header values can be either a
+newline-delimited string or a JSON object; request and response bodies can be a
+string or JSON value. Keep only the fields shown, redact credentials and exposed
+secrets, and use the HTTP helper's status and timing values.
+
+```json
+{"role":"unauthenticated","method":"GET","url":"https://target.test/api/items","request_headers":{"Accept":"application/json"},"request_body":null,"response_status":200,"response_headers":{"Content-Type":"application/json"},"response_body":{"data":"[REDACTED]"},"response_time_ms":12}
+```
+
 ```json
 {"method":"GET","endpoint_template":"/api/items/{id}","injection_location":"path","parameter_name":"id","payload_template":{"id":"<slot:string>"},"required_identity_roles":[],"source_request_ids":["HTTP ledger request ID"],"runtime_contract":{"schema_version":1,"target":{"request":{"path_parameters":{"id":"target-object"}},"assertions":[{"assertion_id":"target-effect","kind":"json_equals","path":["owner_id"],"expected":"other-user"}]},"positive_control":{"request":{"path_parameters":{"id":"owned-object"}},"assertions":[{"assertion_id":"healthy-path","kind":"status_equals","expected":200}]},"negative_control":{"request":{"path_parameters":{"id":"inert-object"}},"assertions":[{"assertion_id":"target-effect","kind":"json_equals","path":["owner_id"],"expected":"other-user"}]}}}
 ```

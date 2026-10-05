@@ -417,6 +417,49 @@ class AttackCliTests(unittest.TestCase):
                 self.assertEqual(conn.execute("SELECT count(*) FROM findings").fetchone()[0], 1)
                 self.assertIsNone(conn.execute("SELECT runtime_contract_json FROM finding_reproduction_specs").fetchone()[0])
 
+    def test_finding_normalizes_structured_redacted_http_evidence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path, payload, _ = self.protocol_finding_fixture(
+                Path(directory), runtime_kind="multipart", skill_name="hunt-file-upload",
+            )
+            document = json.loads(payload.read_text(encoding="utf-8"))
+            document["cwe_id"] = 200
+            document["evidence"] = [{
+                "role": "unauthenticated",
+                "method": "GET",
+                "url": "http://127.0.0.1/items",
+                "request_headers": {
+                    "Accept": "application/json",
+                    "Authorization": "Bearer [REDACTED]",
+                },
+                "request_body": {"query": "redacted"},
+                "response_status": 200,
+                "response_headers": {
+                    "Content-Type": "application/json",
+                    "Set-Cookie": "[REDACTED]",
+                },
+                "response_body": {"data": [{"secret": "[REDACTED]"}]},
+                "response_time_ms": 10,
+            }]
+            payload.write_text(json.dumps(document), encoding="utf-8")
+
+            commit_finding(path, "scan", payload)
+
+            with sqlite3.connect(path) as conn:
+                cwe = conn.execute(
+                    "SELECT cwe_id FROM findings WHERE finding_id='finding'"
+                ).fetchone()[0]
+                stored = conn.execute(
+                    """SELECT request_headers,request_body,response_headers,response_body
+                       FROM attack_requests WHERE finding_id='finding'"""
+                ).fetchone()
+            self.assertEqual(cwe, "CWE-200")
+            self.assertIn("Accept: application/json", stored[0])
+            self.assertIn("Authorization: [REDACTED]", stored[0])
+            self.assertEqual(stored[1], '{"query":"redacted"}')
+            self.assertIn("Set-Cookie: [REDACTED]", stored[2])
+            self.assertEqual(stored[3], '{"data":[{"secret":"[REDACTED]"}]}')
+
     def test_exhaustive_coverage_finding_requires_runtime_contract(self):
         with tempfile.TemporaryDirectory() as directory:
             database, payload, _ = self.protocol_finding_fixture(
