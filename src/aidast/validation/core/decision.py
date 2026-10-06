@@ -43,8 +43,6 @@ class DecisionInput:
     integrity_ok: bool = True
     known: bool = False
     policy_allowed: bool = True
-    positive_control_passed: bool = True
-    negative_control_clear: bool = True
     explicit_non_exploit_evidence: bool = False
     topology_or_unknown_cause: bool = False
     resolvable_blocker: bool = False
@@ -73,10 +71,8 @@ class DecisionEngine:
             return "KNOWN"
         if not value.policy_allowed:
             return "OUT_OF_SCOPE"
-        if not value.positive_control_passed or not value.negative_control_clear:
-            return "INCONCLUSIVE"
         if (value.explicit_non_exploit_evidence
-                and len(value.target_observations) in {3, 5}
+                and bool(value.target_observations)
                 and not any(value.target_observations)
                 and len(value.target_outcomes) == len(value.target_observations)
                 and all(outcome == "not_observed" for outcome in value.target_outcomes)
@@ -89,9 +85,11 @@ class DecisionEngine:
         if value.resolvable_blocker:
             return "BLOCKED" if value.development_used else "DEVELOPING"
         observations = value.target_observations
-        if len(observations) not in {3, 5}:
+        if not observations:
             return "INCONCLUSIVE"
-        if len(observations) == 5 or not all(observations):
+        if not any(observations) or any(
+            outcome not in {"observed", "not_observed"} for outcome in value.target_outcomes
+        ):
             return "INCONCLUSIVE"
         if value.semantic_conflict and value.attack_has_positive_evidence:
             return "CONTESTED"

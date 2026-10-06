@@ -124,7 +124,7 @@ class WebSocketContractTests(unittest.TestCase):
                 doc["target"]["endpoint"] = "ws://127.0.0.1/items?" + query
                 mod.WebSocketRuntimeContract.model_validate(doc)
 
-    def test_registered_contract_and_semantics_require_distinct_matching_controls(self):
+    def test_registered_contract_and_semantics_use_target_only(self):
         from aidast.validation.contracts.runtime_contract import validate_runtime_contract
         from aidast.validation.contracts.runtime_semantics import validate_runtime_semantics
         from aidast.validation.core.profiles import SkillProfileResolver
@@ -133,14 +133,8 @@ class WebSocketContractTests(unittest.TestCase):
         runtime = validate_runtime_contract(runtime_document())
         self.assertIsInstance(runtime, cls)
         validate_runtime_semantics(runtime, profile)
-        for mismatch in ("frames", "assertions"):
-            doc = runtime_document()
-            if mismatch == "frames":
-                doc["negative_control"]["frames"] = doc["target"]["frames"]
-            else:
-                doc["negative_control"]["assertions"][0]["expected"] = "different"
-            with self.assertRaises(ValueError):
-                validate_runtime_semantics(cls.model_validate(doc), profile)
+        self.assertNotIn("negative_control", runtime.model_dump(mode="json"))
+        self.assertIsNone(validate_runtime_semantics(runtime, profile))
 
     def test_assertions_output_only_digests_and_bounded_metadata(self):
         mod = self.contract_module()
@@ -551,12 +545,10 @@ class WebSocketAdapterTests(unittest.TestCase):
         self.addCleanup(lambda: (server.shutdown(), thread.join(timeout=2)))
         return f"ws://127.0.0.1:{server.socket.getsockname()[1]}/items"
 
-    def test_loopback_json_target_and_inert_negative(self):
+    def test_loopback_json_target(self):
         endpoint = self.start_server(lambda ws: ws.send(ws.recv()))
         target = self.execute(endpoint=endpoint)
-        negative = self.execute(endpoint=endpoint, attempt_kind="negative_control")
         self.assertTrue(target.signal_observed)
-        self.assertFalse(negative.signal_observed)
         self.assertTrue(all(row[1] == "completed" for row in self.rows()))
 
     def test_loopback_explicit_close_preserves_two_buffered_messages(self):

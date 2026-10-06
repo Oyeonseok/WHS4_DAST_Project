@@ -48,7 +48,7 @@ class PlaywrightBrowserExecutor:
             case_id=case_id, target_kind="finding", endpoint=url, method="GET",
             injection_location="query", parameter_name="browser_navigation",
             payload_template=None, required_identity_roles=(),
-            credential_references=(), signal_types=("dom_effect",), controls={},
+            credential_references=(), signal_types=("dom_effect",),
             attack_skill_name="browser-runtime", attack_skill_sha256="0" * 64,
             validation_skill_sha256="0" * 64,
             validation_profile_sha256="0" * 64,

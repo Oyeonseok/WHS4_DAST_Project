@@ -4,7 +4,9 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
+from aidast.pipeline.browser_credentials import register_browser_session_credentials
 from aidast.pipeline.lifecycle import start_stage_run
 from aidast.pipeline.live_schema import migrate_live_pipeline_schema
 from aidast.pipeline.live_schema import migrate_live_pipeline_schema
@@ -80,19 +82,122 @@ class ValidationRequestBrokerTests(unittest.TestCase):
             case_id="case", target_kind="finding", endpoint="https://test/items/{id}",
             method="GET", injection_location="path", parameter_name="id",
             payload_template={"id": "<slot:int>"}, required_identity_roles=("user",),
-            credential_references=("credential",), signal_types=("response_diff",), controls={},
+            credential_references=("credential",), signal_types=("response_diff",),
             attack_skill_name="hunt-idor", attack_skill_sha256="a" * 64,
             validation_skill_sha256="b" * 64, validation_profile_sha256="c" * 64,
         )
+
+    def test_native_http_preflight_accepts_registered_browser_session(self):
+        from aidast.validation import build_native_validation_coordinator
+
+        snapshot = Path(self.temp.name) / "browser.json"
+        snapshot.write_text(json.dumps({"cookies": [], "origins": [{
+            "origin": "https://test", "localStorage": [
+                {"name": "token", "value": "header.payload.signature"},
+            ],
+        }]}), encoding="utf-8")
+        result_root = Path(self.temp.name) / "result"
+        reference = register_browser_session_credentials(
+            self.conn, scan_id="scan", result_root=result_root,
+            sessions=[("https://test/", snapshot, True)],
+        )[0]["credential_reference_id"]
+        policy_path = Path(self.temp.name) / "TargetPolicy.json"
+        policy_path.write_text(json.dumps({
+            "policies": [self.policy.model_dump(mode="json")],
+        }), encoding="utf-8")
+        with patch("aidast.validation.execution.credentials.RESULT_ROOT", result_root):
+            coordinator = build_native_validation_coordinator(
+                db_path=self.path, policy_path=policy_path,
+            )
+            case = self.blind.model_copy(update={
+                "endpoint": "https://test/items/7",
+                "credential_references": (reference,), "runtime_contract": {},
+            })
+            self.assertIsNone(coordinator.reproduction.http.unsupported_reason(case))
+
+    def test_browser_session_headers_resolve_for_dispatched_url(self):
+        from aidast.validation.execution.credentials import PipelineCredentialResolver
+
+        snapshot = Path(self.temp.name) / "browser.json"
+        snapshot.write_text(json.dumps({"cookies": [], "origins": [{
+            "origin": "https://test", "localStorage": [
+                {"name": "token", "value": "header.payload.signature"},
+            ],
+        }]}), encoding="utf-8")
+        result_root = Path(self.temp.name) / "result"
+        reference = register_browser_session_credentials(
+            self.conn, scan_id="scan", result_root=result_root,
+            sessions=[("https://test/", snapshot, True)],
+        )[0]["credential_reference_id"]
+        seen = []
+        broker = ValidationRequestBroker(
+            db_path=self.path, scan_id="scan", stage_run_id="stage", case_id="case",
+            attempt_id="attempt", blind_case=self.blind.model_copy(update={
+                "credential_references": (reference,),
+            }), policy=self.policy,
+            transport=lambda request, timeout: seen.append(request) or Response(),
+            credential_resolver=PipelineCredentialResolver(
+                self.path, result_root=result_root, browser_sessions=True,
+            ),
+        )
+        self.assertEqual(broker.request("https://test/items/7", method="GET").body, b"ok")
+        self.assertEqual(seen[0].get_header("Authorization"),
+                         "Bearer header.payload.signature")
+
+    def test_browser_replay_uses_registered_session_for_navigation(self):
+        from aidast.validation import BrowserReproductionPort, BrowserRuntimeContract
+        from aidast.validation.execution.credentials import PipelineCredentialResolver
+
+        snapshot = Path(self.temp.name) / "browser.json"
+        snapshot.write_text(json.dumps({"cookies": [], "origins": [{
+            "origin": "https://test", "localStorage": [
+                {"name": "token", "value": "header.payload.signature"},
+            ],
+        }]}), encoding="utf-8")
+        result_root = Path(self.temp.name) / "result"
+        reference = register_browser_session_credentials(
+            self.conn, scan_id="scan", result_root=result_root,
+            sessions=[("https://test/", snapshot, True)],
+        )[0]["credential_reference_id"]
+        attempt = {"navigation": {}, "wait_ms": 10, "assertions": [{
+            "assertion_id": "marker", "kind": "console_contains", "expected": "marker",
+        }]}
+        contract = BrowserRuntimeContract.model_validate({
+            "runtime_kind": "browser", "schema_version": 1,
+            "target": attempt, "positive_control": attempt, "negative_control": attempt,
+        })
+        case = self.blind.model_copy(update={
+            "endpoint": "https://test/items/7", "credential_references": (reference,),
+            "runtime_contract": contract.model_dump(mode="json"),
+        })
+        seen = []
+        def executor(**kwargs):
+            seen.append(kwargs)
+            return {"final_url": kwargs["url"], "elements": {},
+                    "console_messages": ["marker"], "request_ids": ["browser-request"]}
+        port = BrowserReproductionPort(
+            executor=executor,
+            credential_resolver=PipelineCredentialResolver(
+                self.path, result_root=result_root, browser_sessions=True,
+            ),
+        )
+        self.assertIsNone(port.unsupported_reason(case))
+        result = port.execute(
+            case, attempt_kind="target", batch_no=1, ordinal=1,
+            attempt_id="attempt", db_path=self.path, scan_id="scan",
+            stage_run_id="stage", case_id="case", policy=self.policy,
+        )
+        self.assertTrue(result.signal_observed)
+        self.assertEqual(seen[0]["headers"]["Authorization"],
+                         "Bearer header.payload.signature")
 
     def test_login_session_verification_uses_fresh_token_and_redacts_ledger(self):
         from aidast.validation.execution.http_adapter import HttpReproductionPort
         from aidast.validation.contracts.runtime_contract import HttpRuntimeContract
 
-        for protected_status, token_present, kind, expected_status in (
-                (200, True, "target", 200), (401, True, "target", 200),
-                (200, False, "target", 200), (200, False, "negative_control", 201)):
-            with self.subTest(status=protected_status, token=token_present, kind=kind):
+        for protected_status, token_present in (
+                (200, True), (401, True), (200, False)):
+            with self.subTest(status=protected_status, token=token_present):
                 calls = []
 
                 def transport(request, timeout):
@@ -101,7 +206,7 @@ class ValidationRequestBrokerTests(unittest.TestCase):
                     response.status = protected_status if len(calls) == 2 else 200
                     body = (b'{"user":{"id":7}}' if len(calls) == 2 else
                             b'{"authentication":{"token":"private-fresh-token"}}' if token_present else
-                            b'{}' if kind == "negative_control" else b'{"authentication":{}}')
+                            b'{"authentication":{}}')
                     response.read = lambda maximum: body
                     return response
 
@@ -114,7 +219,7 @@ class ValidationRequestBrokerTests(unittest.TestCase):
                     "session_verification": {
                         "endpoint_template": "/items/session", "token_path": ["authentication", "token"],
                         "request": {}, "assertions": [
-                            {"assertion_id": "protected-status", "kind": "status_equals", "expected": expected_status},
+                            {"assertion_id": "protected-status", "kind": "status_equals", "expected": 200},
                             {"assertion_id": "account", "kind": "json_equals", "path": ["user", "id"], "expected": 7},
                         ],
                     },
@@ -124,7 +229,7 @@ class ValidationRequestBrokerTests(unittest.TestCase):
                     "runtime_contract": runtime.model_dump(mode="json"),
                 })
                 result = HttpReproductionPort(transport=transport).execute(
-                    blind, attempt_kind=kind, batch_no=1, ordinal=1,
+                    blind, attempt_kind="target", batch_no=1, ordinal=1,
                     attempt_id=self.attempt, db_path=self.path, scan_id="scan",
                     stage_run_id=self.stage, case_id="case", policy=self.policy,
                 )
@@ -141,8 +246,8 @@ class ValidationRequestBrokerTests(unittest.TestCase):
                     "SELECT details_json FROM validation_evidence WHERE evidence_id=?", (evidence_id,),
                 ).fetchone()[0])
                 self.assertEqual(stored["protected_access"]["verified"], proof["verified"])
-                self.assertEqual(proof["verified"], (token_present or kind == "negative_control") and protected_status == expected_status)
-                self.assertEqual(len(calls), 2 if token_present or kind == "negative_control" else 1)
+                self.assertEqual(proof["verified"], token_present and protected_status == 200)
+                self.assertEqual(len(calls), 2 if token_present else 1)
                 if token_present:
                     self.assertEqual(calls[1].get_header("Authorization"), "Bearer private-fresh-token")
                 self.assertTrue(result.signal_observed)
@@ -159,7 +264,7 @@ class ValidationRequestBrokerTests(unittest.TestCase):
             sleeper=lambda delay: None, clock=lambda: 100.0,
         )
 
-    def test_anonymous_control_omits_case_credentials_on_same_endpoint(self):
+    def test_target_replay_uses_case_credentials_once(self):
         calls, resolutions = [], []
         proof = [{"assertion_id": "effect", "kind": "body_contains", "expected": "ok"}]
         runtime = HttpRuntimeContract.model_validate({
@@ -176,18 +281,15 @@ class ValidationRequestBrokerTests(unittest.TestCase):
             calls.append(request)
             return Response()
         port = HttpReproductionPort(transport=transport, credential_resolver=resolve)
-        for kind in ("target", "negative_control"):
-            port.execute(blind, attempt_kind=kind, batch_no=1, ordinal=1,
-                         attempt_id=self.attempt, db_path=self.path, scan_id="scan",
-                         stage_run_id=self.stage, case_id="case", policy=self.policy)
+        port.execute(blind, attempt_kind="target", batch_no=1, ordinal=1,
+                     attempt_id=self.attempt, db_path=self.path, scan_id="scan",
+                     stage_run_id=self.stage, case_id="case", policy=self.policy)
         self.assertEqual(resolutions, ["credential"])
-        self.assertEqual(calls[0].full_url, calls[1].full_url)
+        self.assertEqual(len(calls), 1)
         self.assertEqual(calls[0].get_header("Authorization"), "Bearer private")
         self.assertEqual(calls[0].get_header("Cookie"), "login=private")
-        self.assertIsNone(calls[1].get_header("Authorization"))
-        self.assertIsNone(calls[1].get_header("Cookie"))
 
-    def test_each_attempt_can_select_one_identity_without_header_collision(self):
+    def test_target_can_select_one_identity_without_header_collision(self):
         calls, resolutions = [], []
         proof = [{"assertion_id": "effect", "kind": "body_contains", "expected": "ok"}]
         runtime = HttpRuntimeContract.model_validate({
@@ -211,14 +313,13 @@ class ValidationRequestBrokerTests(unittest.TestCase):
             calls.append(request.get_header("Authorization"))
             return Response()
         port = HttpReproductionPort(transport=transport, credential_resolver=resolve)
-        for kind in ("target", "positive_control", "negative_control"):
-            port.execute(blind, attempt_kind=kind, batch_no=1, ordinal=1,
-                         attempt_id=self.attempt, db_path=self.path, scan_id="scan",
-                         stage_run_id=self.stage, case_id="case", policy=self.policy)
-        self.assertEqual(resolutions, ["credential-a", "credential-b"])
-        self.assertEqual(calls, ["Bearer credential-a", "Bearer credential-b", None])
+        port.execute(blind, attempt_kind="target", batch_no=1, ordinal=1,
+                     attempt_id=self.attempt, db_path=self.path, scan_id="scan",
+                     stage_run_id=self.stage, case_id="case", policy=self.policy)
+        self.assertEqual(resolutions, ["credential-a"])
+        self.assertEqual(calls, ["Bearer credential-a"])
 
-    def test_read_only_negative_control_uses_bounded_same_origin_endpoint(self):
+    def test_legacy_negative_control_endpoint_is_never_dispatched(self):
         calls = []
         proof = [{"assertion_id": "effect", "kind": "body_contains", "expected": "secret"}]
         runtime = HttpRuntimeContract.model_validate({
@@ -240,13 +341,12 @@ class ValidationRequestBrokerTests(unittest.TestCase):
             response.status = 404
             response.read = lambda maximum: b"missing"
             return response
-        result = HttpReproductionPort(transport=transport).execute(
-            blind, attempt_kind="negative_control", batch_no=1, ordinal=1,
+        HttpReproductionPort(transport=transport).execute(
+            blind, attempt_kind="target", batch_no=1, ordinal=1,
             attempt_id=self.attempt, db_path=self.path, scan_id="scan",
             stage_run_id=self.stage, case_id="case", policy=self.policy,
         )
-        self.assertEqual(calls, ["https://test/items/__aidast_negative_control_missing__"])
-        self.assertFalse(result.signal_observed)
+        self.assertEqual(calls, ["https://test/items/1"])
 
     def test_request_is_policy_checked_and_persists_redacted_ledger(self):
         result = self.broker().request("https://test/items/7?token=private", method="GET")

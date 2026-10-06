@@ -318,7 +318,8 @@ class ValidationRequestBroker:
                         "request requires the current running case execution"
                     )
                 used, active, previous = _policy_usage(conn, self.scan_id, self.policy.policy_id)
-                if used >= self.policy.limits.max_requests:
+                if (self.policy.limits.max_requests is not None
+                        and used >= self.policy.limits.max_requests):
                     raise ValidationRequestError("TargetPolicy request budget exhausted")
                 if active >= self.policy.limits.concurrency:
                     raise ValidationRequestError("TargetPolicy concurrency limit reached")

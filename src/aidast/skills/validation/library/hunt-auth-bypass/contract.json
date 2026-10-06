@@ -11,26 +11,7 @@
   "target_expected_signal": {
     "kind": "hunt-auth-bypass_verified",
     "criterion": "a protected operation succeeds without its required authentication state",
-    "requires_fresh_target_and_control_evidence": true
-  },
-  "control_positive": {
-    "payload_template": {
-      "mode": "channel_health_baseline"
-    },
-    "expected_signal": {
-      "kind": "authorization_boundary_channel_operational",
-      "criterion": "the same transport, identity, parser, browser, callback, or timing channel produces its declared harmless baseline"
-    },
-    "signal_type": "authorization_boundary"
-  },
-  "control_negative": {
-    "payload_template": {
-      "mode": "inert_same_shape_control"
-    },
-    "expected_signal": {
-      "kind": "no_authorization_boundary_target_effect",
-      "criterion": "an inert same-shape input does not produce the target security effect"
-    }
+    "requires_fresh_target_evidence": true
   },
   "impact_rules": {
     "boundary": "identify the exact unauthenticated, identity, role, tenant, or administrator boundary crossed",
@@ -56,13 +37,17 @@
         "A fresh credential returned by the target login replay",
         "A declared same-origin read-only protected resource and account field assertion"
       ],
-      "expected_signal": {"kind": "authenticated_protected_resource_observed"},
+      "expected_signal": {
+        "kind": "authenticated_protected_resource_observed"
+      },
       "recommended_actions": [
-        "Supply session_verification in the HTTP runtime contract and replay target and unauthenticated control"
+        "Supply session_verification in the HTTP runtime contract and replay the target"
       ],
       "execution_owner": "validation",
       "feasibility": "medium",
-      "potential_impact": {"sensitivity": 1}
+      "potential_impact": {
+        "sensitivity": 1
+      }
     },
     {
       "path_id": "bounded-impact-confirmation",

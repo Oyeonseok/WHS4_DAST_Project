@@ -42,7 +42,7 @@ class ValidationRuntimeSemanticTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeSemanticError, "header, body, or JSON"):
             validate_runtime_semantics(contract, self.profile("hunt-idor"))
 
-    def test_http_target_and_inert_control_must_be_distinct(self):
+    def test_legacy_controls_are_ignored_by_target_semantics(self):
         assertion = {
             "assertion_id": "owner", "kind": "json_equals",
             "path": ["owner"], "expected": "other-user",
@@ -52,8 +52,8 @@ class ValidationRuntimeSemanticTests(unittest.TestCase):
             schema_version=1, target=same,
             positive_control=http_attempt("baseline", assertion), negative_control=same,
         )
-        with self.assertRaisesRegex(RuntimeSemanticError, "must differ"):
-            validate_runtime_semantics(contract, self.profile("hunt-idor"))
+        self.assertIsNone(validate_runtime_semantics(contract, self.profile("hunt-idor")))
+        self.assertNotIn("negative_control", contract.model_dump(mode="json"))
 
     def test_content_assertion_with_distinct_control_is_accepted(self):
         assertion = {
@@ -69,50 +69,15 @@ class ValidationRuntimeSemanticTests(unittest.TestCase):
             validate_runtime_semantics(contract, self.profile("hunt-idor"))
         )
 
-    def test_read_only_negative_control_can_use_an_inert_same_origin_path(self):
-        assertion = {
-            "assertion_id": "marker", "kind": "body_contains",
-            "expected": '"password":',
-        }
-        same_request = {"request": {}, "assertions": [assertion]}
-        contract = HttpRuntimeContract.model_validate({
-            "schema_version": 1,
-            "target": same_request,
-            "positive_control": {
-                "request": {}, "assertions": [{
-                    "assertion_id": "healthy", "kind": "status_equals", "expected": 200,
-                }],
-            },
-            "negative_control": {
-                **same_request,
-                "endpoint_template": "/__aidast_negative_control_missing__",
-            },
-        })
-        self.assertIsNone(
-            validate_runtime_semantics(contract, self.profile("hunt-source-leak"))
-        )
-        invalid = contract.model_copy(update={
-            "target": contract.target.model_copy(update={"endpoint_template": "/other"}),
-        })
-        with self.assertRaisesRegex(RuntimeSemanticError, "only for the inert negative"):
-            validate_runtime_semantics(invalid, self.profile("hunt-source-leak"))
-
-    def test_http_negative_control_must_test_the_target_marker(self):
+    def test_target_marker_is_sufficient_without_a_negative_control(self):
         contract = HttpRuntimeContract(
             schema_version=1,
             target=http_attempt("target", {
                 "assertion_id": "owner", "kind": "json_equals",
                 "path": ["owner"], "expected": "other-user",
             }),
-            positive_control=http_attempt("baseline", {
-                "assertion_id": "status", "kind": "status_equals", "expected": 200,
-            }),
-            negative_control=http_attempt("inert", {
-                "assertion_id": "different", "kind": "body_contains", "expected": "denied",
-            }),
         )
-        with self.assertRaisesRegex(RuntimeSemanticError, "same target proof assertions"):
-            validate_runtime_semantics(contract, self.profile("hunt-idor"))
+        self.assertIsNone(validate_runtime_semantics(contract, self.profile("hunt-idor")))
 
     def test_source_leak_requires_a_specific_credential_pattern_marker(self):
         def contract(marker):
@@ -141,8 +106,7 @@ class ValidationRuntimeSemanticTests(unittest.TestCase):
         assessment = BlindAssessment.model_validate({
             "case_id": "case", "blind_case_sha256": "f" * 64,
             "reproduced": True, "signal_types": ("authorization_boundary",),
-            "target_attempt_ids": ("target-1", "target-2", "target-3"),
-            "control_attempt_ids": ("positive", "negative"), "evidence_ids": ("t1",),
+            "target_attempt_ids": ("target-1", "target-2", "target-3"), "evidence_ids": ("t1",),
             "impact_boundary": axis, "impact_sensitivity": axis,
             "impact_actor_requirements": axis, "conclusion": "Controlled replay and controls support authentication bypass.",
         })
@@ -161,7 +125,6 @@ class ValidationRuntimeSemanticTests(unittest.TestCase):
             "case_id": "case", "blind_case_sha256": "f" * 64,
             "reproduced": True, "signal_types": ("error_signature",),
             "target_attempt_ids": ("target-1", "target-2", "target-3"),
-            "control_attempt_ids": ("positive", "negative"),
             "evidence_ids": ("evidence",),
             "impact_boundary": axis, "impact_sensitivity": axis,
             "impact_actor_requirements": {**axis, "score": 2},
@@ -190,14 +153,10 @@ class ValidationRuntimeSemanticTests(unittest.TestCase):
                        "path": ["users", 0, "password"], "expected": True}
         declared_value = runtime('"password":').model_dump(mode="json")
         declared_value["target"]["assertions"].append(value_probe)
-        declared_value["negative_control"]["assertions"].append(value_probe)
         with_value = HttpRuntimeContract.model_validate(declared_value)
         self.assertIsNone(validate_runtime_semantics(with_value, profile))
         still_bounded, _ = bound_profile_proof_assessment(profile, with_value, assessment)
         self.assertEqual(still_bounded.impact_sensitivity.score, 0)
-        declared_value["negative_control"]["assertions"].pop()
-        with self.assertRaisesRegex(RuntimeSemanticError, "same target proof assertions"):
-            validate_runtime_semantics(HttpRuntimeContract.model_validate(declared_value), profile)
         unchanged, rule = bound_profile_proof_assessment(
             profile, runtime('"sourcesContent":'), assessment,
         )
@@ -217,7 +176,6 @@ class ValidationRuntimeSemanticTests(unittest.TestCase):
             "case_id": "case", "blind_case_sha256": "f" * 64,
             "reproduced": True, "signal_types": ("error_signature",),
             "target_attempt_ids": ("t1", "t2", "t3"),
-            "control_attempt_ids": ("positive", "negative"),
             "evidence_ids": ("e-positive", "e-negative", "e-target"),
             "impact_boundary": axis(1, ("e-positive",)),
             "impact_sensitivity": axis(0, ("e-target",)),
@@ -239,14 +197,13 @@ class ValidationRuntimeSemanticTests(unittest.TestCase):
                           bounded.impact_actor_requirements.score), (0, 0))
         self.assertEqual(set(rules), {
             "impact_boundary_missing_observed_target",
-            "impact_boundary_missing_negative_control",
             "impact_actor_requirements_missing_observed_target",
         })
         self.assertEqual(assessment.impact_boundary.score, 1)
 
         grounded = assessment.model_copy(update={
             "impact_boundary": assessment.impact_boundary.model_copy(update={
-                "evidence_ids": ("e-target", "e-negative"),
+                "evidence_ids": ("e-target",),
             }),
             "impact_actor_requirements": assessment.impact_actor_requirements.model_copy(update={
                 "evidence_ids": ("e-target",),
@@ -295,59 +252,24 @@ class ValidationRuntimeSemanticTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeSemanticError, "execution marker"):
             validate_runtime_semantics(contract, self.profile("hunt-xss"))
 
-    def test_xss_negative_control_must_test_the_target_execution_marker(self):
-        def attempt(variant, marker):
-            return {
-                "navigation": {"query_parameters": {"value": variant}},
-                "assertions": [{
-                    "assertion_id": "executed", "kind": "console_contains",
-                    "expected": marker,
-                }],
-            }
-
+    def test_xss_target_execution_marker_is_sufficient(self):
         contract = BrowserRuntimeContract(
             runtime_kind="browser", schema_version=1,
-            target=attempt("target", "target-executed"),
-            positive_control=attempt("baseline", "healthy"),
-            negative_control=attempt("inert", "different-marker"),
+            target={"navigation": {}, "assertions": [{
+                "assertion_id": "executed", "kind": "console_contains",
+                "expected": "target-executed",
+            }]},
         )
-        with self.assertRaisesRegex(RuntimeSemanticError, "same target proof assertions"):
-            validate_runtime_semantics(contract, self.profile("hunt-xss"))
+        self.assertIsNone(validate_runtime_semantics(contract, self.profile("hunt-xss")))
 
-    def test_oob_target_and_inert_trigger_must_be_distinct(self):
-        def attempt(variant):
-            return {
-                "trigger": {"query_parameters": {
-                    "callback": "proof-{nonce}.example", "variant": variant,
-                }},
-                "token_template": "proof-{nonce}.example", "protocols": ["dns"],
-            }
+    def test_oob_target_nonce_contract_is_sufficient(self):
+        attempt = {
+            "trigger": {"query_parameters": {"callback": "proof-{nonce}.example"}},
+            "token_template": "proof-{nonce}.example", "protocols": ["dns"],
+        }
+        contract = OobRuntimeContract(runtime_kind="oob", schema_version=1, target=attempt)
+        self.assertIsNone(validate_runtime_semantics(contract, self.profile("hunt-ssrf")))
 
-        same = attempt("same")
-        contract = OobRuntimeContract(
-            runtime_kind="oob", schema_version=1, target=same,
-            positive_control=attempt("baseline"), negative_control=same,
-        )
-        with self.assertRaisesRegex(RuntimeSemanticError, "must differ"):
-            validate_runtime_semantics(contract, self.profile("hunt-ssrf"))
-
-    def test_oob_negative_control_must_use_the_target_callback_threshold(self):
-        def attempt(variant, minimum):
-            return {
-                "trigger": {"query_parameters": {
-                    "callback": "proof-{nonce}.example", "variant": variant,
-                }},
-                "token_template": "proof-{nonce}.example", "protocols": ["dns"],
-                "minimum_callbacks": minimum,
-            }
-
-        contract = OobRuntimeContract(
-            runtime_kind="oob", schema_version=1,
-            target=attempt("target", 2), positive_control=attempt("baseline", 1),
-            negative_control=attempt("inert", 1),
-        )
-        with self.assertRaisesRegex(RuntimeSemanticError, "same callback proof criteria"):
-            validate_runtime_semantics(contract, self.profile("hunt-ssrf"))
 
 
 if __name__ == "__main__":

@@ -38,6 +38,18 @@ def legacy_contract_document() -> dict[str, object]:
 
 
 class ValidationRuntimeContractTests(unittest.TestCase):
+    def test_target_only_contract_is_valid(self):
+        document = {
+            "schema_version": 1,
+            "target": {"request": {}, "assertions": [
+                {"assertion_id": "proof", "kind": "body_contains", "expected": "owned-by-peer"},
+            ]},
+        }
+        contract = validate_runtime_contract(document)
+        self.assertEqual(contract.for_attempt("target").assertions[0].assertion_id, "proof")
+        self.assertNotIn("positive_control", contract.model_dump(mode="json"))
+        self.assertNotIn("negative_control", contract.model_dump(mode="json"))
+
     def test_request_renders_only_declared_path_query_and_json_body(self):
         template = HttpRequestTemplate(
             path_parameters={"id": "object 7"},
@@ -113,46 +125,37 @@ class ValidationRuntimeContractTests(unittest.TestCase):
         self.assertEqual(positive["assertions"][0]["actual_sha256"],
                          canonical_sha256(True))
 
-    def test_contract_requires_all_three_attempt_kinds(self):
+    def test_contract_executes_only_target_attempt(self):
         request = {"request": {}, "assertions": [{
             "assertion_id": "status", "kind": "status_equals", "expected": 200,
         }]}
         contract = HttpRuntimeContract(
             schema_version=1, target=request,
-            positive_control=request, negative_control=request,
         )
         self.assertEqual(
-            contract.for_attempt("negative_control").assertions[0].assertion_id,
+            contract.for_attempt("target").assertions[0].assertion_id,
             "status",
         )
+        with self.assertRaisesRegex(ValueError, "unknown Validation attempt kind"):
+            contract.for_attempt("negative_control")
 
-    def test_legacy_http_contract_hash_and_shape_remain_unchanged(self):
+    def test_legacy_http_contract_controls_are_discarded(self):
         raw = legacy_contract_document()
         validated = validate_runtime_contract(raw)
         self.assertIsInstance(validated, HttpRuntimeContract)
         self.assertNotIn("runtime_kind", validated.model_dump(mode="json"))
-        self.assertEqual(
-            canonical_sha256(validated.model_dump(mode="json")),
-            canonical_sha256(raw),
-        )
+        self.assertEqual(set(validated.model_dump(mode="json")), {"schema_version", "target"})
+        self.assertNotEqual(canonical_sha256(validated.model_dump(mode="json")), canonical_sha256(raw))
 
-    def test_negative_control_accepts_only_literal_same_origin_path(self):
+    def test_legacy_negative_control_endpoint_is_discarded(self):
         raw = legacy_contract_document()
         raw["negative_control"] = {
             **raw["negative_control"],
             "endpoint_template": "/__aidast_negative_control_missing__",
         }
         validated = validate_runtime_contract(raw)
-        self.assertEqual(
-            validated.negative_control.endpoint_template,
-            "/__aidast_negative_control_missing__",
-        )
-        for invalid in ("https://evil.invalid/x", "//evil.invalid/x", "/../x", "/%2e%2e/x"):
-            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
-                validate_runtime_contract({
-                    **raw,
-                    "negative_control": {**raw["negative_control"], "endpoint_template": invalid},
-                })
+        self.assertNotIn("negative_control", validated.model_dump(mode="json"))
+        self.assertIsNone(validated.target.endpoint_template)
 
     def test_session_verification_rejects_external_write_and_status_only_requests(self):
         base = legacy_contract_document()
@@ -178,7 +181,7 @@ class ValidationRuntimeContractTests(unittest.TestCase):
         )
         self.assertTrue(any(item["gap_axis"] == "sensitivity" for item in proposals))
 
-    def test_anonymous_control_can_use_same_request_without_changing_legacy_hash(self):
+    def test_legacy_control_identity_does_not_change_target_replay(self):
         from aidast.validation.core.profiles import SkillProfileResolver
         from aidast.validation.contracts.runtime_semantics import validate_runtime_semantics
         proof = {"assertion_id": "foreign-owner", "kind": "json_equals", "path": ["data", 0, "id"], "expected": 1}
@@ -189,7 +192,7 @@ class ValidationRuntimeContractTests(unittest.TestCase):
             "negative_control": {**attempt, "identity_mode": "anonymous"},
         })
         validate_runtime_semantics(contract, SkillProfileResolver().resolve("hunt-api-misconfig").profile)
-        self.assertEqual(contract.negative_control.identity_mode, "anonymous")
+        self.assertNotIn("negative_control", contract.model_dump(mode="json"))
         self.assertNotIn("identity_mode", contract.target.model_dump(mode="json"))
 
     def test_attempt_can_select_one_declared_credential_role(self):

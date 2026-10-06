@@ -11,7 +11,7 @@ from aidast.validation.core.profiles import SkillProfileResolver
 from scripts.validation_auth_lab import AUTH_CASES, ORDER_A, ORDER_B, auth_contract, control_response_matches, ensure_fixture, observe_fixture, score_auth_cases, verify_source_guards
 
 
-def test_three_auth_contracts_have_distinct_target_and_negative_requests() -> None:
+def test_three_auth_contracts_reduce_to_target_replay() -> None:
     profile = SkillProfileResolver().resolve("hunt-idor").profile
     for case in AUTH_CASES:
         endpoint, runtime = auth_contract(case, a_id=1, b_id=2, a_payment=1,
@@ -19,8 +19,8 @@ def test_three_auth_contracts_have_distinct_target_and_negative_requests() -> No
         parsed = validate_runtime_contract(runtime)
         validate_runtime_semantics(parsed, profile)
         assert endpoint.startswith("/api/v1/payments")
-        assert parsed.target.assertions == parsed.negative_control.assertions
-        assert parsed.target.request != parsed.negative_control.request
+        assert parsed.target.assertions
+        assert "negative_control" not in parsed.model_dump(mode="json")
 
 
 def test_source_guards_bind_exact_pinned_routes() -> None:

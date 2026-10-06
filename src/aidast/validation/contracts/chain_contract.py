@@ -112,7 +112,7 @@ class ChainRuntimeContract(StrictContract):
             ):
                 raise ValueError("chain values can be extracted only from HTTP responses")
             step = self.steps[binding.to_position]
-            for attempt_kind in ("target", "positive_control", "negative_control"):
+            for attempt_kind in ("target",):
                 request = chain_attempt_request(step.runtime_contract, attempt_kind)
                 if binding.target_kind == "path_parameter":
                     declared = binding.target_path[0] in request.path_parameters

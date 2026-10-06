@@ -14,7 +14,7 @@ from pydantic import Field, field_validator, model_serializer, model_validator
 from aidast.core.http_safety import is_sensitive_header
 from aidast.core.request_broker import BrokerResponse
 
-from .models import StrictContract, canonical_sha256
+from .models import StrictContract, TargetOnlyRuntimeContract, canonical_sha256
 
 
 JsonScalar = str | int | float | bool | None
@@ -206,11 +206,9 @@ class HttpSessionVerification(StrictContract):
         return self
 
 
-class HttpRuntimeContract(StrictContract):
+class HttpRuntimeContract(TargetOnlyRuntimeContract):
     schema_version: Literal[1]
     target: HttpAttemptContract
-    positive_control: HttpAttemptContract
-    negative_control: HttpAttemptContract
     session_verification: HttpSessionVerification | None = None
 
     @model_serializer(mode="wrap")
@@ -221,9 +219,9 @@ class HttpRuntimeContract(StrictContract):
         return document
 
     def for_attempt(self, attempt_kind: str) -> HttpAttemptContract:
-        if attempt_kind not in {"target", "positive_control", "negative_control"}:
+        if attempt_kind != "target":
             raise ValueError("unknown Validation attempt kind")
-        return getattr(self, attempt_kind)
+        return self.target
 
 
 _SUPPORTED_RUNTIME_KINDS = frozenset({

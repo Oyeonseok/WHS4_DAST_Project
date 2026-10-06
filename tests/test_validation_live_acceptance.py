@@ -66,14 +66,10 @@ class _AcceptanceAgent:
             item["attempt_id"] for item in observations
             if item["attempt_kind"] == "target"
         )
-        controls = tuple(
-            item["attempt_id"] for item in observations
-            if item["attempt_kind"] != "target"
-        )
         axis = {
             "score": 1,
             "evidence_ids": (evidence[0],),
-            "reason": "The live control and target evidence supports this bounded score.",
+            "reason": "The live target evidence supports this bounded score.",
         }
         return {
             "case_id": blind_case["case_id"],
@@ -81,14 +77,13 @@ class _AcceptanceAgent:
             "reproduced": True,
             "signal_types": tuple(blind_case["signal_types"]),
             "target_attempt_ids": targets,
-            "control_attempt_ids": controls,
             "evidence_ids": evidence,
             "blocker_axis": None,
             "blocker_reason": None,
             "impact_boundary": axis,
             "impact_sensitivity": axis,
             "impact_actor_requirements": axis,
-            "conclusion": "The live target marker repeated while the inert control stayed clear.",
+            "conclusion": "The live target marker was observed.",
         }
 
     def compare(self, claim, assessment, correction=None):
@@ -113,6 +108,8 @@ class ValidationLiveAcceptanceTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
+        self.scope_path = self.root / "Scope.md"
+        self.scope_path.write_text("Fixture scope permits bounded local Validation.", encoding="utf-8")
         _ObjectHandler.requests = []
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), _ObjectHandler)
         self.addCleanup(self.server.server_close)
@@ -159,7 +156,8 @@ class ValidationLiveAcceptanceTests(unittest.TestCase):
                 )
                 finish_stage_run(conn, chain, status="skipped")
             coordinator = build_native_validation_coordinator(
-                db_path=database, policy_path=policy_path, **native_resources,
+                db_path=database, policy_path=policy_path, scope_path=self.scope_path,
+                **native_resources,
             )
             coordinator.agent = _AcceptanceAgent()
             result = coordinator.run("scan")
@@ -180,7 +178,7 @@ class ValidationLiveAcceptanceTests(unittest.TestCase):
             result.summary["statuses"], {expected_status: 1}, decision_json,
         )
         self.assertEqual(case_status, expected_status)
-        self.assertEqual(attempts, 5 if expected_status == "CONFIRMED" else 0)
+        self.assertEqual(attempts, 1 if expected_status == "CONFIRMED" else 0)
         self.assertEqual(operations[0], operations[1] or 0)
         return operations[0]
 
@@ -200,9 +198,9 @@ class ValidationLiveAcceptanceTests(unittest.TestCase):
         base_url = f"http://127.0.0.1:{port}"
         contract_endpoint = f"ws://127.0.0.1:{port}/items"
         runtime = AttackCliTests.protocol_runtime("websocket")
-        for name in ("target", "positive_control", "negative_control"):
-            runtime[name]["endpoint"] = contract_endpoint
-        runtime["positive_control"]["frames"] = runtime["target"]["frames"]
+        runtime = {key: value for key, value in runtime.items()
+                   if key not in {"positive_control", "negative_control"}}
+        runtime["target"]["endpoint"] = contract_endpoint
         policy = TargetPolicy(
             asset_type=AssetType.URL, asset=f"{base_url}/items",
             allowed_schemes=["http"], allowed_hosts=["127.0.0.1"],
@@ -216,11 +214,13 @@ class ValidationLiveAcceptanceTests(unittest.TestCase):
             base_url=base_url, method="GET", runtime=runtime, policy=policy,
         )
 
-        self.assertEqual(operation_count, 15)
-        self.assertEqual(len(received), 5)
+        self.assertEqual(operation_count, 3)
+        self.assertEqual(len(received), 1)
 
     def test_real_attack_staging_reaches_native_grpc_coordinator(self):
         runtime = AttackCliTests.protocol_runtime("grpc")
+        runtime = {key: value for key, value in runtime.items()
+                   if key not in {"positive_control", "negative_control"}}
         validated = validate_runtime_contract(runtime)
         loaded = validated.target.load(None)
         received = []
@@ -243,9 +243,7 @@ class ValidationLiveAcceptanceTests(unittest.TestCase):
         server.start()
         self.addCleanup(lambda: server.stop(0).wait())
         base_url = f"http://127.0.0.1:{port}"
-        for name in ("target", "positive_control", "negative_control"):
-            runtime[name]["endpoint"] = base_url
-        runtime["positive_control"]["message"] = runtime["target"]["message"]
+        runtime["target"]["endpoint"] = base_url
         policy = TargetPolicy(
             asset_type=AssetType.URL, asset=f"{base_url}/items",
             allowed_schemes=["http"], allowed_hosts=["127.0.0.1"],
@@ -263,8 +261,8 @@ class ValidationLiveAcceptanceTests(unittest.TestCase):
             base_url=base_url, method="POST", runtime=runtime, policy=policy,
         )
 
-        self.assertEqual(operation_count, 5)
-        self.assertEqual(len(received), 5)
+        self.assertEqual(operation_count, 1)
+        self.assertEqual(len(received), 1)
 
     def test_real_staging_rejects_incompatible_protocol_destinations_before_dispatch(self):
         for runtime_kind, skill_name, method, contract_endpoint, resource_name in (
@@ -281,12 +279,9 @@ class ValidationLiveAcceptanceTests(unittest.TestCase):
         ):
             with self.subTest(runtime_kind=runtime_kind):
                 runtime = AttackCliTests.protocol_runtime(runtime_kind)
-                for name in ("target", "positive_control", "negative_control"):
-                    runtime[name]["endpoint"] = contract_endpoint
-                if runtime_kind == "websocket":
-                    runtime["positive_control"]["frames"] = runtime["target"]["frames"]
-                else:
-                    runtime["positive_control"]["message"] = runtime["target"]["message"]
+                runtime = {key: value for key, value in runtime.items()
+                           if key not in {"positive_control", "negative_control"}}
+                runtime["target"]["endpoint"] = contract_endpoint
                 policy = TargetPolicy(
                     asset_type=AssetType.URL, asset=f"{self.base_url}/items",
                     allowed_schemes=["http"], allowed_hosts=["127.0.0.1"],
@@ -315,7 +310,7 @@ class ValidationLiveAcceptanceTests(unittest.TestCase):
                 self.assertEqual(operation_count, 0)
                 self.assertEqual(calls, [])
 
-    def test_native_http_pipeline_confirms_only_with_clear_live_negative_control(self):
+    def test_native_http_pipeline_confirms_with_live_target(self):
         database = self.root / "Pipeline.db"
         policy_path = self.root / "TargetPolicy.json"
         policy = TargetPolicy(
@@ -409,16 +404,6 @@ class ValidationLiveAcceptanceTests(unittest.TestCase):
                 "request": {"path_parameters": {"id": "target"}},
                 "assertions": [marker],
             },
-            "positive_control": {
-                "request": {"path_parameters": {"id": "owned"}},
-                "assertions": [{
-                    "assertion_id": "healthy", "kind": "status_equals", "expected": 200,
-                }],
-            },
-            "negative_control": {
-                "request": {"path_parameters": {"id": "inert"}},
-                "assertions": [marker],
-            },
         }).model_dump(mode="json")
         spec = canonical_reproduction_spec(
             finding_id="acceptance-finding", attack_skill_name="hunt-idor",
@@ -459,7 +444,7 @@ class ValidationLiveAcceptanceTests(unittest.TestCase):
         conn.close()
 
         coordinator = build_native_validation_coordinator(
-            db_path=database, policy_path=policy_path,
+            db_path=database, policy_path=policy_path, scope_path=self.scope_path,
         )
         coordinator.agent = _AcceptanceAgent()
         result = coordinator.run("acceptance-scan")
@@ -467,8 +452,7 @@ class ValidationLiveAcceptanceTests(unittest.TestCase):
         self.assertEqual(result.summary["statuses"], {"CONFIRMED": 1})
         self.assertEqual(
             _ObjectHandler.requests,
-            ["/objects/owned", "/objects/inert", "/objects/target",
-             "/objects/target", "/objects/target"],
+            ["/objects/target"],
         )
         with sqlite3.connect(database) as verified:
             self.assertEqual(verified.execute(
@@ -476,13 +460,13 @@ class ValidationLiveAcceptanceTests(unittest.TestCase):
             ).fetchone()[0], "CONFIRMED")
             self.assertEqual(verified.execute(
                 "SELECT count(*) FROM validation_attempts WHERE finished_at IS NOT NULL"
-            ).fetchone()[0], 5)
+            ).fetchone()[0], 1)
             self.assertEqual(verified.execute(
                 "SELECT count(*) FROM validation_http_requests WHERE status='completed'"
-            ).fetchone()[0], 5)
+            ).fetchone()[0], 1)
             self.assertEqual(verified.execute(
                 "SELECT count(*) FROM validation_evidence WHERE evidence_kind='observation'"
-            ).fetchone()[0], 5)
+            ).fetchone()[0], 1)
 
 
 if __name__ == "__main__":

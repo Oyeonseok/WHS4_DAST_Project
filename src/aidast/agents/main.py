@@ -988,6 +988,7 @@ Reuse compatible input keys; never invent operator values or confirmations.
         operation: str,
         work_dir: Path,
         session_id: str | None = None,
+        model: str | None = None,
     ) -> tuple[ModelT, str]:
         """Run the WHS resumable, tool-disabled Validation model session."""
         return self._native_pipeline_agent()._run_structured_session(
@@ -997,6 +998,7 @@ Reuse compatible input keys; never invent operator values or confirmations.
             operation=operation,
             work_dir=work_dir,
             session_id=session_id,
+            model=model,
         )
 
     def run_chaining_orchestrator(

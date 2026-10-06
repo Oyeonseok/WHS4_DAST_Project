@@ -186,7 +186,8 @@ class ValidationTransportBroker:
             try:
                 self._check_owner(conn)
                 used, active, previous = _policy_usage(conn, *scope)
-                if used + sum(spec.request_units for spec in specs) > limits.max_requests:
+                if (limits.max_requests is not None
+                        and used + sum(spec.request_units for spec in specs) > limits.max_requests):
                     raise ValidationTransportError("TargetPolicy request budget exhausted")
                 if active + sum(spec.concurrency_units for spec in specs) > limits.concurrency:
                     raise ValidationTransportError("TargetPolicy concurrency limit reached")

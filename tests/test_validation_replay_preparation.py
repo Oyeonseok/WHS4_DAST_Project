@@ -4,13 +4,10 @@ import json
 from types import SimpleNamespace
 from unittest.mock import Mock
 
-import pytest
-
 from aidast.validation import HttpRuntimeContract
 
 from aidast.validation.orchestration.replay_preparation import (
-    CodexReplayPreparer, ReplayPreparationDraft, _validate_attempt_endpoints,
-    prepare_missing_http_replay,
+    CodexReplayPreparer, ReplayPreparationDraft, prepare_missing_http_replay,
 )
 
 
@@ -68,11 +65,11 @@ def test_planner_decodes_scalar_envelope_to_executable_contract():
     )
     prepared = CodexReplayPreparer(agent=agent).prepare({})
     assert prepared.runtime_contract.target.identity_mode == "case"
-    assert prepared.runtime_contract.negative_control.identity_mode == "anonymous"
+    assert "negative_control" not in prepared.runtime_contract.model_dump(mode="json")
     assert prepared.runtime_contract.target.assertions[0].path == ("data", 0, "id")
 
 
-def test_alternate_negative_endpoint_is_limited_to_read_only_replay():
+def test_legacy_control_endpoints_are_not_part_of_prepared_replay():
     proof = [{"assertion_id": "effect", "kind": "body_contains", "expected": "marker"}]
     runtime = HttpRuntimeContract.model_validate({
         "schema_version": 1,
@@ -83,10 +80,5 @@ def test_alternate_negative_endpoint_is_limited_to_read_only_replay():
             "request": {}, "assertions": proof,
         },
     })
-    _validate_attempt_endpoints(
-        SimpleNamespace(method="GET", endpoint="https://test/exposed"), runtime,
-    )
-    with pytest.raises(ValueError, match="read-only"):
-        _validate_attempt_endpoints(
-            SimpleNamespace(method="POST", endpoint="https://test/register"), runtime,
-        )
+    assert runtime.target.endpoint_template is None
+    assert set(runtime.model_dump(mode="json")) == {"schema_version", "target"}

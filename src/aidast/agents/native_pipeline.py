@@ -772,6 +772,7 @@ Reuse compatible input keys; never invent operator values or confirmations.
     def _run_structured_session(
         self, *, prompt: str, model_type: type[ModelT], artifact_name: str,
         operation: str, work_dir: Path, session_id: str | None = None,
+        model: str | None = None,
     ) -> tuple[ModelT, str]:
         """Run or resume one tool-disabled Codex session with a fresh strict schema."""
         executable = shutil.which(self._executable)
@@ -790,7 +791,7 @@ Reuse compatible input keys; never invent operator values or confirmations.
         result_path.unlink(missing_ok=True)
         common = [
             "--skip-git-repo-check", "--ignore-user-config", "--model",
-            self._validation_model, "--disable", "shell_tool", "--disable",
+            model or self._validation_model, "--disable", "shell_tool", "--disable",
             "unified_exec", "--disable", "apps", "--disable",
             "standalone_web_search", "--disable", "browser_use", "--disable",
             "computer_use", "--disable", "in_app_browser", "--json",

@@ -702,18 +702,21 @@ class ValidationCoordinator:
                 )
             else:
                 observations, evidence_ids = recovered
+                if self._needs_target_retry(observations):
+                    observations, evidence_ids = self._execute_batch(
+                        repo, candidate, stage_run_id, policy=policy,
+                        batch_no=observations[0]["batch_no"], recovered=recovered,
+                    )
             if stop_incomplete_replay(observations, evidence_ids):
                 return True
-            target_values = [item["signal_observed"] for item in observations if item["attempt_kind"] == "target"]
-            if len(target_values) == 3 and any(target_values) and not all(target_values):
-                extra, extra_evidence = self._execute_batch(
-                    repo, candidate, stage_run_id, policy=policy, extra_only=True,
-                    batch_no=observations[0]["batch_no"],
+            if not any(item["attempt_kind"] == "target" for item in observations):
+                repo.finalize(
+                    case["case_id"], stage_run_id=stage_run_id,
+                    expected_version=version, status="INCONCLUSIVE",
+                    decision={"reason": "target_observation_missing", "phase": "blind_replay"},
+                    evidence_ids=evidence_ids,
                 )
-                observations += extra
-                evidence_ids += extra_evidence
-                if stop_incomplete_replay(observations, evidence_ids):
-                    return True
+                return True
             if sealed_preimpact is not None:
                 assessment = sealed_preimpact
                 development_evidence = conn.execute(
@@ -983,10 +986,9 @@ class ValidationCoordinator:
         if stop_incomplete_replay(observations, evidence_ids):
             return True
         if preflight.eligibility == "CONDITIONAL":
-            controls = {item["attempt_kind"] for item in observations
-                        if item["signal_observed"] is not None}
-            if (any(item["outcome"] not in {"observed", "not_observed"} for item in observations)
-                    or not {"positive_control", "negative_control"} <= controls):
+            targets = [item for item in observations if item["attempt_kind"] == "target"]
+            if (not targets or any(item["outcome"] not in {"observed", "not_observed"}
+                                   for item in targets)):
                 repo.finalize(
                     case["case_id"], stage_run_id=stage_run_id, expected_version=version,
                     status="INCONCLUSIVE",
@@ -994,16 +996,9 @@ class ValidationCoordinator:
                     evidence_ids=evidence_ids,
                 )
                 return True
-            positive = all(item["signal_observed"] is True for item in observations
-                           if item["attempt_kind"] == "positive_control")
-            negative = all(item["signal_observed"] is False for item in observations
-                           if item["attempt_kind"] == "negative_control")
-            targets = [item for item in observations if item["attempt_kind"] == "target"]
             reason = None
-            if not positive or not negative:
-                reason = "conditional_controls_failed"
-            elif (assessment.reproduced is None or assessment.blocker_axis is not None
-                  or len(targets) not in {3, 5}
+            if (assessment.reproduced is None or assessment.blocker_axis is not None
+                  or not any(item["signal_observed"] is True for item in targets)
                   or any(item["signal_observed"] is None for item in targets)):
                 reason = "conditional_evidence_unavailable"
             if reason is not None:
@@ -1047,10 +1042,6 @@ class ValidationCoordinator:
                     evidence_ids=tuple(evidence_ids),
                 )
         targets = tuple(bool(item["signal_observed"]) for item in observations if item["attempt_kind"] == "target")
-        positive = all(bool(item["signal_observed"]) for item in observations
-                       if item["attempt_kind"] == "positive_control")
-        negative = not any(bool(item["signal_observed"]) for item in observations
-                           if item["attempt_kind"] == "negative_control")
         impact_tuple = (
             assessment.impact_boundary.score, assessment.impact_sensitivity.score,
             assessment.impact_actor_requirements.score,
@@ -1062,8 +1053,32 @@ class ValidationCoordinator:
                 candidate.profile.profile.zero_sensitivity_boundary_confirmation
             ),
         )
+        observed_target_evidence = {
+            item["evidence_id"] for item in observations
+            if item["attempt_kind"] == "target" and item["signal_observed"] is True
+        }
+        developed_impact_evidence = set()
+        for row in conn.execute(
+            """SELECT observation_json,observation_sha256
+               FROM validation_impact_hypotheses
+               WHERE case_id=? AND stage_run_id=? AND status='succeeded'""",
+            (case["case_id"], stage_run_id),
+        ):
+            impact_observation = json.loads(row["observation_json"])
+            if canonical_sha256(impact_observation) != row["observation_sha256"]:
+                raise ValidationCoordinatorError("stored impact observation digest mismatch")
+            if impact_observation["signal_observed"] is True:
+                developed_impact_evidence.update(impact_observation["evidence_ids"])
+        grounded_impact_evidence = observed_target_evidence | developed_impact_evidence
+        impact_grounded = all(
+            axis.score == 0 or bool(grounded_impact_evidence.intersection(axis.evidence_ids))
+            for axis in (
+                assessment.impact_boundary, assessment.impact_sensitivity,
+                assessment.impact_actor_requirements,
+            )
+        )
         contradictory_reproduction = bool(
-            assessment.reproduced is False and targets and all(targets)
+            assessment.reproduced is False and any(targets)
         )
         development_unavailable_reason = (
             self._development_unavailable_reason(candidate, assessment.blocker_axis)
@@ -1073,10 +1088,9 @@ class ValidationCoordinator:
         )
         status = self.engine.decide(DecisionInput(
             policy_allowed=all(item["policy_allowed"] for item in observations),
-            positive_control_passed=positive, negative_control_clear=negative,
             explicit_non_exploit_evidence=(
                 assessment.reproduced is False
-                and len([item for item in observations if item["attempt_kind"] == "target"]) in {3, 5}
+                and any(item["attempt_kind"] == "target" for item in observations)
                 and all(item["explicit_non_exploit"] and item["outcome"] == "not_observed"
                         for item in observations
                         if item["attempt_kind"] == "target")
@@ -1100,7 +1114,8 @@ class ValidationCoordinator:
             # it does not negate a freshly reproduced mechanism.  Boundary and
             # vulnerability-class conflicts remain contested.
             semantic_conflict=_material_claim_conflict(comparison),
-            attack_has_positive_evidence=bool(comparison.attack_evidence_ids), impact=impact_result,
+            attack_has_positive_evidence=bool(comparison.attack_evidence_ids),
+            impact=impact_result if impact_grounded else None,
         ))
         if status == "DEVELOPING":
             status = "BLOCKED"
@@ -1114,6 +1129,8 @@ class ValidationCoordinator:
             decision["claim_impact_narrowed_by_validation"] = True
         if contradictory_reproduction:
             decision["blind_replay_consistency"] = "assessment_denied_positive_replay"
+        if not impact_grounded:
+            decision["impact_evidence_missing_target"] = True
         if development_unavailable_reason is not None:
             decision["development_unavailable_reason"] = development_unavailable_reason
         if development_admission_reason is not None:
@@ -1181,13 +1198,24 @@ class ValidationCoordinator:
         }
 
     def _execute_batch(self, repo: ValidationRepository, candidate: ValidatedCandidate,
-                       stage_run_id: str, *, policy: TargetPolicy, extra_only: bool = False,
-                       batch_no: int = 1) -> tuple[list[dict], list[str]]:
-        plan = [("target", 4), ("target", 5)] if extra_only else [
-            ("positive_control", 1), ("negative_control", 1),
-            ("target", 1), ("target", 2), ("target", 3),
-        ]
-        observations, evidence_ids = [], []
+                       stage_run_id: str, *, policy: TargetPolicy,
+                       batch_no: int = 1,
+                       recovered: tuple[list[dict], list[str]] | None = None,
+                       ) -> tuple[list[dict], list[str]]:
+        if recovered is None:
+            plan = [("target", 1)]
+            observations, evidence_ids = [], []
+            unresolved_outcomes = set()
+        else:
+            observations, evidence_ids = list(recovered[0]), list(recovered[1])
+            target_ordinals = [item["ordinal"] for item in observations
+                               if item["attempt_kind"] == "target"]
+            plan = [("target", max(target_ordinals) + 1)]
+            unresolved_outcomes = {
+                item["outcome"] for item in observations
+                if item["attempt_kind"] == "target" and item["outcome"] == "not_observed"
+                and not item["explicit_non_exploit"]
+            }
         for kind, ordinal in plan:
             attempt = repo.add_attempt(
                 case_id=candidate.case_id, stage_run_id=stage_run_id, batch_no=batch_no,
@@ -1223,12 +1251,32 @@ class ValidationCoordinator:
                 content_sha256=observation.content_sha256, content_length=observation.content_length,
             )
             observations.append({"attempt_id": attempt, "evidence_id": evidence,
-                                 "attempt_kind": kind, "batch_no": batch_no,
+                                 "attempt_kind": kind, "ordinal": ordinal,
+                                 "batch_no": batch_no,
                                  **observation.model_dump(mode="json")})
             evidence_ids.append(evidence)
             if self._nonproof_transport_observation(observations[-1]):
                 break
+            if (kind == "target" and observation.outcome == "not_observed"
+                    and not observation.explicit_non_exploit):
+                if observation.outcome in unresolved_outcomes:
+                    break
+                unresolved_outcomes.add(observation.outcome)
+                plan.append(("target", ordinal + 1))
         return observations, evidence_ids
+
+    @staticmethod
+    def _needs_target_retry(observations: list[dict]) -> bool:
+        targets = sorted(
+            (item for item in observations if item["attempt_kind"] == "target"),
+            key=lambda item: item["ordinal"],
+        )
+        return bool(
+            targets and targets[-1]["outcome"] == "not_observed"
+            and not targets[-1]["explicit_non_exploit"]
+            and not any(item["outcome"] == "not_observed"
+                        and not item["explicit_non_exploit"] for item in targets[:-1])
+        )
 
     @staticmethod
     def _nonproof_transport_observation(observation: dict) -> bool:
@@ -1325,8 +1373,7 @@ class ValidationCoordinator:
             """SELECT batch_no FROM validation_attempts WHERE case_id=? AND stage_run_id=?
             GROUP BY batch_no ORDER BY batch_no DESC""", (case_id, stage_run_id),
         )]
-        required = {("positive_control", 1), ("negative_control", 1),
-                    ("target", 1), ("target", 2), ("target", 3)}
+        required = {("target", 1)}
         for batch in batches:
             rows = conn.execute(
                 """SELECT a.attempt_id,a.attempt_kind,a.ordinal,a.batch_no,a.signal_type,a.outcome,
@@ -1350,7 +1397,8 @@ class ValidationCoordinator:
             runtime = details.pop("validation_runtime", {})
             observations.append({
                 "attempt_id": row["attempt_id"], "evidence_id": row["evidence_id"],
-                "attempt_kind": row["attempt_kind"], "batch_no": row["batch_no"],
+                "attempt_kind": row["attempt_kind"], "ordinal": row["ordinal"],
+                "batch_no": row["batch_no"],
                 "outcome": row["outcome"], "signal_type": row["signal_type"],
                 "signal_observed": (
                     bool(row["signal_observed"])
@@ -1434,12 +1482,12 @@ class ValidationCoordinator:
     def _observations_for_assessment(cls, conn: sqlite3.Connection, case_id: str,
                                      stage_run_id: str,
                                      assessment: BlindAssessment) -> tuple[list[dict], list[str]]:
-        attempt_ids = assessment.control_attempt_ids + assessment.target_attempt_ids
+        attempt_ids = assessment.target_attempt_ids
         if not attempt_ids or len(attempt_ids) != len(set(attempt_ids)):
             raise ValidationCoordinatorError("frozen BlindAssessment has invalid attempt references")
         placeholders = ",".join("?" for _ in attempt_ids)
         rows = conn.execute(
-            f"""SELECT a.attempt_id,a.attempt_kind,a.batch_no,a.signal_type,a.outcome,
+            f"""SELECT a.attempt_id,a.attempt_kind,a.ordinal,a.batch_no,a.signal_type,a.outcome,
             a.signal_observed,a.blocker_axis,a.observation_json,e.evidence_id,
             e.content_sha256,e.content_length FROM validation_attempts a
             JOIN validation_evidence e ON e.attempt_id=a.attempt_id
@@ -1739,16 +1787,11 @@ class ValidationCoordinator:
                 item["attempt_id"] for item in observations
                 if item["attempt_kind"] == "target"
             ]
-            control_ids = [
-                item["attempt_id"] for item in observations
-                if item["attempt_kind"] != "target"
-            ]
             correction = (
                 "The previous object cited IDs outside this replay batch. "
                 f"Use case_id={case_id!r}; evidence_ids must be a subset of "
                 f"{list(evidence_ids)!r}; target_attempt_ids must equal "
-                f"{target_ids!r}; control_attempt_ids must equal "
-                f"{control_ids!r}. Every nested impact-axis evidence_ids list "
+                f"{target_ids!r}. Every nested impact-axis evidence_ids list "
                 "must also use only the supplied evidence IDs. Keep the "
                 "evidence-based conclusion unchanged except where an invalid "
                 "reference forced an unsupported claim."
@@ -2202,10 +2245,7 @@ class ValidationCoordinator:
             raise ValidationCoordinatorError("blind assessment cites foreign case or evidence")
         target_ids = {item["attempt_id"] for item in observations
                       if item["attempt_kind"] == "target"}
-        control_ids = {item["attempt_id"] for item in observations
-                       if item["attempt_kind"] != "target"}
-        if set(assessment.target_attempt_ids) != target_ids \
-                or set(assessment.control_attempt_ids) != control_ids:
+        if set(assessment.target_attempt_ids) != target_ids:
             raise ValidationCoordinatorError("blind assessment must cite the complete replay batch")
         for axis in (assessment.impact_boundary, assessment.impact_sensitivity,
                      assessment.impact_actor_requirements):

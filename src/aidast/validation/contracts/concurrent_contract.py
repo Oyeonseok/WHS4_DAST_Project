@@ -6,7 +6,7 @@ from typing import Any, Annotated, Literal
 
 from pydantic import Field, field_validator, model_validator
 
-from .models import StrictContract
+from .models import StrictContract, TargetOnlyRuntimeContract
 from .multipart_contract import MultipartRequestTemplate
 from .runtime_contract import HttpAttemptContract, HttpRequestTemplate, ResponseAssertion
 
@@ -35,7 +35,7 @@ class ConcurrentAggregateAssertion(StrictContract):
 
 
 class ConcurrentAttemptContract(StrictContract):
-    """One target/control child template and its bounded proof criteria."""
+    """One target child template and its bounded proof criteria."""
 
     request: HttpRequestTemplate | MultipartRequestTemplate
     member_assertions: tuple[ResponseAssertion, ...] = Field(min_length=1, max_length=16)
@@ -61,7 +61,7 @@ class ConcurrentAttemptContract(StrictContract):
         return self
 
 
-class ConcurrentRuntimeContract(StrictContract):
+class ConcurrentRuntimeContract(TargetOnlyRuntimeContract):
     """A single finite barrier release of ordinary HTTP or multipart requests."""
 
     runtime_kind: Literal["concurrent"]
@@ -71,8 +71,6 @@ class ConcurrentRuntimeContract(StrictContract):
     release_strategy: Literal["simultaneous"]
     barrier_timeout_seconds: Annotated[float, Field(gt=0, le=30)]
     target: ConcurrentAttemptContract
-    positive_control: ConcurrentAttemptContract
-    negative_control: ConcurrentAttemptContract
 
     @property
     def total_members(self) -> int:
@@ -85,6 +83,6 @@ class ConcurrentRuntimeContract(StrictContract):
         return self
 
     def for_attempt(self, attempt_kind: str) -> ConcurrentAttemptContract:
-        if attempt_kind not in {"target", "positive_control", "negative_control"}:
+        if attempt_kind != "target":
             raise ValueError("unknown Validation attempt kind")
-        return getattr(self, attempt_kind)
+        return self.target

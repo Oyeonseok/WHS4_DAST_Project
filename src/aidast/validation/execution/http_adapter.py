@@ -7,7 +7,7 @@ import json
 import time
 from pathlib import Path
 from typing import Callable, Mapping
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import urljoin
 
 from aidast.recon.policy import TargetPolicy
 
@@ -62,6 +62,8 @@ class HttpReproductionPort:
     def execute(self, blind_case: BlindCase, *, attempt_kind: str, batch_no: int,
                 ordinal: int, attempt_id: str, db_path: Path, scan_id: str,
                 stage_run_id: str, case_id: str, policy: TargetPolicy) -> ReproductionObservation:
+        if attempt_kind != "target":
+            raise ValueError("unknown Validation attempt kind")
         unsupported = self.unsupported_reason(blind_case)
         if unsupported is not None:
             raise ValueError(unsupported)
@@ -71,15 +73,9 @@ class HttpReproductionPort:
                 raise ValueError("HTTP replay requires a staged runtime contract")
             runtime = HttpRuntimeContract.model_validate(blind_case.runtime_contract)
             attempt = runtime.for_attempt(attempt_kind)
-            endpoint = blind_case.endpoint
             if attempt.endpoint_template is not None:
-                if attempt_kind != "negative_control" or blind_case.method not in {"GET", "HEAD"}:
-                    raise ValueError("alternate control endpoints require a read-only negative control")
-                base = urlsplit(blind_case.endpoint)
-                endpoint = urljoin(
-                    f"{base.scheme}://{base.netloc}/", attempt.endpoint_template.lstrip("/"),
-                )
-            url, headers, data = render_http_request(endpoint, attempt.request)
+                raise ValueError("target endpoint override is not allowed")
+            url, headers, data = render_http_request(blind_case.endpoint, attempt.request)
         else:
             url, headers, data = self.request_builder(blind_case, attempt_kind, batch_no, ordinal)
         selected_references = None
@@ -104,8 +100,6 @@ class HttpReproductionPort:
             policy=policy, transport=self.transport,
             credential_resolver=self.credential_resolver,
             credential_references=selected_references,
-            request_boundary=((blind_case.method, url) if runtime is not None
-                              and runtime.for_attempt(attempt_kind).endpoint_template is not None else None),
         )
         try:
             started = self.clock()
@@ -146,7 +140,7 @@ class HttpReproductionPort:
             "response_bytes": len(response.body), "evaluation": evaluation,
             "request_ids": broker.request_ids,
         }
-        if runtime is not None and runtime.session_verification is not None and attempt_kind != "positive_control":
+        if runtime is not None and runtime.session_verification is not None:
             proof = self._verify_session(
                 blind_case, runtime, response, attempt_kind=attempt_kind,
                 attempt_id=attempt_id, db_path=db_path, scan_id=scan_id,
@@ -154,9 +148,6 @@ class HttpReproductionPort:
             )
             details["protected_access"] = proof
             details["request_ids"].extend(proof.get("request_ids", []))
-            # A public verification resource cannot prove an authentication boundary.
-            if attempt_kind == "negative_control" and proof.get("protected_fields_observed") is True:
-                observed = True
         return ReproductionObservation(
             outcome="blocked" if blocker else "observed" if observed else "not_observed",
             signal_type=blind_case.signal_types[0], signal_observed=observed,

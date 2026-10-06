@@ -76,8 +76,7 @@ class GrpcReproductionPort:
             return "grpc_runtime_contract_missing"
         try:
             runtime = GrpcRuntimeContract.model_validate(blind_case.runtime_contract)
-            if any(attempt.endpoint != _source_origin(blind_case.endpoint) for attempt in
-                   (runtime.target, runtime.positive_control, runtime.negative_control)):
+            if runtime.target.endpoint != _source_origin(blind_case.endpoint):
                 return "grpc_endpoint_mismatch"
         except ValueError:
             return "grpc_runtime_contract_invalid"

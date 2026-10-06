@@ -56,7 +56,7 @@ class FakePort:
 
     def execute(self, blind_case, *, attempt_kind, batch_no, ordinal, attempt_id, **context):
         self.calls.append((attempt_kind, batch_no, ordinal))
-        observed = attempt_kind != "negative_control"
+        observed = True
         return ReproductionObservation(
             outcome="observed" if observed else "not_observed",
             signal_type=blind_case.signal_types[0], signal_observed=observed,
@@ -171,12 +171,11 @@ class FakeAgent:
     def assess(self, blind_case, observations, correction=None):
         evidence = tuple(item["evidence_id"] for item in observations)
         targets = tuple(item["attempt_id"] for item in observations if item["attempt_kind"] == "target")
-        controls = tuple(item["attempt_id"] for item in observations if item["attempt_kind"] != "target")
-        axis = {"score": 1, "evidence_ids": (evidence[0],), "reason": "Current evidence supports score one."}
+        axis = {"score": 1, "evidence_ids": (evidence[-1],), "reason": "Current evidence supports score one."}
         return {
             "case_id": blind_case["case_id"], "blind_case_sha256": blind_case["blind_case_sha256"],
             "reproduced": True, "signal_types": tuple(blind_case["signal_types"]),
-            "target_attempt_ids": targets, "control_attempt_ids": controls,
+            "target_attempt_ids": targets,
             "evidence_ids": evidence, "blocker_axis": None, "blocker_reason": None,
             "impact_boundary": axis, "impact_sensitivity": axis,
             "impact_actor_requirements": axis, "conclusion": "Three stable target observations.",
@@ -240,8 +239,37 @@ class NegativeProofPort(FakePort):
             return result
         return result.model_copy(update={
             "outcome": "not_observed", "signal_observed": False,
-            "explicit_non_exploit": self.last_target_has_proof or ordinal != 3,
+            "explicit_non_exploit": self.last_target_has_proof,
         })
+
+
+class LatePositivePort(FakePort):
+    def execute(self, blind_case, *, attempt_kind, batch_no, ordinal, attempt_id, **context):
+        result = super().execute(
+            blind_case, attempt_kind=attempt_kind, batch_no=batch_no,
+            ordinal=ordinal, attempt_id=attempt_id, **context,
+        )
+        if attempt_kind == "target" and ordinal == 1:
+            return result.model_copy(update={
+                "outcome": "not_observed", "signal_observed": False,
+                "explicit_non_exploit": False,
+            })
+        return result
+
+
+class DenyingLatePositiveAgent(FakeAgent):
+    def assess(self, blind_case, observations, correction=None):
+        return super().assess(blind_case, observations, correction) | {"reproduced": False}
+
+
+class UngroundedImpactAgent(FakeAgent):
+    def assess(self, blind_case, observations, correction=None):
+        result = super().assess(blind_case, observations, correction)
+        unsupported_evidence = next(item["evidence_id"] for item in observations
+                                    if item["signal_observed"] is False)
+        for name in ("impact_boundary", "impact_sensitivity", "impact_actor_requirements"):
+            result[name]["evidence_ids"] = (unsupported_evidence,)
+        return result
 
 
 class InvalidBlockedProofPort(NegativeProofPort):
@@ -646,7 +674,7 @@ class ValidationCoordinatorTests(unittest.TestCase):
                 "SELECT latest_stage_run_id FROM validation_cases"
             ).fetchone()[0])
             self.assertEqual(audit["axes"]["impact_boundary"]["status"],
-                             "missing_replay_citation")
+                             "needs_verified_fact")
             decision = json.loads(conn.execute(
                 "SELECT decision_json FROM validation_cases"
             ).fetchone()[0])
@@ -709,12 +737,16 @@ class ValidationCoordinatorTests(unittest.TestCase):
             self.assertEqual(audit["effective_axes"], [1, 0, 1])
 
     def test_explicit_negative_proof_requires_every_target_attempt(self):
+        port = NegativeProofPort(last_target_has_proof=False)
         result = ValidationCoordinator(
             db_path=self.path, agent=NegativeProofAgent(),
-            reproduction=NegativeProofPort(last_target_has_proof=False),
+            reproduction=port,
             policy_provider=lambda endpoint, method: self.policy,
         ).run("scan")
         self.assertEqual(result.summary["statuses"], {"INCONCLUSIVE": 1})
+        self.assertEqual([kind for kind, _, _ in port.calls], [
+            "target", "target",
+        ])
 
     def test_complete_explicit_negative_proof_is_disproven(self):
         result = ValidationCoordinator(
@@ -818,7 +850,7 @@ class ValidationCoordinatorTests(unittest.TestCase):
         ).run("scan")
         self.assertEqual(second.case_ids, first.case_ids)
         self.assertEqual(second.summary["statuses"], {"CONFIRMED": 1})
-        self.assertEqual(len(port.calls), 5)
+        self.assertEqual(len(port.calls), 1)
         self.assertEqual(eligibility.requests[0].scope_sha256, scope.scope_sha256)
         with db.connect(self.path) as conn:
             self.assertEqual(conn.execute("SELECT scope_sha256 FROM validation_cases").fetchone()[0], scope.scope_sha256)
@@ -980,14 +1012,14 @@ class ValidationCoordinatorTests(unittest.TestCase):
 
     def test_partial_replay_before_resume_does_not_bypass_consistency_cap(self):
         ValidationCoordinator(
-            db_path=self.path, agent=UnderpoweredAgent(), reproduction=FakePort(),
+            db_path=self.path, agent=UnderpoweredAgent(), reproduction=LatePositivePort(),
             policy_provider=lambda endpoint, method: self.policy,
         ).run("scan")
 
         original_add = ValidationRepository.add_attempt
 
         def interrupt_before_second_attempt(repo, **kwargs):
-            if kwargs["attempt_kind"] == "negative_control":
+            if kwargs["attempt_kind"] == "target" and kwargs["ordinal"] == 2:
                 raise RuntimeError("interrupted after one replay attempt")
             return original_add(repo, **kwargs)
 
@@ -995,7 +1027,7 @@ class ValidationCoordinatorTests(unittest.TestCase):
             with patch.object(ValidationRepository, "add_attempt",
                               new=interrupt_before_second_attempt):
                 ValidationCoordinator(
-                    db_path=self.path, agent=FakeAgent(), reproduction=FakePort(),
+                    db_path=self.path, agent=FakeAgent(), reproduction=LatePositivePort(),
                     policy_provider=lambda endpoint, method: self.policy,
                 ).run("scan")
         with db.connect(self.path) as conn:
@@ -1003,7 +1035,7 @@ class ValidationCoordinatorTests(unittest.TestCase):
                 "SELECT latest_stage_run_id FROM validation_cases"
             ).fetchone()[0]
         result = ValidationCoordinator(
-            db_path=self.path, agent=FakeAgent(), reproduction=FakePort(),
+            db_path=self.path, agent=FakeAgent(), reproduction=LatePositivePort(),
             policy_provider=lambda endpoint, method: self.policy,
         ).resume(stage)
         with db.connect(self.path) as conn:
@@ -1141,7 +1173,7 @@ class ValidationCoordinatorTests(unittest.TestCase):
             ).run("scan")
         self.assertEqual(len(prompts), 2)
         self.assertIn("<correction_request>", prompts[1])
-        self.assertEqual(len(port.calls), 5)
+        self.assertEqual(len(port.calls), 1)
         self.assertEqual(result.summary["statuses"], {"CONFIRMED": 1})
         with db.connect(self.path) as conn:
             self.assertEqual(conn.execute("SELECT eligibility FROM validation_eligibility_assessments").fetchall(),
@@ -1159,6 +1191,66 @@ class ValidationCoordinatorTests(unittest.TestCase):
         self.assertEqual(
             staged.eligibility_view()["reproduction_spec_sha256"], persisted_digest,
         )
+
+    def test_candidate_uses_the_account_recorded_by_its_source_request(self):
+        from aidast.pipeline.lifecycle import register_credential_reference
+        from aidast.validation import canonical_sha256
+
+        with db.connect(self.path) as conn:
+            peer = register_credential_reference(
+                conn, scan_id="scan", label="peer", reference_uri="env://TEST_PEER",
+                identity_role="authenticated",
+            )
+            primary = register_credential_reference(
+                conn, scan_id="scan", label="primary", reference_uri="env://TEST_PRIMARY",
+                identity_role="authenticated",
+            )
+            source_account = max(peer, primary)
+            conn.execute("""INSERT INTO findings
+                (finding_id,scan_id,endpoint_id,vuln_type,severity,title)
+                VALUES ('finding_auth','scan','endpoint','idor','LOW','Account fixture')""")
+            conn.execute("""INSERT INTO attack_attempts
+                (attempt_id,scan_id,task_id,skill_name,endpoint_id,request_fingerprint,
+                 outcome,finding_id,resolution_reason,resolved_at)
+                VALUES ('attempt_auth','scan','attack_task','hunt-idor','endpoint',?,
+                        'confirmed','finding_auth','promoted',CURRENT_TIMESTAMP)""", ("e" * 64,))
+            conn.execute("""INSERT INTO attack_requests
+                (request_id,finding_id,method,url,response_status,response_body)
+                VALUES ('attack_evidence_auth','finding_auth','GET',
+                        'https://test/objects/1',200,X'31')""")
+            conn.execute("""INSERT INTO attack_http_requests
+                (request_id,scan_id,stage_run_id,task_id,policy_id,policy_sha256,method,url,
+                 request_fingerprint,status,response_status,response_bytes,result_json,scheduled_at)
+                VALUES ('http_auth','scan','attack_stage','attack_task','policy',?,'GET',
+                        'https://test/objects/1',?,'completed',200,1,?,0)""", (
+                    canonical_sha256(self.policy.model_dump(mode="json")), "e" * 64,
+                    json.dumps({"credential_reference_id": source_account}),
+                ))
+            spec = canonical_reproduction_spec(
+                finding_id="finding_auth", attack_skill_name="hunt-idor", endpoint_id="endpoint",
+                method="GET", endpoint_template="/objects/{id}", injection_location="path",
+                parameter_name="id", payload_template={"id": "<slot:int>"},
+                required_identity_roles=["authenticated"], source_attempt_ids=["attempt_auth"],
+                source_request_ids=["http_auth"],
+                source_policy_sha256=canonical_sha256(self.policy.model_dump(mode="json")),
+            )
+            conn.execute("""INSERT INTO finding_reproduction_specs
+                (finding_id,attack_skill_name,endpoint_id,method,endpoint_template,injection_location,
+                 parameter_name,payload_template_json,required_identity_roles_json,
+                 source_attempt_ids_json,source_request_ids_json,payload_structure_sha256,
+                 source_policy_sha256,spec_sha256) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
+                    spec["finding_id"], spec["attack_skill_name"], spec["endpoint_id"], spec["method"],
+                    spec["endpoint_template"], spec["injection_location"], spec["parameter_name"],
+                    json.dumps(spec["payload_template"]), json.dumps(spec["required_identity_roles"]),
+                    json.dumps(spec["source_attempt_ids"]), json.dumps(spec["source_request_ids"]),
+                    spec["payload_structure_sha256"], spec["source_policy_sha256"], spec["spec_sha256"],
+                ))
+            candidate = CandidateIntegrityGate(conn).validate_finding(
+                case_id="case", scan_id="scan", finding_id="finding_auth",
+            )
+
+        self.assertNotEqual(peer, primary)
+        self.assertEqual(candidate.staged._blind_case.credential_references, (source_account,))
 
     def test_candidate_gate_accepts_completed_task_adopted_by_completed_resume(self):
         with db.connect(self.path) as conn:
@@ -1182,6 +1274,74 @@ class ValidationCoordinatorTests(unittest.TestCase):
             )
 
         self.assertEqual(candidate.finding_id, "finding")
+
+    def test_validation_replays_completed_source_from_timed_out_attack_stage(self):
+        with db.connect(self.path) as conn:
+            conn.execute("""UPDATE stage_runs SET status='failed',
+                error_message='native Attack Agent timed out'
+                WHERE stage_run_id='attack_stage'""")
+            conn.commit()
+        port = FakePort()
+        result = ValidationCoordinator(
+            db_path=self.path, agent=FakeAgent(), reproduction=port,
+            policy_provider=lambda endpoint, method: self.policy,
+        ).run("scan")
+        self.assertEqual(result.summary["statuses"], {"CONFIRMED": 1})
+        self.assertEqual(len(port.calls), 1)
+        self.assertEqual({kind for kind, _, _ in port.calls},
+                         {"target"})
+
+    def test_validation_replays_cancelled_source_only_when_timeout_evidence_is_complete(self):
+        with db.connect(self.path) as conn:
+            conn.execute("""UPDATE stage_runs SET status='failed',
+                error_message='native Attack Agent timed out'
+                WHERE stage_run_id='attack_stage'""")
+            conn.execute("UPDATE attack_tasks SET status='cancelled' WHERE task_id='attack_task'")
+            conn.commit()
+        port = FakePort()
+        result = ValidationCoordinator(
+            db_path=self.path, agent=FakeAgent(), reproduction=port,
+            policy_provider=lambda endpoint, method: self.policy,
+        ).run("scan")
+        self.assertEqual(result.summary["statuses"], {"CONFIRMED": 1})
+        self.assertEqual(len(port.calls), 1)
+
+    def test_validation_holds_timed_out_source_with_unfinished_request(self):
+        with db.connect(self.path) as conn:
+            conn.execute("""UPDATE stage_runs SET status='failed',
+                error_message='native Attack Agent timed out'
+                WHERE stage_run_id='attack_stage'""")
+            conn.execute("UPDATE attack_tasks SET status='cancelled' WHERE task_id='attack_task'")
+            conn.execute("UPDATE attack_http_requests SET status='outcome_unknown' WHERE request_id='http'")
+            conn.commit()
+        port = FakePort()
+        result = ValidationCoordinator(
+            db_path=self.path, agent=FakeAgent(), reproduction=port,
+            policy_provider=lambda endpoint, method: self.policy,
+        ).run("scan")
+        self.assertEqual(result.summary["statuses"], {"INCONCLUSIVE": 1})
+        self.assertEqual(port.calls, [])
+
+    def test_validation_holds_timed_out_source_with_unrelated_unfinished_request(self):
+        with db.connect(self.path) as conn:
+            conn.execute("""UPDATE stage_runs SET status='failed',
+                error_message='native Attack Agent timed out'
+                WHERE stage_run_id='attack_stage'""")
+            conn.execute("UPDATE attack_tasks SET status='cancelled' WHERE task_id='attack_task'")
+            conn.execute("""INSERT INTO attack_http_requests
+                (request_id,scan_id,stage_run_id,task_id,policy_id,policy_sha256,method,url,
+                 request_fingerprint,status,scheduled_at)
+                SELECT 'unfinished',scan_id,stage_run_id,task_id,policy_id,policy_sha256,
+                       method,url,request_fingerprint,'outcome_unknown',scheduled_at
+                FROM attack_http_requests WHERE request_id='http'""")
+            conn.commit()
+        port = FakePort()
+        result = ValidationCoordinator(
+            db_path=self.path, agent=FakeAgent(), reproduction=port,
+            policy_provider=lambda endpoint, method: self.policy,
+        ).run("scan")
+        self.assertEqual(result.summary["statuses"], {"INCONCLUSIVE": 1})
+        self.assertEqual(port.calls, [])
 
     def test_candidate_gate_rejects_completed_task_without_completed_resume(self):
         with db.connect(self.path) as conn:
@@ -1440,7 +1600,7 @@ class ValidationCoordinatorTests(unittest.TestCase):
                 "https://test",
             )
 
-    def test_run_executes_fresh_three_with_controls_and_commits_confirmed(self):
+    def test_run_stops_after_first_grounded_target(self):
         port = FakePort()
         result = ValidationCoordinator(
             db_path=self.path, agent=FakeAgent(), reproduction=port,
@@ -1449,13 +1609,71 @@ class ValidationCoordinatorTests(unittest.TestCase):
         self.assertEqual(result.status, "completed")
         self.assertEqual(result.validation_agent_ids, ("eligibility_agent_fixture", "validation_agent_fixture"))
         self.assertEqual([kind for kind, _, _ in port.calls],
-                         ["positive_control", "negative_control", "target", "target", "target"])
+                         ["target"])
         with db.connect(self.path) as conn:
             row = conn.execute("SELECT current_status,processing_phase FROM validation_cases").fetchone()
             self.assertEqual(row, ("CONFIRMED", "completed"))
-            self.assertEqual(conn.execute("SELECT count(*) FROM validation_attempts").fetchone()[0], 5)
+            self.assertEqual(conn.execute("SELECT count(*) FROM validation_attempts").fetchone()[0], 1)
 
-    def test_missing_http_contract_is_prepared_and_controls_are_executed(self):
+    def test_uncertain_target_retries_until_new_positive_evidence(self):
+        port = LatePositivePort()
+        result = ValidationCoordinator(
+            db_path=self.path, agent=FakeAgent(), reproduction=port,
+            policy_provider=lambda endpoint, method: self.policy,
+        ).run("scan")
+        self.assertEqual(result.summary["statuses"], {"CONFIRMED": 1})
+        self.assertEqual([kind for kind, _, _ in port.calls], [
+            "target", "target",
+        ])
+
+    def test_resume_continues_uncertain_target_without_replaying_saved_attempts(self):
+        port = LatePositivePort()
+        original_add_attempt = ValidationRepository.add_attempt
+
+        def interrupt_before_retry(repository, **kwargs):
+            if kwargs["attempt_kind"] == "target" and kwargs["ordinal"] == 2:
+                raise RuntimeError("interrupted before target retry")
+            return original_add_attempt(repository, **kwargs)
+
+        with patch.object(ValidationRepository, "add_attempt", interrupt_before_retry):
+            with self.assertRaisesRegex(ValidationCoordinatorError, "interrupted before target retry"):
+                ValidationCoordinator(
+                    db_path=self.path, agent=FakeAgent(), reproduction=port,
+                    policy_provider=lambda endpoint, method: self.policy,
+                ).run("scan")
+        self.assertEqual(len(port.calls), 1)
+        with db.connect(self.path) as conn:
+            stage_id = conn.execute(
+                "SELECT stage_run_id FROM stage_runs WHERE stage='validation'"
+            ).fetchone()[0]
+        resumed = ValidationCoordinator(
+            db_path=self.path, agent=FakeAgent(), reproduction=port,
+            policy_provider=lambda endpoint, method: self.policy,
+        ).resume(stage_id)
+        self.assertEqual(resumed.summary["case_count"], 1)
+        self.assertEqual([kind for kind, _, _ in port.calls], [
+            "target", "target",
+        ])
+        with db.connect(self.path) as conn:
+            status = conn.execute("SELECT current_status FROM validation_cases").fetchone()[0]
+        self.assertEqual(status, "CONFIRMED")
+
+    def test_mixed_replay_cannot_confirm_when_blind_assessment_denies_it(self):
+        result = ValidationCoordinator(
+            db_path=self.path, agent=DenyingLatePositiveAgent(),
+            reproduction=LatePositivePort(),
+            policy_provider=lambda endpoint, method: self.policy,
+        ).run("scan")
+        self.assertEqual(result.summary["statuses"], {"INCONCLUSIVE": 1})
+
+    def test_positive_target_without_target_cited_impact_is_inconclusive(self):
+        result = ValidationCoordinator(
+            db_path=self.path, agent=UngroundedImpactAgent(), reproduction=LatePositivePort(),
+            policy_provider=lambda endpoint, method: self.policy,
+        ).run("scan")
+        self.assertEqual(result.summary["statuses"], {"INCONCLUSIVE": 1})
+
+    def test_missing_http_contract_is_prepared_and_target_is_executed(self):
         preparer = FakeReplayPreparer()
         calls = []
         def transport(request, timeout):
@@ -1469,11 +1687,10 @@ class ValidationCoordinatorTests(unittest.TestCase):
         result = coordinator.run("scan")
         self.assertEqual(result.summary["statuses"], {"CONFIRMED": 1})
         self.assertEqual(preparer.calls, 1)
-        self.assertEqual(calls, ['https://test/objects/1', 'https://test/objects/2',
-                                 'https://test/objects/1', 'https://test/objects/1', 'https://test/objects/1'])
+        self.assertEqual(calls, ['https://test/objects/1'])
         with db.connect(self.path) as conn:
             kinds = conn.execute('SELECT attempt_kind,count(*) FROM validation_attempts GROUP BY attempt_kind').fetchall()
-            self.assertEqual(dict(kinds), {'positive_control': 1, 'negative_control': 1, 'target': 3})
+            self.assertEqual(dict(kinds), {'target': 1})
             self.assertIsNone(conn.execute('SELECT runtime_contract_json FROM finding_reproduction_specs').fetchone()[0])
             self.assertEqual(conn.execute('SELECT count(*) FROM validation_replay_plans').fetchone()[0], 1)
 
@@ -1492,14 +1709,14 @@ class ValidationCoordinatorTests(unittest.TestCase):
         with db.connect(self.path) as conn:
             stage = conn.execute("SELECT stage_run_id FROM stage_runs WHERE stage='validation'").fetchone()[0]
             original_plan = conn.execute("SELECT runtime_contract_json,runtime_sha256 FROM validation_replay_plans").fetchone()
-        self.assertEqual(len(calls), 5)
+        self.assertEqual(len(calls), 1)
         result = ValidationCoordinator(
             db_path=self.path, agent=FakeAgent(), reproduction=HttpReproductionPort(transport=transport),
             policy_provider=lambda endpoint, method: self.policy,
         ).resume(stage)
         self.assertEqual(result.status, "completed")
         self.assertEqual(preparer.calls, 1)
-        self.assertEqual(len(calls), 5)
+        self.assertEqual(len(calls), 1)
         with db.connect(self.path) as conn:
             self.assertEqual(conn.execute("SELECT runtime_contract_json,runtime_sha256 FROM validation_replay_plans").fetchone(), original_plan)
             self.assertEqual(conn.execute("SELECT current_status FROM validation_cases").fetchone()[0], "CONFIRMED")
@@ -1584,7 +1801,7 @@ class ValidationCoordinatorTests(unittest.TestCase):
 
         factory.assert_called_once_with()
         self.assertEqual(result.validation_agent_ids, ("eligibility_agent_fixture", "validation_agent_fixture"))
-        self.assertEqual(len(port.calls), 5)
+        self.assertEqual(len(port.calls), 1)
 
     def test_selected_validation_model_reaches_lazy_codex_agents(self):
         with (
@@ -1650,7 +1867,7 @@ class ValidationCoordinatorTests(unittest.TestCase):
             prerequisite_resolver=SuccessfulPrerequisite(),
         ).run("scan")
         self.assertEqual(result.summary["statuses"], {"CONFIRMED": 1})
-        self.assertEqual(len(port.calls), 10)
+        self.assertEqual(len(port.calls), 2)
         with db.connect(self.path) as conn:
             self.assertEqual(conn.execute(
                 "SELECT status FROM validation_development_actions"
@@ -1787,7 +2004,7 @@ class ValidationCoordinatorTests(unittest.TestCase):
         ).run("scan")
 
         self.assertEqual(result.summary["statuses"], {"CONFIRMED": 1})
-        self.assertEqual(len(port.calls), 10)
+        self.assertEqual(len(port.calls), 2)
         with db.connect(self.path) as conn:
             action = conn.execute(
                 """SELECT status,action_type FROM validation_development_actions"""
@@ -2121,7 +2338,7 @@ class ValidationCoordinatorTests(unittest.TestCase):
         )
         with self.assertRaises(ValidationCoordinatorError):
             coordinator.run("scan")
-        self.assertEqual(len(first_port.calls), 5)
+        self.assertEqual(len(first_port.calls), 1)
         with db.connect(self.path) as conn:
             stage_id = conn.execute(
                 "SELECT stage_run_id FROM stage_runs WHERE stage='validation'"
@@ -2144,7 +2361,7 @@ class ValidationCoordinatorTests(unittest.TestCase):
         with db.connect(self.path) as conn:
             self.assertEqual(conn.execute(
                 "SELECT count(*) FROM validation_attempts"
-            ).fetchone()[0], 5)
+            ).fetchone()[0], 1)
 
     def interrupt_after_preflight(self):
         port = FakePort()
@@ -2351,7 +2568,7 @@ class ValidationCoordinatorTests(unittest.TestCase):
                 db_path=self.path, agent=CompareCrashedAgent(), reproduction=first_port,
                 policy_provider=lambda endpoint, method: self.policy,
             ).run("scan")
-        self.assertEqual(len(first_port.calls), 5)
+        self.assertEqual(len(first_port.calls), 1)
         with db.connect(self.path) as conn:
             stage_id = conn.execute(
                 "SELECT stage_run_id FROM stage_runs WHERE stage='validation'"
@@ -2382,7 +2599,7 @@ class ValidationCoordinatorTests(unittest.TestCase):
         with db.connect(self.path) as conn:
             self.assertEqual(conn.execute(
                 "SELECT count(*) FROM validation_attempts"
-            ).fetchone()[0], 5)
+            ).fetchone()[0], 1)
             self.assertEqual(conn.execute(
                 "SELECT count(*) FROM validation_evidence WHERE evidence_kind='blind_assessment'"
             ).fetchone()[0], 1)
@@ -2693,7 +2910,7 @@ class ValidationCoordinatorTests(unittest.TestCase):
         ).run("scan")
 
         self.assertEqual(result.summary["statuses"], {"CONFIRMED": 2, "KNOWN": 1})
-        self.assertEqual(len(port.calls), 10)
+        self.assertEqual(len(port.calls), 2)
         self.assertTrue(port.asserted_chain)
         with db.connect(self.path) as conn:
             chain_case = conn.execute(
@@ -2730,17 +2947,16 @@ class ConditionalEligibilityTests(unittest.TestCase):
         self.assertEqual(self.decision["reason"], "conditional_evidence_unavailable")
         self.assertEqual(self.phases, ["preflight"])
 
-    def test_conditional_failed_control_cannot_be_policy_excluded(self):
-        class FailedControlPort(FakePort):
+    def test_conditional_failed_target_cannot_be_policy_excluded(self):
+        class FailedTargetPort(FakePort):
             def execute(self, *args, **kwargs):
                 result = super().execute(*args, **kwargs)
-                if kwargs["attempt_kind"] == "positive_control":
-                    return result.model_copy(update={"outcome": "not_observed", "signal_observed": False})
-                return result
+                return result.model_copy(update={"outcome": "not_observed", "signal_observed": False,
+                                         "explicit_non_exploit": True})
 
-        result = self.run_conditional("INELIGIBLE", port=FailedControlPort())
+        result = self.run_conditional("INELIGIBLE", port=FailedTargetPort())
         self.assertEqual(result.summary["statuses"], {"INCONCLUSIVE": 1})
-        self.assertEqual(self.decision["reason"], "conditional_controls_failed")
+        self.assertEqual(self.decision["reason"], "conditional_evidence_unavailable")
         self.assertEqual(self.phases, ["preflight"])
 
     def test_conditional_unresolved_auth_blocker_cannot_be_policy_excluded(self):
@@ -2905,7 +3121,7 @@ class ConditionalEligibilityTests(unittest.TestCase):
         result = self.run_conditional()
         self.assertEqual(result.summary["statuses"], {"CONFIRMED": 1})
         self.assertEqual(self.phases, ["preflight", "post_replay"])
-        self.assertEqual(len(self.port.calls), 5)
+        self.assertEqual(len(self.port.calls), 1)
 
     def test_conditional_eligible_preserves_underpowered_technical_decision(self):
         result = self.run_conditional(agent=UnderpoweredAgent())
@@ -2965,7 +3181,7 @@ class ConditionalEligibilityTests(unittest.TestCase):
             stage = conn.execute("SELECT latest_stage_run_id FROM validation_cases").fetchone()[0]
         result = coordinator.resume(stage)
         self.assertTrue(result.summary["resumed"])
-        self.assertEqual(len(port.calls), 5)
+        self.assertEqual(len(port.calls), 1)
         self.assertEqual((agent.assess_calls, agent.compare_calls), (1, 1))
         self.assertEqual([request.phase for request in eligibility.requests], ["preflight", "post_replay"])
         with db.connect(self.path) as conn:
@@ -2996,7 +3212,7 @@ class ConditionalEligibilityTests(unittest.TestCase):
             with self.assertRaisesRegex(ValidationCoordinatorError, "interrupted after development post"):
                 coordinator.run("scan")
         original_refs = eligibility.requests[-1].evidence_refs
-        self.assertEqual(len(original_refs), 8)
+        self.assertEqual(len(original_refs), 4)
         with db.connect(self.path) as conn:
             stage = conn.execute("SELECT latest_stage_run_id FROM validation_cases").fetchone()[0]
             development = conn.execute("SELECT evidence_id FROM validation_evidence WHERE evidence_kind='development_observation'").fetchone()[0]
@@ -3006,7 +3222,7 @@ class ConditionalEligibilityTests(unittest.TestCase):
 
         coordinator.resume(stage)
 
-        self.assertEqual(len(port.calls), 10)
+        self.assertEqual(len(port.calls), 2)
         self.assertEqual((agent.assess_calls, agent.compare_calls), (2, 1))
         self.assertEqual([request.phase for request in eligibility.requests], ["preflight", "post_replay"])
         with db.connect(self.path) as conn:
