@@ -178,8 +178,8 @@ GET /api/v1/scans/{scan_id}
 스캔 단계는 `Scope`, `Recon`, `Attack`, `Chaining`, `Validation`, `Report` 순서입니다.
 `GET /api/v1/scans/{scan_id}/validations`는 저장된 검증 케이스의 판정,
 민감정보를 제거한 사유와 대상 재현 시도·증거 건수를 반환합니다. 과거 기록에
-대조군 시도가 있으면 해당 건수도 함께 조회할 수 있지만, 현재 Validation은 양성·음성
-대조군 요청을 필수로 실행하지 않습니다. `CONFIRMED`는 TP,
+대조군 시도가 있으면 해당 건수도 함께 조회할 수 있습니다. 현재 Validation은 양성·음성
+대조군 요청을 보내지 않습니다. `CONFIRMED`는 TP,
 `DISPROVEN`은 FP로 표시합니다. `KNOWN`은 이전 확정 케이스와의 일치이며
 독립적인 TP로 세지 않고 원본 케이스를 가리킵니다. 다른 판정은 TP/FP로 단정하지
 않습니다. 보고서는 현재 `CONFIRMED`인 케이스와 연결될 때만 화면에 표시합니다.
