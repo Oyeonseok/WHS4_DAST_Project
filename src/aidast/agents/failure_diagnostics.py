@@ -27,6 +27,10 @@ _MODEL_POLICY_REFUSAL_MARKERS = (
 )
 
 _MODEL_CAPACITY_MARKERS = (
+    "model-capacity error",
+    "model capacity error",
+    "model-capacity failure",
+    "model capacity failure",
     "selected model is at capacity",
     "selected model was at capacity",
     "selected model reached capacity",

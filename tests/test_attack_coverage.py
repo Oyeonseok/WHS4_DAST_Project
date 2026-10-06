@@ -1426,6 +1426,7 @@ def test_completed_envelope_with_open_lead_retries_without_failing_pipeline(
         "outcomes. The batch is incomplete."
     ),
     "The selected model is at capacity. Please try a different model.",
+    "The single Attack Agent ended with a model-capacity error.",
 ])
 def test_structured_model_capacity_result_retries_without_failing_pipeline(
     tmp_path: Path, summary: str,

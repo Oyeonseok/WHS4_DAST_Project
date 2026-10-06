@@ -44,6 +44,9 @@ def test_model_capacity_error_is_distinct_from_application_capacity() -> None:
     assert is_model_capacity_error(
         "Selected model is at capacity. Please try a different model."
     )
+    assert is_model_capacity_error(
+        "The single Attack Agent ended with a model-capacity error."
+    )
     assert not is_model_capacity_error("request governor has no remaining capacity")
 
 
