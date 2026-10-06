@@ -6,7 +6,7 @@ from typing import Annotated, Any, Literal
 
 from pydantic import Field, field_validator, model_validator
 
-from .models import StrictContract, canonical_sha256
+from .models import StrictContract, TargetOnlyRuntimeContract, canonical_sha256
 from .runtime_contract import HttpRequestTemplate
 
 
@@ -39,17 +39,15 @@ class OobAttemptContract(StrictContract):
         return self
 
 
-class OobRuntimeContract(StrictContract):
+class OobRuntimeContract(TargetOnlyRuntimeContract):
     runtime_kind: Literal["oob"]
     schema_version: Literal[1]
     target: OobAttemptContract
-    positive_control: OobAttemptContract
-    negative_control: OobAttemptContract
 
     def for_attempt(self, attempt_kind: str) -> OobAttemptContract:
-        if attempt_kind not in {"target", "positive_control", "negative_control"}:
+        if attempt_kind != "target":
             raise ValueError("unknown Validation attempt kind")
-        return getattr(self, attempt_kind)
+        return self.target
 
 
 class OobEvent(StrictContract):

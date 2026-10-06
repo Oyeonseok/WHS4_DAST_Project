@@ -120,6 +120,21 @@ class PipelineCredentialResolver:
         return dict(value)
 
 
+def credential_preflight_reason(resolver, reference: str, destination_url: str) -> str | None:
+    preflight = getattr(resolver, "unsupported_reason", None)
+    if not callable(preflight):
+        return None
+    if isinstance(resolver, PipelineCredentialResolver):
+        return preflight(reference, destination_url=destination_url)
+    return preflight(reference)
+
+
+def resolve_credential_headers(resolver, reference: str, destination_url: str) -> Mapping[str, str]:
+    if isinstance(resolver, PipelineCredentialResolver):
+        return resolver(reference, destination_url=destination_url)
+    return resolver(reference)
+
+
 class KeyringCredentialBackend:
     """Resolve `keyring://SERVICE/ACCOUNT` lazily through Python keyring."""
 

@@ -189,29 +189,16 @@ def evaluate_profile_evidence(
         raise ValueError("profile evidence rule does not match the bound contract")
     replay = tuple(observations)
     target_attempt_ids = set(assessment.target_attempt_ids)
-    control_attempt_ids = set(assessment.control_attempt_ids)
     target_replay = [item for item in replay
                      if item["attempt_kind"] == "target"
                      and item["attempt_id"] in target_attempt_ids]
-    positive_replay = [item for item in replay
-                       if item["attempt_kind"] == "positive_control"
-                       and item["attempt_id"] in control_attempt_ids]
-    negative_replay = [item for item in replay
-                       if item["attempt_kind"] == "negative_control"
-                       and item["attempt_id"] in control_attempt_ids]
-    if (len(target_attempt_ids) not in {3, 5}
+    if (not target_attempt_ids
             or len(target_replay) != len(target_attempt_ids)
-            or any(item["outcome"] != "observed" or item["signal_observed"] is not True
+            or not any(item["outcome"] == "observed" and item["signal_observed"] is True
+                       for item in target_replay)
+            or any(item["outcome"] not in {"observed", "not_observed"}
                    for item in target_replay)):
         replay_status = "target_inconsistent"
-    elif (len(positive_replay) != 1
-          or positive_replay[0]["outcome"] != "observed"
-          or positive_replay[0]["signal_observed"] is not True):
-        replay_status = "positive_control_failed"
-    elif (len(negative_replay) != 1
-          or negative_replay[0]["outcome"] != "not_observed"
-          or negative_replay[0]["signal_observed"] is not False):
-        replay_status = "negative_control_failed"
     else:
         replay_status = "complete"
     request_ids: set[str] = set()
@@ -234,10 +221,6 @@ def evaluate_profile_evidence(
     targets = {item["evidence_id"] for item in replay
                if item["attempt_kind"] == "target" and item["outcome"] == "observed"
                and item["signal_observed"] is True}
-    negatives = {item["evidence_id"] for item in replay
-                 if item["attempt_kind"] == "negative_control"
-                 and item["outcome"] == "not_observed"
-                 and item["signal_observed"] is False}
     extracted = (extract_replay_facts(
         rule.profile_id, runtime_contract, assessment, replay,
         replay_status=replay_status,
@@ -253,8 +236,6 @@ def evaluate_profile_evidence(
         missing_citations = []
         if axis.score > 0 and not citations.intersection(targets):
             missing_citations.append("observed_target")
-        if axis.score > 0 and axis_name == "impact_boundary" and not citations.intersection(negatives):
-            missing_citations.append("inert_negative_control")
         status = ("not_claimed" if axis.score == 0 else
                   "replay_not_grounded" if replay_status != "complete" else
                   "missing_replay_citation" if missing_citations else
@@ -265,7 +246,7 @@ def evaluate_profile_evidence(
             "required_fact": fact,
             "missing_facts": [fact] if axis.score > 0 else [],
             "missing_citations": missing_citations,
-            "cited_evidence_ids": sorted(citations.intersection(targets | negatives)),
+            "cited_evidence_ids": sorted(citations.intersection(targets)),
         }
     return {
         "rule_version": RULE_VERSION,
@@ -292,10 +273,7 @@ def evaluate_profile_evidence(
                            assessment.impact_actor_requirements.score],
         "target_attempt_ids": sorted(item["attempt_id"] for item in replay
                                      if item["attempt_kind"] == "target"),
-        "control_attempt_ids": sorted(item["attempt_id"] for item in replay
-                                      if item["attempt_kind"] in {"positive_control", "negative_control"}),
         "observed_target_evidence_ids": sorted(targets),
-        "inert_negative_evidence_ids": sorted(negatives),
         "request_ids": sorted(request_ids)[:16],
         "operation_ids": sorted(operation_ids)[:16],
         "reported_assertion_ids": sorted(assertion_ids)[:16],

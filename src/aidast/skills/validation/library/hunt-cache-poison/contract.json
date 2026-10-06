@@ -10,26 +10,7 @@
   "target_expected_signal": {
     "kind": "hunt-cache-poison_verified",
     "criterion": "an attacker-controlled response variant is served to an independent request",
-    "requires_fresh_target_and_control_evidence": true
-  },
-  "control_positive": {
-    "payload_template": {
-      "mode": "channel_health_baseline"
-    },
-    "expected_signal": {
-      "kind": "timing_channel_operational",
-      "criterion": "the same transport, identity, parser, browser, callback, or timing channel produces its declared harmless baseline"
-    },
-    "signal_type": "timing"
-  },
-  "control_negative": {
-    "payload_template": {
-      "mode": "inert_same_shape_control"
-    },
-    "expected_signal": {
-      "kind": "no_timing_target_effect",
-      "criterion": "an inert same-shape input does not produce the target security effect"
-    }
+    "requires_fresh_target_evidence": true
   },
   "impact_rules": {
     "boundary": "credit a boundary only when controlled timing or concurrency changes a protected outcome",

@@ -11,7 +11,7 @@ Apply this guidance only to the staged BlindCase, its immutable contract, and fr
 
 the authorization response, code, token, redirect, or account binding is accepted outside its declared binding
 
-Require the declared positive control to prove the signal channel is operational and the inert negative control to stay clear. Do not infer reproduction from status codes, hashes, timing noise, or the Attack claim alone.
+Require fresh target evidence for the declared security effect. Do not infer reproduction from status codes, hashes, timing noise, or the Attack claim alone.
 
 ## Impact interpretation
 

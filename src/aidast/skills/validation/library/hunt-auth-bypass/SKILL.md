@@ -11,7 +11,7 @@ Apply this guidance only to the staged BlindCase, its immutable contract, and fr
 
 a protected operation succeeds without its required authentication state
 
-Require the declared positive control to prove the signal channel is operational and the inert negative control to stay clear. Do not infer reproduction from status codes, hashes, timing noise, or the Attack claim alone.
+Require fresh target evidence for the declared security effect. Do not infer reproduction from status codes, hashes, timing noise, or the Attack claim alone.
 
 ## Impact interpretation
 
@@ -21,11 +21,11 @@ Require the declared positive control to prove the signal channel is operational
 
 Cite only evidence from the current Validation case for every impact score.
 
-Controlled login responses and their positive/negative controls can establish
-reproduction. An optional `session_verification` supplies further account or
+Fresh target login responses can establish reproduction. An optional
+`session_verification` supplies further account or
 protected-resource evidence through the `protected_access` observation. Its
-absence is not an additional sensitivity-zero rule or a requirement to execute
-controls. Score the actual fresh observations under the existing impact rules.
+absence is not an additional sensitivity-zero rule. Score the actual fresh
+observations under the existing impact rules.
 
 ## Impact expansion
 

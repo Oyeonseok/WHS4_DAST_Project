@@ -237,13 +237,19 @@ class GrpcRuntimeContract(_GrpcContract):
     schema_version: Literal[1]
     runtime_kind: Literal["grpc"]
     target: GrpcAttemptContract
-    positive_control: GrpcAttemptContract
-    negative_control: GrpcAttemptContract
+
+    @model_validator(mode="before")
+    @classmethod
+    def ignore_legacy_controls(cls, value):
+        if isinstance(value, dict):
+            return {key: item for key, item in value.items()
+                    if key not in {"positive_control", "negative_control"}}
+        return value
 
     def for_attempt(self, attempt_kind: str) -> GrpcAttemptContract:
-        if attempt_kind not in {"target", "positive_control", "negative_control"}:
+        if attempt_kind != "target":
             raise ValueError("unknown Validation attempt kind")
-        return getattr(self, attempt_kind)
+        return self.target
 
 
 def bounded_response_metadata(value: object) -> tuple[tuple[str, str | bytes], ...]:

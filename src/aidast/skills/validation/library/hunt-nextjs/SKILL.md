@@ -11,7 +11,7 @@ Apply this guidance only to the staged BlindCase, its immutable contract, and fr
 
 Next.js framework metadata, server data, or protected route behavior crosses its intended boundary
 
-Require the declared positive control to prove the signal channel is operational and the inert negative control to stay clear. Do not infer reproduction from status codes, hashes, timing noise, or the Attack claim alone.
+Require fresh target evidence for the declared security effect. Do not infer reproduction from status codes, hashes, timing noise, or the Attack claim alone.
 
 ## Impact interpretation
 

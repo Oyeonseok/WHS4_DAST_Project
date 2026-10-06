@@ -463,7 +463,7 @@ class IncompleteBatchTests(unittest.TestCase):
                 reservation = broker.reserve(transport_fixture.TransportOperationSpec(
                     runtime_kind="grpc", operation_kind="unary", destination="https://test/objects/1",
                     policy_url="https://test/objects/1", method="GET", request_bytes=0, max_response_bytes=0))
-                if context["attempt_kind"] == "negative_control":
+                if context["attempt_kind"] == "target":
                     if status == "failed":
                         broker.abandon_reserved((reservation,))
                     else:
@@ -486,10 +486,10 @@ class IncompleteBatchTests(unittest.TestCase):
             agent=coordinator_fixture.FakeAgent(), reproduction=Port(),
             policy_provider=lambda endpoint, method: self.policy).run("scan")
         self.assertEqual(result.summary["statuses"], {"INCONCLUSIVE": 1})
-        self.assertEqual(calls, ["positive_control", "negative_control"])
+        self.assertEqual(calls, ["target"])
         with sqlite3.connect(self.path) as conn:
-            self.assertEqual(conn.execute("SELECT count(*) FROM validation_evidence WHERE evidence_kind='observation'").fetchone()[0], 2)
-            self.assertEqual(conn.execute("SELECT count(*) FROM validation_attempts").fetchone()[0], 2)
+            self.assertEqual(conn.execute("SELECT count(*) FROM validation_evidence WHERE evidence_kind='observation'").fetchone()[0], 1)
+            self.assertEqual(conn.execute("SELECT count(*) FROM validation_attempts").fetchone()[0], 1)
 
     def test_unknown_control_stops_batch_without_becoming_negative_proof(self):
         self.run_incomplete_control("outcome_unknown", "outcome_unknown")
@@ -561,7 +561,7 @@ class EligibilityPreflightBoundaryTests(unittest.TestCase):
             eligibility_agent=ConditionalAgent(),
             policy_provider=lambda endpoint, method: self.policy,
         ).run("scan")
-        self.assertEqual(len(port.calls), 5)
+        self.assertEqual(len(port.calls), 1)
 
     def test_corrected_eligibility_response_persists_only_valid_result(self):
         class CorrectingAgent(coordinator_fixture.FakeEligibilityAgent):
@@ -577,7 +577,7 @@ class EligibilityPreflightBoundaryTests(unittest.TestCase):
             policy_provider=lambda endpoint, method: self.policy,
         ).run("scan")
         self.assertEqual(len(eligibility.requests), 2)
-        self.assertEqual(len(port.calls), 5)
+        self.assertEqual(len(port.calls), 1)
         with sqlite3.connect(self.path) as conn:
             self.assertEqual(conn.execute("SELECT eligibility,scope_quote FROM validation_eligibility_assessments").fetchall(),
                              [("ELIGIBLE", self.scope.scope_markdown)])
@@ -661,14 +661,14 @@ class ConditionalEvidenceBoundaryTests(unittest.TestCase):
         self.assertEqual(self.phases, ["preflight"])
         self.assertEqual(self.port.calls, [])
 
-    def test_conditional_missing_controls_never_calls_post(self):
+    def test_conditional_missing_target_never_calls_post(self):
         from unittest.mock import patch
 
         execute = coordinator_fixture.ValidationCoordinator._execute_batch
 
         def incomplete_batch(coordinator, *args, **kwargs):
             observations, evidence = execute(coordinator, *args, **kwargs)
-            return [item for item in observations if item["attempt_kind"] == "target"], evidence
+            return [], evidence
 
         with patch.object(coordinator_fixture.ValidationCoordinator, "_execute_batch", incomplete_batch):
             result = self.run_conditional("INELIGIBLE")

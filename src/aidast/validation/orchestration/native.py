@@ -58,7 +58,7 @@ def build_native_validation_coordinator(
     except (OSError, ValueError) as exc:
         raise ValidationCoordinatorError(f"cannot load current TargetPolicy: {exc}") from exc
     resolver = credential_resolver or PipelineCredentialResolver(
-        db_path, backends=credential_backends,
+        db_path, backends=credential_backends, browser_sessions=True,
     )
     try:
         observer = oob_observer or HttpJsonOobObserver.from_environment()

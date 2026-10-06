@@ -14,7 +14,7 @@ from aidast.attack.store import _redact, _verify_handoff, _SECRET_VALUE, _URL
 from aidast.pipeline.models import verify_artifact
 from aidast.recon.policy import TargetPolicy
 
-from .evidence_policy import _HEADER, redact_text, sanitize_metadata
+from .evidence_policy import _HEADER, redact_text as safe_text, sanitize_metadata
 from ..contracts.models import ValidationError, canonical_json as canonical, canonical_sha256 as digest
 
 
@@ -34,10 +34,6 @@ def _row_digest(row: dict) -> str:
     return digest({key: ({"sha256": hashlib.sha256(value).hexdigest(), "length": len(value)}
                          if isinstance(value, bytes) else value)
                    for key, value in row.items()})
-
-
-def safe_text(value: Any) -> Any:
-    return redact_text(value)
 
 
 def _safe_metadata(value: Any) -> Any:

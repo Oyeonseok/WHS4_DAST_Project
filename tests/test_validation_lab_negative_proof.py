@@ -33,7 +33,7 @@ def _blind(*, kind: str = "auth_denial") -> BlindCase:
         parameter_name="category_id" if kind == "integer_route" else "probe",
         payload_template={}, required_identity_roles=(), credential_references=(),
         signal_types=("error_signature",) if kind == "integer_route" else ("authorization_boundary",),
-        controls={}, runtime_contract=runtime,
+        runtime_contract=runtime,
         attack_skill_name="hunt-sqli" if kind == "integer_route" else "hunt-auth-bypass",
         attack_skill_sha256="a" * 64, validation_skill_sha256="b" * 64,
         validation_profile_sha256="c" * 64,

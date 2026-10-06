@@ -93,12 +93,15 @@ class CandidateIntegrityGate:
         runtime_contract = None
         if runtime_json is not None:
             try:
-                runtime = validate_runtime_contract(json.loads(runtime_json))
+                raw_runtime = json.loads(runtime_json)
+                if canonical_sha256(raw_runtime) != runtime_sha256:
+                    raise CandidateIntegrityError("runtime_contract_sha256")
+                runtime = validate_runtime_contract(raw_runtime)
+            except CandidateIntegrityError:
+                raise
             except (ValueError, TypeError):
                 raise CandidateIntegrityError("runtime_contract_schema") from None
             runtime_contract = runtime.model_dump(mode="json")
-            if canonical_sha256(runtime_contract) != runtime_sha256:
-                raise CandidateIntegrityError("runtime_contract_sha256")
         development_json = spec.pop("development_contract_json", None)
         development_sha256 = spec.pop("development_contract_sha256", None)
         if (development_json is None) != (development_sha256 is None):
@@ -215,14 +218,38 @@ class CandidateIntegrityGate:
             raise CandidateIntegrityError("impact_development_identity_roles")
         references = []
         for role in roles:
-            row = self.conn.execute(
+            rows = self.conn.execute(
                 """SELECT credential_reference_id FROM credential_references
-                WHERE scan_id=? AND identity_role=? ORDER BY credential_reference_id LIMIT 1""",
+                WHERE scan_id=? AND identity_role=? ORDER BY credential_reference_id""",
                 (scan_id, role),
-            ).fetchone()
-            if row is None:
+            ).fetchall()
+            available = {row[0] for row in rows}
+            if not available:
                 raise CandidateIntegrityError("credential_resolution")
-            references.append(row[0])
+            source_references = set()
+            for source in source_requests:
+                if source["result_json"] is None:
+                    continue
+                try:
+                    result = json.loads(source["result_json"])
+                except (json.JSONDecodeError, TypeError):
+                    raise CandidateIntegrityError("source_request_identity") from None
+                if not isinstance(result, dict):
+                    raise CandidateIntegrityError("source_request_identity")
+                reference = result.get("credential_reference_id")
+                if reference is not None:
+                    if not isinstance(reference, str):
+                        raise CandidateIntegrityError("source_request_identity")
+                    if reference in available:
+                        source_references.add(reference)
+            if len(source_references) > 1:
+                raise CandidateIntegrityError("source_request_identity_ambiguous")
+            if source_references:
+                references.append(source_references.pop())
+            elif len(available) == 1:
+                references.append(next(iter(available)))
+            else:
+                raise CandidateIntegrityError("source_request_identity_ambiguous")
         attack_evidence = tuple(row[0] for row in self.conn.execute(
             "SELECT request_id FROM attack_requests WHERE finding_id=? ORDER BY request_id",
             (finding_id,),
@@ -236,11 +263,6 @@ class CandidateIntegrityGate:
             parameter_name=spec["parameter_name"], payload_template=spec["payload_template"],
             required_identity_roles=tuple(roles), credential_references=tuple(references),
             signal_types=profile.profile.signal_types,
-            controls={
-                "positive": profile.profile.control_positive.model_dump(mode="json"),
-                "negative": profile.profile.control_negative.model_dump(mode="json"),
-                "baseline_samples": profile.profile.baseline_samples,
-            },
             runtime_contract=runtime_contract,
             development_capabilities=tuple(
                 DevelopmentCapability(
@@ -448,12 +470,7 @@ class CandidateIntegrityGate:
             payload_template=composite_payload, required_identity_roles=required_roles,
             credential_references=credential_refs,
             signal_types=terminal.profile.profile.signal_types,
-            controls={
-                "positive": terminal.profile.profile.control_positive.model_dump(mode="json"),
-                "negative": terminal.profile.profile.control_negative.model_dump(mode="json"),
-                "baseline_samples": terminal.profile.profile.baseline_samples,
-                "terminal_only": True,
-            }, runtime_contract=chain_runtime,
+            runtime_contract=chain_runtime,
             development_capabilities=(
                 terminal.staged._blind_case.development_capabilities
             ),
@@ -491,22 +508,33 @@ class CandidateIntegrityGate:
             raise CandidateIntegrityError("confirmed_attempts")
         for row in rows:
             stage = self.conn.execute(
-                """SELECT s.status,s.stage,t.status,s.stage_run_id
+                """SELECT s.status,s.stage,t.status,s.stage_run_id,s.error_message
                 FROM attack_tasks t JOIN stage_runs s
                 ON s.stage_run_id=t.stage_run_id WHERE t.task_id=? AND t.scan_id=?""",
                 (row["task_id"], scan_id),
             ).fetchone()
-            if (
-                stage is None
-                or stage[1] != "attack"
-                or stage[2] != "completed"
-                or (
-                    stage[0] != "completed"
-                    and not self._has_completed_resume_lineage(
-                        scan_id=scan_id, source_stage_run_id=stage[3]
-                    )
-                )
-            ):
+            if stage is None or stage[1] != "attack":
+                raise CandidateIntegrityError("durable_attack_stage")
+            adopted = stage[0] != "completed" and self._has_completed_resume_lineage(
+                scan_id=scan_id, source_stage_run_id=stage[3]
+            )
+            if stage[2] == "completed" and (stage[0] == "completed" or adopted):
+                continue
+            # A native orchestrator can time out after its helper has durably
+            # recorded a confirmed attempt and reproduction spec. Only hand
+            # that candidate to Validation when every task request has a known
+            # completed outcome; Validation will replay the target independently.
+            timed_out_source = (
+                stage[0] == "failed"
+                and stage[4] == "native Attack Agent timed out"
+                and stage[2] in {"completed", "cancelled"}
+                and not self.conn.execute(
+                    """SELECT 1 FROM attack_http_requests
+                    WHERE scan_id=? AND task_id=? AND status!='completed' LIMIT 1""",
+                    (scan_id, row["task_id"]),
+                ).fetchone()
+            )
+            if not timed_out_source:
                 raise CandidateIntegrityError("durable_attack_stage")
         return rows
 
@@ -559,7 +587,7 @@ class CandidateIntegrityGate:
         placeholders = ",".join("?" for _ in identifiers)
         rows = self.conn.execute(
             f"""SELECT request_id,task_id,request_fingerprint,method,policy_sha256,status,url,
-            authorization_source,response_status
+            authorization_source,response_status,result_json
             FROM attack_http_requests WHERE scan_id=? AND request_id IN ({placeholders})""",
             (scan_id, *identifiers),
         ).fetchall()

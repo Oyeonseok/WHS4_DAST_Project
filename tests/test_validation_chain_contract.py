@@ -161,7 +161,7 @@ class ValidationChainContractTests(unittest.TestCase):
                 case_id="case", target_kind="chain", endpoint="https://test/items/{id}",
                 method="GET", injection_location="path", parameter_name="id",
                 payload_template={}, required_identity_roles=(), credential_references=(),
-                signal_types=("response_diff",), controls={}, attack_skill_name="chain",
+                signal_types=("response_diff",), attack_skill_name="chain",
                 attack_skill_sha256="a" * 64, validation_skill_sha256="b" * 64,
                 validation_profile_sha256="c" * 64,
                 runtime_contract=self.contract().model_dump(mode="json"),
@@ -261,7 +261,7 @@ class ValidationChainContractTests(unittest.TestCase):
                     method="GET", injection_location="query", parameter_name="id",
                     payload_template={}, required_identity_roles=(), credential_references=(),
                     signal_types=(("dom_effect",) if kind == "browser" else ("oob_callback",)),
-                    controls={}, attack_skill_name="chain", attack_skill_sha256="a" * 64,
+                    attack_skill_name="chain", attack_skill_sha256="a" * 64,
                     validation_skill_sha256="b" * 64, validation_profile_sha256="c" * 64,
                     runtime_contract=contract.model_dump(mode="json"),
                 )
