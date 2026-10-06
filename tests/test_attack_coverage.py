@@ -1353,6 +1353,67 @@ def test_model_timeout_with_partial_lead_closes_lead_and_continues(
         ).fetchall() == [("completed",)]
 
 
+def test_completed_envelope_with_open_lead_retries_without_failing_pipeline(
+    tmp_path: Path,
+) -> None:
+    imported = imported_pipeline(tmp_path)
+
+    class OpenLeadOnceAgent(UnsupportedCoverageAgent):
+        def run_attack_orchestrator(self, **kwargs):
+            if not self.calls:
+                self.calls.append(kwargs)
+                lead_task, *other_tasks = kwargs["attack_tasks"]
+                transition_task(
+                    kwargs["db_path"], kwargs["scan_id"],
+                    kwargs["stage_run_id"], lead_task["task_id"], "running",
+                )
+                with sqlite3.connect(kwargs["db_path"]) as conn:
+                    conn.execute(
+                        """INSERT INTO attack_attempts
+                           (attempt_id,scan_id,task_id,skill_name,endpoint_id,
+                            request_fingerprint,outcome)
+                           VALUES ('partial-completion-lead',?,?,?,?,?,'lead')""",
+                        (
+                            kwargs["scan_id"], lead_task["task_id"],
+                            lead_task["skill_name"], lead_task["endpoint_id"],
+                            "f" * 64,
+                        ),
+                    )
+                for task in other_tasks:
+                    transition_task(
+                        kwargs["db_path"], kwargs["scan_id"],
+                        kwargs["stage_run_id"], task["task_id"], "skipped",
+                        "unsupported safe test contract",
+                    )
+                return AttackStageResult(
+                    status="COMPLETED", scan_id=kwargs["scan_id"],
+                    db_path=str(kwargs["db_path"]),
+                    stage_run_id=kwargs["stage_run_id"],
+                    attack_agent_ids=["open-lead-agent"],
+                    summary="batch returned with a provisional lead",
+                )
+            return super().run_attack_orchestrator(**kwargs)
+
+    agent = OpenLeadOnceAgent()
+    result = ExhaustiveAttackCoordinator(
+        agent=agent, db_path=imported.pipeline_database,
+        scope_path=imported.recon_database.parent / "Scope.md",
+        policy_path=imported.recon_database.parent / "TargetPolicy.json",
+        batch_size=2,
+    ).run(imported.scan_id)
+
+    assert len(agent.calls) > 1
+    assert result.coverage["unfinished"] == 0
+    with sqlite3.connect(imported.pipeline_database) as conn:
+        assert conn.execute(
+            """SELECT outcome,resolved_at IS NOT NULL FROM attack_attempts
+               WHERE attempt_id='partial-completion-lead'"""
+        ).fetchone() == ("inconclusive", 1)
+        assert conn.execute(
+            "SELECT DISTINCT status FROM stage_runs WHERE stage='attack'"
+        ).fetchall() == [("completed",)]
+
+
 @pytest.mark.parametrize("summary", [
     (
         "The single Attack Agent failed to start because its selected model "

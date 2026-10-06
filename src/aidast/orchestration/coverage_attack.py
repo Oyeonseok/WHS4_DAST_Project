@@ -27,7 +27,12 @@ from aidast.attack.db_cli import (
     commit_attempt, transition_task as transition_attack_task,
 )
 from aidast.attack.request_cli import RequestGuardError, guarded_request
-from aidast.orchestration.attack import AttackBatchFailure, AttackCoordinator, AttackCoordinatorError
+from aidast.orchestration.attack import (
+    AttackBatchFailure,
+    AttackCoordinator,
+    AttackCoordinatorError,
+    AttackUnresolvedLeadFailure,
+)
 from aidast.pipeline.lifecycle import finish_stage_run, start_stage_run, transition_task
 
 
@@ -420,6 +425,10 @@ class ExhaustiveAttackCoordinator:
             policy_refusal = getattr(exc, "failure_code", None) == "model_policy_refusal"
             model_capacity = getattr(exc, "failure_code", None) == "model_capacity"
             model_timeout = getattr(exc, "failure_code", None) == "timeout"
+            unresolved_lead_failure = isinstance(exc, AttackUnresolvedLeadFailure)
+            unresolved_attempt_ids = tuple(
+                getattr(exc, "unresolved_attempt_ids", ())
+            )
             if model_capacity or model_timeout:
                 task_rows = conn.execute(
                     """SELECT task_id,status FROM attack_tasks
@@ -454,6 +463,50 @@ class ExhaustiveAttackCoordinator:
                     )
                     if callable(activate_fallback):
                         activate_fallback()
+            if unresolved_lead_failure and unresolved_attempt_ids:
+                placeholders = ",".join("?" for _ in unresolved_attempt_ids)
+                lead_coverage = conn.execute(
+                    f"""SELECT DISTINCT c.coverage_id,c.attempt_count,c.last_task_id
+                        FROM attack_attempts a
+                        JOIN attack_tasks t ON t.task_id=a.task_id
+                        JOIN attack_coverage_items c
+                          ON c.last_task_id=t.task_id
+                         AND c.last_stage_run_id=t.stage_run_id
+                        WHERE t.stage_run_id=? AND c.status='running'
+                          AND a.attempt_id IN ({placeholders})
+                          AND a.outcome='lead' AND a.finding_id IS NULL
+                          AND a.resolved_at IS NULL""",
+                    (stage_run_id, *unresolved_attempt_ids),
+                ).fetchall()
+                reason = (
+                    "Attack batch returned before resolving a provisional lead; "
+                    "fresh coverage retry must reproduce or reject it."
+                )
+                resolve_interrupted_stage_leads(
+                    conn, stage_run_id=stage_run_id, reason=reason,
+                )
+                task_rows = conn.execute(
+                    """SELECT task_id,status FROM attack_tasks
+                       WHERE stage_run_id=? AND status IN ('pending','running')""",
+                    (stage_run_id,),
+                ).fetchall()
+                for task in task_rows:
+                    transition_task(
+                        conn, task["task_id"], status="cancelled",
+                        error_message=reason,
+                    )
+                for coverage in lead_coverage:
+                    terminal = coverage["attempt_count"] >= self.retry_limit
+                    transition_coverage(
+                        conn, coverage["coverage_id"],
+                        "error_terminal" if terminal else "error_retryable",
+                        (
+                            "retry limit reached after unresolved provisional lead"
+                            if terminal else reason
+                        ),
+                        stage_run_id=stage_run_id,
+                        task_id=coverage["last_task_id"],
+                    )
             if policy_refusal:
                 open_leads = conn.execute(
                     """SELECT COUNT(*) FROM attack_attempts a
@@ -517,6 +570,14 @@ class ExhaustiveAttackCoordinator:
                      AND a.finding_id IS NULL AND a.resolved_at IS NULL""",
                 (stage_run_id,),
             ).fetchone()[0]
+            if unresolved_attempt_ids:
+                placeholders = ",".join("?" for _ in unresolved_attempt_ids)
+                open_leads += conn.execute(
+                    f"""SELECT COUNT(*) FROM attack_attempts
+                        WHERE attempt_id IN ({placeholders}) AND outcome='lead'
+                          AND finding_id IS NULL AND resolved_at IS NULL""",
+                    unresolved_attempt_ids,
+                ).fetchone()[0]
             stopped_probes = self._record_stopped_probes(conn, stage_run_id) if isinstance(exc, AttackBatchFailure) else set()
             unknown_requests = sum(row[0] not in stopped_probes for row in conn.execute(
                 """SELECT request_id FROM attack_http_requests

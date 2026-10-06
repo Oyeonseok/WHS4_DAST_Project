@@ -27,6 +27,18 @@ class AttackBatchFailure(AttackCoordinatorError):
     """An identified native batch reported failure; durable tasks decide continuation."""
 
 
+class AttackUnresolvedLeadFailure(AttackBatchFailure):
+    """A bounded batch returned while one of its provisional leads was still open."""
+
+    failure_code = "unresolved_lead"
+
+    def __init__(self, attempt_ids: list[str]) -> None:
+        self.unresolved_attempt_ids = tuple(attempt_ids)
+        super().__init__(
+            f"Attack Agent left {len(self.unresolved_attempt_ids)} unresolved lead(s)"
+        )
+
+
 class AttackCoordinator:
     """Bridge completed Recon state to a native Codex Attack sub-agent."""
 
@@ -491,9 +503,7 @@ class AttackCoordinator:
         # after its stage snapshot.
         unresolved = [row[0] for row in new_attempts if row[1] == "lead"]
         if unresolved:
-            raise AttackCoordinatorError(
-                f"Attack Agent left {len(unresolved)} unresolved lead(s)"
-            )
+            raise AttackUnresolvedLeadFailure(unresolved)
         invalid_confirmed = [
             row[0] for row in new_attempts
             if row[1] == "confirmed" and (not row[2] or not row[3])
