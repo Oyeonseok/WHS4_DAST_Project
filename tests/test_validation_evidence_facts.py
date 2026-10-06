@@ -18,7 +18,6 @@ def assessment(signal_type):
         "case_id": "case", "blind_case_sha256": "f" * 64,
         "reproduced": True, "signal_types": (signal_type,),
         "target_attempt_ids": ("t1", "t2", "t3"),
-        "control_attempt_ids": ("p1", "n1"),
         "evidence_ids": ("e-t1", "e-t2", "e-t3", "e-p1", "e-n1"),
         "impact_boundary": axis, "impact_sensitivity": axis,
         "impact_actor_requirements": axis, "conclusion": "Fixture replay.",
@@ -45,7 +44,7 @@ def observations(kind, target_details, negative_details, positive_details=None):
 
 
 class EvidenceFactExtractionTests(unittest.TestCase):
-    def test_http_assertion_matches_contract_and_negative_control(self):
+    def test_http_assertion_matches_target_contract(self):
         assertion = {"assertion_id": "marker", "kind": "body_contains",
                      "expected": "unique-source-marker"}
         runtime = {
@@ -70,11 +69,11 @@ class EvidenceFactExtractionTests(unittest.TestCase):
         )
         self.assertEqual(len(extracted.facts), 1)
         fact = extracted.facts[0]
-        self.assertEqual(fact["kind"], "assertion_differential")
+        self.assertEqual(fact["kind"], "target_assertion_observed")
         self.assertEqual(fact["runtime_kind"], "http")
         self.assertEqual(fact["assertion_kind"], "body_contains")
         self.assertEqual(fact["target_evidence_ids"], ["e-t1", "e-t2", "e-t3"])
-        self.assertEqual(fact["negative_evidence_id"], "e-n1")
+        self.assertNotIn("negative_evidence_id", fact)
         self.assertEqual(fact["provenance"], "contract_bound_adapter_summary")
         self.assertNotIn("protected_content_not_field_name", str(extracted))
         missing_ledger = [{**item, "details": {
@@ -144,7 +143,7 @@ class EvidenceFactExtractionTests(unittest.TestCase):
             "hunt-ssrf", oob, assessment("oob_callback"),
             oob_replay, replay_status="complete",
         ).facts
-        self.assertEqual([fact["kind"] for fact in oob_facts], ["nonce_callback_differential"])
+        self.assertEqual([fact["kind"] for fact in oob_facts], ["target_nonce_callback_observed"])
         self.assertEqual(oob_facts[0]["provenance"], "contract_bound_adapter_summary")
         self.assertNotIn("actual_server_source_principal", str(oob_facts))
 
@@ -155,7 +154,7 @@ class EvidenceFactExtractionTests(unittest.TestCase):
         )
         self.assertEqual(extracted.facts, ())
 
-    def test_different_json_paths_are_not_the_same_control_predicate(self):
+    def test_different_legacy_control_path_does_not_change_target_fact(self):
         target = {"assertion_id": "same-label", "kind": "json_equals",
                   "expected": "marker", "path": ["protected"]}
         negative = {**target, "path": ["public"]}
@@ -170,10 +169,10 @@ class EvidenceFactExtractionTests(unittest.TestCase):
                   "actual_sha256": canonical_sha256(None)}
         replay = observations("http", {"evaluation": {"assertions": [passed]}},
                               {"evaluation": {"assertions": [failed]}})
-        self.assertEqual(extract_replay_facts(
+        self.assertEqual(len(extract_replay_facts(
             "hunt-idor", runtime, assessment("authorization_boundary"),
             replay, replay_status="complete",
-        ).facts, ())
+        ).facts), 1)
 
     def test_compact_native_channels_bind_control_summaries(self):
         from test_validation_multipart_runtime import attempt as multipart_attempt
@@ -247,13 +246,13 @@ class EvidenceFactExtractionTests(unittest.TestCase):
             replay_status="complete",
         )
         values = [fact for fact in receipt.facts
-                  if fact["kind"] == "json_value_differential"]
+                  if fact["assertion_kind"] == "json_path_nonempty_string"]
         self.assertEqual(len(values), 1)
         self.assertEqual(values[0]["value_shape"], "nonempty_string")
         self.assertNotIn("private-seed-hash", str(receipt))
         field_only = observations("http", evaluated(b'{"users":[{"password":""}]}'),
                                   negative)
-        self.assertFalse(any(fact["kind"] == "json_value_differential"
+        self.assertFalse(any(fact["assertion_kind"] == "json_path_nonempty_string"
                              for fact in extract_replay_facts(
                                  "hunt-source-leak", runtime,
                                  assessment("error_signature"), field_only,

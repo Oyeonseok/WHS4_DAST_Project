@@ -10,26 +10,7 @@
   "target_expected_signal": {
     "kind": "hunt-oauth_verified",
     "criterion": "the authorization response, code, token, redirect, or account binding is accepted outside its declared binding",
-    "requires_fresh_target_and_control_evidence": true
-  },
-  "control_positive": {
-    "payload_template": {
-      "mode": "channel_health_baseline"
-    },
-    "expected_signal": {
-      "kind": "authorization_boundary_channel_operational",
-      "criterion": "the same transport, identity, parser, browser, callback, or timing channel produces its declared harmless baseline"
-    },
-    "signal_type": "authorization_boundary"
-  },
-  "control_negative": {
-    "payload_template": {
-      "mode": "inert_same_shape_control"
-    },
-    "expected_signal": {
-      "kind": "no_authorization_boundary_target_effect",
-      "criterion": "an inert same-shape input does not produce the target security effect"
-    }
+    "requires_fresh_target_evidence": true
   },
   "impact_rules": {
     "boundary": "identify the exact unauthenticated, identity, role, tenant, or administrator boundary crossed",

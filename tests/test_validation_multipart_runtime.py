@@ -128,27 +128,12 @@ class BinaryAndMultipartContractTests(unittest.TestCase):
         )
         self.assertIsInstance(validate_runtime_contract(runtime.model_dump(mode="json")), MultipartRuntimeContract)
         validate_runtime_semantics(runtime, SkillProfileResolver().resolve("hunt-file-upload").profile)
-        mismatched = runtime.model_copy(update={"negative_control": runtime.negative_control.model_copy(
-            update={"assertions": (ResponseAssertion(assertion_id="other", kind="body_contains", expected="other"),)}
-        )})
-        with self.assertRaisesRegex(ValueError, "same target proof assertions"):
-            validate_runtime_semantics(mismatched, SkillProfileResolver().resolve("hunt-file-upload").profile)
-        duration_mismatch = runtime.model_copy(update={"negative_control": runtime.negative_control.model_copy(
-            update={"assertions": (
-                ResponseAssertion(assertion_id="body", kind="body_contains", expected="uploaded"),
-                ResponseAssertion(assertion_id="duration", kind="duration_at_most_ms", expected=1),
-            )}
-        )})
-        timed_target = runtime.model_copy(update={"target": runtime.target.model_copy(
-            update={"assertions": (
-                ResponseAssertion(assertion_id="body", kind="body_contains", expected="uploaded"),
-                ResponseAssertion(assertion_id="duration", kind="duration_at_most_ms", expected=2),
-            )}
-        )})
-        with self.assertRaisesRegex(ValueError, "same target proof assertions"):
-            validate_runtime_semantics(duration_mismatch.model_copy(
-                update={"target": timed_target.target}
-            ), SkillProfileResolver().resolve("hunt-file-upload").profile)
+        self.assertNotIn("negative_control", runtime.model_dump(mode="json"))
+        status_only = runtime.model_copy(update={"target": runtime.target.model_copy(update={
+            "assertions": (ResponseAssertion(assertion_id="status", kind="status_equals", expected=200),),
+        })})
+        with self.assertRaisesRegex(ValueError, "header, body, or JSON"):
+            validate_runtime_semantics(status_only, SkillProfileResolver().resolve("hunt-file-upload").profile)
 
 
 class MultipartLoopbackTests(unittest.TestCase):

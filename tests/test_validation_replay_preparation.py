@@ -63,5 +63,5 @@ def test_planner_decodes_scalar_envelope_to_executable_contract():
     )
     prepared = CodexReplayPreparer(agent=agent).prepare({})
     assert prepared.runtime_contract.target.identity_mode == "case"
-    assert prepared.runtime_contract.negative_control.identity_mode == "anonymous"
+    assert "negative_control" not in prepared.runtime_contract.model_dump(mode="json")
     assert prepared.runtime_contract.target.assertions[0].path == ("data", 0, "id")

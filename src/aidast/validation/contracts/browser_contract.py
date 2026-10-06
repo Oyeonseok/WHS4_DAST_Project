@@ -6,7 +6,7 @@ from typing import Annotated, Any, Literal
 
 from pydantic import Field, field_validator, model_validator
 
-from .models import StrictContract, canonical_sha256
+from .models import StrictContract, TargetOnlyRuntimeContract, canonical_sha256
 from .runtime_contract import HttpRequestTemplate
 
 
@@ -62,17 +62,15 @@ class BrowserAttemptContract(StrictContract):
         return self
 
 
-class BrowserRuntimeContract(StrictContract):
+class BrowserRuntimeContract(TargetOnlyRuntimeContract):
     runtime_kind: Literal["browser"]
     schema_version: Literal[1]
     target: BrowserAttemptContract
-    positive_control: BrowserAttemptContract
-    negative_control: BrowserAttemptContract
 
     def for_attempt(self, attempt_kind: str) -> BrowserAttemptContract:
-        if attempt_kind not in {"target", "positive_control", "negative_control"}:
+        if attempt_kind != "target":
             raise ValueError("unknown Validation attempt kind")
-        return getattr(self, attempt_kind)
+        return self.target
 
 
 class BrowserElementSnapshot(StrictContract):

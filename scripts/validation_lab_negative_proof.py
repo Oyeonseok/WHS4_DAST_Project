@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Callable, Mapping
 
 from aidast.validation import BlindCase, ReproductionObservation, canonical_sha256
-from aidast.validation.contracts.runtime_contract import HttpRequestTemplate, render_http_request
+from aidast.validation.contracts.runtime_contract import HttpRequestTemplate, render_http_request, validate_runtime_contract
 from aidast.validation.execution.http_adapter import HttpReproductionPort
 
 try:
@@ -156,9 +156,11 @@ def load_lab_negative_proofs(
             ):
                 raise ValueError(f"route guard mismatch: {candidate_id}")
             endpoint, _, _, runtime, skill = _contract(dict(candidate))
-            runtime_sha = canonical_sha256(runtime)
+            stored_runtime = json.loads(spec["runtime_contract_json"])
+            runtime_sha = canonical_sha256(stored_runtime)
             if (spec["attack_skill_name"] != skill or
-                    spec["runtime_contract_sha256"] != runtime_sha):
+                    spec["runtime_contract_sha256"] != runtime_sha or
+                    validate_runtime_contract(stored_runtime).model_dump(mode="json") != runtime):
                 raise ValueError(f"staged runtime mismatch: {candidate_id}")
             target_url, target_headers, target_body = render_http_request(
                 BASES[candidate["project"]] + endpoint,

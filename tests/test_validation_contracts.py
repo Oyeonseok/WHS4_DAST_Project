@@ -18,8 +18,7 @@ def axis(score=1):
 class ValidationContractTests(unittest.TestCase):
     def assessment(self):
         return {"case_id": "case", "blind_case_sha256": "a" * 64, "reproduced": True,
-                "signal_types": ("response_diff",), "target_attempt_ids": ("target",),
-                "control_attempt_ids": ("positive", "negative"), "evidence_ids": ("evidence",),
+                "signal_types": ("response_diff",), "target_attempt_ids": ("target",), "evidence_ids": ("evidence",),
                 "impact_boundary": axis(), "impact_sensitivity": axis(),
                 "impact_actor_requirements": axis(), "conclusion": "bounded fixture"}
 
@@ -27,6 +26,7 @@ class ValidationContractTests(unittest.TestCase):
         self.assertEqual(canonical_sha256({"a": 1, "b": 2}), canonical_sha256({"b": 2, "a": 1}))
 
     def test_blind_assessment_forbids_status_and_duplicate_references(self):
+        self.assertNotIn("control_attempt_ids", BlindAssessment.model_json_schema()["properties"])
         document = self.assessment() | {"current_status": "CONFIRMED"}
         with self.assertRaises(PydanticValidationError):
             BlindAssessment.model_validate(document)
@@ -65,7 +65,7 @@ class ValidationContractTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 evaluate_impact(*invalid)
 
-    def test_decision_priority_and_clean_batch_requirement(self):
+    def test_decision_priority_and_grounded_target_requirement(self):
         engine = DecisionEngine()
         sufficient = evaluate_impact(1, 1, 1)
         self.assertEqual(engine.decide(DecisionInput(integrity_ok=False, known=True)), "INCONCLUSIVE")
@@ -113,13 +113,23 @@ class ValidationContractTests(unittest.TestCase):
         self.assertEqual(engine.decide(DecisionInput(resolvable_blocker=True)), "DEVELOPING")
         self.assertEqual(engine.decide(DecisionInput(resolvable_blocker=True, development_used=True)), "BLOCKED")
         self.assertEqual(engine.decide(DecisionInput(target_observations=(True, True, False, True, True),
-                                                          impact=sufficient)), "INCONCLUSIVE")
+                                                          impact=sufficient)), "CONFIRMED")
         self.assertEqual(engine.decide(DecisionInput(target_observations=(True, True, True),
             semantic_conflict=True, attack_has_positive_evidence=True, impact=sufficient)), "CONTESTED")
         self.assertEqual(engine.decide(DecisionInput(target_observations=(True, True, True),
                                                           impact=evaluate_impact(0, 3, 3))), "UNDERPOWERED")
         self.assertEqual(engine.decide(DecisionInput(target_observations=(True, True, True),
                                                           impact=sufficient)), "CONFIRMED")
+
+    def test_single_grounded_target_can_complete_decision(self):
+        engine = DecisionEngine()
+        self.assertEqual(engine.decide(DecisionInput(
+            target_observations=(True,), impact=evaluate_impact(1, 1, 1),
+        )), "CONFIRMED")
+        self.assertEqual(engine.decide(DecisionInput(
+            explicit_non_exploit_evidence=True, target_observations=(False,),
+            target_outcomes=("not_observed",),
+        )), "DISPROVEN")
 
     def test_explicit_negative_observation_requires_completed_negative_replay(self):
         base = dict(outcome="not_observed", signal_type="response_diff",
@@ -135,7 +145,7 @@ class ValidationContractTests(unittest.TestCase):
             method="GET", injection_location="query", parameter_name="id",
             payload_template={"id": "<slot:int>"}, required_identity_roles=("subscriber",),
             credential_references=("opaque_ref",), signal_types=("response_diff",),
-            controls={"positive": {}, "negative": {}}, attack_skill_name="hunt-idor",
+            attack_skill_name="hunt-idor",
             attack_skill_sha256="a" * 64, validation_skill_sha256="b" * 64,
             validation_profile_sha256="c" * 64)
         claim = AttackClaim(target_kind="finding", target_id="finding", vuln_class="idor",
@@ -143,6 +153,8 @@ class ValidationContractTests(unittest.TestCase):
             attack_evidence_ids=("attack_evidence",))
         staged = StagedBlindCase(blind, claim)
         view = staged.blind_view()
+        self.assertNotIn("controls", BlindCase.model_json_schema()["properties"])
+        self.assertNotIn("controls", view)
         self.assertNotIn("claimed_impact", view)
         self.assertNotIn("db_path", view)
         with self.assertRaises(BlindDisclosureError):
@@ -161,7 +173,7 @@ class ValidationContractTests(unittest.TestCase):
             method="GET", injection_location="query", parameter_name="id",
             payload_template={"id": "<slot:int>"}, required_identity_roles=("subscriber",),
             credential_references=("opaque_ref",), signal_types=("response_diff",),
-            controls={"positive": {}, "negative": {}}, attack_skill_name="hunt-idor",
+            attack_skill_name="hunt-idor",
             attack_skill_sha256="a" * 64, validation_skill_sha256="b" * 64,
             validation_profile_sha256="c" * 64)
         claim = AttackClaim(target_kind="finding", target_id="finding", vuln_class="idor",
@@ -197,7 +209,7 @@ class ValidationContractTests(unittest.TestCase):
             method="GET", injection_location="query", parameter_name="id",
             payload_template={"id": "<slot:int>"}, required_identity_roles=("subscriber",),
             credential_references=("opaque_ref",), signal_types=("response_diff",),
-            controls={"positive": {}, "negative": {}}, attack_skill_name="hunt-idor",
+            attack_skill_name="hunt-idor",
             attack_skill_sha256="a" * 64, validation_skill_sha256="b" * 64,
             validation_profile_sha256="c" * 64)
         claim = AttackClaim(target_kind="finding", target_id="finding", vuln_class="idor",

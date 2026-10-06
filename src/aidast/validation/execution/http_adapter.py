@@ -13,6 +13,7 @@ from aidast.recon.policy import TargetPolicy
 
 from ..contracts.models import BlindCase
 from ..contracts.models import ReproductionObservation
+from .credentials import credential_preflight_reason
 from .request_broker import (ValidationCredentialError, ValidationPolicyRejection,
                              ValidationRequestBroker)
 from ..contracts.runtime_contract import (HttpRuntimeContract, evaluate_http_response,
@@ -49,12 +50,12 @@ class HttpReproductionPort:
             return "http_runtime_contract_missing"
         if blind_case.credential_references and self.credential_resolver is None:
             return "credential_resolver_missing"
-        resolver_preflight = getattr(self.credential_resolver, "unsupported_reason", None)
-        if callable(resolver_preflight):
-            for reference in blind_case.credential_references:
-                reason = resolver_preflight(reference)
-                if reason is not None:
-                    return reason
+        for reference in blind_case.credential_references:
+            reason = credential_preflight_reason(
+                self.credential_resolver, reference, blind_case.endpoint,
+            )
+            if reason is not None:
+                return reason
         return None
 
     def execute(self, blind_case: BlindCase, *, attempt_kind: str, batch_no: int,
@@ -119,7 +120,7 @@ class HttpReproductionPort:
             "response_bytes": len(response.body), "evaluation": evaluation,
             "request_ids": broker.request_ids,
         }
-        if runtime is not None and runtime.session_verification is not None and attempt_kind != "positive_control":
+        if runtime is not None and runtime.session_verification is not None:
             proof = self._verify_session(
                 blind_case, runtime, response, attempt_kind=attempt_kind,
                 attempt_id=attempt_id, db_path=db_path, scan_id=scan_id,
@@ -127,9 +128,6 @@ class HttpReproductionPort:
             )
             details["protected_access"] = proof
             details["request_ids"].extend(proof.get("request_ids", []))
-            # A public verification resource cannot prove an authentication boundary.
-            if attempt_kind == "negative_control" and proof.get("protected_fields_observed") is True:
-                observed = True
         return ReproductionObservation(
             outcome="blocked" if blocker else "observed" if observed else "not_observed",
             signal_type=blind_case.signal_types[0], signal_observed=observed,

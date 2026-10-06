@@ -144,7 +144,7 @@ class GrpcContractTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             loaded.deserialize_response(b"x" * 1000001)
 
-    def test_registered_contract_semantics_require_distinct_matching_controls(self):
+    def test_registered_contract_semantics_require_target_message_proof(self):
         from aidast.validation.contracts.runtime_contract import validate_runtime_contract
         from aidast.validation.contracts.runtime_semantics import validate_runtime_semantics
         from aidast.validation.core.profiles import SkillProfileResolver
@@ -153,14 +153,11 @@ class GrpcContractTests(unittest.TestCase):
         runtime = validate_runtime_contract(runtime_document())
         self.assertIsInstance(runtime, cls)
         validate_runtime_semantics(runtime, profile)
-        for mismatch in ("message", "assertions"):
-            doc = runtime_document()
-            if mismatch == "message":
-                doc["negative_control"]["message"] = doc["target"]["message"]
-            else:
-                doc["negative_control"]["assertions"][0]["expected"] = "other"
-            with self.assertRaises(ValueError):
-                validate_runtime_semantics(cls.model_validate(doc), profile)
+        self.assertNotIn("negative_control", runtime.model_dump(mode="json"))
+        doc = runtime_document()
+        doc["target"]["assertions"] = [{"assertion_id": "status", "kind": "grpc_status_equals", "expected": "OK"}]
+        with self.assertRaisesRegex(ValueError, "message, trailer, error, or timing"):
+            validate_runtime_semantics(cls.model_validate(doc), profile)
 
     def test_assertions_preserve_only_digests_status_sizes_and_duration(self):
         mod = self.module()
@@ -311,7 +308,7 @@ class GrpcAdapterTests(unittest.TestCase):
             }),
         )
         for policy in cases:
-            for attempt_kind in ("target", "positive_control", "negative_control"):
+            for attempt_kind in ("target",):
                 with self.subTest(
                     policy=policy.model_dump(mode="json"), attempt_kind=attempt_kind,
                 ):
@@ -550,7 +547,7 @@ class GrpcAdapterTests(unittest.TestCase):
                 self.assertIn(("grpc.enable_http_proxy", 0), create.call_args.kwargs["options"])
                 self.assertNotIn("grpc.ssl_target_name_override", str(create.call_args))
 
-    def test_loopback_ok_negative_permission_denied_trailer_and_bounds(self):
+    def test_loopback_target_permission_denied_trailer_and_bounds(self):
         from aidast.validation.contracts.grpc_contract import GrpcRuntimeContract
         loaded = GrpcRuntimeContract.model_validate(runtime_document()).target.load(None)
         received = []
@@ -579,7 +576,6 @@ class GrpcAdapterTests(unittest.TestCase):
                                                 "trailer": "x-result", "expected": "inert"})
             result = self.execute(doc=doc, endpoint=endpoint)
             self.assertTrue(result.signal_observed)
-            self.assertFalse(self.execute(endpoint=endpoint, attempt_kind="negative_control").signal_observed)
             doc = runtime_document()
             doc["target"]["message"]["value"] = "denied"
             doc["target"]["assertions"] = [
@@ -598,7 +594,7 @@ class GrpcAdapterTests(unittest.TestCase):
             doc["target"]["max_response_bytes"] = 32
             self.assertEqual(self.execute(doc=doc, endpoint=endpoint).outcome, "outcome_unknown")
             self.assertEqual(self.rows()[-1]["status"], "outcome_unknown")
-            self.assertEqual(received, ["target", "inert", "denied", "unavailable", "large"])
+            self.assertEqual(received, ["target", "denied", "unavailable", "large"])
         finally:
             server.stop(0).wait()
 

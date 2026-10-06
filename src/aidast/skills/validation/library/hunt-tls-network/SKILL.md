@@ -11,7 +11,7 @@ Apply this guidance only to the staged BlindCase, its immutable contract, and fr
 
 the tested endpoint exhibits the declared protocol, certificate, or transport-policy weakness
 
-Require the declared positive control to prove the signal channel is operational and the inert negative control to stay clear. Do not infer reproduction from status codes, hashes, timing noise, or the Attack claim alone.
+Require fresh target evidence for the declared security effect. Do not infer reproduction from status codes, hashes, timing noise, or the Attack claim alone.
 
 ## Impact interpretation
 
