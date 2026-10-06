@@ -50,6 +50,18 @@ class StrictContract(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
 
+class TargetOnlyRuntimeContract(StrictContract):
+    """Read historical replay documents while discarding retired controls."""
+
+    @model_validator(mode="before")
+    @classmethod
+    def ignore_legacy_controls(cls, value: Any) -> Any:
+        if isinstance(value, dict):
+            return {key: item for key, item in value.items()
+                    if key not in {"positive_control", "negative_control"}}
+        return value
+
+
 class ImpactAxisProposal(StrictContract):
     score: Annotated[int, Field(ge=0, le=3)]
     evidence_ids: tuple[Identifier, ...] = Field(min_length=1, max_length=128)
@@ -67,8 +79,7 @@ class BlindAssessment(StrictContract):
     blind_case_sha256: Digest
     reproduced: StrictBool | None
     signal_types: tuple[SignalType, ...] = Field(max_length=7)
-    target_attempt_ids: tuple[Identifier, ...] = Field(max_length=6)
-    control_attempt_ids: tuple[Identifier, ...] = Field(max_length=64)
+    target_attempt_ids: tuple[Identifier, ...] = Field(min_length=1, max_length=128)
     evidence_ids: tuple[Identifier, ...] = Field(max_length=128)
     blocker_axis: BlockerAxis | None = None
     blocker_reason: Explanation | None = None
@@ -79,7 +90,7 @@ class BlindAssessment(StrictContract):
 
     @model_validator(mode="after")
     def consistent_references(self) -> "BlindAssessment":
-        groups = (self.signal_types, self.target_attempt_ids, self.control_attempt_ids, self.evidence_ids)
+        groups = (self.signal_types, self.target_attempt_ids, self.evidence_ids)
         if any(len(items) != len(set(items)) for items in groups):
             raise ValueError("duplicate blind-assessment references are not allowed")
         if (self.blocker_axis is None) != (self.blocker_reason is None):
@@ -172,7 +183,6 @@ class BlindCase(StrictContract):
     required_identity_roles: tuple[str, ...]
     credential_references: tuple[Identifier, ...]
     signal_types: tuple[str, ...]
-    controls: dict[str, Any]
     runtime_contract: dict[str, Any] | None = None
     development_capabilities: tuple[DevelopmentCapability, ...] = ()
     impact_development_capabilities: tuple[ImpactDevelopmentCapability, ...] = ()
@@ -302,7 +312,7 @@ class ReproductionObservation(StrictContract):
 class ReproductionPort(Protocol):
     def execute(
         self, blind_case: BlindCase, *, attempt_kind: Literal[
-            "target", "positive_control", "negative_control"
+            "target"
         ], batch_no: int, ordinal: int, attempt_id: str, db_path: Path,
         scan_id: str, stage_run_id: str, case_id: str, policy: TargetPolicy,
     ) -> ReproductionObservation: ...

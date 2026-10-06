@@ -74,13 +74,13 @@ def bound_revalidated_assessment(
         return assessment, audit
     current_replay = _replay_signature(
         conn, case["case_id"], stage_run_id,
-        (*assessment.target_attempt_ids, *assessment.control_attempt_ids),
+        assessment.target_attempt_ids,
     )
     prior_replay = _replay_signature(
         conn, case["case_id"], prior_stage,
-        (*prior_document["target_attempt_ids"], *prior_document["control_attempt_ids"]),
+        tuple(prior_document["target_attempt_ids"]),
     )
-    if (len(current_replay) < 5
+    if (not current_replay
             or _without_batch_numbers(current_replay)
                 != _without_batch_numbers(prior_replay)):
         return assessment, audit

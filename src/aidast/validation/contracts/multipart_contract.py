@@ -10,7 +10,7 @@ from pydantic import Field, field_validator, model_validator
 from aidast.core.http_safety import is_sensitive_header
 
 from .binary import BinaryArtifactResolver, BinaryValue
-from .models import StrictContract, canonical_sha256
+from .models import StrictContract, TargetOnlyRuntimeContract, canonical_sha256
 from .runtime_contract import (
     JsonScalar, ResponseAssertion, _HEADER_NAME, render_http_request,
     HttpRequestTemplate,
@@ -111,17 +111,15 @@ class MultipartAttemptContract(StrictContract):
         return self
 
 
-class MultipartRuntimeContract(StrictContract):
+class MultipartRuntimeContract(TargetOnlyRuntimeContract):
     runtime_kind: Literal["multipart"]
     schema_version: Literal[1]
     target: MultipartAttemptContract
-    positive_control: MultipartAttemptContract
-    negative_control: MultipartAttemptContract
 
     def for_attempt(self, attempt_kind: str) -> MultipartAttemptContract:
-        if attempt_kind not in {"target", "positive_control", "negative_control"}:
+        if attempt_kind != "target":
             raise ValueError("unknown Validation attempt kind")
-        return getattr(self, attempt_kind)
+        return self.target
 
 
 def encode_multipart(

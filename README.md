@@ -73,7 +73,7 @@ aidast dashboard --ui-dir WebUI/dist
 | Handoff | Recon 산출물의 해시와 역할 검증 | `Handoff.json`, `Pipeline.db` |
 | Attack | 정책과 승인 경계 안에서 후보 조사 | finding, attempt, evidence |
 | Chaining | 검증 가능한 finding 간 연결 분석 | chain candidate |
-| Validation | 재현·대조군·증거 기반 최종 판정 | validation case |
+| Validation | 승인된 범위에서 대상 요청을 새로 재현하고 증거·영향을 평가해 최종 판정 | validation case |
 | Report | 검증된 case의 플랫폼별 로컬 초안 생성 | `Report.md`, `Report.json` |
 
 Handoff는 Recon 종료 후 산출물을 다음 단계로 전달하기 위한 준비 작업입니다.
@@ -83,6 +83,10 @@ Attack은 Recon 신호로 선택된 Hunt Skill을 사용합니다. 템플릿이 
 프로브는 Agent가 payload를 직접 생성하지 않고, 버전과 해시가 고정된 YAML
 템플릿과 Python Runner가 요청 변형·matcher·evidence를 결정론적으로
 처리합니다. matcher 적중은 finding 확정이 아니라 Validation 후보입니다.
+
+현재 Validation은 후보의 대상 요청을 승인된 정책과 요청 예산 안에서 새로 실행하고,
+관측된 보안 효과와 증거를 평가합니다. 양성·음성 대조군 요청은 필수 단계가 아닙니다.
+과거 검증 기록에는 대조군 시도가 남아 있을 수 있으며, 조회 화면은 이를 이전 기록으로 표시할 수 있습니다.
 
 ## 실행 전 확인
 

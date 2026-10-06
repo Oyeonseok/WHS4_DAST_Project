@@ -10,26 +10,7 @@
   "target_expected_signal": {
     "kind": "hunt-file-upload_verified",
     "criterion": "the uploaded test artifact reaches the prohibited storage, parsing, or execution state",
-    "requires_fresh_target_and_control_evidence": true
-  },
-  "control_positive": {
-    "payload_template": {
-      "mode": "channel_health_baseline"
-    },
-    "expected_signal": {
-      "kind": "state_change_channel_operational",
-      "criterion": "the same transport, identity, parser, browser, callback, or timing channel produces its declared harmless baseline"
-    },
-    "signal_type": "state_change"
-  },
-  "control_negative": {
-    "payload_template": {
-      "mode": "inert_same_shape_control"
-    },
-    "expected_signal": {
-      "kind": "no_state_change_target_effect",
-      "criterion": "an inert same-shape input does not produce the target security effect"
-    }
+    "requires_fresh_target_evidence": true
   },
   "impact_rules": {
     "boundary": "identify whose resource or protected workflow accepted the state transition",

@@ -225,16 +225,22 @@ class WebSocketRuntimeContract(_WebSocketContract):
     runtime_kind: Literal["websocket"]
     schema_version: Literal[1]
     target: WebSocketAttemptContract
-    positive_control: WebSocketAttemptContract
-    negative_control: WebSocketAttemptContract
+
+    @model_validator(mode="before")
+    @classmethod
+    def ignore_legacy_controls(cls, value):
+        if isinstance(value, dict):
+            return {key: item for key, item in value.items()
+                    if key not in {"positive_control", "negative_control"}}
+        return value
 
     def for_attempt(self, attempt_kind: str) -> WebSocketAttemptContract:
-        if attempt_kind not in {"target", "positive_control", "negative_control"}:
+        if attempt_kind != "target":
             raise ValueError("unknown Validation attempt kind")
-        return getattr(self, attempt_kind)
+        return self.target
 
     def validate_policy_timeout(self, timeout_seconds: float) -> None:
-        for attempt in (self.target, self.positive_control, self.negative_control):
+        for attempt in (self.target,):
             if max(attempt.receive_wait_seconds, attempt.connection_timeout_seconds) > timeout_seconds:
                 raise ValueError("WebSocket waits exceed policy timeout")
 

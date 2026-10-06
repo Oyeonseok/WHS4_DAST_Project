@@ -49,8 +49,7 @@ def _summary(details: object, channel: str) -> list[dict[str, Any]]:
 
 
 def _fingerprint(assertion: Any) -> str:
-    # A control only separates the same predicate. The label is allowed to differ,
-    # but paths, selectors, headers, frame indices and other inputs are not.
+    # Bind adapter summaries to the declared target predicate without retaining values.
     return canonical_sha256(assertion.model_dump(mode="json", exclude={"assertion_id"}))
 
 
@@ -101,24 +100,11 @@ def _matched_summary(
 
 def _assertion_facts(
     profile_id: str, runtime: Any, channel: str,
-    targets: list[dict[str, Any]], negative: dict[str, Any],
+    targets: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     target_contract = runtime.for_attempt("target")
-    negative_contract = runtime.for_attempt("negative_control")
     results: list[dict[str, Any]] = []
     for assertion in _assertions(target_contract, channel):
-        candidates = [item for item in _assertions(negative_contract, channel)
-                      if _fingerprint(item) == _fingerprint(assertion)]
-        if len(candidates) != 1:
-            continue
-        negative_result = _matched_summary(
-            candidates[0], negative_contract, negative.get("details"), channel,
-        )
-        if negative_result is None or (
-            negative_result.get("p") if channel == "concurrent"
-            else negative_result.get("passed")
-        ) is not False:
-            continue
         if not all(
             (row := _matched_summary(assertion, target_contract, item.get("details"), channel))
             is not None and (row.get("p") if channel == "concurrent" else row.get("passed")) is True
@@ -126,9 +112,7 @@ def _assertion_facts(
         ):
             continue
         fact = {
-            "kind": ("json_value_differential"
-                     if assertion.kind == "json_path_nonempty_string"
-                     else "assertion_differential"),
+            "kind": "target_assertion_observed",
             "profile_id": profile_id,
             "runtime_kind": channel,
             "assertion_kind": assertion.kind,
@@ -137,8 +121,6 @@ def _assertion_facts(
             "expected_sha256": canonical_sha256(assertion.expected),
             "target_attempt_ids": [item["attempt_id"] for item in targets],
             "target_evidence_ids": [item["evidence_id"] for item in targets],
-            "negative_attempt_id": negative["attempt_id"],
-            "negative_evidence_id": negative["evidence_id"],
             "provenance": "contract_bound_adapter_summary",
         }
         if assertion.kind == "json_path_nonempty_string":
@@ -149,42 +131,32 @@ def _assertion_facts(
 
 
 def _oob_facts(
-    profile_id: str, runtime: Any,
-    targets: list[dict[str, Any]], negative: dict[str, Any],
+    profile_id: str, runtime: Any, targets: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    target_contract = runtime.for_attempt("target")
-    negative_contract = runtime.for_attempt("negative_control")
-
-    def valid(item: dict[str, Any], contract: Any, *, observed: bool) -> bool:
+    contract = runtime.for_attempt("target")
+    protocols: set[str] = set()
+    for item in targets:
         details = item.get("details")
         if not isinstance(details, dict):
-            return False
+            return []
         nonce = hashlib.sha256(item["attempt_id"].encode("utf-8")).hexdigest()[:16]
         token = contract.token_template.replace("{nonce}", nonce)
         count = details.get("matched_callback_count")
-        protocols = details.get("matched_protocols")
+        observed_protocols = details.get("matched_protocols")
         if (details.get("token_sha256") != canonical_sha256(token)
-                or type(count) is not int or count < 0
-                or not isinstance(protocols, list)
+                or type(count) is not int or count < contract.minimum_callbacks
+                or not isinstance(observed_protocols, list) or not observed_protocols
                 or not all(isinstance(protocol, str) and protocol in contract.protocols
-                           for protocol in protocols)):
-            return False
-        return (count >= contract.minimum_callbacks and bool(protocols)) if observed else count == 0 and not protocols
-
-    if not all(valid(item, target_contract, observed=True) for item in targets):
-        return []
-    if not valid(negative, negative_contract, observed=False):
-        return []
+                           for protocol in observed_protocols)):
+            return []
+        protocols.update(observed_protocols)
     return [{
-        "kind": "nonce_callback_differential",
+        "kind": "target_nonce_callback_observed",
         "profile_id": profile_id,
         "runtime_kind": "oob",
         "target_attempt_ids": [item["attempt_id"] for item in targets],
         "target_evidence_ids": [item["evidence_id"] for item in targets],
-        "negative_attempt_id": negative["attempt_id"],
-        "negative_evidence_id": negative["evidence_id"],
-        "protocols": sorted({protocol for item in targets
-                             for protocol in item["details"]["matched_protocols"]}),
+        "protocols": sorted(protocols),
         "provenance": "contract_bound_adapter_summary",
     }]
 
@@ -193,7 +165,7 @@ def extract_replay_facts(
     profile_id: str, runtime_contract: Any, assessment: BlindAssessment,
     observations: Iterable[dict[str, Any]], *, replay_status: str,
 ) -> ExtractedFacts:
-    """Return only differential, contract-bound structural facts for this Blind replay."""
+    """Return contract-bound structural facts from fresh target observations."""
     if replay_status != "complete":
         return ExtractedFacts(())
     runtime = (validate_runtime_contract(runtime_contract)
@@ -203,24 +175,19 @@ def extract_replay_facts(
         return ExtractedFacts(())
     replay = tuple(observations)
     target_ids = set(assessment.target_attempt_ids)
-    control_ids = set(assessment.control_attempt_ids)
     targets = [item for item in replay if item.get("attempt_kind") == "target"
                and item.get("attempt_id") in target_ids]
-    positives = [item for item in replay if item.get("attempt_kind") == "positive_control"
-                 and item.get("attempt_id") in control_ids]
-    negatives = [item for item in replay if item.get("attempt_kind") == "negative_control"
-                 and item.get("attempt_id") in control_ids]
-    if (len(target_ids) not in {3, 5} or len(targets) != len(target_ids)
-            or len(positives) != 1 or len(negatives) != 1
-            or not all(_has_ledger_ids(item, channel)
-                       for item in (*targets, *positives, *negatives))
-            or any(item.get("outcome") != "observed" or item.get("signal_observed") is not True
-                   for item in (*targets, *positives))
-            or negatives[0].get("outcome") != "not_observed"
-            or negatives[0].get("signal_observed") is not False):
+    if (not target_ids or len(targets) != len(target_ids)
+            or not all(_has_ledger_ids(item, channel) for item in targets)
+            or not any(item.get("outcome") == "observed" and item.get("signal_observed") is True
+                       for item in targets)
+            or any(item.get("outcome") not in {"observed", "not_observed"}
+                   for item in targets)):
         return ExtractedFacts(())
+    targets = [item for item in targets if item["outcome"] == "observed"
+               and item["signal_observed"] is True]
     targets.sort(key=lambda item: assessment.target_attempt_ids.index(item["attempt_id"]))
-    facts = (_oob_facts(profile_id, runtime, targets, negatives[0])
+    facts = (_oob_facts(profile_id, runtime, targets)
              if channel == "oob" else
-             _assertion_facts(profile_id, runtime, channel, targets, negatives[0]))
+             _assertion_facts(profile_id, runtime, channel, targets))
     return ExtractedFacts(tuple(facts[:MAX_FACTS]), max(0, len(facts) - MAX_FACTS))

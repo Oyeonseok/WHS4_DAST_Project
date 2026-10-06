@@ -15,6 +15,7 @@ from ..contracts.models import ReproductionObservation
 from .request_broker import (ValidationCredentialError, ValidationPolicyRejection,
                              ValidationRequestBroker)
 from ..contracts.runtime_contract import HttpRequestTemplate, render_http_request
+from .credentials import credential_preflight_reason
 
 
 class OobObserver(Protocol):
@@ -52,12 +53,12 @@ class OobReproductionPort:
             return "oob_observer_unavailable"
         if blind_case.credential_references and self.credential_resolver is None:
             return "credential_resolver_missing"
-        resolver_preflight = getattr(self.credential_resolver, "unsupported_reason", None)
-        if callable(resolver_preflight):
-            for reference in blind_case.credential_references:
-                reason = resolver_preflight(reference)
-                if reason is not None:
-                    return reason
+        for reference in blind_case.credential_references:
+            reason = credential_preflight_reason(
+                self.credential_resolver, reference, blind_case.endpoint,
+            )
+            if reason is not None:
+                return reason
         return None
 
     def execute(

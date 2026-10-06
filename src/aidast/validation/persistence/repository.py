@@ -862,7 +862,6 @@ def shared_validation_status(database: Path, *, scan_id: str | None = None,
             for case in cases:
                 case["scope_eligibility"] = _scope_eligibility_status(conn, case)
             owners = {name: 0 for name in ("validation", "chaining", "manual")}
-            hypothesis_count = 0
             for owner, count in conn.execute(
                 """SELECT h.execution_owner,count(*) FROM validation_impact_hypotheses h
                 JOIN validation_cases c ON c.case_id=h.case_id
@@ -870,12 +869,9 @@ def shared_validation_status(database: Path, *, scan_id: str | None = None,
                 GROUP BY h.execution_owner""", (scan_id,),
             ):
                 owners[owner] = count
-                hypothesis_count += count
             return {"database": str(path), "scan_id": scan_id, "case_count": len(cases),
-                    "cases": cases, "impact_hypothesis_count": hypothesis_count,
+                    "cases": cases, "impact_hypothesis_count": sum(owners.values()),
                     "impact_hypotheses_by_owner": owners}
-    except ValidationError:
-        raise
     except (OSError, sqlite3.Error, json.JSONDecodeError):
         raise ValidationError("cannot read shared Validation status") from None
 

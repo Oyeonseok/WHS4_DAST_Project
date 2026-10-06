@@ -79,7 +79,7 @@ class ConcurrentContractTests(unittest.TestCase):
             with self.subTest(request=request), self.assertRaises(ValidationError):
                 ConcurrentRuntimeContract(**invalid)
 
-    def test_semantics_require_distinct_child_and_matching_member_proof(self):
+    def test_semantics_use_only_target_concurrency_proof(self):
         common = {
             "runtime_kind": "concurrent", "schema_version": 1,
             "workers": 2, "repeat_count": 1, "release_strategy": "simultaneous",
@@ -90,16 +90,12 @@ class ConcurrentContractTests(unittest.TestCase):
         runtime = ConcurrentRuntimeContract(**common)
         profile = SkillProfileResolver().resolve("hunt-race-condition").profile
         self.assertIsNone(validate_runtime_semantics(runtime, profile))
-        same_child = runtime.model_copy(update={"negative_control": runtime.target})
-        with self.assertRaisesRegex(RuntimeSemanticError, "must differ"):
-            validate_runtime_semantics(same_child, profile)
-        mismatch = runtime.model_copy(update={"negative_control": runtime.negative_control.model_copy(
-            update={"member_assertions": (
-                ResponseAssertion(assertion_id="different", kind="status_equals", expected=201),
-            )}
-        )})
-        with self.assertRaisesRegex(RuntimeSemanticError, "same target proof assertions"):
-            validate_runtime_semantics(mismatch, profile)
+        self.assertNotIn("negative_control", runtime.model_dump(mode="json"))
+        no_timing = runtime.model_copy(update={"target": runtime.target.model_copy(update={
+            "start_skew_at_most_ms": None,
+        })})
+        with self.assertRaisesRegex(RuntimeSemanticError, "duration or start skew"):
+            validate_runtime_semantics(no_timing, profile)
 
     def test_count_aggregate_uses_member_assertions_to_classify_partial_success(self):
         members = (

@@ -10,26 +10,7 @@
   "target_expected_signal": {
     "kind": "hunt-ntlm-info_verified",
     "criterion": "the controlled callback endpoint receives the declared NTLM authentication attempt",
-    "requires_fresh_target_and_control_evidence": true
-  },
-  "control_positive": {
-    "payload_template": {
-      "mode": "channel_health_baseline"
-    },
-    "expected_signal": {
-      "kind": "oob_callback_channel_operational",
-      "criterion": "the same transport, identity, parser, browser, callback, or timing channel produces its declared harmless baseline"
-    },
-    "signal_type": "oob_callback"
-  },
-  "control_negative": {
-    "payload_template": {
-      "mode": "inert_same_shape_control"
-    },
-    "expected_signal": {
-      "kind": "no_oob_callback_target_effect",
-      "criterion": "an inert same-shape input does not produce the target security effect"
-    }
+    "requires_fresh_target_evidence": true
   },
   "impact_rules": {
     "boundary": "identify whether the callback crosses the target server or internal network boundary",

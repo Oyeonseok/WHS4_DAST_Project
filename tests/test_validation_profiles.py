@@ -23,13 +23,6 @@ def valid_profile_document(*, signal: str, runtime: str) -> dict[str, object]:
     document = SkillProfileResolver().resolve("hunt-file-upload").profile.model_dump()
     document["runtime_kinds"] = (runtime,)
     document["signal_types"] = (signal,)
-    document["control_positive"]["signal_type"] = signal
-    document["control_positive"]["expected_signal"]["kind"] = (
-        f"{signal}_channel_operational"
-    )
-    document["control_negative"]["expected_signal"]["kind"] = (
-        f"no_{signal}_target_effect"
-    )
     if signal == "timing":
         document["baseline_samples"] = 3
     return document
@@ -66,7 +59,20 @@ class ValidationProfileTests(unittest.TestCase):
         self.assertIn("hunt-idor validation", resolved.validation_skill_text)
         self.assertIn("cross-role-object-access", resolved.validation_skill_text)
 
-    def test_profiles_define_skill_specific_effects_and_bounded_controls(self):
+    def test_target_only_guidance_does_not_require_replay_controls(self):
+        resolver = SkillProfileResolver()
+        misc = resolver.resolve("hunt-misc")
+        auth = resolver.resolve("hunt-auth-bypass")
+        self.assertNotIn("control", misc.profile.target_expected_signal.criterion.casefold())
+        self.assertNotIn("control", misc.validation_skill_text.casefold())
+        self.assertNotIn("unauthenticated control", json.dumps(
+            auth.profile.model_dump(mode="json"), ensure_ascii=False,
+        ).casefold())
+        base_guidance = " ".join(misc.validation_base_skill_text.split())
+        self.assertIn("Do not require positive or negative replay controls", base_guidance)
+        self.assertIn("unauthenticated target", base_guidance)
+
+    def test_profiles_define_skill_specific_target_effects(self):
         criteria = set()
         for entry in load_catalog():
             if entry.skill_id == "chain":
@@ -81,10 +87,9 @@ class ValidationProfileTests(unittest.TestCase):
                 profile.model_dump(mode="json"), ensure_ascii=False
             ))
             criteria.add(criterion)
-            self.assertEqual(profile.control_positive.payload_template,
-                             {"mode": "channel_health_baseline"})
-            self.assertEqual(profile.control_negative.payload_template,
-                             {"mode": "inert_same_shape_control"})
+            self.assertTrue(profile.target_expected_signal.requires_fresh_target_evidence)
+            self.assertNotIn("control_positive", profile.model_dump(mode="json"))
+            self.assertNotIn("control_negative", profile.model_dump(mode="json"))
             self.assertLessEqual(len(profile.allowed_development_actions), 2)
             self.assertGreaterEqual(len(profile.impact_expansion_paths), 1)
             for path in profile.impact_expansion_paths:
@@ -97,9 +102,6 @@ class ValidationProfileTests(unittest.TestCase):
             "schema_version": 1, "attack_skill_name": "hunt-test",
             "signal_types": ["timing"], "target_expected_signal": {},
             "runtime_kinds": ["http"],
-            "control_positive": {"payload_template": {}, "expected_signal": {},
-                                 "signal_type": "timing"},
-            "control_negative": {"payload_template": {}, "expected_signal": {}},
             "impact_rules": {}, "allowed_development_actions": [],
             "impact_expansion_paths": [], "unexpected": True,
         }
@@ -113,22 +115,7 @@ class ValidationProfileTests(unittest.TestCase):
             "target_expected_signal": {
                 "kind": "hunt-test_verified",
                 "criterion": "a unique marker executes in the declared browser context",
-                "requires_fresh_target_and_control_evidence": True,
-            },
-            "control_positive": {
-                "payload_template": {"mode": "channel_health_baseline"},
-                "expected_signal": {
-                    "kind": "dom_effect_channel_operational",
-                    "criterion": "the harmless browser baseline executes in the same context",
-                },
-                "signal_type": "dom_effect",
-            },
-            "control_negative": {
-                "payload_template": {"mode": "inert_same_shape_control"},
-                "expected_signal": {
-                    "kind": "no_dom_effect_target_effect",
-                    "criterion": "the inert input does not execute in the browser context",
-                },
+                "requires_fresh_target_evidence": True,
             },
             "impact_rules": {
                 "boundary": "identify the browser boundary crossed by the effect",
@@ -176,8 +163,7 @@ class ValidationProfileTests(unittest.TestCase):
         axis = {"score": 1, "evidence_ids": ("evidence",), "reason": "Evidence-bound score."}
         assessment = BlindAssessment(
             case_id="case", blind_case_sha256="a" * 64, reproduced=True,
-            signal_types=("response_diff",), target_attempt_ids=("target",),
-            control_attempt_ids=("control",), evidence_ids=("evidence",),
+            signal_types=("response_diff",), target_attempt_ids=("target",), evidence_ids=("evidence",),
             impact_boundary=axis, impact_sensitivity=axis,
             impact_actor_requirements=axis, conclusion="Observed consistently.",
         )
@@ -221,8 +207,7 @@ class ValidationProfileTests(unittest.TestCase):
         axis = {"score": 1, "evidence_ids": ("evidence",), "reason": "Evidence-bound score."}
         assessment = BlindAssessment(
             case_id="case", blind_case_sha256="a" * 64, reproduced=True,
-            signal_types=("authorization_boundary",), target_attempt_ids=("target",),
-            control_attempt_ids=("control",), evidence_ids=("evidence",),
+            signal_types=("authorization_boundary",), target_attempt_ids=("target",), evidence_ids=("evidence",),
             impact_boundary=axis, impact_sensitivity=axis,
             impact_actor_requirements=axis, conclusion="Observed consistently.",
         )
@@ -271,8 +256,7 @@ class ValidationProfileTests(unittest.TestCase):
         def assessment(case_id):
             return BlindAssessment(
                 case_id=case_id, blind_case_sha256="a" * 64, reproduced=True,
-                signal_types=("authorization_boundary",), target_attempt_ids=("target",),
-                control_attempt_ids=("control",), evidence_ids=("evidence",),
+                signal_types=("authorization_boundary",), target_attempt_ids=("target",), evidence_ids=("evidence",),
                 impact_boundary=axis, impact_sensitivity=axis,
                 impact_actor_requirements=axis, conclusion="Observed consistently.",
             )
@@ -333,8 +317,7 @@ class ValidationProfileTests(unittest.TestCase):
         axis = {"score": 0, "evidence_ids": ("evidence",), "reason": "Observed denial."}
         assessment = BlindAssessment(
             case_id="case", blind_case_sha256="a" * 64, reproduced=False,
-            signal_types=("authorization_boundary",), target_attempt_ids=("target",),
-            control_attempt_ids=("control",), evidence_ids=("evidence",),
+            signal_types=("authorization_boundary",), target_attempt_ids=("target",), evidence_ids=("evidence",),
             impact_boundary=axis, impact_sensitivity=axis,
             impact_actor_requirements=axis, conclusion="Not reproduced.",
         )
@@ -370,8 +353,7 @@ class ValidationProfileTests(unittest.TestCase):
         axis = {"score": 1, "evidence_ids": ("evidence",), "reason": "Evidence-bound score."}
         assessment = BlindAssessment(
             case_id="case", blind_case_sha256="a" * 64, reproduced=True,
-            signal_types=("authorization_boundary",), target_attempt_ids=("target",),
-            control_attempt_ids=("control",), evidence_ids=("evidence",),
+            signal_types=("authorization_boundary",), target_attempt_ids=("target",), evidence_ids=("evidence",),
             impact_boundary=axis, impact_sensitivity=axis,
             impact_actor_requirements=axis, conclusion="Observed consistently.",
         )
@@ -413,8 +395,7 @@ class ValidationProfileTests(unittest.TestCase):
         axis = {"score": 1, "evidence_ids": ("evidence",), "reason": "Evidence-bound score."}
         assessment = BlindAssessment(
             case_id="case", blind_case_sha256="a" * 64, reproduced=True,
-            signal_types=("response_diff",), target_attempt_ids=("target",),
-            control_attempt_ids=("control",), evidence_ids=("evidence",),
+            signal_types=("response_diff",), target_attempt_ids=("target",), evidence_ids=("evidence",),
             impact_boundary=axis, impact_sensitivity=axis,
             impact_actor_requirements=axis, conclusion="Observed consistently.",
         )
@@ -448,6 +429,11 @@ class ValidationProfileTests(unittest.TestCase):
                 artifact_name="unblind", operation="unblind", work_dir=Path(temporary),
                 session_id=session_id,
             )
+            agent._run_structured_session(
+                prompt="ui", model_type=BlindAssessment,
+                artifact_name="ui", operation="ui", work_dir=Path(temporary),
+                session_id=session_id, model="recon-model",
+            )
 
         self.assertEqual((first, second), (assessment, assessment))
         self.assertEqual((session_id, resumed_id),
@@ -455,6 +441,7 @@ class ValidationProfileTests(unittest.TestCase):
         self.assertEqual(commands[0][commands[0].index("--model") + 1], "gpt-5.6-terra")
         self.assertNotIn("resume", commands[0])
         self.assertEqual(commands[1][-3:], ["resume", "thread-validation", "-"])
+        self.assertEqual(commands[2][commands[2].index("--model") + 1], "recon-model")
 
 
 if __name__ == "__main__":

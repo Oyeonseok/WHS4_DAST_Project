@@ -9,14 +9,14 @@ Apply this guidance only to the staged BlindCase, its immutable contract, and fr
 
 ## Proof standard
 
-the Hunt Skill declared security effect differs stably from an inert same-shape control
+the fresh target response demonstrates the Hunt Skill's declared security effect beyond a status code
 
-Require the declared positive control to prove the signal channel is operational and the inert negative control to stay clear. Do not infer reproduction from status codes, hashes, timing noise, or the Attack claim alone.
+Require fresh target evidence for the declared security effect. Do not infer reproduction from status codes, hashes, timing noise, or the Attack claim alone.
 
 ## Impact interpretation
 
 - Boundary: identify the exact route, origin, tenant, service, or configuration boundary crossed
-- Sensitivity: cite the security-relevant data or capability behind the stable response difference
+- Sensitivity: cite security-relevant data or capability observed in the target response
 - Actor requirements: score the minimum authentication and environmental prerequisites
 
 Cite only evidence from the current Validation case for every impact score.

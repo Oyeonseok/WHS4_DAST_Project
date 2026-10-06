@@ -81,7 +81,7 @@ class ProfileEvidenceTests(unittest.TestCase):
         assessment = BlindAssessment.model_validate({
             "case_id": "case", "blind_case_sha256": "f" * 64,
             "reproduced": True, "signal_types": ("authorization_boundary",),
-            "target_attempt_ids": ("t1", "t2", "t3"), "control_attempt_ids": ("p1", "n1"),
+            "target_attempt_ids": ("t1", "t2", "t3"),
             "evidence_ids": ("e-target", "e-negative", "e-positive"),
             "impact_boundary": {"score": 2, "evidence_ids": ("e-target", "e-negative"), "reason": "Owner boundary."},
             "impact_sensitivity": {"score": 2, "evidence_ids": ("e-target",), "reason": "Object read."},
@@ -103,17 +103,17 @@ class ProfileEvidenceTests(unittest.TestCase):
         self.assertEqual(audit["axes"]["impact_boundary"]["missing_facts"],
                          ["caller_owner_object_binding"])
         self.assertEqual(audit["axes"]["impact_boundary"]["cited_evidence_ids"],
-                         ["e-negative", "e-target"])
+                         ["e-target"])
 
-        failed_positive = [
+        failed_targets = [
             {**item, "outcome": "not_observed", "signal_observed": False}
-            if item["attempt_kind"] == "positive_control" else item
+            if item["attempt_kind"] == "target" else item
             for item in observations
         ]
         failed = evaluate_profile_evidence(
-            resolved.profile, resolved.profile_sha256, assessment, failed_positive,
+            resolved.profile, resolved.profile_sha256, assessment, failed_targets,
         )
-        self.assertEqual(failed["replay_status"], "positive_control_failed")
+        self.assertEqual(failed["replay_status"], "target_inconsistent")
         self.assertEqual(failed["axes"]["impact_boundary"]["status"], "replay_not_grounded")
 
         partial_targets = [
@@ -124,15 +124,15 @@ class ProfileEvidenceTests(unittest.TestCase):
         partial = evaluate_profile_evidence(
             resolved.profile, resolved.profile_sha256, assessment, partial_targets,
         )
-        self.assertEqual(partial["replay_status"], "target_inconsistent")
-        self.assertEqual(partial["axes"]["impact_boundary"]["status"], "replay_not_grounded")
+        self.assertEqual(partial["replay_status"], "complete")
+        self.assertEqual(partial["observed_target_evidence_ids"], ["e-target", "e-target-2"])
 
     def test_uncited_axis_is_separate_from_missing_semantic_fact(self):
         resolved = self.resolver.resolve("hunt-xss")
         assessment = BlindAssessment.model_validate({
             "case_id": "case", "blind_case_sha256": "f" * 64,
             "reproduced": True, "signal_types": ("dom_effect",),
-            "target_attempt_ids": ("t1", "t2", "t3"), "control_attempt_ids": ("p1", "n1"),
+            "target_attempt_ids": ("t1", "t2", "t3"),
             "evidence_ids": ("e-target", "e-negative", "e-positive"),
             "impact_boundary": {"score": 1, "evidence_ids": ("e-positive",), "reason": "Claim."},
             "impact_sensitivity": {"score": 0, "evidence_ids": ("e-target",), "reason": "None."},
