@@ -202,6 +202,31 @@ def synchronize_attack_graph(
         if endpoint:
             projector.edge(endpoint, coverage, "has_coverage_hypothesis")
 
+    if conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='attack_preconditions'"
+    ).fetchone():
+        for row in _rows(conn, """SELECT p.precondition_id,p.coverage_id,p.kind,p.state,
+                                          p.resolution_reference_type,
+                                          a.action_id,a.action_kind,a.status action_status
+                                   FROM attack_preconditions p
+                                   LEFT JOIN attack_operator_actions a
+                                     ON a.precondition_id=p.precondition_id
+                                   WHERE p.scan_id=? ORDER BY p.precondition_id""", (scan_id,)):
+            precondition = projector.node(
+                "precondition", row["precondition_id"],
+                state=("satisfied" if row["state"] == "satisfied" else
+                       "retired" if row["state"] == "retired" else "blocked"),
+                priority=90 if row["state"] == "required" else 40,
+                metadata={key: row[key] for key in (
+                    "precondition_id", "coverage_id", "kind", "state",
+                    "resolution_reference_type", "action_id", "action_kind",
+                    "action_status",
+                )},
+            )
+            coverage = coverage_nodes.get(row["coverage_id"])
+            if coverage:
+                projector.edge(coverage, precondition, "requires_precondition")
+
     finding_nodes: dict[str, str] = {}
     for row in _rows(conn, """SELECT finding_id,endpoint_id,vuln_type,severity,title,status
                                FROM findings WHERE scan_id=? ORDER BY finding_id""", (scan_id,)):

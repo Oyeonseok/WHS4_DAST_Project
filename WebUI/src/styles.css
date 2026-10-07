@@ -683,3 +683,28 @@ dialog:has(.scan-form,.scope-intake-form,.scope-workflow){
   border-radius: 8px;
   background: rgba(0, 0, 0, .18);
 }
+.operator-actions {
+  display: grid;
+  gap: 12px;
+  margin-bottom: 16px;
+  padding: 16px;
+  border: 1px solid color-mix(in srgb, var(--warning, #f0b35a) 45%, transparent);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--warning, #f0b35a) 8%, var(--panel, #111a21));
+}
+.operator-actions > div > p,
+.operator-actions article > p { margin: 6px 0 0; color: var(--muted); }
+.operator-actions article {
+  display: grid;
+  gap: 10px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+.operator-actions article > div {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 8px;
+}
+.operator-actions article code { color: var(--muted); }
+.operator-actions article button { justify-self: start; }

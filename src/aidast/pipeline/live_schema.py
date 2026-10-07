@@ -136,6 +136,53 @@ CREATE TABLE IF NOT EXISTS attack_lead_queue (
 CREATE INDEX IF NOT EXISTS idx_attack_lead_queue_scan
     ON attack_lead_queue(scan_id,state,priority DESC,created_at);
 
+CREATE TABLE IF NOT EXISTS attack_preconditions (
+    precondition_id TEXT PRIMARY KEY NOT NULL,
+    scan_id TEXT NOT NULL REFERENCES scans(scan_id),
+    coverage_id TEXT NOT NULL REFERENCES attack_coverage_items(coverage_id),
+    kind TEXT NOT NULL CHECK(kind IN (
+        'usable_session','required_role','second_identity','scanner_owned_object',
+        'fresh_token','prior_state'
+    )),
+    state TEXT NOT NULL DEFAULT 'required' CHECK(state IN (
+        'required','satisfied','waived','retired'
+    )),
+    requirement_json TEXT NOT NULL DEFAULT '{}' CHECK(
+        json_valid(requirement_json) AND length(CAST(requirement_json AS BLOB)) <= 4096
+    ),
+    resolution_reference_type TEXT CHECK(resolution_reference_type IS NULL OR
+        resolution_reference_type IN ('credential_reference','attack_fact','operator_ack')),
+    resolution_reference_id TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    satisfied_at TEXT,
+    UNIQUE(scan_id,coverage_id,kind)
+);
+CREATE INDEX IF NOT EXISTS idx_attack_preconditions_scan
+    ON attack_preconditions(scan_id,state,kind);
+
+CREATE TABLE IF NOT EXISTS attack_operator_actions (
+    action_id TEXT PRIMARY KEY NOT NULL,
+    scan_id TEXT NOT NULL REFERENCES scans(scan_id),
+    precondition_id TEXT NOT NULL REFERENCES attack_preconditions(precondition_id),
+    action_kind TEXT NOT NULL CHECK(action_kind IN (
+        'login','provide_role','provide_second_identity','create_owned_object',
+        'refresh_token','establish_state'
+    )),
+    status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN (
+        'pending','acknowledged','completed','expired','cancelled'
+    )),
+    title TEXT NOT NULL CHECK(length(trim(title)) > 0),
+    instruction TEXT NOT NULL CHECK(length(trim(instruction)) > 0),
+    acknowledged_by TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    completed_at TEXT,
+    UNIQUE(precondition_id)
+);
+CREATE INDEX IF NOT EXISTS idx_attack_operator_actions_scan
+    ON attack_operator_actions(scan_id,status,created_at);
+
 CREATE TABLE IF NOT EXISTS attack_http_requests (
     request_id TEXT PRIMARY KEY NOT NULL,
     scan_id TEXT NOT NULL REFERENCES scans(scan_id),

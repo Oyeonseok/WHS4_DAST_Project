@@ -30,6 +30,7 @@ from aidast.attack.work_queue import (
     refresh_lead_queue,
     select_dual_queue,
 )
+from aidast.attack.preconditions import resolve_attack_preconditions
 from aidast.attack.template_loader import template_ids_for_skill
 from aidast.attack.db_cli import (
     commit_attempt, transition_task as transition_attack_task,
@@ -693,6 +694,7 @@ class ExhaustiveAttackCoordinator:
             conn.row_factory = sqlite3.Row
             conn.execute("PRAGMA foreign_keys=ON")
             stage_run_id = start_stage_run(conn, scan_id=scan_id, stage="attack")
+            resolve_attack_preconditions(conn, scan_id)
             requeue_credential_blocked_coverage(conn, scan_id)
             synchronize_attack_graph(
                 conn, scan_id, stage_run_id=stage_run_id,

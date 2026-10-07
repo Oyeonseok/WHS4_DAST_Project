@@ -52,12 +52,14 @@ import { activityHeightBounds, clampPanelWidth, panelBounds } from './lib/layout
 import { filterFindings, findingVerdict, findingValidationStatus, knownSourceCase, parseValidationCases, reportCaseForFinding, type FindingVerdict, type ValidationCase, type ValidationStatus } from './lib/validation';
 import { ResizeHandle } from './components/ResizeHandle';
 import { ManualLoginNotice } from './components/ManualLoginNotice';
+import { OperatorActions } from './components/OperatorActions';
 import { ScopeExecutionRules as ScopeExecutionRulesView, ScopeExclusionStatus, ScopePolicyAdvisories } from './components/ScopeExecutionRules';
 import { ScopeHeaderRequirements } from './components/ScopeHeaderRequirements';
 import { ReportSubmission } from './components/ReportSubmission';
 import { reportLanguageChoices } from './lib/reportSubmission';
 import { confirmedReportSummaries, requestReportSummaries, requestScanExecutionSummary, type ReportSummary, type ScanExecutionSummary } from './lib/reports';
 import { useManualLogin } from './hooks/useManualLogin';
+import { useOperatorActions } from './hooks/useOperatorActions';
 import { parseScanTokenUsage, type ScanTokenUsage, type TokenBucket } from './lib/modelCalls';
 import { ModelCallLog } from './components/ModelCallLog';
 
@@ -437,6 +439,9 @@ export default function App() {
   const [attackWikiError, setAttackWikiError] = useState('');
   const { snapshot, state, error, refresh } = useScanSocket(scanId);
   const manualLogin = useManualLogin(scanId, snapshot?.status || '', !demo && !!scanId);
+  const operatorActions = useOperatorActions(
+    scanId, !demo && !!scanId, snapshot?.status || '',
+  );
   const tokenUsage = tokenUsageState?.scanId === scanId ? tokenUsageState.data : null;
   const tokenStatus = tokenUsageState?.scanId === scanId
     ? tokenUsageState.error ? 'error' : tokenUsage ? 'ready' : 'loading'
@@ -1413,6 +1418,7 @@ export default function App() {
   const latestReconPhase = latestReconActivity?.message_params?.phase;
   const latestReconState = latestReconActivity?.message_params?.state;
   const manualLoginNotice = <ManualLoginNotice {...manualLogin} language={language}/>;
+  const operatorActionNotice = <OperatorActions {...operatorActions} language={language}/>;
   const workLogs = snapshot?.logs.filter(log => log.message_code === 'agent.work') ?? [];
   const currentWork = [...(snapshot?.logs ?? [])].reverse().find(log =>
     log.stage === snapshot?.stage && (log.message_code === 'agent.work' || log.message_code === 'recon.activity'));
@@ -1565,6 +1571,7 @@ export default function App() {
   </Panel>;
   const scanProgressContent = <div className="scan-progress-dialog">
     {manualLoginNotice}
+    {operatorActionNotice}
     {cancelError && <p className="scan-progress-failed" role="alert"><strong>{tk("스캔 취소 실패 ·", "Scan cancellation failed ·")} </strong>{cancelError}</p>}
     {pauseError && <p className="scan-progress-failed" role="alert"><strong>{tk("일시정지 상태 변경 실패 ·", "Pause state change failed ·")} </strong>{pauseError}</p>}
     <div className="scan-progress-overview">
