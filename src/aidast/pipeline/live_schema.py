@@ -34,6 +34,84 @@ CREATE TRIGGER IF NOT EXISTS pipeline_sources_no_delete
 BEFORE DELETE ON pipeline_sources
 BEGIN SELECT RAISE(ABORT, 'pipeline source provenance is immutable'); END;
 
+CREATE TABLE IF NOT EXISTS attack_graph_nodes (
+    node_id TEXT PRIMARY KEY NOT NULL,
+    scan_id TEXT NOT NULL REFERENCES scans(scan_id),
+    node_kind TEXT NOT NULL CHECK(node_kind IN (
+        'endpoint','parameter','coverage','finding','lead','fact','credential',
+        'identity','object','role','precondition','chain','synthetic_candidate','tool_run'
+    )),
+    node_key TEXT NOT NULL CHECK(length(trim(node_key)) > 0),
+    state TEXT NOT NULL DEFAULT 'active' CHECK(state IN (
+        'active','queued','running','blocked','satisfied','resolved','retired'
+    )),
+    priority INTEGER NOT NULL DEFAULT 50 CHECK(priority BETWEEN 0 AND 100),
+    metadata_json TEXT NOT NULL DEFAULT '{}' CHECK(
+        json_valid(metadata_json) AND length(CAST(metadata_json AS BLOB)) <= 8192
+    ),
+    content_sha256 TEXT NOT NULL CHECK(length(content_sha256)=64),
+    first_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(scan_id,node_kind,node_key)
+);
+CREATE INDEX IF NOT EXISTS idx_attack_graph_nodes_scan
+    ON attack_graph_nodes(scan_id,node_kind,state,priority DESC);
+
+CREATE TABLE IF NOT EXISTS attack_graph_edges (
+    edge_id TEXT PRIMARY KEY NOT NULL,
+    scan_id TEXT NOT NULL REFERENCES scans(scan_id),
+    from_node_id TEXT NOT NULL REFERENCES attack_graph_nodes(node_id),
+    to_node_id TEXT NOT NULL REFERENCES attack_graph_nodes(node_id),
+    relationship TEXT NOT NULL CHECK(length(trim(relationship)) > 0),
+    state TEXT NOT NULL DEFAULT 'active' CHECK(state IN ('active','resolved','retired')),
+    evidence_json TEXT NOT NULL DEFAULT '{}' CHECK(
+        json_valid(evidence_json) AND length(CAST(evidence_json AS BLOB)) <= 8192
+    ),
+    content_sha256 TEXT NOT NULL CHECK(length(content_sha256)=64),
+    first_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(scan_id,from_node_id,to_node_id,relationship)
+);
+CREATE INDEX IF NOT EXISTS idx_attack_graph_edges_scan
+    ON attack_graph_edges(scan_id,from_node_id,to_node_id);
+
+CREATE TABLE IF NOT EXISTS attack_graph_revisions (
+    revision_id TEXT PRIMARY KEY NOT NULL,
+    scan_id TEXT NOT NULL REFERENCES scans(scan_id),
+    stage_run_id TEXT REFERENCES stage_runs(stage_run_id),
+    trigger_kind TEXT NOT NULL CHECK(length(trim(trigger_kind)) > 0),
+    graph_sha256 TEXT NOT NULL CHECK(length(graph_sha256)=64),
+    node_count INTEGER NOT NULL CHECK(node_count >= 0),
+    edge_count INTEGER NOT NULL CHECK(edge_count >= 0),
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(scan_id,graph_sha256)
+);
+CREATE INDEX IF NOT EXISTS idx_attack_graph_revisions_scan
+    ON attack_graph_revisions(scan_id,created_at);
+
+CREATE TABLE IF NOT EXISTS attack_graph_events (
+    event_id TEXT PRIMARY KEY NOT NULL,
+    scan_id TEXT NOT NULL REFERENCES scans(scan_id),
+    stage_run_id TEXT REFERENCES stage_runs(stage_run_id),
+    node_id TEXT REFERENCES attack_graph_nodes(node_id),
+    edge_id TEXT REFERENCES attack_graph_edges(edge_id),
+    event_kind TEXT NOT NULL CHECK(event_kind IN (
+        'node.added','node.changed','edge.added','edge.changed','planner.revision'
+    )),
+    details_json TEXT NOT NULL DEFAULT '{}' CHECK(
+        json_valid(details_json) AND length(CAST(details_json AS BLOB)) <= 4096
+    ),
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_attack_graph_events_scan
+    ON attack_graph_events(scan_id,created_at);
+CREATE TRIGGER IF NOT EXISTS attack_graph_events_no_update
+BEFORE UPDATE ON attack_graph_events
+BEGIN SELECT RAISE(ABORT, 'attack graph events are append-only'); END;
+CREATE TRIGGER IF NOT EXISTS attack_graph_events_no_delete
+BEFORE DELETE ON attack_graph_events
+BEGIN SELECT RAISE(ABORT, 'attack graph events are append-only'); END;
+
 CREATE TABLE IF NOT EXISTS attack_http_requests (
     request_id TEXT PRIMARY KEY NOT NULL,
     scan_id TEXT NOT NULL REFERENCES scans(scan_id),

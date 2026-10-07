@@ -22,6 +22,7 @@ from aidast.attack.coverage import (
     resolve_interrupted_stage_leads,
     transition_coverage,
 )
+from aidast.attack.graph import graph_context_for_endpoint, synchronize_attack_graph
 from aidast.attack.template_loader import template_ids_for_skill
 from aidast.attack.db_cli import (
     commit_attempt, transition_task as transition_attack_task,
@@ -85,6 +86,12 @@ class ExhaustiveAttackCoordinator:
                 "Recon DB has no executable black-box hypotheses or explicit "
                 "source-import coverage annotations"
             )
+        with closing(sqlite3.connect(self.db_path)) as conn, conn:
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA foreign_keys=ON")
+            synchronize_attack_graph(
+                conn, scan_id, trigger_kind="coverage.manifest.ready",
+            )
         stages: list[str] = []
         for _batch_no in range(1, self.max_batches + 1):
             current = coverage_status(self.db_path, scan_id)
@@ -116,6 +123,10 @@ class ExhaustiveAttackCoordinator:
                         retry_limit=self.retry_limit,
                     )
                     finish_stage_run(conn, stage_run_id, status="completed")
+                    synchronize_attack_graph(
+                        conn, scan_id, stage_run_id=stage_run_id,
+                        trigger_kind="deterministic.batch.completed",
+                    )
                 continue
             selected_skills = tuple(dict.fromkeys(task["skill_name"] for task in tasks))
             reasons = {
@@ -152,6 +163,10 @@ class ExhaustiveAttackCoordinator:
                         retry_limit=self.retry_limit,
                     )
                     finish_stage_run(conn, stage_run_id, status="completed")
+                    synchronize_attack_graph(
+                        conn, scan_id, stage_run_id=stage_run_id,
+                        trigger_kind="agent.batch.completed",
+                    )
             # A bounded native batch may legitimately fail as a whole after
             # every task has already persisted a terminal or retryable
             # disposition (for example, an OOB proof prohibited by policy).
@@ -605,6 +620,13 @@ class ExhaustiveAttackCoordinator:
                     error_message=None if recoverable else str(exc),
                     allow_terminal_task_errors=recoverable,
                 )
+            synchronize_attack_graph(
+                conn, conn.execute(
+                    "SELECT scan_id FROM stage_runs WHERE stage_run_id=?",
+                    (stage_run_id,),
+                ).fetchone()[0], stage_run_id=stage_run_id,
+                trigger_kind="agent.batch.recovered",
+            )
             return can_continue
 
     @staticmethod
@@ -660,6 +682,10 @@ class ExhaustiveAttackCoordinator:
                 conn, scan_id=scan_id, stage_run_id=stage_run_id,
                 batch_size=self.batch_size, max_attempts=self.retry_limit,
             )
+            synchronize_attack_graph(
+                conn, scan_id, stage_run_id=stage_run_id,
+                trigger_kind="batch.claimed",
+            )
             tasks = []
             for item in claimed:
                 annotation_category = str(
@@ -679,6 +705,9 @@ class ExhaustiveAttackCoordinator:
                         hypothesis_reason,
                     ],
                     "template_ids": list(template_ids_for_skill(item["skill_name"])),
+                    "attack_graph_context": graph_context_for_endpoint(
+                        conn, scan_id, str(item["endpoint_id"]),
+                    ),
                 })
             return stage_run_id, tasks
 
