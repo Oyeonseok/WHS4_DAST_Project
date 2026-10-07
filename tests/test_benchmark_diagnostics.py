@@ -127,6 +127,56 @@ def test_source_import_endpoints_are_flagged_without_annotations(tmp_path: Path)
     assert result["execution"]["available_endpoint_count"] == 1
 
 
+def test_adaptive_attack_diagnostics_report_persisted_states_only(tmp_path: Path) -> None:
+    database = tmp_path / "Pipeline.db"
+    _legacy_database(database)
+    with sqlite3.connect(database) as conn:
+        conn.executescript("""
+            CREATE TABLE attack_graph_revisions (scan_id TEXT);
+            CREATE TABLE attack_graph_nodes (scan_id TEXT, state TEXT);
+            CREATE TABLE attack_lead_queue (scan_id TEXT, state TEXT);
+            CREATE TABLE attack_preconditions (scan_id TEXT, state TEXT);
+            CREATE TABLE attack_operator_actions (scan_id TEXT, status TEXT);
+            CREATE TABLE attack_chain_leads (scan_id TEXT, state TEXT);
+            CREATE TABLE synthetic_ui_candidates (scan_id TEXT, state TEXT);
+            CREATE TABLE attack_tool_runs (scan_id TEXT, status TEXT);
+            CREATE TABLE attack_intent_checkpoints
+                (scan_id TEXT, evidence_quality TEXT);
+            CREATE TABLE attack_coverage_items
+                (scan_id TEXT, status TEXT, attempt_count INTEGER,
+                 disposition_reason TEXT);
+            INSERT INTO attack_graph_revisions VALUES ('scan_a');
+            INSERT INTO attack_graph_nodes VALUES ('scan_a','active');
+            INSERT INTO attack_lead_queue VALUES ('scan_a','queued');
+            INSERT INTO attack_preconditions VALUES ('scan_a','required');
+            INSERT INTO attack_operator_actions VALUES ('scan_a','pending');
+            INSERT INTO attack_chain_leads VALUES ('scan_a','completed');
+            INSERT INTO synthetic_ui_candidates VALUES ('scan_a','verified');
+            INSERT INTO attack_tool_runs VALUES ('scan_a','completed');
+            INSERT INTO attack_intent_checkpoints VALUES ('scan_a','adequate');
+            INSERT INTO attack_coverage_items VALUES
+                ('scan_a','error_retryable',1,
+                 'negative evidence quality is insufficient');
+        """)
+    before = database.read_bytes()
+
+    adaptive = inspect_scan(database, "scan_a")["adaptive_attack"]
+
+    assert adaptive == {
+        "graph_revision_count": 1,
+        "graph_node_states": {"active": 1},
+        "lead_queue_states": {"queued": 1},
+        "precondition_states": {"required": 1},
+        "operator_action_statuses": {"pending": 1},
+        "online_chain_states": {"completed": 1},
+        "synthetic_ui_candidate_states": {"verified": 1},
+        "external_tool_statuses": {"completed": 1},
+        "intent_checkpoint_quality": {"adequate": 1},
+        "insufficient_negative_quality_dispositions": 1,
+    }
+    assert database.read_bytes() == before
+
+
 def test_zero_attempts_after_failed_stage_are_not_initialized_only(tmp_path: Path) -> None:
     database = tmp_path / "Attack.db"
     _legacy_database(database)

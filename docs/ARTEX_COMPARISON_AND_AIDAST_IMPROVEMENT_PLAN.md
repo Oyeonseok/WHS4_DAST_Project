@@ -105,6 +105,52 @@ ARTEX 방식의 auth/permission/menu stub을 Recon 보조 모드로 사용해 �
 
 재시도 시 intent별로 이미 사용한 전략, payload family, 응답 특징, 획득한 사실, 남은 Todo를 이어받는다. 단일 401/403이나 한 종류 payload 실패는 `tested_negative`로 확정하지 않는다. 대조 요청과 대체 전략이 충분한 경우만 terminal negative로 처리한다.
 
+## `artex` 브랜치 구현 상태
+
+1. **온라인 Attack Graph — `500a5fd`**
+   endpoint, parameter, coverage, lead, finding, fact, credential, identity,
+   object, role과 전제조건을 Pipeline DB에서 안전한 메타데이터 그래프로
+   투영한다. durable evidence가 달라질 때만 revision을 만들고 새 작업에는
+   endpoint 인접 그래프를 제한된 크기로 전달한다.
+2. **Coverage/Lead 이중 queue — `75fec8a`**
+   coverage 바닥선을 유지하면서 그래프에서 나온 고가치 lead를 함께
+   예약한다. 한 queue가 다른 queue를 굶기지 않으며 동일 lead를 중복
+   소진하지 않는다.
+3. **전제조건 resolver와 HITL — `e5a53e3`**
+   session, role, second identity, scanner-owned object, fresh token과 prior
+   state를 구조화한다. 자동 복구 근거가 없을 때 대시보드에 구체적인
+   operator action을 만들며, 단순 확인 클릭만으로 전제조건을 충족시키지
+   않는다.
+4. **공격 중 chaining — `ada45d4`**
+   confirmed finding이 생기면 같은 endpoint, origin의 identifier, credential
+   boundary에 해당하는 기존 Recon coverage만 제한적으로 재우선화한다.
+   최종 Chaining 단계는 증거 정리와 보고서용 확정 역할을 유지한다.
+5. **제한된 클라이언트 UI 합성 — `936504f`, `a57dc95`, `d08f55f`, `593e938`**
+   stateful UI frontier와 HTML/JS의 literal route를 제한된 수로 수집한다.
+   합성 route는 `synthetic_ui_candidates`에 머물며 실제 target HTTP 관측이
+   있어야 endpoint로 승격된다. 스크립트를 실행하거나 합성 결과를 인증
+   성공 또는 취약점 증거로 사용하지 않는다.
+6. **Broker 기반 외부 도구 adapter — `32f34b9`**
+   `nuclei-http-template-v1`과 `sqlmap-payload-family-v1`의 구조화 manifest를
+   지원한다. shell, raw workflow, proxy, credential header를 거부하고 모든
+   물리 요청을 기존 RequestBroker, TargetPolicy, request ledger로 보낸다.
+7. **Intent checkpoint와 부정 증거 품질 — `ca8be77`**
+   전략군, payload군, 응답 digest 특징, fact 참조, 남은 Todo와 control
+   request ID를 append-only로 저장한다. 원문 request/response, URL, token과
+   credential은 저장하지 않는다. 현재 작업의 서로 다른 요청과 대체 전략이
+   충분해야 `tested_negative`가 되며, 약한 음성 증거는 다른 전략의 재시도로
+   넘어가고 마지막에도 취약점 부재로 과장하지 않는다.
+
+각 단계의 상태는 `aidast.benchmarks.diagnostics.inspect_scan`의
+`adaptive_attack`에서 graph revision, lead queue, precondition/HITL, online
+chain, synthetic UI candidate, external tool run, intent checkpoint 품질로
+읽을 수 있다. 이 값은 실행 상태를 측정하기 위한 것이며 그 자체를 취약점
+recall이나 finding 증거로 해석하지 않는다.
+
+기존 AIDAST의 안전 경계는 그대로 적용된다. 공개 benchmark 답안은 실행
+후 비교에만 사용하고, 실제 요청은 승인된 scope와 예산을 통과해야 하며,
+Finding은 request-bound reproduction spec과 독립 Validation을 거쳐야 한다.
+
 ## 비교 평가 기준
 
 VulnBank와 OWASP Juice Shop을 초기화하고 ARTEX와 AIDAST에 동일한 scope, 계정, 모델, 요청 수, 시간 예산을 제공한다. 공개 답안은 실행 전에 agent에 제공하지 않고 완료 후 대조한다.

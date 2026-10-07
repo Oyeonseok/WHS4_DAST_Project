@@ -131,6 +131,20 @@ def inspect_scan(database: Path, scan_id: str) -> dict[str, Any]:
             else None
         )
         stage_count = count("stage_runs")
+        weak_negative_dispositions = None
+        if "attack_coverage_items" in tables:
+            columns = {
+                row[1] for row in conn.execute(
+                    "PRAGMA table_info(attack_coverage_items)"
+                )
+            }
+            if "disposition_reason" in columns:
+                weak_negative_dispositions = conn.execute(
+                    """SELECT count(*) FROM attack_coverage_items
+                       WHERE scan_id=? AND lower(COALESCE(disposition_reason,''))
+                         LIKE '%negative evidence quality%'""",
+                    (scan_id,),
+                ).fetchone()[0]
         initialized_only = (
             attempt_count == 0 and finding_count == 0 and stage_count == 0
             if all(value is not None for value in (attempt_count, finding_count, stage_count))
@@ -176,6 +190,26 @@ def inspect_scan(database: Path, scan_id: str) -> dict[str, Any]:
                     "benchmark_catalog_items", "assessment_status",
                 ),
             },
+            "adaptive_attack": {
+                "graph_revision_count": count("attack_graph_revisions"),
+                "graph_node_states": statuses("attack_graph_nodes", "state"),
+                "lead_queue_states": statuses("attack_lead_queue", "state"),
+                "precondition_states": statuses("attack_preconditions", "state"),
+                "operator_action_statuses": statuses(
+                    "attack_operator_actions", "status",
+                ),
+                "online_chain_states": statuses("attack_chain_leads", "state"),
+                "synthetic_ui_candidate_states": statuses(
+                    "synthetic_ui_candidates", "state",
+                ),
+                "external_tool_statuses": statuses("attack_tool_runs", "status"),
+                "intent_checkpoint_quality": statuses(
+                    "attack_intent_checkpoints", "evidence_quality",
+                ),
+                "insufficient_negative_quality_dispositions": (
+                    weak_negative_dispositions
+                ),
+            },
             "semantics": (
                 "Initialized databases are not completed negative scans. Attempt "
                 "counts include recorded errors and rejections; response counts "
@@ -184,5 +218,7 @@ def inspect_scan(database: Path, scan_id: str) -> dict[str, Any]:
                 "latest independent Validation decision counts a finding as "
                 "confirmed. No black-box recall is inferred from these counts; "
                 "absence of recognized source provenance does not prove isolation."
+                " Adaptive Attack counts describe persisted scheduling and evidence "
+                "state; they do not by themselves establish vulnerability recall."
             ),
         }
