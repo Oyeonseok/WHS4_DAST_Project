@@ -281,6 +281,17 @@ same temporary file.
    ```json
    {"method":"GET","url":"https://target.test/api/me","headers":{},"credential_reference_id":"credref_existing"}
    ```
+   When several requests match an allowlisted nuclei HTTP template or sqlmap
+   payload family, you may instead write one bounded manifest and invoke
+   `external_tool_helper_path run` with the same DB, scan, stage, task and
+   policy arguments plus `--manifest`. The only adapter IDs are
+   `nuclei-http-template-v1` and `sqlmap-payload-family-v1`. The helper accepts
+   structured HTTP requests only, rejects shell/raw/workflow/proxy fields and
+   credential headers, and dispatches every physical request through the same
+   guarded request ledger. It does not execute nuclei, sqlmap, Bash, or an
+   independent network stack. Use opaque `credential_reference_id` values for
+   authentication and keep the manifest within the task's existing endpoint,
+   method, authorization envelope, and request budget.
 8. When observed behavior satisfies the active Skill's confirmation criteria,
    write a minimal redacted evidence JSON and use `commit-finding`. Include all
    supporting open attempt IDs in `lead_attempt_ids` and the official

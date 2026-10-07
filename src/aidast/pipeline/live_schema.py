@@ -204,6 +204,33 @@ CREATE TABLE IF NOT EXISTS attack_chain_leads (
 CREATE INDEX IF NOT EXISTS idx_attack_chain_leads_scan
     ON attack_chain_leads(scan_id,state,priority DESC,created_at);
 
+CREATE TABLE IF NOT EXISTS attack_tool_runs (
+    tool_run_id TEXT PRIMARY KEY NOT NULL,
+    scan_id TEXT NOT NULL REFERENCES scans(scan_id),
+    stage_run_id TEXT NOT NULL,
+    task_id TEXT NOT NULL,
+    adapter_id TEXT NOT NULL CHECK(adapter_id IN (
+        'nuclei-http-template-v1','sqlmap-payload-family-v1'
+    )),
+    manifest_sha256 TEXT NOT NULL CHECK(length(manifest_sha256)=64),
+    status TEXT NOT NULL DEFAULT 'running' CHECK(status IN (
+        'running','completed','failed','outcome_unknown'
+    )),
+    planned_request_count INTEGER NOT NULL CHECK(planned_request_count BETWEEN 1 AND 20),
+    completed_request_count INTEGER NOT NULL DEFAULT 0 CHECK(completed_request_count BETWEEN 0 AND 20),
+    request_ids_json TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(request_ids_json)),
+    result_summary_json TEXT NOT NULL DEFAULT '{}' CHECK(
+        json_valid(result_summary_json) AND length(CAST(result_summary_json AS BLOB)) <= 4096
+    ),
+    error_code TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    finished_at TEXT,
+    FOREIGN KEY(stage_run_id,scan_id) REFERENCES stage_runs(stage_run_id,scan_id),
+    FOREIGN KEY(task_id,scan_id) REFERENCES attack_tasks(task_id,scan_id)
+);
+CREATE INDEX IF NOT EXISTS idx_attack_tool_runs_scan
+    ON attack_tool_runs(scan_id,status,created_at);
+
 CREATE TABLE IF NOT EXISTS attack_http_requests (
     request_id TEXT PRIMARY KEY NOT NULL,
     scan_id TEXT NOT NULL REFERENCES scans(scan_id),

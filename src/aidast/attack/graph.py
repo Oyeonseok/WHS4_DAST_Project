@@ -266,6 +266,30 @@ def synchronize_attack_graph(
             if followup:
                 projector.edge(chain, followup, "schedules_followup")
 
+    if conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='attack_tool_runs'"
+    ).fetchone():
+        for row in _rows(conn, """SELECT r.tool_run_id,r.task_id,r.adapter_id,r.status,
+                                          r.planned_request_count,r.completed_request_count,
+                                          c.coverage_id
+                                   FROM attack_tool_runs r
+                                   LEFT JOIN attack_coverage_items c
+                                     ON c.scan_id=r.scan_id AND c.last_task_id=r.task_id
+                                   WHERE r.scan_id=? ORDER BY r.tool_run_id""", (scan_id,)):
+            tool = projector.node(
+                "tool_run", row["tool_run_id"], state=(
+                    "resolved" if row["status"] in {"completed", "failed"} else
+                    "running" if row["status"] == "running" else "blocked"
+                ), priority=70,
+                metadata={key: row[key] for key in (
+                    "tool_run_id", "task_id", "adapter_id", "status",
+                    "planned_request_count", "completed_request_count",
+                )},
+            )
+            coverage = coverage_nodes.get(row["coverage_id"])
+            if coverage:
+                projector.edge(coverage, tool, "executed_tool_adapter")
+
     for row in _rows(conn, """SELECT a.attempt_id,a.endpoint_id,a.skill_name,a.outcome,
                                       a.finding_id,a.resolved_at,a.task_id
                                FROM attack_attempts a WHERE a.scan_id=? AND a.outcome='lead'
