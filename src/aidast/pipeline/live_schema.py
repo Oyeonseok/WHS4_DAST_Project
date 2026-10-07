@@ -183,6 +183,27 @@ CREATE TABLE IF NOT EXISTS attack_operator_actions (
 CREATE INDEX IF NOT EXISTS idx_attack_operator_actions_scan
     ON attack_operator_actions(scan_id,status,created_at);
 
+CREATE TABLE IF NOT EXISTS attack_chain_leads (
+    chain_lead_id TEXT PRIMARY KEY NOT NULL,
+    scan_id TEXT NOT NULL REFERENCES scans(scan_id),
+    source_finding_id TEXT NOT NULL REFERENCES findings(finding_id),
+    followup_coverage_id TEXT NOT NULL REFERENCES attack_coverage_items(coverage_id),
+    relationship TEXT NOT NULL CHECK(relationship IN (
+        'same_endpoint_followup','same_origin_identifier_followup',
+        'credential_boundary_followup'
+    )),
+    state TEXT NOT NULL DEFAULT 'queued' CHECK(state IN (
+        'queued','running','completed','retired'
+    )),
+    priority INTEGER NOT NULL CHECK(priority BETWEEN 0 AND 100),
+    source_stage_run_id TEXT REFERENCES stage_runs(stage_run_id),
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(scan_id,source_finding_id,followup_coverage_id)
+);
+CREATE INDEX IF NOT EXISTS idx_attack_chain_leads_scan
+    ON attack_chain_leads(scan_id,state,priority DESC,created_at);
+
 CREATE TABLE IF NOT EXISTS attack_http_requests (
     request_id TEXT PRIMARY KEY NOT NULL,
     scan_id TEXT NOT NULL REFERENCES scans(scan_id),

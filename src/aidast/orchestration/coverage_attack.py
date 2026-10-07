@@ -24,6 +24,7 @@ from aidast.attack.coverage import (
     transition_coverage,
 )
 from aidast.attack.graph import graph_context_for_endpoint, synchronize_attack_graph
+from aidast.attack.online_chaining import refresh_online_chain_leads
 from aidast.attack.work_queue import (
     mark_claimed_leads,
     reconcile_lead_queue,
@@ -100,6 +101,10 @@ class ExhaustiveAttackCoordinator:
             synchronize_attack_graph(
                 conn, scan_id, trigger_kind="coverage.manifest.ready",
             )
+            refresh_online_chain_leads(conn, scan_id)
+            synchronize_attack_graph(
+                conn, scan_id, trigger_kind="online.chains.ready",
+            )
         stages: list[str] = []
         for _batch_no in range(1, self.max_batches + 1):
             current = coverage_status(self.db_path, scan_id)
@@ -137,6 +142,13 @@ class ExhaustiveAttackCoordinator:
                     synchronize_attack_graph(
                         conn, scan_id, stage_run_id=stage_run_id,
                         trigger_kind="deterministic.batch.completed",
+                    )
+                    refresh_online_chain_leads(
+                        conn, scan_id, stage_run_id=stage_run_id,
+                    )
+                    synchronize_attack_graph(
+                        conn, scan_id, stage_run_id=stage_run_id,
+                        trigger_kind="online.chains.changed",
                     )
                 continue
             selected_skills = tuple(dict.fromkeys(task["skill_name"] for task in tasks))
@@ -180,6 +192,13 @@ class ExhaustiveAttackCoordinator:
                     synchronize_attack_graph(
                         conn, scan_id, stage_run_id=stage_run_id,
                         trigger_kind="agent.batch.completed",
+                    )
+                    refresh_online_chain_leads(
+                        conn, scan_id, stage_run_id=stage_run_id,
+                    )
+                    synchronize_attack_graph(
+                        conn, scan_id, stage_run_id=stage_run_id,
+                        trigger_kind="online.chains.changed",
                     )
             # A bounded native batch may legitimately fail as a whole after
             # every task has already persisted a terminal or retryable
@@ -643,6 +662,13 @@ class ExhaustiveAttackCoordinator:
                 conn, scan_id, stage_run_id=stage_run_id,
                 trigger_kind="agent.batch.recovered",
             )
+            refresh_online_chain_leads(
+                conn, scan_id, stage_run_id=stage_run_id,
+            )
+            synchronize_attack_graph(
+                conn, scan_id, stage_run_id=stage_run_id,
+                trigger_kind="online.chains.changed",
+            )
             return can_continue
 
     @staticmethod
@@ -699,6 +725,13 @@ class ExhaustiveAttackCoordinator:
             synchronize_attack_graph(
                 conn, scan_id, stage_run_id=stage_run_id,
                 trigger_kind="batch.preflight",
+            )
+            refresh_online_chain_leads(
+                conn, scan_id, stage_run_id=stage_run_id,
+            )
+            synchronize_attack_graph(
+                conn, scan_id, stage_run_id=stage_run_id,
+                trigger_kind="online.chains.preflight",
             )
             refresh_lead_queue(conn, scan_id)
             queue_selection = select_dual_queue(

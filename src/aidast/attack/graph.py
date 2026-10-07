@@ -242,6 +242,30 @@ def synchronize_attack_graph(
         if endpoint:
             projector.edge(endpoint, finding, "produced_finding")
 
+    if conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='attack_chain_leads'"
+    ).fetchone():
+        for row in _rows(conn, """SELECT chain_lead_id,source_finding_id,
+                                          followup_coverage_id,relationship,state,priority
+                                   FROM attack_chain_leads WHERE scan_id=?
+                                   ORDER BY chain_lead_id""", (scan_id,)):
+            chain = projector.node(
+                "chain", row["chain_lead_id"], state=(
+                    "resolved" if row["state"] == "completed" else
+                    "running" if row["state"] == "running" else "queued"
+                ), priority=int(row["priority"]),
+                metadata={key: row[key] for key in (
+                    "chain_lead_id", "source_finding_id", "followup_coverage_id",
+                    "relationship", "state", "priority",
+                )},
+            )
+            source = finding_nodes.get(row["source_finding_id"])
+            followup = coverage_nodes.get(row["followup_coverage_id"])
+            if source:
+                projector.edge(source, chain, "opens_chain_branch")
+            if followup:
+                projector.edge(chain, followup, "schedules_followup")
+
     for row in _rows(conn, """SELECT a.attempt_id,a.endpoint_id,a.skill_name,a.outcome,
                                       a.finding_id,a.resolved_at,a.task_id
                                FROM attack_attempts a WHERE a.scan_id=? AND a.outcome='lead'
