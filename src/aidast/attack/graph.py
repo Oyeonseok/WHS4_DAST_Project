@@ -290,6 +290,33 @@ def synchronize_attack_graph(
             if coverage:
                 projector.edge(coverage, tool, "executed_tool_adapter")
 
+    if conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='attack_intent_checkpoints'"
+    ).fetchone():
+        for row in _rows(conn, """SELECT checkpoint_id,coverage_id,task_id,sequence,
+                                          evidence_quality,
+                                          json_array_length(strategy_families_json) AS strategy_count,
+                                          json_array_length(payload_families_json) AS payload_count,
+                                          json_array_length(response_features_json) AS response_feature_count,
+                                          json_array_length(control_request_ids_json) AS control_count,
+                                          json_array_length(remaining_todos_json) AS remaining_count
+                                   FROM attack_intent_checkpoints WHERE scan_id=?
+                                   ORDER BY coverage_id,sequence""", (scan_id,)):
+            checkpoint = projector.node(
+                "fact", f"intent-checkpoint:{row['checkpoint_id']}", state=(
+                    "resolved" if row["evidence_quality"] in {"adequate", "strong"}
+                    else "active"
+                ), priority=80,
+                metadata={key: row[key] for key in (
+                    "checkpoint_id", "coverage_id", "task_id", "sequence",
+                    "evidence_quality", "strategy_count", "payload_count",
+                    "response_feature_count", "control_count", "remaining_count",
+                )},
+            )
+            coverage = coverage_nodes.get(row["coverage_id"])
+            if coverage:
+                projector.edge(coverage, checkpoint, "has_intent_checkpoint")
+
     for row in _rows(conn, """SELECT a.attempt_id,a.endpoint_id,a.skill_name,a.outcome,
                                       a.finding_id,a.resolved_at,a.task_id
                                FROM attack_attempts a WHERE a.scan_id=? AND a.outcome='lead'

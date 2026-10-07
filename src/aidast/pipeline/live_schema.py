@@ -231,6 +231,40 @@ CREATE TABLE IF NOT EXISTS attack_tool_runs (
 CREATE INDEX IF NOT EXISTS idx_attack_tool_runs_scan
     ON attack_tool_runs(scan_id,status,created_at);
 
+CREATE TABLE IF NOT EXISTS attack_intent_checkpoints (
+    checkpoint_id TEXT PRIMARY KEY NOT NULL,
+    scan_id TEXT NOT NULL REFERENCES scans(scan_id),
+    coverage_id TEXT NOT NULL REFERENCES attack_coverage_items(coverage_id),
+    stage_run_id TEXT NOT NULL,
+    task_id TEXT NOT NULL,
+    sequence INTEGER NOT NULL CHECK(sequence > 0),
+    strategy_families_json TEXT NOT NULL CHECK(json_valid(strategy_families_json)),
+    payload_families_json TEXT NOT NULL CHECK(json_valid(payload_families_json)),
+    response_features_json TEXT NOT NULL CHECK(
+        json_valid(response_features_json)
+        AND length(CAST(response_features_json AS BLOB)) <= 16384
+    ),
+    acquired_fact_refs_json TEXT NOT NULL CHECK(json_valid(acquired_fact_refs_json)),
+    remaining_todos_json TEXT NOT NULL CHECK(
+        json_valid(remaining_todos_json)
+        AND length(CAST(remaining_todos_json AS BLOB)) <= 8192
+    ),
+    control_request_ids_json TEXT NOT NULL CHECK(json_valid(control_request_ids_json)),
+    evidence_quality TEXT NOT NULL CHECK(evidence_quality IN ('weak','adequate','strong')),
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(stage_run_id,scan_id) REFERENCES stage_runs(stage_run_id,scan_id),
+    FOREIGN KEY(task_id,scan_id) REFERENCES attack_tasks(task_id,scan_id),
+    UNIQUE(coverage_id,sequence)
+);
+CREATE INDEX IF NOT EXISTS idx_attack_intent_checkpoints
+    ON attack_intent_checkpoints(scan_id,coverage_id,sequence DESC);
+CREATE TRIGGER IF NOT EXISTS attack_intent_checkpoints_no_update
+BEFORE UPDATE ON attack_intent_checkpoints
+BEGIN SELECT RAISE(ABORT, 'intent checkpoints are append-only'); END;
+CREATE TRIGGER IF NOT EXISTS attack_intent_checkpoints_no_delete
+BEFORE DELETE ON attack_intent_checkpoints
+BEGIN SELECT RAISE(ABORT, 'intent checkpoints are append-only'); END;
+
 CREATE TABLE IF NOT EXISTS attack_http_requests (
     request_id TEXT PRIMARY KEY NOT NULL,
     scan_id TEXT NOT NULL REFERENCES scans(scan_id),

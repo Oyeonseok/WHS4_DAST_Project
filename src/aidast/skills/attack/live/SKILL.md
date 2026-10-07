@@ -322,7 +322,16 @@ same temporary file.
    form-urlencoded evidence uses an encoded `text_body` plus its Content-Type,
    while JSON evidence uses `json_body`. A format conversion that the target
    rejects makes both the positive control and the finding unusable.
-9. Close all leads for the task, then transition it to `completed`. A coverage
+9. Before completing a coverage task with only negative or rejected evidence,
+   call `commit-checkpoint` with the strategy-family labels, payload-family
+   labels, bounded response features, acquired fact IDs, remaining safe TODOs,
+   and completed control request IDs. Never include request/response bodies,
+   URLs, cookies, tokens, passwords, or other credentials. One 401/403, one
+   payload, or one strategy is weak evidence and cannot establish a terminal
+   negative. On a retry, read `intent_checkpoint` from the task payload and
+   choose a materially different remaining strategy. A checkpoint records work;
+   it never proves a finding by itself.
+10. Close all leads for the task, then transition it to `completed`. A coverage
    task with no request/attempt evidence must be `skipped` with the exact blocker,
    including when a request-bound policy decision denies a task after it entered
    `running`; that denial is not a task failure

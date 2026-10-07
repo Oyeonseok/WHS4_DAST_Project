@@ -229,6 +229,23 @@ def commit_attempt(db_path: Path, scan_id: str, payload_path: Path) -> dict:
         return {"attempt_id": attempt_id, "committed": committed}
 
 
+def commit_checkpoint(db_path: Path, scan_id: str, payload_path: Path) -> dict:
+    """Append a bounded, secret-free intent checkpoint for a running task."""
+    from aidast.attack.intent_checkpoint import commit_intent_checkpoint
+
+    item = _payload(payload_path)
+    task_id = _text(
+        item.pop("task_id", None), required=True, maximum=256, field="task_id",
+    )
+    with closing(sqlite3.connect(db_path)) as conn, conn:
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys=ON")
+        _completed_scan(conn, scan_id)
+        return commit_intent_checkpoint(
+            conn, scan_id=scan_id, task_id=task_id, document=item,
+        )
+
+
 def transition_task(
     db_path: Path, scan_id: str, stage_run_id: str, task_id: str,
     status: str, reason: str | None = None,
@@ -650,7 +667,10 @@ def _parser() -> argparse.ArgumentParser:
     source = read.add_mutually_exclusive_group(required=True)
     source.add_argument("--sql")
     source.add_argument("--sql-file", type=Path)
-    for name in ("commit-attempt", "resolve-attempt", "commit-fact", "commit-finding"):
+    for name in (
+        "commit-attempt", "resolve-attempt", "commit-fact", "commit-finding",
+        "commit-checkpoint",
+    ):
         command = sub.add_parser(name)
         command.add_argument("--db", type=Path, required=True)
         command.add_argument("--scan-id", required=True)
@@ -679,6 +699,8 @@ def main(argv: list[str] | None = None) -> int:
             result = commit_fact(args.db, args.scan_id, args.payload)
         elif args.command == "commit-finding":
             result = commit_finding(args.db, args.scan_id, args.payload)
+        elif args.command == "commit-checkpoint":
+            result = commit_checkpoint(args.db, args.scan_id, args.payload)
         else:
             result = transition_task(
                 args.db, args.scan_id, args.stage_run_id, args.task_id,

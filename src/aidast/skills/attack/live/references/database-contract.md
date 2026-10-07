@@ -29,6 +29,7 @@ PYTHON DB_HELPER commit-attempt --db PIPELINE_DB --scan-id SCAN_ID --payload FIL
 PYTHON DB_HELPER resolve-attempt --db PIPELINE_DB --scan-id SCAN_ID --payload FILE
 PYTHON DB_HELPER commit-fact --db PIPELINE_DB --scan-id SCAN_ID --payload FILE
 PYTHON DB_HELPER commit-finding --db PIPELINE_DB --scan-id SCAN_ID --payload FILE
+PYTHON DB_HELPER commit-checkpoint --db PIPELINE_DB --scan-id SCAN_ID --payload FILE
 PYTHON DB_HELPER transition-task --db PIPELINE_DB --scan-id SCAN_ID --stage-run-id STAGE_RUN_ID --task-id TASK_ID --status running|completed|skipped|failed [--reason TEXT]
 ```
 
@@ -66,6 +67,18 @@ candidate and submit it as another guarded request only if needed.
 ```json
 {"task_id":"configured task ID","skill_name":"hunt-example","endpoint_id":"endpoint_id or empty","request_fingerprint":"fingerprint returned by HTTP helper","method":"GET","url":"https://target/path","identity_role":"unauthenticated","payload_variant":"short label","response_status":200,"response_signature":"sha256 digest","outcome":"negative|lead|inconclusive"}
 ```
+
+Before completing a task with negative or rejected evidence, append an intent
+checkpoint. It contains labels and ledger references only; never include raw
+requests, responses, URLs, tokens, cookies, or credentials:
+
+```json
+{"task_id":"configured task ID","strategy_families":["syntax mutation","identity differential"],"payload_families":["boolean control"],"response_features":[{"request_id":"target request ID","status":200,"body_sha256":"64 lowercase hex characters","assertion_kinds":["status_equals"]},{"request_id":"control request ID","status":401,"body_sha256":"64 lowercase hex characters","assertion_kinds":["body_digest_differs"]}],"acquired_fact_refs":[],"remaining_todos":[],"control_request_ids":["control request ID"]}
+```
+
+One denial, one payload, or one strategy is weak evidence and cannot close a
+coverage item as `tested_negative`. A later retry receives the latest checkpoint
+in its task payload and must select a materially different remaining strategy.
 
 `commit-finding` requires `scan_id`, optional `endpoint_id`, `vuln_type`,
 `severity`, `title`, `description`, optional CVSS/CWE fields, and a non-empty

@@ -753,7 +753,7 @@ def test_off_target_attempt_does_not_poison_exact_inconclusive_evidence(tmp_path
         assert reason == 'Exact response remained inconclusive'
 
 
-@pytest.mark.parametrize('request_endpoint,credential_reference,expected', [('exact',None,'tested_negative'),('other',None,'error_retryable'),('exact','invented-auth','error_retryable')])
+@pytest.mark.parametrize('request_endpoint,credential_reference,expected', [('exact',None,'error_retryable'),('other',None,'error_retryable'),('exact','invented-auth','error_retryable')])
 def test_negative_coverage_requires_the_selected_endpoint_and_identity(tmp_path, request_endpoint, credential_reference, expected):
     from aidast.attack.recon_hypotheses import plan_recon_attack
     from aidast.attack.coverage import reconcile_coverage_batch
@@ -773,7 +773,7 @@ def test_negative_coverage_requires_the_selected_endpoint_and_identity(tmp_path,
         assert conn.execute('SELECT status FROM attack_coverage_items WHERE coverage_id=?', (task['coverage_id'],)).fetchone()[0] == expected
 
 
-def test_authenticated_positive_control_counts_for_anonymous_planned_task(tmp_path):
+def test_authenticated_positive_control_is_exposed_but_needs_a_checkpoint(tmp_path):
     from aidast.attack.recon_hypotheses import plan_recon_attack
     from aidast.attack.coverage import reconcile_coverage_batch
     from aidast.pipeline.lifecycle import register_credential_reference
@@ -824,7 +824,7 @@ def test_authenticated_positive_control_counts_for_anonymous_planned_task(tmp_pa
         assert conn.execute(
             'SELECT status FROM attack_coverage_items WHERE coverage_id=?',
             (task['coverage_id'],),
-        ).fetchone()[0] == 'tested_negative'
+        ).fetchone()[0] == 'error_retryable'
 
 
 def test_dashboard_uses_captured_http_path_even_after_legacy_endpoint_window(tmp_path):
