@@ -505,6 +505,7 @@ uv run pytest -q
 ## 상세 문서
 
 - [운영 상세](docs/OPERATIONS.md): Recon 경계, 인증, 예산, 진단, Legacy 경로
+- [`artex` 브랜치 변경 요약](docs/changes/ARTEX_BRANCH_SUMMARY_2026-10-08.md): 온라인 공격 그래프, HITL, UI 탐색, 실제 버그바운티 모드와 Wiki 제거
 - [병합 변경 이력](docs/changes/MERGE_CHANGES.md): 통합 전후 차이와 변경 이유
 - [Attack Agent 병합 설계](docs/design/ATTACK_AGENT_MERGE_DESIGN.md)
 - [외부 Claude-BugHunter 출처와 라이선스](docs/third-party/claude-bughunter/README.md)
