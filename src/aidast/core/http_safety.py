@@ -200,6 +200,24 @@ def is_sensitive_header(name: str) -> bool:
     )
 
 
+def browser_has_authentication(
+    headers: Mapping[str, str] | None, *,
+    identity_headers: Mapping[str, str] | None = None,
+) -> bool:
+    """Distinguish browser credentials from required researcher ID headers."""
+    controlled = {str(name).casefold() for name in (identity_headers or {})}
+    for name, value in (headers or {}).items():
+        normalized = str(name).casefold().replace("_", "-")
+        if normalized in controlled or normalized.startswith("x-aidast-"):
+            continue
+        if str(value).strip() and (
+            normalized in {"authorization", "proxy-authorization", "cookie"}
+            or is_sensitive_header(normalized)
+        ):
+            return True
+    return False
+
+
 def validate_platform_username(value: str, platform: str) -> str:
     candidate = value.strip()
     if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", candidate) is None:

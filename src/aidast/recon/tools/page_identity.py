@@ -28,6 +28,17 @@ def canonical_visit_key(url: str) -> str:
                        urlencode(query, doseq=True), parsed.fragment))
 
 
+def is_authentication_page_url(url: str) -> bool:
+    """Recognize explicit authentication path segments without reading secrets."""
+    try:
+        segments = [segment.casefold() for segment in urlsplit(url).path.split("/") if segment]
+    except ValueError:
+        return False
+    return any(segment in {
+        "login", "log-in", "signin", "sign-in", "sso", "authenticate",
+    } for segment in segments)
+
+
 def screen_fingerprint(snapshot: object, *, origin: str) -> str | None:
     """Hash visible page content and controls; never persist or send page text."""
     if not isinstance(snapshot, dict):

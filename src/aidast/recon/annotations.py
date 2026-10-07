@@ -12,6 +12,10 @@ from aidast.pipeline.lifecycle import audit_event
 from aidast.recon import db
 from aidast.recon.judgment import normalize_path, is_static_asset, query_signature
 from aidast.recon.verification import result_verification_status
+from aidast.recon.ui_synthesis import (
+    persist_synthetic_ui_candidate,
+    reconcile_synthetic_ui_candidates,
+)
 
 
 TAXONOMY = {
@@ -138,6 +142,14 @@ def sanitize_evidence(value) -> dict:
         ]
     if isinstance(value.get('verification_reason'), str):
         result['verification_reason'] = safe_text(value['verification_reason'])[:80]
+    if value.get('synthesis_kind') == 'navigation':
+        result['synthesis_kind'] = 'navigation'
+    if value.get('required_role_hint') in {'unknown', 'authenticated', 'administrator'}:
+        result['required_role_hint'] = value['required_role_hint']
+    if isinstance(value.get('source_document_sha256'), str) and re.fullmatch(
+        r'[a-f0-9]{64}', value['source_document_sha256']
+    ):
+        result['source_document_sha256'] = value['source_document_sha256']
     if value.get('derivation_rule') in {
         'api_prefix_alias', 'api_collection_alias',
         'authentication_ui_companion', 'versionless_api_action',
@@ -241,6 +253,13 @@ class ObservationRecorder:
             else:
                 self.conn.execute('UPDATE discovery_contexts SET ended_at=? WHERE context_id=?', (db.now(), context_id))
             evidence = sanitize_evidence(item.get('evidence'))
+            if item.get('discovery_kind') == 'synthetic_ui_candidate':
+                persist_synthetic_ui_candidate(
+                    self.conn, scan_id=self.scan_id, origin_id=self.origin_id,
+                    method=method, path=path,
+                    source_url=str(evidence.get('parent_url') or context.get('page_url') or path),
+                    evidence=evidence,
+                )
             if unverified_candidate:
                 evidence['verification_status'] = 'candidate'
             if item.get('traffic_class'):
@@ -274,6 +293,8 @@ class ObservationRecorder:
                 'phase': phase,
                 'parameters': parameter_context(self.conn, endpoint_id),
             })
+        if self.origin_id:
+            reconcile_synthetic_ui_candidates(self.conn, origin_id=self.origin_id)
         self.conn.commit()
         if self.agent is not None:
             payload.sort(key=lambda item: item.get('observed_at') or '')

@@ -16,7 +16,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-RECON_SCHEMA_VERSION = 11
+RECON_SCHEMA_VERSION = 12
 
 SCHEMA = """
 -- WAL은 -wal/-shm 보조 파일에 mmap 기반 공유 락이 필요한데, WSL에서
@@ -802,10 +802,33 @@ CREATE TABLE IF NOT EXISTS deferred_candidates (
     method TEXT NOT NULL, url TEXT NOT NULL, priority INTEGER,
     reason TEXT NOT NULL, observed_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS synthetic_ui_candidates (
+    candidate_id TEXT PRIMARY KEY,
+    scan_id TEXT NOT NULL REFERENCES scans(scan_id),
+    origin_id TEXT NOT NULL REFERENCES origins(origin_id),
+    method TEXT NOT NULL CHECK(method IN ('GET','HEAD','OPTIONS','POST','PUT','PATCH','DELETE')),
+    normalized_path TEXT NOT NULL CHECK(substr(normalized_path,1,1)='/'),
+    candidate_kind TEXT NOT NULL CHECK(candidate_kind IN ('navigation','api_request')),
+    state TEXT NOT NULL DEFAULT 'synthetic'
+        CHECK(state IN ('synthetic','verified','rejected')),
+    required_role_hint TEXT NOT NULL DEFAULT 'unknown',
+    source_url TEXT NOT NULL,
+    source_sha256 TEXT NOT NULL CHECK(length(source_sha256)=64),
+    evidence_json TEXT NOT NULL DEFAULT '{}' CHECK(
+        json_valid(evidence_json) AND length(CAST(evidence_json AS BLOB)) <= 4096
+    ),
+    promoted_endpoint_id TEXT REFERENCES endpoints(endpoint_id),
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    verified_at TEXT,
+    UNIQUE(origin_id,method,normalized_path,candidate_kind,source_sha256)
+);
 CREATE INDEX IF NOT EXISTS idx_observations_endpoint ON endpoint_observations(endpoint_id);
 CREATE INDEX IF NOT EXISTS idx_observations_context ON endpoint_observations(context_id);
 CREATE INDEX IF NOT EXISTS idx_annotations_observation ON endpoint_annotations(observation_id);
 CREATE INDEX IF NOT EXISTS idx_annotations_tag ON endpoint_annotations(category, tag);
+CREATE INDEX IF NOT EXISTS idx_synthetic_ui_candidates
+    ON synthetic_ui_candidates(scan_id,state,origin_id,normalized_path);
 """
 
 
