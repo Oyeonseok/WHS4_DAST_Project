@@ -23,7 +23,7 @@ from aidast.scope.execution_rules import execution_interpretation_complete
 from aidast.scope.exclusion_guidance import (
     split_exclusion_enforcement, agent_exclusion_advisories, render_agent_exclusion_note,
 )
-from aidast.recon.policy import validate_start_url_for_target
+from aidast.recon.policy import default_start_url_for_target, validate_start_url_for_target
 from aidast.scope.models import AssetType
 
 MAX_DATABASE_BYTES = 64 * 1024 * 1024
@@ -225,7 +225,7 @@ def selected_startup_operations(
         key=(target.asset_type.value,target.asset)
         url=starts.get(key)
         if url is None and target.asset_type in {AssetType.URL,AssetType.API}:
-            url=target.asset if target.asset.startswith(('http://','https://')) else None
+            url=default_start_url_for_target(target.asset_type, target.asset)
         if plan is None:
             if target.asset_type is AssetType.WILDCARD and url:
                 operations=[StartupOperation('HTTP_PROBE',url)]

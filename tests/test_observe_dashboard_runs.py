@@ -13,7 +13,6 @@ from scripts.observe_dashboard_runs import (
     evidence, finalize, load_ids, main, observe, remember_events,
 )
 
-BASELINE = "a" * 24
 MODELS = ScanModelChoices(**{key: "fixture-model" for key in (
     "main_model", "recon_model", "attack_model", "chaining_model",
     "validation_model", "report_model",
@@ -25,10 +24,7 @@ def passing_row(scan_id="scan_one"):
             "stage_statuses": dict.fromkeys(STAGES, "completed"),
             "error_events": {}, "observation_errors": [], "event_coverage_complete": True,
             "persisted_models": MODELS.model_dump(), "expected_models_match": True,
-            "summary_present": True,
-            "recon_wiki": {"configured": True, "lint_ok": True,
-                           "baseline_id": BASELINE, "baseline_count": 81,
-                           "exact_recall": 75 / 81}}
+            "summary_present": True}
 
 
 class FixtureDashboard:
@@ -45,16 +41,6 @@ class FixtureDashboard:
         if path.endswith("/audit"):
             return {"events": ([{"id": "older", "level": "error", "event_type": "stage.failed",
                                  "message": "sensitive free-form data"}] if self.errors else [])}
-        if path.endswith("/recon-wiki"):
-            if payload is not None:
-                assert self.statuses[min(self.polls[scan_id] - 1, len(self.statuses) - 1)] == "completed"
-            return {"configured": True, "lint": {"ok": True},
-                    "comparison": {"baseline_id": BASELINE, "baseline_kind": "source",
-                                   "baseline_count": 81, "observed_count": 86,
-                                   "matched_count": 75, "exact_recall": 75 / 81,
-                                   "path_recall": .97, "confirmed_matched_count": 40,
-                                   "declared_candidate_matched_count": 35,
-                                   "missing": 6, "report_markdown": "sensitive body"}}
         if path.endswith("/summary"):
             if not self.summary:
                 raise ObservationError("HTTP 404", status_code=404)
@@ -74,14 +60,11 @@ def test_observes_existing_batch_without_launching_or_saving_sensitive_content(t
     with patch("scripts.observe_dashboard_runs.load_scan_model_choices", return_value=MODELS):
         result = observe(client, [f"scan_{index}" for index in range(count)],
                          result_root=tmp_path, destination=tmp_path / "evidence",
-                         baseline_id=BASELINE, baseline_kind="source", compare_wiki=True,
-                         baseline_count=81, min_recall=.90, timeout=10,
-                         poll_seconds=.001, settle_seconds=0,
+                         timeout=10, poll_seconds=.001, settle_seconds=0,
                          expected_models=MODELS.model_dump())
     assert result["passed"] and result["passed_runs"] == count
     writes = [(path, payload) for path, payload in client.calls if payload is not None]
-    assert len(writes) == count
-    assert all(path.endswith("/recon-wiki") for path, _payload in writes)
+    assert not writes
     raw = (tmp_path / "evidence/dashboard-observation.json").read_text()
     assert "sensitive" not in raw
     assert (tmp_path / "evidence/dashboard-observation.md").is_file()
@@ -99,21 +82,10 @@ def test_observes_existing_batch_without_launching_or_saving_sensitive_content(t
 ])
 def test_strict_checks_expose_failure(change, failed_check):
     row = passing_row() | change
-    assert assess(row, baseline_id=BASELINE, baseline_count=81, min_recall=.90)[failed_check] is False
+    assert assess(row)[failed_check] is False
 
 
-@pytest.mark.parametrize("recall", [.89, float("nan"), float("inf"), True, None])
-def test_recall_threshold_is_numeric_bounded_and_finite(recall):
-    row = passing_row()
-    row["recon_wiki"]["exact_recall"] = recall
-    assert not assess(row, baseline_id=BASELINE, baseline_count=81, min_recall=.90)["exact_recall"]
-
-
-def test_baseline_identity_and_count_are_required():
-    row = passing_row()
-    row["recon_wiki"] |= {"baseline_id": "b" * 24, "baseline_count": 80}
-    checks = assess(row, baseline_id=BASELINE, baseline_count=81, min_recall=.90)
-    assert not checks["baseline_selection"] and not checks["baseline_count"]
+def test_batch_requires_distinct_scan_ids_and_minimum_run_count():
     assert not evidence([passing_row()])["passed"]
     assert not evidence([passing_row()] * 10)["run_count_valid"]
 
@@ -122,8 +94,7 @@ def test_final_collection_cannot_post_before_terminal(tmp_path):
     client = FixtureDashboard()
     row = passing_row() | {"terminal_status": "running"}
     with pytest.raises(ValueError, match="terminal"):
-        finalize(client, row, result_root=tmp_path, baseline_id=BASELINE,
-                 baseline_kind="source", compare_wiki=True, expected_models=None)
+        finalize(client, row, result_root=tmp_path, expected_models=None)
     assert not client.calls
 
 
@@ -139,11 +110,10 @@ def test_finding_report_is_valid_when_legacy_scan_has_no_summary(tmp_path):
     row = passing_row()
     with patch("scripts.observe_dashboard_runs.load_scan_model_choices", return_value=MODELS):
         finalize(LegacyDashboard(summary=False), row, result_root=tmp_path,
-                 baseline_id=BASELINE, baseline_kind="source", compare_wiki=False,
                  expected_models=None)
     assert not row["summary_present"] and row["reports"]
     assert not row["observation_errors"]
-    assert all(assess(row, baseline_id=BASELINE, baseline_count=81, min_recall=.90).values())
+    assert all(assess(row).values())
 
 
 def test_error_event_metadata_is_sanitized_and_not_forgotten():
@@ -178,12 +148,11 @@ def test_truncated_api_requires_full_ledger_and_reads_old_errors_read_only(tmp_p
         collect_full_ledger(row, tmp_path)
 
 
-def test_deadline_preserves_partial_evidence_and_never_compares_running_scan(tmp_path):
+def test_deadline_preserves_partial_evidence_without_mutating_running_scan(tmp_path):
     client = FixtureDashboard(statuses=("running",))
     result = observe(client, ["scan_running"], result_root=tmp_path,
-                     destination=tmp_path / "evidence", baseline_id=BASELINE,
-                     baseline_kind="source", compare_wiki=True, baseline_count=81,
-                     min_recall=.90, timeout=.002, poll_seconds=.001, settle_seconds=0)
+                     destination=tmp_path / "evidence", timeout=.002,
+                     poll_seconds=.001, settle_seconds=0)
     assert not result["passed"]
     assert "observation deadline reached" in result["scans"][0]["observation_errors"]
     assert all(payload is None for _path, payload in client.calls)
@@ -200,7 +169,7 @@ def test_client_rejects_nonlocal_or_credential_urls(url):
 def test_client_rejects_launch_and_control_posts_before_transport():
     client = DashboardClient("http://127.0.0.1:8000")
     for path in ("/api/v1/scans", "/api/v1/scans/scan_one/resume", "/api/v1/scans/scan_one/stop"):
-        with pytest.raises(ValueError, match="only terminal"):
+        with pytest.raises(ValueError, match="read-only"):
             client.request(path, {})
 
 
@@ -216,10 +185,8 @@ def test_id_lists_reject_duplicates_traversal_and_accept_both_formats(tmp_path):
             load_ids(source)
 
 
-def test_cli_requires_baseline_for_comparison_and_rejects_invalid_limits(tmp_path):
+def test_cli_rejects_invalid_limits(tmp_path):
     source = tmp_path / "ids.txt"
     source.write_text("scan_one\n")
     args = ["--scan-ids", str(source), "--output", str(tmp_path / "output")]
-    assert main(args + ["--compare-wiki"]) == 2
-    assert main(args + ["--min-recall", "nan"]) == 2
     assert main(args + ["--poll-seconds", "0"]) == 2

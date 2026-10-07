@@ -660,29 +660,6 @@ dialog:has(.scan-form,.scope-intake-form,.scope-workflow){
   .model-call-result-body{padding:12px}
   .model-call-result-primary{gap:12px 20px}
 }
-.recon-wiki-controls {
-  display: grid;
-  gap: 1rem;
-}
-
-.recon-wiki-result {
-  display: grid;
-  gap: .8rem;
-  padding: 1rem;
-  border: 1px solid var(--line);
-  border-radius: 12px;
-  background: rgba(127, 127, 127, .06);
-}
-
-.recon-wiki-result pre {
-  max-height: 28rem;
-  overflow: auto;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  padding: 1rem;
-  border-radius: 8px;
-  background: rgba(0, 0, 0, .18);
-}
 .operator-actions {
   display: grid;
   gap: 12px;

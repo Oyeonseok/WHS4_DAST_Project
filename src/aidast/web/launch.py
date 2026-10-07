@@ -1005,7 +1005,6 @@ class ScanLaunchManager:
         with self._lock:
             job.finished_at = _now()
             job.status = "completed" if code == 0 else "failed"
-        self._accumulate_runtime_wiki(job)
         self._log(
             job.scan_id, f"resume:{attempt_id}:finished", stage.title(),
             "Resumed scan completed." if code == 0 else "Resumed scan exited with an error.",
@@ -1023,7 +1022,6 @@ class ScanLaunchManager:
         with self._lock:
             job.finished_at = _now()
             job.status = "completed" if code == 0 else "failed"
-        self._accumulate_runtime_wiki(job)
         try:
             stage = self.projector.snapshot(job.scan_id)["stage"]
         except ScanNotFoundError:
@@ -1047,37 +1045,8 @@ class ScanLaunchManager:
                           "error", message_code="pipeline.cancel_persist_failed")
             job.finished_at = _now()
             job.status = "cancelled"
-            self._accumulate_runtime_wiki(job)
             self._log(job.scan_id, "cancel.finished", stage, "Scan cancelled by operator.",
                       "warning", message_code="pipeline.cancelled")
-
-    def _accumulate_runtime_wiki(self, job: LaunchJob) -> None:
-        """Archive each stable Recon.db without feeding it back into execution."""
-        program_id = getattr(getattr(job, "scope", None), "program_id", None)
-        if not isinstance(program_id, str) or not program_id:
-            return
-        try:
-            from .recon_wiki import ReconWikiCatalog
-            ReconWikiCatalog(self.result_root).accumulate(
-                job.scan_id,
-                program_id=program_id,
-                baseline_id=None,
-                baseline_kind="source",
-                target_id=program_id,
-            )
-        except (OSError, sqlite3.Error, ValueError, RuntimeError) as exc:
-            self._log(
-                job.scan_id, "recon-wiki:auto:failed", "Recon",
-                "Recon Wiki automatic accumulation failed.", "warning",
-                message_code="recon_wiki.auto_failed",
-                message_params={"error_type": type(exc).__name__},
-            )
-        else:
-            self._log(
-                job.scan_id, "recon-wiki:auto:completed", "Recon",
-                "Recon.db was accumulated in the Recon Wiki.", "success",
-                message_code="recon_wiki.auto_completed",
-            )
 
     def _log(self, scan_id: str, key: str, stage: str, message: str, level: str = "info", *, message_code: str, message_params: dict[str, Any] | None = None) -> None:
         self.projector.record_event(

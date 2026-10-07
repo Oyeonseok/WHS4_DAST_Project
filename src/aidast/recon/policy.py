@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from fnmatch import fnmatchcase
 from typing import Annotated, Literal
-from urllib.parse import SplitResult, urlsplit
+from urllib.parse import SplitResult, urlsplit, urlunsplit
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -466,6 +466,19 @@ def canonical_host_for_asset(asset_type: AssetType, asset: str) -> str | None:
     if asset_type in {AssetType.DOMAIN, AssetType.IP_ADDRESS}:
         return asset
     return None
+
+
+def default_start_url_for_target(asset_type: AssetType, asset: str) -> str | None:
+    """Return the exact safe HTTP start for URL/API assets.
+
+    Bug bounty platforms frequently store a URL asset as a bare hostname. Keep
+    the policy module's HTTPS default in one place so exclusion preparation and
+    request-policy validation cannot disagree about the first request.
+    """
+    parsed = _normalized_web_asset_url(asset_type, asset)
+    if parsed is None or parsed.username or parsed.password or parsed.query or parsed.fragment:
+        return None
+    return urlunsplit((parsed.scheme.lower(), parsed.netloc, parsed.path or "/", "", ""))
 
 
 def validate_start_url_for_target(

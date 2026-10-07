@@ -1057,7 +1057,7 @@ def inferred_openapi_routes(document: dict, *, document_url: str, base_url: str,
     These candidates are conventions supported by a captured declaration. They
     are never requested here and remain distinguishable from contract routes.
     Only route structure, operation metadata, and well-known protocol paths are
-    used; benchmark and Recon Wiki comparison data are not inputs.
+    used; benchmark comparison data is not an input.
     """
     if (limit <= 0 or not isinstance(document, dict) or not isinstance(document.get("paths"), dict)
             or not (str(document.get("openapi", "")).startswith("3.") or document.get("swagger") == "2.0")):

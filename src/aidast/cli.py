@@ -42,13 +42,6 @@ from aidast.recon.policy import TargetPolicy, validate_policy_for_target
 from aidast.recon.profiles import EXECUTION_PROFILES, grounded_scope_request_rate
 from aidast.recon.surface import export_surface
 from aidast.recon.source_import import SourceImportError, import_flask_source
-from aidast.recon.wiki import (
-    ReconWikiError,
-    compare_databases,
-    ingest_database,
-    init_wiki,
-    lint_wiki,
-)
 from aidast.pipeline.lifecycle import finish_stage_run, start_stage_run
 from aidast.pipeline.locations import scan_run_directory
 from aidast.pipeline.materialize import materialize_pipeline
@@ -132,8 +125,6 @@ def main(
             return _run_scope(args, parser)
         if args.command == "recon":
             return _run_recon(args)
-        if args.command == "recon-wiki":
-            return _run_recon_wiki(args)
         if args.command == "import-recon":
             imported = import_flask_source(
                 args.source,
@@ -207,7 +198,6 @@ def main(
         ScopePathError,
         UpdateError,
         ValidationError,
-        ReconWikiError,
         ValidationCoordinatorError,
         SourceImportError,
         FileNotFoundError,
@@ -370,52 +360,6 @@ def _parser() -> argparse.ArgumentParser:
         ),
     )
     _add_session_options(recon)
-
-    recon_wiki = commands.add_parser(
-        "recon-wiki",
-        help="maintain a provenance-aware persistent Recon coverage wiki",
-    )
-    wiki_commands = recon_wiki.add_subparsers(dest="wiki_command", required=True)
-    wiki_init = wiki_commands.add_parser("init", help="create an empty Recon Wiki")
-    wiki_init.add_argument("--root", type=Path, required=True)
-
-    wiki_ingest = wiki_commands.add_parser(
-        "ingest", help="snapshot one Recon database into the immutable source layer",
-    )
-    wiki_ingest.add_argument("database", type=Path)
-    wiki_ingest.add_argument("--root", type=Path, required=True)
-    wiki_ingest.add_argument(
-        "--kind", choices=("runtime", "source", "benchmark"), required=True,
-    )
-    wiki_ingest.add_argument("--label")
-    wiki_ingest.add_argument(
-        "--target-id",
-        help="logical target identity when the recorded origin is an environment alias",
-    )
-
-    wiki_compare = wiki_commands.add_parser(
-        "compare", help="measure runtime method/path recall against a source baseline",
-    )
-    wiki_compare.add_argument("--observed-db", type=Path, required=True)
-    wiki_compare.add_argument("--baseline-db", type=Path, required=True)
-    wiki_compare.add_argument(
-        "--baseline-kind", choices=("source", "benchmark"), default="source",
-        help="provenance of the baseline database (default: source)",
-    )
-    wiki_compare.add_argument("--root", type=Path, required=True)
-    wiki_compare.add_argument(
-        "--target-id",
-        help="assert one logical target for both databases (for example staging vs loopback)",
-    )
-    wiki_compare.add_argument(
-        "--include-excluded", action="store_true",
-        help="include static and other excluded endpoints in both inventories",
-    )
-
-    wiki_lint = wiki_commands.add_parser(
-        "lint", help="check source integrity, provenance, and generated pages",
-    )
-    wiki_lint.add_argument("--root", type=Path, required=True)
 
     source_import = commands.add_parser(
         "import-recon",
@@ -2586,65 +2530,6 @@ def _run_login() -> int:
 
 
 # 저장된 Recon 관측 결과에 태그를 붙임
-def _run_recon_wiki(args: argparse.Namespace) -> int:
-    if args.wiki_command == "init":
-        root = init_wiki(args.root)
-        print(json.dumps({"wiki_root": str(root), "index": str(root / "wiki/index.md")}))
-        return 0
-    if args.wiki_command == "ingest":
-        source = ingest_database(
-            args.root, args.database, kind=args.kind, label=args.label,
-            target_id=args.target_id,
-        )
-        print(json.dumps({
-            "source_id": source.source_id,
-            "kind": source.kind,
-            "target": source.target,
-            "endpoints": source.endpoint_count,
-            "created": source.created,
-            "raw": str(source.raw_path),
-            "page": str(source.page_path),
-        }, ensure_ascii=False))
-        return 0
-    if args.wiki_command == "compare":
-        comparison = compare_databases(
-            args.root,
-            observed_database=args.observed_db,
-            baseline_database=args.baseline_db,
-            baseline_kind=args.baseline_kind,
-            target_id=args.target_id,
-            include_excluded=args.include_excluded,
-        )
-        print(json.dumps({
-            "comparison_id": comparison.comparison_id,
-            "baseline": comparison.baseline_count,
-            "observed": comparison.observed_count,
-            "matched": comparison.matched_count,
-            "exact_recall": comparison.exact_recall,
-            "path_recall": comparison.path_recall,
-            "confirmed_recall": comparison.confirmed_recall,
-            "declared_candidate_recall": comparison.declared_candidate_recall,
-            "inferred_candidate_recall": comparison.inferred_candidate_recall,
-            "confirmed_or_declared_recall": comparison.confirmed_or_declared_recall,
-            "evidence": {
-                "confirmed": comparison.confirmed_count,
-                "declared_candidates": comparison.declared_candidate_count,
-                "inferred_candidates": comparison.inferred_candidate_count,
-                "confirmed_matched": comparison.confirmed_matched_count,
-                "declared_candidates_matched": comparison.declared_candidate_matched_count,
-                "inferred_candidates_matched": comparison.inferred_candidate_matched_count,
-            },
-            "missing": len(comparison.missing),
-            "report": str(comparison.report_path),
-        }, ensure_ascii=False))
-        return 0
-    if args.wiki_command == "lint":
-        issues = lint_wiki(args.root)
-        print(json.dumps({"ok": not issues, "issues": issues}, ensure_ascii=False))
-        return 0 if not issues else 1
-    raise ReconWikiError(f"unsupported Recon Wiki operation: {args.wiki_command}")
-
-
 def _run_tag(args: argparse.Namespace) -> int:
     from aidast.recon import db as dbmod
     from aidast.recon.annotations import tag_pending_observations

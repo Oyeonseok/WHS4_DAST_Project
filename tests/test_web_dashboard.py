@@ -209,63 +209,6 @@ def _fixture(root: Path) -> Path:
     return database
 
 
-def _wiki_baseline(root: Path) -> Path:
-    database = root / "References" / "vulnbank" / "Recon.db"
-    database.parent.mkdir(parents=True)
-    with sqlite3.connect(database) as conn:
-        conn.executescript("""
-            CREATE TABLE scans (
-              scan_id TEXT PRIMARY KEY, scope_type TEXT, scope_value TEXT,
-              status TEXT, started_at TEXT, finished_at TEXT
-            );
-            CREATE TABLE assets (
-              asset_id TEXT PRIMARY KEY, scan_id TEXT, identifier TEXT, asset_type TEXT
-            );
-            CREATE TABLE origins (
-              origin_id TEXT PRIMARY KEY, asset_id TEXT, base_url TEXT
-            );
-            CREATE TABLE endpoints (
-              endpoint_id TEXT PRIMARY KEY, origin_id TEXT, method TEXT, path TEXT,
-              normalized_path TEXT, verification_status TEXT, is_excluded INTEGER,
-              exclude_reason TEXT, auth_required INTEGER, source_tools TEXT
-            );
-            CREATE TABLE endpoint_observations (
-              observation_id TEXT PRIMARY KEY, endpoint_id TEXT, discovery_kind TEXT
-            );
-        """)
-        conn.execute(
-            "INSERT INTO scans VALUES (?,?,?,?,?,?)",
-            ("scan_source", "URL", "https://bank.test", "completed", "2026-09-01", "2026-09-01"),
-        )
-        conn.execute("INSERT INTO assets VALUES ('asset','scan_source','bank.test','URL')")
-        conn.execute("INSERT INTO origins VALUES ('origin','asset','https://bank.test')")
-        conn.executemany(
-            "INSERT INTO endpoints VALUES (?,?,?,?,?,'verified',0,NULL,NULL,'flask_source_import')",
-            [
-                ("source-get", "origin", "GET", "/health", "/health"),
-                ("source-post", "origin", "POST", "/transfer", "/transfer"),
-            ],
-        )
-        conn.executemany(
-            "INSERT INTO endpoint_observations VALUES (?,?, 'source_route')",
-            [("observation-get", "source-get"), ("observation-post", "source-post")],
-        )
-    return database
-
-
-def _make_runtime_wiki_compatible(database: Path) -> None:
-    with sqlite3.connect(database) as conn:
-        conn.execute("ALTER TABLE origins ADD COLUMN base_url TEXT")
-        conn.execute("UPDATE origins SET base_url='http://127.0.0.1:5001'")
-        conn.execute("ALTER TABLE endpoints ADD COLUMN path TEXT")
-        conn.execute("ALTER TABLE endpoints ADD COLUMN verification_status TEXT DEFAULT 'observed'")
-        conn.execute("ALTER TABLE endpoints ADD COLUMN is_excluded INTEGER DEFAULT 0")
-        conn.execute("ALTER TABLE endpoints ADD COLUMN exclude_reason TEXT")
-        conn.execute("ALTER TABLE endpoints ADD COLUMN auth_required INTEGER")
-        conn.execute("ALTER TABLE endpoints ADD COLUMN source_tools TEXT")
-        conn.execute("UPDATE endpoints SET path=normalized_path,source_tools='katana'")
-
-
 def test_projection_reads_sources_without_leaking_audit_details(tmp_path: Path) -> None:
     database = _fixture(tmp_path)
     projector = DashboardProjector(tmp_path)
@@ -957,44 +900,20 @@ def test_api_snapshot_listing_and_websocket_replay(tmp_path: Path) -> None:
     asyncio.run(exercise_api())
 
 
-def test_dashboard_accumulates_recon_wiki_and_compares_selected_baseline(
-    tmp_path: Path,
-) -> None:
-    runtime = _fixture(tmp_path)
-    _make_runtime_wiki_compatible(runtime)
-    _wiki_baseline(tmp_path)
+def test_removed_coverage_catalog_routes_are_not_exposed(tmp_path: Path) -> None:
     app = create_app(result_root=tmp_path)
 
     async def exercise_api() -> None:
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app), base_url="http://test",
         ) as client:
-            catalog = await client.get("/api/v1/recon-wiki/databases")
-            assert catalog.status_code == 200
-            baseline = next(
-                item for item in catalog.json()["databases"] if item["kind"] == "source"
-            )
-            response = await client.post(
+            for path in (
+                "/api/v1/recon-wiki/databases",
+                "/api/v1/attack-wiki/databases",
                 f"/api/v1/scans/{SCAN_ID}/recon-wiki",
-                headers={"Origin": "http://test"},
-                json={
-                    "baseline_id": baseline["database_id"],
-                    "baseline_kind": "source",
-                    "target_id": "vulnbank@test-version",
-                },
-            )
-            assert response.status_code == 200, response.text
-            result = response.json()
-            assert result["endpoint_count"] == 1
-            assert result["comparison"]["baseline_count"] == 2
-            assert result["comparison"]["matched_count"] == 1
-            assert result["comparison"]["exact_recall"] == 0.5
-            assert result["comparison"]["missing"] == 1
-            assert result["lint"] == {"ok": True, "issues": []}
-            status = await client.get(f"/api/v1/scans/{SCAN_ID}/recon-wiki")
-            assert status.status_code == 200
-            assert status.json()["comparison"]["exact_recall"] == 0.5
-            assert (tmp_path / result["wiki_index"]).is_file()
+                f"/api/v1/scans/{SCAN_ID}/attack-wiki",
+            ):
+                assert (await client.get(path)).status_code == 404
 
     asyncio.run(exercise_api())
 
