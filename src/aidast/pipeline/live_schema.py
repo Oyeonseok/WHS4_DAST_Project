@@ -112,6 +112,30 @@ CREATE TRIGGER IF NOT EXISTS attack_graph_events_no_delete
 BEFORE DELETE ON attack_graph_events
 BEGIN SELECT RAISE(ABORT, 'attack graph events are append-only'); END;
 
+CREATE TABLE IF NOT EXISTS attack_lead_queue (
+    lead_queue_id TEXT PRIMARY KEY NOT NULL,
+    scan_id TEXT NOT NULL REFERENCES scans(scan_id),
+    source_node_id TEXT NOT NULL REFERENCES attack_graph_nodes(node_id),
+    coverage_id TEXT NOT NULL REFERENCES attack_coverage_items(coverage_id),
+    endpoint_id TEXT NOT NULL REFERENCES endpoints(endpoint_id),
+    vuln_class TEXT NOT NULL CHECK(length(trim(vuln_class)) > 0),
+    skill_name TEXT NOT NULL CHECK(length(trim(skill_name)) > 0),
+    priority INTEGER NOT NULL CHECK(priority BETWEEN 0 AND 100),
+    state TEXT NOT NULL DEFAULT 'queued' CHECK(state IN (
+        'queued','claimed','completed','deferred','cancelled'
+    )),
+    reason TEXT NOT NULL CHECK(length(trim(reason)) > 0),
+    source_revision_id TEXT REFERENCES attack_graph_revisions(revision_id),
+    stage_run_id TEXT REFERENCES stage_runs(stage_run_id),
+    task_id TEXT REFERENCES attack_tasks(task_id),
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    claimed_at TEXT,
+    finished_at TEXT,
+    UNIQUE(scan_id,source_node_id,coverage_id)
+);
+CREATE INDEX IF NOT EXISTS idx_attack_lead_queue_scan
+    ON attack_lead_queue(scan_id,state,priority DESC,created_at);
+
 CREATE TABLE IF NOT EXISTS attack_http_requests (
     request_id TEXT PRIMARY KEY NOT NULL,
     scan_id TEXT NOT NULL REFERENCES scans(scan_id),

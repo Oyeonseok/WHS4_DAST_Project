@@ -17,12 +17,19 @@ from aidast.attack.coverage import (
     coverage_status,
     ensure_coverage_manifest,
     reconcile_coverage_batch,
+    requeue_credential_blocked_coverage,
     release_unattempted_coverage,
     resolve_abandoned_attack_leads,
     resolve_interrupted_stage_leads,
     transition_coverage,
 )
 from aidast.attack.graph import graph_context_for_endpoint, synchronize_attack_graph
+from aidast.attack.work_queue import (
+    mark_claimed_leads,
+    reconcile_lead_queue,
+    refresh_lead_queue,
+    select_dual_queue,
+)
 from aidast.attack.template_loader import template_ids_for_skill
 from aidast.attack.db_cli import (
     commit_attempt, transition_task as transition_attack_task,
@@ -122,6 +129,9 @@ class ExhaustiveAttackCoordinator:
                         conn, stage_run_id=stage_run_id,
                         retry_limit=self.retry_limit,
                     )
+                    reconcile_lead_queue(
+                        conn, scan_id, stage_run_id=stage_run_id,
+                    )
                     finish_stage_run(conn, stage_run_id, status="completed")
                     synchronize_attack_graph(
                         conn, scan_id, stage_run_id=stage_run_id,
@@ -161,6 +171,9 @@ class ExhaustiveAttackCoordinator:
                     reconcile_coverage_batch(
                         conn, stage_run_id=stage_run_id,
                         retry_limit=self.retry_limit,
+                    )
+                    reconcile_lead_queue(
+                        conn, scan_id, stage_run_id=stage_run_id,
                     )
                     finish_stage_run(conn, stage_run_id, status="completed")
                     synchronize_attack_graph(
@@ -620,11 +633,13 @@ class ExhaustiveAttackCoordinator:
                     error_message=None if recoverable else str(exc),
                     allow_terminal_task_errors=recoverable,
                 )
+            scan_id = conn.execute(
+                "SELECT scan_id FROM stage_runs WHERE stage_run_id=?",
+                (stage_run_id,),
+            ).fetchone()[0]
+            reconcile_lead_queue(conn, scan_id, stage_run_id=stage_run_id)
             synchronize_attack_graph(
-                conn, conn.execute(
-                    "SELECT scan_id FROM stage_runs WHERE stage_run_id=?",
-                    (stage_run_id,),
-                ).fetchone()[0], stage_run_id=stage_run_id,
+                conn, scan_id, stage_run_id=stage_run_id,
                 trigger_kind="agent.batch.recovered",
             )
             return can_continue
@@ -678,9 +693,23 @@ class ExhaustiveAttackCoordinator:
             conn.row_factory = sqlite3.Row
             conn.execute("PRAGMA foreign_keys=ON")
             stage_run_id = start_stage_run(conn, scan_id=scan_id, stage="attack")
+            requeue_credential_blocked_coverage(conn, scan_id)
+            synchronize_attack_graph(
+                conn, scan_id, stage_run_id=stage_run_id,
+                trigger_kind="batch.preflight",
+            )
+            refresh_lead_queue(conn, scan_id)
+            queue_selection = select_dual_queue(
+                conn, scan_id, batch_size=self.batch_size,
+            )
             claimed = claim_coverage_batch(
                 conn, scan_id=scan_id, stage_run_id=stage_run_id,
                 batch_size=self.batch_size, max_attempts=self.retry_limit,
+                preferred_coverage_ids=queue_selection.preferred_coverage_ids,
+            )
+            mark_claimed_leads(
+                conn, scan_id=scan_id, stage_run_id=stage_run_id,
+                tasks=claimed, selection=queue_selection,
             )
             synchronize_attack_graph(
                 conn, scan_id, stage_run_id=stage_run_id,
@@ -705,6 +734,12 @@ class ExhaustiveAttackCoordinator:
                         hypothesis_reason,
                     ],
                     "template_ids": list(template_ids_for_skill(item["skill_name"])),
+                    "lead_queue_ids": [row[0] for row in conn.execute(
+                        """SELECT lead_queue_id FROM attack_lead_queue
+                           WHERE scan_id=? AND stage_run_id=? AND task_id=?
+                           ORDER BY priority DESC,lead_queue_id""",
+                        (scan_id, stage_run_id, item["task_id"]),
+                    )],
                     "attack_graph_context": graph_context_for_endpoint(
                         conn, scan_id, str(item["endpoint_id"]),
                     ),

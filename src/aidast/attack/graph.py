@@ -324,7 +324,7 @@ def graph_context_for_endpoint(
         return {"revision_id": None, "nodes": [], "edges": []}
     revision = conn.execute(
         """SELECT revision_id FROM attack_graph_revisions
-           WHERE scan_id=? ORDER BY created_at DESC,revision_id DESC LIMIT 1""",
+           WHERE scan_id=? ORDER BY rowid DESC LIMIT 1""",
         (scan_id,),
     ).fetchone()
     node_rows = conn.execute(

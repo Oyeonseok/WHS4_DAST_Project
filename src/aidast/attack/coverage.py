@@ -2051,6 +2051,7 @@ def _adopt_existing_findings(conn: sqlite3.Connection, scan_id: str) -> int:
 def claim_coverage_batch(
     conn: sqlite3.Connection, *, scan_id: str, stage_run_id: str,
     batch_size: int, max_attempts: int = 3,
+    preferred_coverage_ids: Iterable[str] = (),
 ) -> list[dict[str, Any]]:
     if not 1 <= batch_size <= 50:
         raise ValueError("coverage batch size must be between 1 and 50")
@@ -2069,9 +2070,17 @@ def claim_coverage_batch(
         (scan_id, max_attempts),
     ).fetchone())
     effective_batch_size = 1 if has_retryable else batch_size
+    preferred = tuple(dict.fromkeys(
+        str(item) for item in preferred_coverage_ids if str(item).strip()
+    ))[:batch_size]
+    preferred_sql = (
+        "c.coverage_id IN (" + ",".join("?" for _ in preferred) + ")"
+        if preferred else "0"
+    )
     rows = conn.execute(
-        """WITH ranked AS (
+        f"""WITH ranked AS (
                SELECT c.*,e.method,e.normalized_path,o.base_url AS origin_url,
+                      CASE WHEN {preferred_sql} THEN 1 ELSE 0 END AS lead_queue_signal,
                       EXISTS (
                           SELECT 1 FROM endpoint_observations api
                           WHERE api.endpoint_id=c.endpoint_id
@@ -2134,7 +2143,8 @@ def claim_coverage_batch(
                  AND c.attempt_count < ?
            )
            SELECT * FROM ranked
-           ORDER BY CASE status WHEN 'error_retryable' THEN 0 ELSE 1 END,
+           ORDER BY CASE WHEN lead_queue_signal=1 THEN 0 ELSE 1 END,
+                    CASE status WHEN 'error_retryable' THEN 0 ELSE 1 END,
                     CASE WHEN historical_runtime_signal=1 THEN 0 ELSE 1 END,
                     CASE WHEN public_security_signal=1 OR login_security_signal=1
                          THEN 0 ELSE 1 END,
@@ -2152,7 +2162,7 @@ def claim_coverage_batch(
                     END,
                     vuln_class,normalized_path,coverage_id
            LIMIT ?""",
-        (scan_id, max_attempts, effective_batch_size),
+        (*preferred, scan_id, max_attempts, effective_batch_size),
     ).fetchall()
     claimed: list[dict[str, Any]] = []
     for row in rows:
