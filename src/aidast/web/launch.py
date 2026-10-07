@@ -168,6 +168,9 @@ class ScanLaunchRequest(BaseModel):
             raise ValueError("timeout exceeds the selected profile")
         if self.max_depth is not None and self.max_depth > profile.max_depth:
             raise ValueError("depth exceeds the selected profile")
+        if self.profile == "bug-bounty-safe":
+            if len(self.targets) != 1:
+                raise ValueError("bug-bounty-safe requires exactly one target")
         if self.start_url and len(self.targets) != 1:
             raise ValueError("a specific start URL requires exactly one target")
         return self
@@ -370,10 +373,20 @@ class ScanLaunchManager:
         allowed = {item["asset"] for item in scope.targets}
         if any(target not in allowed for target in request.targets):
             raise ValueError("one or more targets are not in the approved Scope")
+        selected = next(
+            item for item in scope.targets if item["asset"] == request.targets[0]
+        ) if len(request.targets) == 1 else None
+        if (
+            request.profile == "bug-bounty-safe"
+            and selected is not None
+            and AssetType(selected["asset_type"]) == AssetType.WILDCARD
+            and request.start_url is None
+        ):
+            raise ValueError("bug-bounty-safe requires an exact start URL for a wildcard target")
         if request.start_url:
-            selected = next(
-                item for item in scope.targets if item["asset"] == request.targets[0]
-            )
+            if request.profile == "bug-bounty-safe" and not request.start_url.lower().startswith("https://"):
+                raise ValueError("bug-bounty-safe start URL must use HTTPS")
+            assert selected is not None
             try:
                 validate_start_url_for_target(
                     request.start_url,
@@ -413,10 +426,15 @@ class ScanLaunchManager:
             if value is not None and value > getattr(effective, field):
                 raise ValueError(f'{field} exceeds the approved policy cap')
         targets = [target for target in document.analysis.in_scope_assets if target.asset in request.targets]
-        starts = normalize_start_urls({(targets[0].asset_type.value,targets[0].asset):request.start_url} if request.start_url else {})
+        starts = normalize_start_urls(
+            {(targets[0].asset_type.value, targets[0].asset): request.start_url}
+            if request.start_url else {},
+            preserve_wildcard_starts=request.profile == "bug-bounty-safe",
+        )
         preparation = prepare_exclusions(document=document, analysis=analysis, targets=targets,
             result_root=self.result_root, start_urls=starts, headers=headers,
-            login_mode=request.login_mode, resolver=self.exclusion_resolver, refresh=refresh)
+            login_mode=request.login_mode, resolver=self.exclusion_resolver, refresh=refresh,
+            preserve_wildcard_starts=request.profile == "bug-bounty-safe")
         return scope, preparation
 
     def prepare_resources(self, request: ExclusionPreparationRequest) -> dict[str, Any]:
@@ -477,7 +495,7 @@ class ScanLaunchManager:
         if request.max_rps is not None:
             argv.extend(("--max-rps", str(request.max_rps)))
         wordlist = self.project_root / "resources" / "wordlists" / "common.txt"
-        if wordlist.is_file():
+        if request.profile != "bug-bounty-safe" and wordlist.is_file():
             argv.extend(("--ffuf-wordlist", str(wordlist)))
         argv.extend(("--ffuf-max-time-seconds", str(request.ffuf_max_time_seconds)))
         if request.max_depth is not None:

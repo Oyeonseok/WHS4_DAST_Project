@@ -12,6 +12,7 @@ from dataclasses import asdict
 from functools import partial
 from pathlib import Path
 from typing import Any, Protocol, Sequence
+from urllib.parse import urlsplit
 from uuid import uuid4
 
 from aidast.agents.main import (
@@ -993,6 +994,8 @@ def _review_scope_draft(scope_path: Path) -> bool:
 def _complete_executable_recon_plan(
     plan: ReconPlan,
     selected_targets: list[ScopeAsset],
+    *,
+    execution_start_urls: dict[tuple[str, str], str] | None = None,
 ) -> ReconPlan:
     """Keep an explicit execution request from becoming a probe-only run."""
     proposed = {(item.asset_type, item.asset): item for item in plan.targets}
@@ -1011,7 +1014,16 @@ def _complete_executable_recon_plan(
         }:
             continue
         model_target = proposed.get((target.asset_type, target.asset))
-        if target.asset_type is AssetType.WILDCARD:
+        if (
+            target.asset_type is AssetType.WILDCARD
+            and (target.asset_type.value, target.asset) in (execution_start_urls or {})
+        ):
+            steps = [
+                ReconStep.HTTP_PROBE,
+                ReconStep.ORIGIN_DISCOVERY,
+                ReconStep.ENDPOINT_DISCOVERY,
+            ]
+        elif target.asset_type is AssetType.WILDCARD:
             steps = [ReconStep.ASSET_DISCOVERY]
         else:
             requested = set(model_target.steps) if model_target is not None else set()
@@ -1230,6 +1242,20 @@ def _run_recon(
         requested_targets=args.target,
         all_targets=args.all_targets,
     )
+    if args.profile == "bug-bounty-safe":
+        if len(selected_targets) != 1:
+            raise ReconCoordinatorError(
+                "bug-bounty-safe requires exactly one selected target"
+            )
+        selected_target = selected_targets[0]
+        if selected_target.asset_type is AssetType.WILDCARD and not args.start_url:
+            raise ReconCoordinatorError(
+                "bug-bounty-safe requires --start-url for a wildcard target"
+            )
+        if args.start_url and not args.start_url.lower().startswith("https://"):
+            raise ReconCoordinatorError(
+                "bug-bounty-safe requires an HTTPS --start-url"
+            )
     policy_values = {}
     for raw in getattr(args, 'policy_input', []) or []:
         key, separator, value = raw.partition('=')
@@ -1256,10 +1282,13 @@ def _run_recon(
         scope_document=scope_document,
         auto_wildcard_start=args.auto_wildcard_start,
     )
-    # Wildcard targets first perform asset discovery. Binding their policy to
-    # a single login URL would disable the approved wildcard expansion.
+    # Ordinary wildcard targets first perform asset discovery. The real-program
+    # profile deliberately binds a wildcard to one operator-selected host.
     from aidast.scope.exclusion_preparation import normalize_start_urls, selected_startup_operations
-    start_urls = normalize_start_urls(start_urls)
+    preserve_wildcard_start = args.profile == "bug-bounty-safe"
+    start_urls = normalize_start_urls(
+        start_urls, preserve_wildcard_starts=preserve_wildcard_start,
+    )
     if args.target:
         print("Selected canonical Scope targets:")
         for target in selected_targets:
@@ -1301,6 +1330,7 @@ def _run_recon(
                     getattr(main_agent, 'classify_exclusion_resources', None)),
                 refresh=getattr(args, 'refresh_exclusions', False),
                 database_paths=capture_paths,
+                preserve_wildcard_starts=preserve_wildcard_start,
             )
             # DOMAIN/IP startup needs the completed offline plan before it has
             # an actual capability shape. Definite probe/browser/discovery holds
@@ -1375,11 +1405,20 @@ def _run_recon(
             ))
         if complete_plan_targets:
             plan = plan.model_copy(update={"targets": complete_plan_targets})
-    elif args.execute or args.policy_only:
-        plan = _complete_executable_recon_plan(plan, selected_targets)
+    elif (args.execute or args.policy_only) and not preserve_wildcard_start:
+        plan = _complete_executable_recon_plan(
+            plan, selected_targets, execution_start_urls=start_urls,
+        )
+    if preserve_wildcard_start:
+        plan = _complete_executable_recon_plan(
+            plan, selected_targets, execution_start_urls=start_urls,
+        )
     if preparation is not None:
         preparation.reconcile_startup(
-            selected_startup_operations(selected_targets,start_urls=start_urls,plan=plan),
+            selected_startup_operations(
+                selected_targets, start_urls=start_urls, plan=plan,
+                preserve_wildcard_starts=preserve_wildcard_start,
+            ),
             headers=request_headers,
             seed_identity_complete=args.session_bundle is None and len(required_identity_headers)==len(scope_document.analysis.required_request_headers or []),
         )
@@ -1414,6 +1453,8 @@ def _run_recon(
             getattr(scope_document.analysis, "out_of_scope_assets", []),
             scope_markdown=scope_markdown,
         )
+        if args.profile == "bug-bounty-safe":
+            policies = _bind_exact_start_urls(policies, start_urls)
         policies = _apply_policy_caps(
             policies,
             profile=args.profile,
@@ -1936,6 +1977,51 @@ def _apply_scope_host_exclusions(
     return result
 
 
+# 실제 프로그램의 선택 대상을 정확한 시작 호스트와 경로로 좁힘
+def _bind_exact_start_urls(
+    policies: dict[tuple[str, str], TargetPolicy],
+    start_urls: dict[tuple[str, str], str],
+) -> dict[tuple[str, str], TargetPolicy]:
+    """Narrow selected policies to the operator-approved concrete URL."""
+    result: dict[tuple[str, str], TargetPolicy] = {}
+    for key, policy in policies.items():
+        start_url = start_urls.get(key)
+        if start_url is None:
+            result[key] = policy
+            continue
+        parsed = urlsplit(start_url)
+        if not parsed.hostname:
+            raise ReconCoordinatorError("exact start URL has no host")
+        start_port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        note = (
+            "Python bound this policy to the exact operator-authorized "
+            f"execution start URL: {start_url}"
+        )
+        notes = list(policy.policy_notes)
+        if note not in notes:
+            notes.append(note)
+        narrowed = policy.model_copy(update={
+            "allowed_schemes": [parsed.scheme],
+            "allowed_hosts": [parsed.hostname.lower().rstrip(".")],
+            "include_subdomains": False,
+            "allowed_ports": [start_port],
+            "allowed_path_prefixes": [parsed.path or "/"],
+            "policy_notes": notes,
+        })
+        try:
+            validate_policy_for_target(
+                narrowed,
+                asset_type=narrowed.asset_type,
+                asset=narrowed.asset,
+            )
+        except ValueError as exc:
+            raise ReconCoordinatorError(
+                f"exact start URL cannot narrow target policy: {exc}"
+            ) from exc
+        result[key] = narrowed
+    return result
+
+
 # 프로필과 CLI 상한을 대상별 실행 정책에 적용
 def _apply_policy_caps(
     policies: dict[tuple[str, str], TargetPolicy],
@@ -1965,7 +2051,9 @@ def _apply_policy_caps(
         ):
             policy_rps = scope_max_rps
         rate_ceiling = (
-            scope_max_rps if scope_max_rps is not None
+            min(scope_max_rps, profile_limits.requests_per_second)
+            if scope_max_rps is not None and profile == "bug-bounty-safe"
+            else scope_max_rps if scope_max_rps is not None
             else profile_limits.requests_per_second if profile_limits is not None
             else policy_rps
         )
@@ -2013,7 +2101,13 @@ def _apply_policy_caps(
                 ),
             }
         )
-        capped[key] = policy.model_copy(update={"limits": limits})
+        tools = policy.tools
+        if profile == "bug-bounty-safe":
+            tools = tools.model_copy(update={
+                "ffuf_enabled": False,
+                "ffuf_recursion": False,
+            })
+        capped[key] = policy.model_copy(update={"limits": limits, "tools": tools})
     return capped
 
 

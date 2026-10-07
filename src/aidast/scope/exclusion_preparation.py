@@ -199,19 +199,26 @@ class StartupOperation:
     url: str | None = None
 
 
-def normalize_start_urls(start_urls):
-    """Wildcard execution always starts with asset discovery, in both CLI and web."""
-    return {key:value for key,value in (start_urls or {}).items() if key[0]!=AssetType.WILDCARD.value}
+def normalize_start_urls(start_urls, *, preserve_wildcard_starts=False):
+    """Keep wildcard starts only when the selected profile intentionally narrows them."""
+    return {
+        key: value for key, value in (start_urls or {}).items()
+        if preserve_wildcard_starts or key[0] != AssetType.WILDCARD.value
+    }
 
 
-def selected_startup_operations(targets, *, start_urls=None, plan=None):
+def selected_startup_operations(
+    targets, *, start_urls=None, plan=None, preserve_wildcard_starts=False,
+):
     """Represent known startup operations; an unplanned DOMAIN/IP is not a GET.
 
     A completed plan proves whether DNS/port/discovery tools are required. Until
     then only a concrete URL/API probe has a known app-owned HTTP descriptor.
     Browser/endpoint-first plans have no complete startup descriptor here.
     """
-    starts=normalize_start_urls(start_urls)
+    starts=normalize_start_urls(
+        start_urls, preserve_wildcard_starts=preserve_wildcard_starts,
+    )
     planned={} if plan is None else {(item.asset_type.value,item.asset):item for item in plan.targets}
     result={}
     for target in targets:
@@ -220,7 +227,9 @@ def selected_startup_operations(targets, *, start_urls=None, plan=None):
         if url is None and target.asset_type in {AssetType.URL,AssetType.API}:
             url=target.asset if target.asset.startswith(('http://','https://')) else None
         if plan is None:
-            if target.asset_type is AssetType.WILDCARD:
+            if target.asset_type is AssetType.WILDCARD and url:
+                operations=[StartupOperation('HTTP_PROBE',url)]
+            elif target.asset_type is AssetType.WILDCARD:
                 operations=[StartupOperation('ASSET_DISCOVERY')]
             elif target.asset_type in {AssetType.URL,AssetType.API} and url:
                 operations=[StartupOperation('HTTP_PROBE',url)]
@@ -352,7 +361,8 @@ class ExclusionPreparation:
 
 def prepare_exclusions(*, document, analysis, targets, result_root, start_urls=None, headers=None,
                        login_mode=None, seed_identity_complete=True, resolver=None,
-                       database_paths=None, refresh=False, cache_only=False, startup_operations=None):
+                       database_paths=None, refresh=False, cache_only=False, startup_operations=None,
+                       preserve_wildcard_starts=False):
     """Prepare captured evidence and explicitly selected startup capabilities offline.
 
     Keep the approved document original and pass the complete v3 analysis separately.
@@ -365,7 +375,9 @@ def prepare_exclusions(*, document, analysis, targets, result_root, start_urls=N
     rules, _ = split_exclusion_enforcement(analysis.execution_rules)
     policies={}; count=rejected=0
     paths=database_paths if database_paths is not None else capture_databases(root)
-    starts=normalize_start_urls(start_urls)
+    starts=normalize_start_urls(
+        start_urls, preserve_wildcard_starts=preserve_wildcard_starts,
+    )
     for target in targets:
         key=(target.asset_type.value,target.asset)
         if key in starts:
@@ -385,7 +397,10 @@ def prepare_exclusions(*, document, analysis, targets, result_root, start_urls=N
         else:
             compiled=(resolver.refresh if refresh else resolver.resolve)(**inputs)
         policies[target.asset]=compiled
-    operations=(selected_startup_operations(targets,start_urls=starts)
+    operations=(selected_startup_operations(
+                    targets, start_urls=starts,
+                    preserve_wildcard_starts=preserve_wildcard_starts,
+                )
                 if startup_operations is None else startup_operations)
     prepared=ExclusionPreparation(policies,[],count,rejected,login_mode=login_mode)
     prepared.agent_guidance = {target.asset: agent_exclusion_advisories(analysis.execution_rules, target.asset)

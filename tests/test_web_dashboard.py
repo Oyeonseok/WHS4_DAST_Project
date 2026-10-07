@@ -1525,6 +1525,32 @@ def test_scan_launcher_builds_fixed_argv_and_streams_pre_database_logs(tmp_path:
     assert float(argv[argv.index("--max-rps") + 1]) == 10.0
     with pytest.raises(ValueError, match="request rate exceeds"):
         manager.launch(request.model_copy(update={"max_rps": 11}))
+    manager.launch(request.model_copy(update={
+        "profile": "bug-bounty-safe",
+        "max_requests": 300,
+        "max_rps": 0.2,
+        "max_concurrency": 1,
+        "ffuf_max_time_seconds": 60,
+    }))
+    argv = captured["argv"]
+    assert argv[argv.index("--profile") + 1] == "bug-bounty-safe"
+    assert "--ffuf-wordlist" not in argv
+    approved = replace(approved, targets=({
+        "asset_type": "WILDCARD",
+        "asset": "*.prismlife.com",
+        "description": "",
+        "maximum_severity": "HIGH",
+    },))
+    with pytest.raises(ValueError, match="exact start URL"):
+        manager._prepare_launch(request.model_copy(update={
+            "profile": "bug-bounty-safe",
+            "targets": ["*.prismlife.com"],
+            "max_requests": 300,
+            "max_rps": 0.2,
+            "max_concurrency": 1,
+            "ffuf_max_time_seconds": 60,
+            "start_url": None,
+        }))
     waiting.set()
 
 
@@ -1808,6 +1834,19 @@ def test_scan_request_rejects_unconfirmed_or_excessive_budget() -> None:
             "targets": ["one.example", "two.example"],
             "start_url": "https://one.example/",
             "authorization_confirmed": True,
+        })
+    bug_bounty = {
+        **base,
+        "profile": "bug-bounty-safe",
+        "max_requests": 300,
+        "ffuf_max_time_seconds": 60,
+        "authorization_confirmed": True,
+    }
+    assert ScanLaunchRequest(**bug_bounty).max_rps is None
+    with pytest.raises(ValueError, match="exactly one target"):
+        ScanLaunchRequest(**{
+            **bug_bounty,
+            "targets": ["one.example", "two.example"],
         })
     with pytest.raises(ValueError, match="absolute HTTPS"):
         ProgramResolveRequest(program_url="http://hackerone.com/program")

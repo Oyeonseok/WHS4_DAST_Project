@@ -1,6 +1,31 @@
 import type { Snapshot } from './events';
 
-export type ExecutionProfileId = 'safe-recon' | 'focused-discovery';
+export type ExecutionProfileId = 'safe-recon' | 'focused-discovery' | 'bug-bounty-safe';
+
+export function validStartUrl(value: string, httpsOnly = false): boolean {
+  if (!value.trim()) return true;
+  try {
+    const parsed = new URL(value.trim());
+    const supportedScheme = parsed.protocol === 'https:' || (!httpsOnly && parsed.protocol === 'http:');
+    return supportedScheme && !!parsed.hostname && !parsed.username && !parsed.password
+      && !parsed.search && !parsed.hash;
+  } catch {
+    return false;
+  }
+}
+
+export function bugBountyTargetReady(
+  profile: ExecutionProfileId,
+  selectedTargets: readonly string[],
+  approvedTargets: readonly { readonly asset: string; readonly asset_type: string }[],
+  startUrl: string,
+): boolean {
+  if (profile !== 'bug-bounty-safe') return true;
+  if (selectedTargets.length !== 1) return false;
+  const selected = approvedTargets.find(item => item.asset === selectedTargets[0]);
+  if (!selected) return false;
+  return selected.asset_type !== 'WILDCARD' || (!!startUrl.trim() && validStartUrl(startUrl, true));
+}
 
 export function approvedScopeSelection(scopeId: string, targets: readonly string[]) {
   const selectedScopeId = scopeId.trim();
@@ -125,10 +150,9 @@ export function resolveExecutionLimits(
   }
   return {
     ...limits,
-    requests_per_second: Math.min(
-      requirements.scope_max_requests_per_second ?? limits.requests_per_second,
-      50,
-    ),
+    requests_per_second: profile === 'bug-bounty-safe'
+      ? Math.min(requirements.scope_max_requests_per_second ?? limits.requests_per_second, limits.requests_per_second, 50)
+      : Math.min(requirements.scope_max_requests_per_second ?? limits.requests_per_second, 50),
   };
 }
 
