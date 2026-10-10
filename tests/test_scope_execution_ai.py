@@ -71,6 +71,22 @@ def test_empty_ai_decision_does_not_infer_rules_from_incidental_numbers(monkeypa
     assert agent.interpret_scope_execution_requirements(capture()).execution_rules.quoted_requirements() == []
 
 
+@pytest.mark.parametrize('method', ['interpret_scope_execution_requirements', 'interpret_scope_header_requirements'])
+def test_feasible_identification_is_an_automatically_supported_control(monkeypatch, adapter, method):
+    agent = adapter.CodexMainAgent()
+    def respond(**kwargs):
+        assert 'whenever feasible' in kwargs['prompt']
+        assert 'required_request_headers' in kwargs['prompt']
+        assert 'automatically' in kwargs['prompt']
+        assert 'not merely an advisory' in kwargs['prompt']
+        payload = {'required_request_headers': []}
+        if method == 'interpret_scope_execution_requirements':
+            payload['execution_rules'] = {'exclusions': []}
+        return kwargs['model_type'].model_validate(payload)
+    monkeypatch.setattr(agent, '_run_structured', respond)
+    getattr(agent, method)(capture())
+
+
 def test_interpretation_rejects_fabricated_capture_evidence(monkeypatch, adapter):
     response = rules()
     response['request_limits'][0]['source_quote'] = 'Invented ceiling'

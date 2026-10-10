@@ -221,7 +221,7 @@ class PolicyAdvisory(BlockingRequirement):
 
 
 class ScopeExecutionRules(StrictModel):
-    policy_review_version: Literal[1, 2] = 1
+    policy_review_version: Literal[1, 2, 3] = 1
     advisories: list[PolicyAdvisory] = Field(
         default_factory=list, max_length=MAX_EXTRACTED_ADVISORIES + MAX_POLICY_REFERENCE_EDGES)
     exclusions: list[ScopeExclusion] | None = Field(default=None, max_length=128)

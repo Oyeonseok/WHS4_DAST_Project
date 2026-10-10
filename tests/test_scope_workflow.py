@@ -6,6 +6,7 @@ import errno
 import hashlib
 import os
 import signal
+import subprocess
 import tempfile
 import time
 import unittest
@@ -406,6 +407,46 @@ class ScopeCoordinatorTests(unittest.TestCase):
 
 
 class CodexMainAgentTests(unittest.TestCase):
+    def test_scope_interpretation_has_no_model_timeout(self) -> None:
+        from aidast.agents import main as main_module, native_pipeline as native_module
+
+        wrong = sample_analysis().model_copy(update={
+            "in_scope_assets": [sample_analysis().in_scope_assets[0].model_copy(
+                update={"asset": "Public-facing applications"})],
+        })
+        for module in (main_module, native_module):
+            with self.subTest(module=module.__name__):
+                agent = module.CodexMainAgent(timeout_seconds=1)
+                timeouts = []
+
+                def respond(command, **kwargs):
+                    output = Path(command[command.index("--output-last-message") + 1])
+                    result = (wrong if output.name == "scope-analysis-fallback.json"
+                              else sample_analysis() if output.name == "scope-analysis-grounding-retry.json"
+                              else ScopeNavigationDecision(action="capture", candidate_id=None))
+                    output.write_text(result.model_dump_json(), encoding="utf-8")
+                    timeouts.append(kwargs["timeout"])
+                    return subprocess.CompletedProcess(command, 0, "", "")
+
+                with patch.object(module.shutil, "which", return_value="codex"), \
+                     patch.object(agent, "_require_login"), \
+                     patch.object(module.codex_process, "run_codex", side_effect=respond):
+                    agent.interpret_captured_scope(sample_page())
+                    if module is main_module:
+                        agent.choose_scope_view(
+                            program_url="https://bugcrowd.com/example",
+                            page_text="Example scope policy",
+                            candidates=[],
+                        )
+                    agent._run_structured(
+                        prompt="Unrelated model work",
+                        model_type=ScopeNavigationDecision,
+                        artifact_name="scope-navigation",
+                        operation="other model operation",
+                    )
+                self.assertEqual(timeouts, [float("inf"), float("inf"), float("inf"), 1]
+                                 if module is main_module else [float("inf"), float("inf"), 1])
+
     def test_captured_scope_retries_one_ungrounded_asset_with_exact_evidence(self) -> None:
         agent = CodexMainAgent()
         wrong = sample_analysis().model_copy(update={

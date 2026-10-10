@@ -57,6 +57,28 @@ def guarded_semantic_document():
     rules = doc.analysis.execution_rules.model_copy(update={'exclusions': [guarded_semantic_rule()]})
     return doc.model_copy(update={'analysis': doc.analysis.model_copy(update={'execution_rules': rules})})
 
+
+def prohibited_methods_document(*, other_rule=False, mixed_rule=False):
+    doc = document(False)
+    quote = ('PUT, PATCH, and DELETE requests are prohibited; do not request /private.'
+             if mixed_rule else 'PUT, PATCH, and DELETE requests are prohibited.')
+    conditions = [dict(operator='predicate', predicate=dict(
+        key=f'method_{method.lower()}', field='method', operator='equals', value=method))
+        for method in ('PUT', 'PATCH', 'DELETE')]
+    if mixed_rule:
+        conditions.append(dict(operator='predicate', predicate=dict(
+            key='private_path', field='path', operator='equals', value='/private')))
+    methods = ScopeExclusion(key='prohibited_http_methods', label='Prohibited HTTP methods',
+        source_quote=quote, condition=dict(operator='any', children=conditions))
+    exclusions = [methods, *([rule(False)] if other_rule else [])]
+    source_text = doc.source.text + '\n' + quote
+    return doc.model_copy(update={
+        'source': doc.source.model_copy(update={'text': source_text,
+            'content_sha256': hashlib.sha256(source_text.encode()).hexdigest()}),
+        'analysis': doc.analysis.model_copy(update={
+            'source_evidence': [*doc.analysis.source_evidence, SourceEvidence(section='Rules', quote=quote)],
+            'execution_rules': doc.analysis.execution_rules.model_copy(update={'exclusions': exclusions})})})
+
 def capture(tmp_path, doc, *, url=URL, receipt=True, scope_id=None, source_type='approved_scope', response=b'Public documentation for all visitors.', headers=None, body=b''):
     from aidast.recon import db
     path = tmp_path / 'Runs' / 'scan_local' / 'Recon.db'
@@ -159,6 +181,31 @@ def test_unknown_seed_holds_without_model_or_target_io_and_system_browser_always
     with pytest.raises(ValueError,match='system-browser'):
         api().prepare_exclusions(document=direct,analysis=direct.analysis,targets=direct.analysis.in_scope_assets,
             result_root=tmp_path,login_mode='system-browser').require_ready()
+
+
+def test_system_browser_login_exempts_only_pure_prohibited_method_rule(tmp_path):
+    from aidast.core.exclusion_guard import evaluate_exclusions
+    doc = prohibited_methods_document()
+    prepared = api().prepare_exclusions(document=doc, analysis=doc.analysis,
+        targets=doc.analysis.in_scope_assets, result_root=tmp_path,
+        login_mode='system-browser')
+    prepared.require_ready()
+    assert prepared.diagnostics[0]['decision'] == 'continue'
+    policy = prepared.policies[URL].model_dump(mode='json')
+    assert [rule['key'] for rule in policy['rules']] == ['prohibited_http_methods']
+    assert evaluate_exclusions(policy, url=URL, method='PUT', body_available=True)['decision'] == 'deny'
+    assert evaluate_exclusions(policy, url=URL, method='GET', body_available=True)['decision'] == 'continue'
+
+
+@pytest.mark.parametrize('other_rule,mixed_rule', [(True, False), (False, True)])
+def test_system_browser_login_still_holds_other_or_mixed_exclusions(tmp_path, other_rule, mixed_rule):
+    doc = prohibited_methods_document(other_rule=other_rule, mixed_rule=mixed_rule)
+    prepared = api().prepare_exclusions(document=doc, analysis=doc.analysis,
+        targets=doc.analysis.in_scope_assets, result_root=tmp_path,
+        login_mode='system-browser')
+    assert prepared.diagnostics[0]['decision'] == 'hold'
+    with pytest.raises(ValueError, match='offline review'):
+        prepared.require_ready()
 
 
 def test_direct_exclusions_apply_without_evidence_and_offline_inspection_returns_denials(tmp_path):
