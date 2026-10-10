@@ -233,12 +233,27 @@ def selected_startup_operations(targets, *, start_urls=None, plan=None):
     return result
 
 
+def _login_exempt_method_rule(rule):
+    """Only the reviewed PUT/PATCH/DELETE rule is exempt during manual login."""
+    if rule.key != 'prohibited_http_methods' or rule.condition.operator != 'any':
+        return False
+    methods = []
+    for child in rule.condition.children:
+        predicate = child.predicate
+        if (child.operator != 'predicate' or predicate is None
+                or predicate.field != 'method' or predicate.operator != 'equals'):
+            return False
+        methods.append(predicate.value)
+    return len(methods) == 3 and set(methods) == {'PUT', 'PATCH', 'DELETE'}
+
+
 def _startup_diagnostics(compiled, operations, *, headers=None, seed_identity_complete=True, policy=None, login_mode=None):
     relevant=[rule.key for rule in compiled.rules
               if exclusion_applicability(rule.model_dump(mode='json'), compiled.target_asset) != 'disjoint']
-    if login_mode=='system-browser' and compiled.rules:
+    login_rules = [rule for rule in compiled.rules if not _login_exempt_method_rule(rule)]
+    if login_mode=='system-browser' and login_rules:
         return [dict(target_asset=compiled.target_asset,url=None,capability='SYSTEM_BROWSER',decision='hold',
-            rule_keys=[rule.key for rule in compiled.rules],
+            rule_keys=[rule.key for rule in login_rules],
             reason='system-browser cannot enforce exclusions; use a governed runtime browser or an existing session bundle')]
     operations=operations or [StartupOperation('MISSING_STARTUP')]
     diagnostics=[]
