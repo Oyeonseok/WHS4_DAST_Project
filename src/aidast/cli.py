@@ -340,8 +340,10 @@ def _parser() -> argparse.ArgumentParser:
         help="run the deferred observation-tagging worker after Recon completes",
     )
     recon.add_argument(
-        "--tag-batch-size", type=_positive_int, default=200,
-        help="maximum observations per deferred tagging request (default: 200)",
+        "--tag-batch-size", type=_positive_int, default=20,
+        help="maximum observations per deferred tagging request (default: 20; "
+             "larger batches cause the model to silently omit most observations, "
+             "which is recorded as unknown)",
     )
     _add_auto_wildcard_start(recon)
 
@@ -415,8 +417,10 @@ def _parser() -> argparse.ArgumentParser:
         help="run the deferred observation-tagging worker after Recon completes",
     )
     run.add_argument(
-        "--tag-batch-size", type=_positive_int, default=200,
-        help="maximum observations per deferred tagging request (default: 200)",
+        "--tag-batch-size", type=_positive_int, default=20,
+        help="maximum observations per deferred tagging request (default: 20; "
+             "larger batches cause the model to silently omit most observations, "
+             "which is recorded as unknown)",
     )
     _add_auto_wildcard_start(run)
     run.add_argument(
@@ -1132,6 +1136,13 @@ def _run_strix_recon(
                     f"methods={target['methods_observed']} statuses={target['response_statuses']}",
                     flush=True,
                 )
+        excluded_404_count = dbmod.exclude_http_404_only_candidates(conn, scan_id=scan_id)
+        if excluded_404_count:
+            print(
+                f"[AI-DAST Recon 진단] 404 전용 후보 {excluded_404_count}건을 "
+                "excluded_candidates로 분리",
+                flush=True,
+            )
         conn.execute(
             "UPDATE scans SET status='completed', finished_at=CURRENT_TIMESTAMP WHERE scan_id=?",
             (scan_id,),

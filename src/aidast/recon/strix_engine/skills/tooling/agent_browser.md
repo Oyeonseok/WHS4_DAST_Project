@@ -38,6 +38,19 @@ Refs (`@e1`, `@e2`, ...) are assigned fresh on every snapshot. They become
 submits, dynamic re-renders, dialog opens. Always re-snapshot before your
 next ref interaction.
 
+**Dismiss cookie/consent banners before anything else.** If the first
+`snapshot -i` on a page shows a `dialog`/banner with a dismiss/accept/close
+control (cookie consent, GDPR notice, newsletter popup), click it immediately,
+before filling any other field or clicking any other control — even if the
+banner looks visually separate from your target. These banners commonly float
+at the bottom of the viewport and can silently intercept clicks meant for a
+button underneath (e.g. a form's submit button), so `agent-browser` reports
+the click as successful while the page never reacts and no request fires. An
+`exec_command` returning success for a click is not proof the click reached
+its intended element — if a form submission produces no visible change and
+no corresponding network request, re-check whether an undismissed overlay is
+still present in the snapshot before concluding the submission itself failed.
+
 ## Quickstart
 
 ```bash

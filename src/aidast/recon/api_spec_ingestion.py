@@ -16,7 +16,7 @@ import sqlite3
 from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit
 
 from aidast.recon import db as dbmod
 from aidast.recon.judgment import normalize_path
@@ -64,6 +64,41 @@ def _matching_rule(
         ):
             return rule
     return None
+
+
+def _canonical_url(url: str, rules: dict[str, Any]) -> str:
+    """Rewrite a sandbox-local host:port (e.g. host.docker.internal) to the
+    Scope-approved canonical form via ``rules["loopback_host_aliases"]``.
+
+    The Strix agent inside the sandbox reaches a loopback target through its
+    own container-internal hostname, so an LLM-reported ``document_url`` or
+    ``selected_base_url`` can carry that hostname even though every MITM
+    capture was persisted under the canonical approved host (see
+    ``origin_for_record`` in cli.py, which applies this same alias table
+    before writing http_transactions). Without this normalization, a spec
+    whose URLs use the sandbox-internal host never matches the approved
+    Scope rule and never finds its own captured document transaction, even
+    though the underlying traffic was captured and approved. Returns the
+    URL unchanged when no alias applies.
+    """
+    try:
+        parsed = urlsplit(url)
+        host = (parsed.hostname or "").lower().rstrip(".")
+        scheme = parsed.scheme.lower()
+        port = parsed.port or (443 if scheme == "https" else 80)
+    except (TypeError, ValueError):
+        return url
+    alias = next((
+        item for item in rules.get("loopback_host_aliases", [])
+        if item.get("host") == host and item.get("port") == port
+    ), None)
+    if alias is None:
+        return url
+    canonical_host = str(alias["canonical_host"])
+    canonical_port = int(alias.get("canonical_port", port))
+    default_port = 443 if scheme == "https" else 80
+    netloc = canonical_host if canonical_port == default_port else f"{canonical_host}:{canonical_port}"
+    return urlunsplit((scheme, netloc, parsed.path, parsed.query, parsed.fragment))
 
 
 def _origin_for_base(
@@ -177,18 +212,38 @@ def ingest_llm_api_inventory(
         if not isinstance(document_url, str) or not isinstance(base_url, str):
             result["unmapped"] = int(result["unmapped"]) + 1
             continue
-        document = conn.execute(
-            """SELECT http_transaction_id,origin_id FROM http_transactions
-               WHERE url=? AND response_status BETWEEN 200 AND 299
-                 AND response_body IS NOT NULL
-               ORDER BY captured_at DESC LIMIT 1""",
-            (document_url,),
-        ).fetchone()
-        if not document or not document[0] or not document[1]:
-            result["rejected"] = int(result["rejected"]) + 1
-            continue
+
+        # The agent reports URLs as it saw them from inside the sandbox,
+        # which can be a container-internal loopback alias rather than the
+        # canonical Scope-approved host every capture was actually stored
+        # under. Check both the as-reported and the canonical form against
+        # the approved Scope rules before giving up on either.
+        canonical_document_url = _canonical_url(document_url, rules)
+        canonical_base_url = _canonical_url(base_url, rules)
+
         document_rule = _matching_rule(document_url, "GET", rules, allow_query=True)
         if not document_rule:
+            document_rule = _matching_rule(
+                canonical_document_url, "GET", rules, allow_query=True,
+            )
+        if not document_rule:
+            result["rejected"] = int(result["rejected"]) + 1
+            continue
+
+        # Only trust a document this *scan* actually captured and that
+        # succeeded with a real body — never another scan's transaction that
+        # happens to share the same URL string.
+        document = conn.execute(
+            """SELECT t.http_transaction_id FROM http_transactions t
+               JOIN origins o ON o.origin_id = t.origin_id
+               JOIN assets a ON a.asset_id = o.asset_id
+               WHERE a.scan_id = ? AND t.url IN (?, ?)
+                 AND t.response_status BETWEEN 200 AND 299
+                 AND t.response_body IS NOT NULL
+               ORDER BY t.captured_at DESC LIMIT 1""",
+            (scan_id, document_url, canonical_document_url),
+        ).fetchone()
+        if not document or not document[0]:
             result["rejected"] = int(result["rejected"]) + 1
             continue
 
@@ -203,10 +258,15 @@ def ingest_llm_api_inventory(
 
         selected_rule = _matching_rule(base_url, "GET", rules)
         if not selected_rule:
+            selected_rule = _matching_rule(canonical_base_url, "GET", rules)
+        if not selected_rule:
             result["unmapped"] = int(result["unmapped"]) + 1
             continue
+        # Origins are always created/looked up under the canonical host, so
+        # every spec that maps to the same logical target lands on the same
+        # origin regardless of which sandbox-local alias it was reported with.
         mapped_origin = _origin_for_base(
-            conn, scan_id=scan_id, base_url=base_url, rule=selected_rule,
+            conn, scan_id=scan_id, base_url=canonical_base_url, rule=selected_rule,
         )
         if not mapped_origin:
             result["unmapped"] = int(result["unmapped"]) + 1
@@ -221,7 +281,7 @@ def ingest_llm_api_inventory(
                 continue
             method = str(operation.get("method") or "").upper()
             path = _operation_path(base_path, operation.get("path"))
-            candidate_url = f"{base_url.rstrip('/')}{operation.get('path', '')}"
+            candidate_url = f"{canonical_base_url.rstrip('/')}{operation.get('path', '')}"
             rule = _matching_rule(candidate_url, method, rules) if path else None
             if not path or method not in _METHODS or not rule:
                 result["rejected"] = int(result["rejected"]) + 1

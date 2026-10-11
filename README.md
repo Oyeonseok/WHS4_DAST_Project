@@ -383,7 +383,28 @@ Wildcard 자산 발견 결과도 승인 Scope 정책 안에서만 후속 작업�
 내장 Recon root agent는 승인된 host와 허용된 MITM 경계 안에서 탐색하며,
 일회용 계정 등록은 `--allow-authorized-account-registration` 또는 로컬 테스트용
 `--allow-lab-account-creation`을 명시한 경우에만 고려합니다. Scope의 금지가 우선합니다.
-해당 옵션 없이 폼 제출·상태 변경을 하지 않습니다.
+해당 옵션 없이 폼 제출·상태 변경을 하지 않습니다. `--allow-lab-account-creation`은
+정확한 loopback 대상에서만 동작하며, 실제 등록·로그인 수행 여부는 에이전트의 탐색
+판단과 Scope 정책에 달려 있어 항상 성공한다고 가정하면 안 됩니다. 예:
+
+```bash
+aidast recon "https://lab.aidast.invalid/juice-shop" \
+  --target "http://127.0.0.1:3001/" \
+  --start-url "http://127.0.0.1:3001/" \
+  --allow-lab-account-creation \
+  --execute --diagnostic-logs --tag-after
+```
+
+"AI-DAST Recon 완료" 메시지만으로 로그인 성공을 단정하지 마세요. 실제로 인증까지
+됐는지는 `result/logs/<scan_id>/recon-capture/`의 캡처에서 직접 확인해야 합니다:
+`mitm_capture.jsonl`(또는 `aidast_list_captured_requests`로 질의)에 회원가입/로그인
+엔드포인트로 가는 POST가 실제로 찍혔는지, `agent_action_diagnostics.jsonl`의
+`auth_decision_reported` 이벤트가 있는지를 봅니다. 폼이 전부 유효하게 채워지고
+제출 버튼까지 눌렸는데도 해당 POST가 캡처에 없다면, 쿠키 동의 배너 같은 오버레이가
+닫히지 않은 채로 남아 제출 클릭을 가로챘을 가능성을 의심하세요 — 이 경우
+agent-browser 쪽에서는 클릭이 "성공"으로 보고되지만 실제로는 버튼에 도달하지
+못합니다(`recon/strix_engine/skills/tooling/agent_browser.md`의 쿠키 배너 관련
+지침 참고).
 
 격리된 로컬 랩에서 JS/UI/API 명세에 드러난 쓰기 경로까지 확인하려면
 `--allow-lab-state-changing-discovery`를 추가합니다. 이 옵션은 exact loopback 타깃만

@@ -612,6 +612,61 @@ def reconcile_observed_endpoints(
             conn.execute("DELETE FROM endpoints WHERE endpoint_id=?", (old_id,))
 
 
+def exclude_http_404_only_candidates(conn: sqlite3.Connection, *, scan_id: str) -> int:
+    """Reclassify endpoints whose only evidence is a 404-only HTTP transaction.
+
+    An active endpoint (``is_excluded=0``) for this scan is excluded with
+    ``exclude_reason='http_404_only'`` when all of the following hold:
+
+    - at least one linked ``http_transaction`` returned status 404;
+    - no linked transaction returned a non-404 status, and none are missing
+      a response (``response_status IS NULL`` blocks exclusion rather than
+      being ignored, since an unanswered request is not a confirmed 404);
+    - it has no discovery evidence besides ``discovery_kind='http_request'``
+      — an independent ``api_spec_operation``, ``form_action``, or other
+      discovery keeps the candidate active even if the raw request 404'd,
+      since the alternate evidence may still be a real route.
+
+    This only reclassifies already-captured evidence into
+    ``excluded_candidates`` (see ``recon/surface.py``); it never issues new
+    requests and never changes what was actually discovered.
+    """
+    rows = conn.execute(
+        """
+        SELECT e.endpoint_id
+        FROM endpoints e
+        JOIN origins o ON o.origin_id = e.origin_id
+        JOIN assets a ON a.asset_id = o.asset_id
+        WHERE a.scan_id = ? AND e.is_excluded = 0
+          AND EXISTS (
+              SELECT 1 FROM endpoint_observations v
+              JOIN http_transactions t ON t.http_transaction_id = v.http_transaction_id
+              WHERE v.endpoint_id = e.endpoint_id AND t.response_status = 404
+          )
+          AND NOT EXISTS (
+              SELECT 1 FROM endpoint_observations v
+              JOIN http_transactions t ON t.http_transaction_id = v.http_transaction_id
+              WHERE v.endpoint_id = e.endpoint_id
+                AND (t.response_status IS NULL OR t.response_status != 404)
+          )
+          AND NOT EXISTS (
+              SELECT 1 FROM endpoint_observations v
+              WHERE v.endpoint_id = e.endpoint_id AND v.discovery_kind != 'http_request'
+          )
+        """,
+        (scan_id,),
+    ).fetchall()
+    endpoint_ids = [row[0] for row in rows]
+    if endpoint_ids:
+        conn.executemany(
+            "UPDATE endpoints SET is_excluded=1, exclude_reason='http_404_only' "
+            "WHERE endpoint_id=?",
+            [(endpoint_id,) for endpoint_id in endpoint_ids],
+        )
+        conn.commit()
+    return len(endpoint_ids)
+
+
 def insert_dns_resolution(
     conn: sqlite3.Connection, *, asset_id: str, hostname: str, source: str
 ) -> None:
