@@ -1,0 +1,97 @@
+{
+  "schema_version": 1,
+  "experiment_date": "2026-09-26",
+  "bundle": "result/test-runs/validation-candidates/validation-single-run-20260926",
+  "fixture_kind": "synthetic_attack_claims_for_validation_only",
+  "official_key_sha256": "9bc241353aa7dde248b1c27da0cb7015c8ef246544648b28115df7db5ee37a84",
+  "single_lab_runner_invocation": true,
+  "ready_candidates": 7,
+  "prerequisite_cases": 3,
+  "validation_stage_counts": {
+    "completed": 7
+  },
+  "case_status_counts": {
+    "CONFIRMED": 1,
+    "DISPROVEN": 6
+  },
+  "validation_attempts": 36,
+  "profile_audits": 7,
+  "impact_hypothesis_counts": {
+    "succeeded": 1
+  },
+  "impact_receipt_hash_matches": true,
+  "positive_impact_axes": [
+    2,
+    2,
+    2
+  ],
+  "lab_score_summary": {
+    "PASS": 7,
+    "NEEDS_PREREQUISITES": 3
+  },
+  "impact_score_result": "PASS",
+  "evidence_backed_status_matches": 7,
+  "independent_axis_labels": 0,
+  "cases": [
+    {
+      "candidate_id": "juice-shop:case:GET:/api/Complaints:unauthenticated_disclosure",
+      "expected_status": "DISPROVEN",
+      "actual_status": "DISPROVEN",
+      "proof_result": "PASS"
+    },
+    {
+      "candidate_id": "juice-shop:case:GET:/api/Feedbacks/:id:unauthenticated_disclosure",
+      "expected_status": "DISPROVEN",
+      "actual_status": "DISPROVEN",
+      "proof_result": "PASS"
+    },
+    {
+      "candidate_id": "juice-shop:case:GET:/api/PrivacyRequests:unauthenticated_disclosure",
+      "expected_status": "DISPROVEN",
+      "actual_status": "DISPROVEN",
+      "proof_result": "PASS"
+    },
+    {
+      "candidate_id": "juice-shop:case:GET:/api/Users:unauthenticated_disclosure",
+      "expected_status": "DISPROVEN",
+      "actual_status": "DISPROVEN",
+      "proof_result": "PASS"
+    },
+    {
+      "candidate_id": "vuln-bank:case:GET:/api/billers/by-category/<int:category_id>:sql_injection",
+      "expected_status": "DISPROVEN",
+      "actual_status": "DISPROVEN",
+      "proof_result": "PASS"
+    },
+    {
+      "candidate_id": "vuln-bank:case:GET:/api/v1/payments/<int:payment_id>:bola",
+      "expected_status": "DISPROVEN",
+      "actual_status": null,
+      "proof_result": "NEEDS_PREREQUISITES"
+    },
+    {
+      "candidate_id": "vuln-bank:case:GET:/api/v1/payments:bola",
+      "expected_status": "DISPROVEN",
+      "actual_status": null,
+      "proof_result": "NEEDS_PREREQUISITES"
+    },
+    {
+      "candidate_id": "vuln-bank:case:GET:/api/virtual-cards/<int:card_id>/transactions:sql_injection",
+      "expected_status": "DISPROVEN",
+      "actual_status": "DISPROVEN",
+      "proof_result": "PASS"
+    },
+    {
+      "candidate_id": "vuln-bank:curated:GET:/api/v1/payments/merchant_id/<int:merchant_id>:bola",
+      "expected_status": "CONFIRMED",
+      "actual_status": null,
+      "proof_result": "NEEDS_PREREQUISITES"
+    },
+    {
+      "candidate_id": "vuln-bank:curated:GET:/debug/users:excessive_data_exposure",
+      "expected_status": "CONFIRMED",
+      "actual_status": "CONFIRMED",
+      "proof_result": "PASS"
+    }
+  ]
+}

@@ -1,0 +1,24 @@
+{
+  "fixture_secret_values_absent_from_public_text": true,
+  "full_media_decode_succeeded": true,
+  "generation": {
+    "byte_size": 321285,
+    "chapters": 10,
+    "duration_seconds": 50,
+    "filename": "Video.webm",
+    "height": 720,
+    "mode": "evidence_replay",
+    "sha256": "70e8521babb56b37d79335bca93379eb1b12e8321b8bc87b3e650fb3ad127f45",
+    "source_revision": "7308731eb43fe8f202aca5b7ef3bf70dba382a11232a2a722e66c5be1f47c793",
+    "status": "ready",
+    "width": 1280
+  },
+  "live_requests_made": false,
+  "manifest_hashes_match": true,
+  "mode": "evidence_replay",
+  "original_report_files_unchanged": true,
+  "real_chromium_render_and_vp8_encoding": true,
+  "sample_notice": "SYNTHETIC EXAMPLE / OFFLINE FIXTURE. No real target was tested; not a real program submission.",
+  "source_paths_absent": true,
+  "zip_sha256": "10157f908c8e9b3809bc9322863e4cf41cd74ad4e376b3d23450b49f5ab1c0d4"
+}

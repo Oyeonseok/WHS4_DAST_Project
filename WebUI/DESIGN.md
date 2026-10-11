@@ -1,0 +1,294 @@
+# AI DAST WebUI Design System
+
+## 1. Atmosphere & Identity
+
+AI DAST is a restrained local security workspace: calm enough for sustained
+operator use, explicit about trust boundaries, and dense only where the data
+requires it. Its signature is the persistent live-activity rail, which keeps
+connection state, scan progress, and chronological events visible without
+competing with the primary task.
+
+## 2. Color
+
+### Palette
+
+| Role | Token | Light | Dark | Usage |
+| --- | --- | --- | --- | --- |
+| Surface / primary | `--bg` | `#eef3f0` | `#101419` | Workspace background |
+| Surface / panel | `--panel` | `#ffffff` | `#161c23` | Cards, forms, activity controls |
+| Surface / soft | `--soft` | `#e6f0e9` | `#202e2a` | Selected and emphasized regions |
+| Border / default | `--line` | `#d5dfd9` | `#29313a` | Dividers and outlines |
+| Text / primary | `--text` | `#17221d` | `#e3e9ed` | Headings and body copy |
+| Text / secondary | `--muted` | `#607068` | `#9fabb6` | Metadata and supporting copy |
+| Accent / primary | `--accent` | `#377b55` | `#a9d7bb` | Actions, focus, live progress |
+| Status / warning | `--amber` | `#916b24` | `#dfbe7f` | Caution and demo state |
+
+### Rules
+
+- Green communicates an active or verified state, not decoration.
+- Amber communicates caution or synthetic/demo state.
+- Red is reserved for errors, rejected decisions, and critical findings.
+- Dark-theme secondary text targets at least 7:1 contrast where practical
+  because the activity stream uses small monospace metadata.
+- New colors must be introduced here before component CSS uses them.
+
+## 3. Typography
+
+### Scale
+
+| Level | Size | Weight | Line height | Usage |
+| --- | --- | --- | --- | --- |
+| Page title | `36px` | 600 | 1.2 | Page heading |
+| Section title | `19px` | 600 | 1.35 | Panel heading |
+| Card title | `17px` | 600 | 1.4 | Local grouping |
+| Body | `16px` | 400 | 1.6 | Default interface copy |
+| Body / small | `14–15px` | 400-600 | 1.5 | Supporting text and controls |
+| Caption | `12–13px` | 500 | 1.45 | Labels and metadata |
+| Overline | `11px` | 600 | 1.3 | Eyebrows and section markers |
+| Log body | `14px` | 400 | 1.65 | Live event messages |
+| Log metadata | `12px` | 500 | 1.4 | Time, stage, and stream markers |
+
+### Font stacks
+
+- Primary: `Inter, "Noto Sans KR", "Malgun Gothic", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif`
+- Monospace: `"SFMono-Regular", Consolas, "Liberation Mono", monospace`
+
+### Rules
+
+- Interface text does not fall below `12px`. Short navigational overlines may
+  use `11px`.
+- Operational body and explanatory copy should use at least `14px`.
+- Log message copy remains at least `14px`.
+- Mobile breakpoints never reduce a selector below its desktop font size.
+- Data-heavy numbers use tabular figures.
+- Uppercase labels are limited to short metadata and use increased tracking.
+
+## 4. Spacing & Layout
+
+### Base unit
+
+Spacing follows a 4px base with practical steps of 4, 8, 12, 16, 20, 24,
+32, and 40px.
+
+### Shell
+
+- Desktop: fixed side navigation, fluid content, persistent activity rail.
+- The desktop shell follows the StyleGallery
+  [`fixed-sidenav-shell`](https://github.com/changeroa/StyleGallery/blob/main/patterns/viewport-shell/fixed-sidenav-shell.md)
+  contract: navigation stays stable and the document remains the primary scroll
+  owner.
+- The content plus activity region follows
+  [`main-with-rail`](https://github.com/changeroa/StyleGallery/blob/main/patterns/split-sidebar/main-with-rail.md):
+  the primary task stays dominant and the rail reflows to a sheet when space is
+  constrained.
+- The activity rail owns its log scroll; the document owns main-content
+  scroll. Controls remain outside the log scroll region.
+- At desktop sizes the activity rail is `320-350px`, preserving readable
+  log lines and filter controls.
+- At `900px` and below the activity rail becomes a fixed, collapsible bottom
+  sheet so live state is reachable without scrolling through page content.
+  The expanded sheet fills the viewport below the top bar, up to `620px`, so
+  the scrollable event stream remains readable on shorter screens.
+- At `660px` and below the sheet sits above the 72px bottom navigation.
+- Mobile navigation includes short Korean labels beneath icons and remains
+  horizontally scrollable without hiding destinations. The active destination
+  scrolls into view on navigation so the current location is always visible.
+- Primary content must reflow without horizontal scrolling at `390px`.
+
+## 5. Components
+
+### Synthetic result preview
+
+- The live Findings, Validation, and Reports screens offer one explicit
+  example-data entry point. It loads the existing synthetic workflow in
+  memory, without mixing examples into persisted scan results.
+- The demo strip identifies the synthetic state and offers a return to the
+  same live screen. Preview navigation never writes a scan, verdict, or report
+  to the backend.
+- Use the existing secondary action and warning/demo treatments; the entry
+  point must wrap without hiding its action on mobile.
+
+### Validation case
+
+- **Structure**: finding title and case ID, textual verdict, reproduction and
+  control attempt counts, redacted decision reason, and linked report when
+  the case is currently confirmed.
+- **Variants**: pending, TP, FP, known match to a confirmed case, and
+  inconclusive. Known matches link their source case rather than claiming
+  independent confirmation.
+- **Accessibility**: verdict text accompanies color; filters use labelled
+  native selects, and detail actions remain keyboard accessible.
+- **Layout**: compact single-column cards with wrapping metadata and a
+  flexible fact row that reflows on mobile.
+
+### Panel
+
+- **Structure**: section, heading cluster, optional action, body.
+- **Variants**: standard, notice, error, empty.
+- **States**: default, hover where actionable, focus, empty, error.
+- **Accessibility**: semantic section headings and visible focus.
+- **Layout**: vertical stack; the document owns scrolling.
+- **Scan controls**: when the main content rail narrows, the scan heading
+  puts controls below the title and wraps buttons as whole words.
+
+### Status badge
+
+- **Structure**: status dot plus concise label.
+- **Variants**: live/success, demo/warning, error/critical, neutral.
+- **States**: static status; no decorative animation.
+- **Accessibility**: status is expressed in text as well as color.
+- **Layout**: inline cluster.
+
+### Metric card
+
+- **Structure**: label/icon row, tabular value, contextual note.
+- **Variants**: green, blue, amber, purple.
+- **States**: static until a real navigation action is assigned.
+- **Accessibility**: color never carries the value alone.
+- **Layout**: responsive grid; values do not dominate actionable content.
+
+### Activity rail
+
+- **Structure**: header, source status, stage progress, search and filters,
+  follow control, scrollable event stream. Scope collection
+  events and scan events share one chronological stream but retain explicit
+  `스코프 수집` and `스캔 · {단계}` source labels.
+- **Variants**: desktop rail, tablet sheet, mobile sheet, collapsed.
+- **States**: live, demo, reconnecting, offline, following, paused, empty,
+  Scope collecting, and browser-input waiting.
+- **Accessibility**: named aside, keyboard-scrollable stream, labelled filters,
+  text status in addition to dots, and a labelled collapse control.
+- **Motion**: no decorative motion; event arrival relies on scroll position and
+  visual emphasis.
+- **Layout**: fixed controls around one bounded `.log-stream` scroll owner.
+- **Recon history**: the scan progress dialog shows individual, sanitized URL
+  discoveries with method, response evidence, and source. It pages older
+  records on demand rather than cutting the stream to the latest entries;
+  the older-record control announces loading, completion, and errors in text.
+- **Live cadence**: while Scope collection is active, a non-persisted
+  `작업 중 · N초` row and status badge update once per second. Persisted backend
+  events remain the authoritative phase history; the timer only fills quiet
+  intervals so the operator can see that work is still running.
+- **Progress**: Scope browser activity and Recon task/tool activity advance
+  estimated progress within their current phase. Running values move in 1%
+  steps every 200ms; confirmed completion catches up every 80ms. Quiet
+  intervals do not invent work, pause freezes the value, and replaying a
+  shorter event window never moves the same job backwards. Recon discovery
+  reserves progress above 75% for tagging, review, and export; only a recorded
+  completed stage reaches 100%.
+
+### Agent work board
+
+- **Structure**: six named roles (main, recon, attack, chaining, validation,
+  report), each showing the latest recorded action or an explicit waiting state.
+- **States**: waiting before its first event, active only for a started event
+  in the current running stage, and last recorded work otherwise.
+- **Source**: durable, allowlisted execution events; never guess an LLM action
+  from elapsed time. Recon tool events may update the Recon role between
+  agent milestones.
+- **Layout**: compact responsive grid within the scan panel and progress
+  dialog; text wraps within each card without a separate scroll region.
+- **Accessibility**: role and state are plain text; the latest step is
+  announced by the scan panel's status line.
+
+### Log entry
+
+- **Structure**: timestamp, stage, level indicator, message.
+- **Variants**: info, success, warning, error.
+- **States**: default and newest-event emphasis.
+- **Accessibility**: readable contrast, text level available to assistive
+  technology, and wrapping for unbroken data.
+- **Layout**: chronological vertical stack.
+
+### LLM execution record
+
+- Group start and terminal events by call ID; retain older loaded calls on refresh.
+- Show Scope as a distinct filterable stage, with its collection job ID rather
+  than an empty scan-link warning. Show the explicitly requested model;
+  historical missing models remain unrecorded, never inferred.
+- Purpose, input-size counts, final-result counts, error category, timing and
+  token usage use the existing facts grid and open disclosure primitives.
+  Raw prompts, response bodies and credentials are not rendered.
+- Input size is a compact inline fact rather than a height-matched empty card.
+  Results use one open disclosure: decision counts are prominent section-size
+  values, followed by policy, evidence and response-field counts in that order.
+  Missing fields are omitted; recorded zero counts remain visible.
+- Model, stage and duration stay above the summaries; technical IDs and start
+  time follow them. Summary labels and numbers wrap together on narrow screens.
+- Scope collection and re-collection reuse the scan model selector, including
+  custom IDs and validation. Active jobs show their recorded model as read-only.
+- Live records refresh while this view is mounted; event IDs preserve history.
+- Labels use the Korean translation dictionary; supporting facts use one column
+  on mobile while primary metrics wrap as whole items.
+
+### Operator next action
+
+- **Structure**: concise state summary, ordered workflow steps, one primary next
+  action.
+- **Variants**: register program, approve Scope, start scan, review findings.
+- **States**: complete, current, upcoming.
+- **Accessibility**: ordered list semantics, status expressed in text and icon,
+  and one unambiguous button label.
+- **Layout**: full-width panel before metrics on Overview; steps reflow to one
+  column on narrow screens.
+
+### Connection status
+
+- **Structure**: status dot plus plain Korean state.
+- **Variants**: demo, connected, connecting, reconnecting, no scan selected,
+  offline.
+- **States**: announced with `role="status"` and never left in a permanent
+  loading state when no scan exists.
+- **Accessibility**: state is understandable without color or implementation
+  vocabulary.
+
+### Dialog action dock
+
+- **Structure**: required confirmation immediately above cancel and primary
+  action controls.
+- **States**: disabled until prerequisites pass, busy while submitting.
+- **Accessibility**: remains visible at the bottom of long scrollable dialogs
+  without obscuring form content.
+- **Layout**: sticky to the dialog bottom with a tonal surface and top divider.
+
+## 6. Motion & Interaction
+
+| Type | Duration | Easing | Usage |
+| --- | --- | --- | --- |
+| Micro | `150ms` | ease-out | Hover and press feedback |
+| Standard | `200-300ms` | ease-in-out | Sheet or panel state changes |
+
+- Motion only communicates interaction or state.
+- Layout properties are not animated.
+- `prefers-reduced-motion: reduce` disables non-essential transitions.
+- Pause stops auto-follow only; event ingestion continues.
+
+## 7. Depth & Surface
+
+The primary strategy is **borders plus tonal shift**. Panels separate through
+one-pixel borders and adjacent dark or light surface tones. Shadows are
+reserved for true overlays such as dialogs and the mobile activity sheet.
+Cards do not receive decorative shadows.
+
+## 8. Accessibility Constraints & Accepted Debt
+
+### Constraints
+
+- Target WCAG 2.2 AA; dark activity metadata aims for 7:1 contrast.
+- Every interactive control has a visible focus indicator.
+- Status never depends on color alone.
+- Touch targets are at least 38px; primary actions target 40px or more.
+- Korean and English copy must wrap without clipping or orphaned controls.
+- The shipped operator interface is Korean-only. Machine identifiers,
+  filenames, API paths, and standard vulnerability classifications may remain
+  in their canonical form.
+- The mobile activity sheet must remain collapsible and must not cover the
+  bottom navigation.
+
+### Accepted debt
+
+| Item | Location | Why accepted | Exit |
+| --- | --- | --- | --- |
+| Connection vocabulary is rendered by three existing call sites | `src/App.tsx` | This pass is intentionally CSS-first and avoids restructuring the oversized application component | Extract one shared status component during the planned App decomposition |
+| Log timestamps show clock time without day boundaries | `src/App.tsx` | Requires event presentation logic, not visual styling | Add date rollover markers when multi-day scan UX is implemented |
+| Several legacy component colors and spacings remain literal values | `src/styles.css` | Full token migration would exceed this focused readability change | Consolidate opportunistically when each component is next changed |

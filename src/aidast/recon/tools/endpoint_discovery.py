@@ -1,0 +1,2695 @@
+"""ENDPOINT DISCOVERY
+
+최종 Flow
+==========
+
+1. Playwright Manual Authentication
+   - Chromium 자동 실행
+   - 사용자 직접 로그인
+   - Cookie / localStorage / sessionStorage 저장
+   - 로그인 과정 HTTP 관찰
+
+2. Authenticated Katana Standard
+   - Cookie / Authorization Header 사용
+
+3. Authenticated Katana Headless
+   - 저장된 세션을 복제한 독립 Chromium에 CDP 연결
+   - 실패 시 Header 방식 Fallback
+
+4. Playwright Runtime 유지
+   - Katana가 로그인 Browser Context를 변경하지 않음
+
+5. Katana 결과 Merge
+
+6. Authenticated ffuf
+   - Katana / 로그인 과정 Endpoint 기반
+   - Path Prefix Fuzzing
+
+7. Playwright UI Interaction
+   - 발견한 HTML 페이지 방문
+   - 메뉴 / Tab / Accordion 등 안전 Action
+   - XHR / Fetch / WebSocket 관찰
+
+8. OpenAPI / GraphQL Secondary Discovery
+
+9. 전체 Merge
+
+기존 DB 호환을 위해 반환값은 list[dict].
+"""
+
+from __future__ import annotations
+
+import json
+import html
+import math
+import os
+import re
+import shutil
+import subprocess
+import tempfile
+import hashlib
+import uuid
+import time
+
+from dataclasses import replace
+from pathlib import Path
+from typing import Callable
+from urllib.parse import (
+    urljoin,
+    urlparse,
+    unquote,
+)
+
+from aidast.paths import RESULT_ROOT
+from aidast.core.http_safety import has_request_exclusions
+
+from .api_secondary_discovery import (
+    discover_api_secondary,
+    discover_adaptive_js_api_candidates,
+    recover_observed_json_gets,
+)
+
+from .playwright_driver import (
+    InteractionConfig,
+    ManualSessionConfig,
+    PlaywrightDriver,
+)
+from .katana_browser import open_katana_browser
+from .ai_patterns import CodexPatternPlanner
+from .mitm_proxy import read_observed_recon_responses, read_recent_json_responses
+
+from .ffuf_root_selector import (
+    FfufRootSelectionError,
+    select_ffuf_roots_from_endpoints,
+)
+from aidast.recon.policy import TargetPolicy
+from aidast.recon.judgment import is_probable_redirect_loop_path
+
+
+ALLOWED_SCHEMES = {
+    "http",
+    "https",
+}
+
+
+def _tool_rate_args(tool: str, requests_per_second: float) -> list[str]:
+    """Translate a fractional policy rate without ever rounding it upward."""
+    if requests_per_second < 1:
+        delay_seconds = math.ceil(1 / requests_per_second)
+        return ["-delay", str(delay_seconds)] if tool == "katana" else [
+            "-p", str(delay_seconds)
+        ]
+    integer_rate = math.floor(requests_per_second)
+    return ["-rl", str(integer_rate)] if tool == "katana" else [
+        "-rate", str(integer_rate)
+    ]
+
+
+# =========================================================
+# Origin
+# =========================================================
+
+def _effective_port(
+    parsed,
+) -> int | None:
+
+    if parsed.port is not None:
+        return parsed.port
+
+    scheme = (
+        parsed.scheme.lower()
+    )
+
+    if scheme == "http":
+        return 80
+
+    if scheme == "https":
+        return 443
+
+    return None
+
+
+def _same_origin(
+    url: str,
+    base_url: str,
+) -> bool:
+
+    try:
+
+        parsed = urlparse(
+            url
+        )
+
+        base = urlparse(
+            base_url
+        )
+
+        return (
+            parsed.scheme.lower()
+            ==
+            base.scheme.lower()
+
+            and
+
+            (
+                parsed.hostname
+                or ""
+            ).lower()
+            ==
+            (
+                base.hostname
+                or ""
+            ).lower()
+
+            and
+
+            _effective_port(
+                parsed
+            )
+            ==
+            _effective_port(
+                base
+            )
+        )
+
+    except ValueError:
+
+        return False
+
+
+# =========================================================
+# Normalize
+# =========================================================
+
+def _normalize_route(
+    value: str | None,
+    base_url: str,
+) -> str | None:
+
+    if not value:
+        return None
+
+    value = (
+        value.strip()
+    )
+
+    if not value:
+        return None
+
+    try:
+
+        full_url = urljoin(
+            base_url.rstrip("/")
+            + "/",
+
+            value,
+        )
+
+        parsed = urlparse(
+            full_url
+        )
+
+    except (
+        ValueError,
+        TypeError,
+    ):
+
+        return None
+
+    if (
+        parsed.scheme.lower()
+        not in ALLOWED_SCHEMES
+    ):
+
+        return None
+
+    if not parsed.hostname:
+        return None
+
+    # 외부 Origin 제거
+    if not _same_origin(
+        full_url,
+        base_url,
+    ):
+
+        return None
+
+    # Canonical Endpoint:
+    # Query / Fragment 제외
+    path = (
+        parsed.path
+        or "/"
+    )
+
+    # Katana/browser error pages can leak escaped fragments into a discovered
+    # URL (for example `%5C`, `\\`, `&quot;`).  They are not reliable routes;
+    # reject them instead of decoding or rewriting them into a new target.
+    # Decode only for validation (the returned route remains in its original
+    # canonical encoding).  A second pass catches double-escaped separators
+    # such as ``%255C`` without rewriting legitimate encoded characters.
+    decoded_path = path
+    for _ in range(2):
+        decoded_path = html.unescape(unquote(decoded_path))
+    if (
+        "\\" in decoded_path
+        or any(ord(char) < 0x20 or ord(char) == 0x7F for char in decoded_path)
+        or re.search(r"%(?![0-9A-Fa-f]{2})", path)
+        or re.search(r"&(?:amp|quot|apos|lt|gt|#(?:\d+|x[0-9A-Fa-f]+));?", path, re.IGNORECASE)
+    ):
+        return None
+
+    if not path.startswith(
+        "/"
+    ):
+
+        path = (
+            "/" + path
+        )
+
+    return path
+
+
+# =========================================================
+# Deduplication
+# =========================================================
+
+def _deduplicate_results(
+    results: list[dict],
+) -> list[dict]:
+
+    unique: dict[
+        tuple[str, str],
+        dict,
+    ] = {}
+
+    for result in results:
+
+        method = (
+            result.get(
+                "method",
+                "GET",
+            )
+            .upper()
+        )
+
+        path = (
+            result.get(
+                "path"
+            )
+        )
+
+        if not path:
+            continue
+
+        if is_probable_redirect_loop_path(path):
+            continue
+
+        key = (
+            method,
+            path,
+        )
+
+        incoming_sources: list[
+            str
+        ] = []
+
+        source = (
+            result.get(
+                "source"
+            )
+        )
+
+        if source:
+
+            incoming_sources.append(
+                source
+            )
+
+        for source_name in (
+            result.get(
+                "sources",
+                [],
+            )
+        ):
+
+            if (
+                source_name
+                not in incoming_sources
+            ):
+
+                incoming_sources.append(
+                    source_name
+                )
+
+        if key not in unique:
+
+            item = dict(
+                result
+            )
+
+            item[
+                "method"
+            ] = method
+
+            item[
+                "path"
+            ] = path
+
+            item["observation_variants"] = result.get("observation_variants", [dict(result)])
+
+            item[
+                "sources"
+            ] = (
+                incoming_sources.copy()
+            )
+
+            unique[key] = item
+
+            continue
+
+        unique[key]["observation_variants"].extend(
+            result.get("observation_variants", [dict(result)])
+        )
+        from aidast.recon.verification import result_verification_status
+        strengths = {'candidate': 0, 'observed': 1, 'verified': 2}
+        if strengths[result_verification_status(result)] > strengths[result_verification_status(unique[key])]:
+            # Keep the full URL and evidence of the stronger observation.
+            # Query variants remain separate evidence; never label an earlier
+            # candidate's URL verified using another query's response.
+            previous = unique[key]
+            unique[key] = dict(result, method=method, path=path,
+                               sources=previous['sources'], observation_variants=previous['observation_variants'])
+
+        stored_sources = (
+            unique[key]
+            .setdefault(
+                "sources",
+                [],
+            )
+        )
+
+        for source_name in (
+            incoming_sources
+        ):
+
+            if (
+                source_name
+                not in stored_sources
+            ):
+
+                stored_sources.append(
+                    source_name
+                )
+
+    return list(
+        unique.values()
+    )
+
+
+# =========================================================
+# CLI Headers
+# =========================================================
+
+def _append_headers(
+    command: list[str],
+    headers: dict[str, str] | None,
+) -> None:
+
+    if not headers:
+        return
+
+    for (
+        name,
+        value,
+    ) in headers.items():
+
+        command.extend(
+            [
+                "-H",
+                f"{name}: {value}",
+            ]
+        )
+
+
+# =========================================================
+# Katana Scope
+# =========================================================
+
+def _katana_scope_regex(
+    base_url: str,
+) -> str:
+
+    parsed = urlparse(
+        base_url
+    )
+
+    # scheme://host:port 만 사용
+    origin = (
+        f"{parsed.scheme}://"
+        f"{parsed.netloc}"
+    )
+
+    return (
+        "^"
+        + re.escape(
+            origin
+        )
+        + r"(?:/|$)"
+    )
+
+
+# =========================================================
+# Katana Output
+# =========================================================
+
+def _parse_katana_output(
+    stdout: str,
+    *,
+    base_url: str,
+    source: str,
+    target_policy: TargetPolicy | None = None,
+    diagnostic_callback=None,
+    emit_summary: bool = True,
+) -> list[dict]:
+
+    results: list[
+        dict
+    ] = []
+
+    raw_count = 0
+    removed_count = 0
+    form_count = 0
+
+    parsed_base = urlparse(base_url)
+    origin = f'{parsed_base.scheme}://{parsed_base.netloc}'
+
+    def append_result(
+        *, endpoint, method, request, response, discovery_kind=None,
+    ) -> None:
+        nonlocal removed_count
+        if not isinstance(endpoint, str):
+            return
+        path = _normalize_route(endpoint, base_url)
+        if path is None:
+            removed_count += 1
+            return
+        method = str(method or 'GET').upper()
+        if not re.fullmatch(r'[A-Z]{1,20}', method):
+            return
+        # This is passive endpoint metadata. Keep the destination/path boundary,
+        # but do not mistake collection of a POST route for permission to send it.
+        if target_policy is not None and not target_policy.allows_observed_url(
+            origin + path
+        ):
+            removed_count += 1
+            return
+
+        from aidast.recon.annotations import sanitize_evidence, safe_url
+        headers = response.get('headers') or {}
+        headers = (
+            {str(k).lower().replace('_', '-'): v for k, v in headers.items()}
+            if isinstance(headers, dict) else {}
+        )
+        evidence = sanitize_evidence({
+            'parent_url': request.get('source'),
+            'html_tag': request.get('tag'),
+            'html_attribute': request.get('attribute'),
+            'response_status': response.get('status_code'),
+            'content_type': headers.get('content-type'),
+            'content_length': response.get('content_length'),
+            'redirect_url': headers.get('location'),
+        })
+        parent_url = evidence.get('parent_url', '')
+        results.append({
+            'method': method, 'path': path,
+            'url': safe_url(urljoin(base_url, endpoint)),
+            'content_type': evidence.get('content_type'), 'source': source,
+            'discovery_kind': discovery_kind or (
+                'http_response' if evidence.get('response_status') else 'tool_report'
+            ),
+            'evidence': evidence,
+            'context': {
+                'context_key': f'{source}:parent:{parent_url}',
+                'page_url': parent_url, 'action_type': 'tool_run',
+                'association_method': 'crawler_source' if parent_url else 'tool_batch',
+            },
+            'traffic_class': 'passive' if discovery_kind == 'form_action' else 'active',
+        })
+
+    for line in (
+        stdout.splitlines()
+    ):
+
+        line = (
+            line.strip()
+        )
+
+        if not line:
+            continue
+
+        raw_count += 1
+
+        request = {}
+        response = {}
+        endpoint = line
+        if line.startswith(('{', '[')):
+            try:
+                record = json.loads(line)
+            except (ValueError, TypeError):
+                continue
+            if not isinstance(record, dict) or not isinstance(record.get('request'), dict):
+                continue
+            request = record['request']
+            response = record.get('response') or {}
+            if not isinstance(response, dict):
+                response = {}
+            endpoint = request.get('endpoint')
+        append_result(
+            endpoint=endpoint, method=request.get('method'), request=request,
+            response=response,
+        )
+
+        forms = response.get('forms') if isinstance(response, dict) else None
+        if isinstance(forms, list):
+            for form in forms:
+                if not isinstance(form, dict):
+                    continue
+                form_count += 1
+                append_result(
+                    endpoint=form.get('action'), method=form.get('method') or 'GET',
+                    request={
+                        'source': request.get('endpoint'),
+                        'tag': 'form',
+                        'attribute': 'action',
+                    },
+                    response={}, discovery_kind='form_action',
+                )
+
+    if emit_summary:
+        print(f"  {source} Raw : {raw_count}건")
+        print(f"  외부/비허용 제거 : {removed_count}건")
+        print(f"  Target 결과 : {len(results)}건")
+
+    if emit_summary and diagnostic_callback is not None:
+        from aidast.recon.diagnostics import diagnostic_endpoint
+        diagnostic_callback(
+            "katana_parser", component="endpoint_discovery", source=source,
+            stdout_line_count=raw_count, route_removed_count=removed_count,
+            extracted_form_count=form_count, parsed_count=len(results),
+            endpoints=[diagnostic_endpoint(item) for item in results],
+        )
+
+    return results
+
+
+def _filter_results_by_policy(
+    results: list[dict], *, base_url: str, target_policy: TargetPolicy | None,
+    passive_metadata: bool = False,
+) -> list[dict]:
+    if target_policy is None:
+        return results
+    parsed_base = urlparse(base_url)
+    origin = f"{parsed_base.scheme}://{parsed_base.netloc}"
+    filtered: list[dict] = []
+    for result in results:
+        path = result.get("path")
+        if not path:
+            continue
+        candidate = origin + path
+        method = result.get("method", "GET")
+        allowed = (
+            target_policy.allows_observed_url(candidate)
+            if passive_metadata
+            else target_policy.allows_url(candidate, method=method)
+        )
+        if (
+            not allowed
+            and not passive_metadata
+            and result.get("browser_supporting_request") is True
+            and target_policy.allows_browser_support_url(candidate, method=method)
+        ):
+            allowed = True
+        if allowed:
+            filtered.append(result)
+    return filtered
+
+
+# =========================================================
+# Katana Runner
+# =========================================================
+
+def _run_katana(
+    command: list[str],
+) -> subprocess.CompletedProcess:
+
+    return subprocess.run(
+        command,
+
+        capture_output=True,
+
+        text=True,
+
+        timeout=180,
+    )
+
+
+# =========================================================
+# Katana
+# =========================================================
+
+def discover_with_katana(
+    base_url: str,
+    *,
+    mode: str,
+    auth_headers: dict[str, str] | None,
+    chrome_ws_url: str | None = None,
+    proxy_url: str | None = None,
+    target_policy: TargetPolicy | None = None,
+    diagnostic_callback=None,
+) -> list[dict]:
+
+    def diagnose_process(event: str, **details) -> None:
+        if diagnostic_callback is not None:
+            diagnostic_callback(
+                event, component="endpoint_discovery", tool="katana",
+                mode=mode, **details,
+            )
+
+    if target_policy is not None and not proxy_url:
+        raise ValueError("policy-enforced katana requires a proxy")
+
+    cdp_probe_results: list[dict] = []
+
+    if shutil.which(
+        "katana"
+    ) is None:
+
+        print(
+            "  [건너뜀] katana 미설치"
+        )
+
+        diagnose_process("tool_unavailable")
+
+        return []
+
+    base_command = [
+        "katana",
+
+        "-u",
+        base_url,
+
+        "-silent",
+        "-j", "-or", "-ob",
+
+        # Extract form action + method metadata without filling/submitting forms.
+        "-fx",
+
+        # JavaScript Crawl
+        "-jc",
+
+        # Target Origin Scope
+        "-cs",
+        _katana_scope_regex(
+            base_url
+        ),
+    ]
+
+    if target_policy is not None:
+        base_command += [
+            "-d", str(target_policy.limits.max_depth),
+            "-c", str(target_policy.limits.concurrency),
+            "-timeout", str(target_policy.limits.timeout_seconds),
+            # Keep a focused recon phase bounded even when the request budget
+            # is large; the policy budget remains enforced by mitmproxy.
+            "-ct", "150s",
+        ]
+        base_command += _tool_rate_args(
+            "katana", target_policy.limits.requests_per_second
+        )
+
+    # -proxy applies to Katana's own HTTP client (standard and header fallback).
+    # In CDP mode, the isolated Chromium process itself uses the policy proxy.
+    proxy_flags = (
+        [
+            "-proxy",
+            proxy_url,
+            # Internal scheduling marker. The policy proxy removes it before
+            # forwarding requests to the target.
+            "-H",
+            "X-AIDAST-Source: katana",
+        ]
+        if proxy_url
+        else []
+    )
+
+    # =====================================================
+    # Standard
+    # =====================================================
+
+    if mode == "standard":
+
+        source = (
+            "katana_auth_standard"
+        )
+
+        command = list(
+            base_command
+        ) + proxy_flags
+
+        _append_headers(
+            command,
+            auth_headers,
+        )
+
+        try:
+
+            completed = (
+                _run_katana(
+                    command
+                )
+            )
+
+        except (
+            subprocess.TimeoutExpired,
+            OSError,
+        ) as exc:
+
+            print(
+                "  [경고] "
+                "Katana Standard 실패: "
+                f"{type(exc).__name__}"
+            )
+
+            diagnose_process(
+                "tool_error", error_type=type(exc).__name__,
+            )
+
+            return []
+
+    # =====================================================
+    # Headless
+    # =====================================================
+
+    elif mode == "headless":
+
+        source = (
+            "katana_auth_headless"
+        )
+
+        completed = None
+        cdp_no_usable_results = False
+        cdp_sparse_results = False
+
+        # ---------------------------------------------
+        # Playwright 로그인 Chromium에 CDP 연결
+        # ---------------------------------------------
+
+        if chrome_ws_url:
+
+            print(
+                "  [Katana Headless] "
+                "독립 Chromium CDP 연결"
+            )
+
+            command = (
+                list(
+                    base_command
+                )
+                + [
+                    "-hl",
+
+                    # Reuse the existing browser profile (no incognito) so
+                    # Playwright's authenticated cookies/storage remain
+                    # available to Katana over CDP.
+                    "-xhr",
+
+                    "-cwu",
+                    chrome_ws_url,
+                    "-noi",
+                    # Internal marker consumed by the policy proxy; it is
+                    # stripped before forwarding and reserves headless budget.
+                    "-H",
+                    "X-AIDAST-Phase: headless",
+                ]
+            )
+
+            try:
+
+                completed = (
+                    _run_katana(
+                        command
+                    )
+                )
+
+            except (
+                subprocess.TimeoutExpired,
+                OSError,
+            ) as exc:
+
+                print(
+                    "  [경고] "
+                    "Katana CDP 실패: "
+                    f"{type(exc).__name__}"
+                )
+
+                diagnose_process(
+                    "tool_error", launch_mode="cdp",
+                    error_type=type(exc).__name__,
+                )
+
+                completed = None
+
+            if completed is not None and completed.returncode == 0:
+                # A successful process exit is not enough: CDP can return
+                # console/progress text or malformed JSON without any usable
+                # in-scope endpoint. Apply the exact production parser and
+                # policy filter before deciding whether to fall back.
+                cdp_probe_results = _parse_katana_output(
+                    completed.stdout or "",
+                    base_url=base_url,
+                    source=source,
+                    target_policy=target_policy,
+                    emit_summary=False,
+                )
+                cdp_no_usable_results = not cdp_probe_results
+                cdp_sparse_results = len(cdp_probe_results) < 5
+                if cdp_no_usable_results:
+                    print(
+                        "  [Katana Headless] CDP에서 사용 가능한 endpoint가 없어 "
+                        "Header fallback을 시도합니다."
+                    )
+                    diagnose_process(
+                        "no_usable_results", launch_mode="cdp",
+                        returncode=completed.returncode,
+                        stdout_line_count=len((completed.stdout or "").splitlines()),
+                    )
+                elif cdp_sparse_results:
+                    diagnose_process("sparse_results", launch_mode="cdp",
+                                     count=len(cdp_probe_results))
+
+        # ---------------------------------------------
+        # CDP 실패 또는 빈 결과 → Header 방식 Headless
+        # ---------------------------------------------
+
+        if (
+            completed is None
+            or completed.returncode != 0
+            or (
+                chrome_ws_url is not None
+                and completed is not None
+                and (cdp_no_usable_results or cdp_sparse_results)
+            )
+        ):
+
+            if chrome_ws_url:
+
+                print(
+                    "  [Katana Headless] "
+                    "CDP 결과 없음/실패 → "
+                    "Header 방식 Fallback"
+                )
+
+            else:
+
+                print(
+                    "  [Katana Headless] "
+                    "CDP 없음 → "
+                    "Header 방식"
+                )
+
+            # Header fallback은 -cwu 없이 katana가 자체 내장 브라우저를 새로
+            # 띄우는 독립 실행이라(로그인 세션 없음, Playwright 훅도 안 붙음)
+            # 여기는 CDP 모드와 달리 -proxy가 실제로 의미가 있다.
+            command = (
+                list(
+                    base_command
+                )
+                + proxy_flags
+                + [
+                    "-hl",
+                    "-xhr",
+                ]
+            )
+
+            # A non-empty but tiny CDP result can mean a blocked lazy/CDN
+            # script. Give the independent header crawler a short second pass.
+            if cdp_sparse_results and "-ct" in command:
+                command[command.index("-ct") + 1] = "45s"
+
+            _append_headers(
+                command,
+                auth_headers,
+            )
+
+            try:
+
+                completed = (
+                    _run_katana(
+                        command
+                    )
+                )
+
+            except (
+                subprocess.TimeoutExpired,
+                OSError,
+            ) as exc:
+
+                print(
+                    "  [경고] "
+                    "Katana Headless 실패: "
+                    f"{type(exc).__name__}"
+                )
+
+                diagnose_process(
+                    "tool_error", launch_mode="header_fallback",
+                    error_type=type(exc).__name__,
+                )
+
+                return cdp_probe_results
+
+    else:
+
+        raise ValueError(
+            "mode는 "
+            "'standard' 또는 "
+            "'headless'여야 합니다."
+        )
+
+    # =====================================================
+    # Result
+    # =====================================================
+
+    if completed is None:
+
+        return cdp_probe_results
+
+    if diagnostic_callback is not None:
+        diagnose_process(
+            "katana_process",
+            returncode=completed.returncode,
+            stdout_line_count=len(completed.stdout.splitlines()),
+            stderr_line_count=len((completed.stderr or "").splitlines()),
+        )
+
+    if completed.returncode != 0:
+
+        print(
+            "  [경고] "
+            "Katana 비정상 종료 "
+            f"(code={completed.returncode})"
+        )
+
+        return cdp_probe_results
+
+    return _deduplicate_results(
+        cdp_probe_results + _parse_katana_output(
+            completed.stdout,
+
+            base_url=base_url,
+
+            source=source,
+            target_policy=target_policy,
+            diagnostic_callback=diagnostic_callback,
+        )
+    )
+
+
+# =========================================================
+# ffuf Roots
+# =========================================================
+
+def _build_ffuf_roots(
+    endpoints: list[dict],
+    *,
+    max_depth: int = 3,
+    max_roots: int = 50,
+) -> list[str]:
+
+    roots: set[
+        str
+    ] = {
+        "/"
+    }
+
+    for endpoint in endpoints:
+
+        path = (
+            endpoint.get(
+                "path"
+            )
+        )
+
+        if not path:
+            continue
+
+        parts = [
+            part
+
+            for part in (
+                path.split("/")
+            )
+
+            if part
+        ]
+
+        if not parts:
+            continue
+
+        max_prefix = min(
+            len(parts) - 1,
+            max_depth,
+        )
+
+        for depth in range(
+            1,
+            max_prefix + 1,
+        ):
+
+            roots.add(
+                "/"
+                + "/".join(
+                    parts[:depth]
+                )
+            )
+
+        # /api/Products 같은
+        # 짧은 Path도 Fuzz Root
+        if (
+            len(parts) <= 2
+            and not parts[-1].isdigit()
+        ):
+
+            roots.add(
+                "/"
+                + "/".join(
+                    parts
+                )
+            )
+
+    ordered = sorted(
+        roots,
+
+        key=lambda value: (
+            value.count("/"),
+            value,
+        ),
+    )
+
+    return ordered[
+        :max_roots
+    ]
+
+
+# =========================================================
+# ffuf
+# =========================================================
+
+def _active_proxy_budget_remaining(capture_path) -> int | None:
+    """Read the proxy's advisory active budget; admission remains authoritative."""
+    if capture_path is None:
+        return None
+    try:
+        value = json.loads(Path(capture_path).with_suffix('.progress.json').read_text())
+        remaining = value.get('active_requests_remaining')
+        return remaining if type(remaining) is int and remaining >= 0 else None
+    except (OSError, ValueError, TypeError, AttributeError):
+        return None
+
+
+def _active_proxy_budget_available(capture_path) -> bool:
+    remaining = _active_proxy_budget_remaining(capture_path)
+    return remaining is None or remaining > 0
+
+
+_FFUF_DISCOVERY_PRIORITY = (
+    "healthz", "metrics", ".well-known/security.txt", "security.txt",
+    ".env", ".env.bak", "dashboard", "graphql", "debug/users",
+    ".git/config", "robots.txt", "sitemap.xml", "health", "status",
+    "api/health", "api/status", "debug", "internal", "config", "api",
+    "openapi.json", "swagger.json",
+    "login", "register", "forgot-password", "reset-password", "auth",
+    "account", "profile", "users", "me", "admin", "transactions", "transfer", "upload",
+    "actuator/health",
+)
+_FFUF_ROOT_PRIORITY_MIN_SECONDS = 60
+
+
+def _priority_ffuf_wordlist(wordlist: str) -> tuple[tempfile.TemporaryDirectory, str, list[str]]:
+    """Prepend a small generic high-signal set before a large operator list."""
+    directory = tempfile.TemporaryDirectory(prefix="aidast-ffuf-")
+    source = Path(wordlist)
+    lines = list(dict.fromkeys(
+        line.strip() for line in source.read_text(encoding="utf-8", errors="ignore").splitlines()
+        if line.strip()
+    ))
+    priority = list(_FFUF_DISCOVERY_PRIORITY)
+    ordered = priority + [item for item in lines if item not in set(priority)]
+    target = Path(directory.name) / "ordered.txt"
+    target.write_text("\n".join(ordered) + ("\n" if ordered else ""), encoding="utf-8")
+    return directory, str(target), ordered[:len(_FFUF_DISCOVERY_PRIORITY)]
+
+
+_FFUF_COMPATIBLE_GUIDED_EXCLUSIONS = frozenset({
+    # A bounded, single-worker GET discovery pass does not perform any of
+    # these activities.  Request-level exclusions are still enforced by the
+    # mandatory proxy for every candidate URL.
+    "disruptive_testing",
+    "prohibited_destinations",
+    "prohibited_impact",
+    "prohibited_disruptive_testing",
+    "prohibited_external_access",
+    "prohibited_destructive_impact",
+})
+
+
+def _minimum_ffuf_root_allowed(
+    target_policy: TargetPolicy | None,
+    *,
+    ffuf_origin: str,
+) -> bool:
+    """Allow a deterministic root only for understood, compatible guidance.
+
+    The selector may occasionally return an empty list despite an explicitly
+    enabled ffuf tool.  We must not reinterpret arbitrary prose or restore a
+    root that the selector rejected due to a path-specific precaution.  A
+    minimum ``/`` root is therefore eligible only when every Agent-guided
+    exclusion has a known semantic key whose prohibited activity cannot be
+    caused by the bounded GET discovery operation.
+    """
+    if target_policy is None or not target_policy.tools.ffuf_enabled:
+        return False
+    if not target_policy.allows_url(ffuf_origin + "/", method="GET"):
+        return False
+
+    guided_notes = [
+        note for note in target_policy.policy_notes
+        if "Agent-guided exclusion" in note
+    ]
+    if not guided_notes:
+        return False
+
+    keys: set[str] = set()
+    for note in guided_notes:
+        match = re.search(
+            r"Agent-guided exclusion(?: \(untrusted policy data; no additional authority\))?"
+            r"(?:\s*:\s*|\s+)([A-Za-z0-9_-]+)",
+            note,
+        )
+        if match is None:
+            # Captured structured guidance stores the key in JSON after the
+            # heading rather than directly after it.
+            match = re.search(r'"key"\s*:\s*"([A-Za-z0-9_-]+)"', note)
+        if match is None:
+            return False
+        keys.add(match.group(1))
+
+    return bool(keys) and keys <= _FFUF_COMPATIBLE_GUIDED_EXCLUSIONS
+
+
+def discover_with_ffuf(
+    base_url: str,
+    *,
+    wordlist: str | None,
+    seed_endpoints: list[dict],
+    auth_headers: dict[str, str] | None,
+    proxy_url: str | None = None,
+    root_selector: Callable[[list[dict]], list[str]] | None = None,
+    target_policy: TargetPolicy | None = None,
+    max_time_seconds: int = 150,
+    diagnostic_callback=None,
+    budget_available: Callable[[], bool] | None = None,
+    budget_remaining: Callable[[], int | None] | None = None,
+) -> list[dict]:
+    parsed_base = urlparse(base_url)
+    ffuf_origin = (
+        f"{parsed_base.scheme}://{parsed_base.netloc}"
+        if parsed_base.scheme and parsed_base.netloc
+        else base_url.rstrip("/")
+    )
+
+    if target_policy is not None and not target_policy.tools.ffuf_enabled:
+        print("  [건너뜀] TargetPolicy에서 ffuf가 허용되지 않음")
+        if diagnostic_callback is not None:
+            diagnostic_callback("phase_skipped", phase="ffuf")
+        return []
+
+    if target_policy is not None and not proxy_url:
+        raise ValueError("policy-enforced ffuf requires a proxy")
+
+    if shutil.which(
+        "ffuf"
+    ) is None:
+
+        print(
+            "  [건너뜀] ffuf 미설치"
+        )
+        if diagnostic_callback is not None:
+            diagnostic_callback("phase_skipped", phase="ffuf")
+
+        return []
+
+    if not wordlist:
+
+        print(
+            "  [건너뜀] "
+            "ffuf Wordlist 없음"
+        )
+        if diagnostic_callback is not None:
+            diagnostic_callback("phase_skipped", phase="ffuf")
+
+        return []
+
+    if not Path(
+        wordlist
+    ).is_file():
+
+        print(
+            "  [건너뜀] "
+            f"Wordlist 없음: {wordlist}"
+        )
+        if diagnostic_callback is not None:
+            diagnostic_callback("phase_skipped", phase="ffuf")
+
+        return []
+
+    with Path(wordlist).open("rb") as wordlist_file:
+        wordlist_lines = sum(1 for _ in wordlist_file)
+
+    baseline_seed = [item for item in seed_endpoints if not re.search(
+        r'\.(?:js|mjs|css|png|jpg|jpeg|gif|svg|ico|woff2?|ttf|map)$',
+        str(item.get('path') or '').split('?', 1)[0], re.I)]
+    baseline_roots = _build_ffuf_roots(baseline_seed, max_depth=1, max_roots=3)
+    policy_guided = bool(target_policy is not None and target_policy.policy_notes)
+    selector_endpoints = ([dict(path=root, method='GET', source='baseline_prefix_candidate')
+                           for root in baseline_roots] + seed_endpoints
+                          if policy_guided else seed_endpoints)
+    selector = root_selector or select_ffuf_roots_from_endpoints
+    try:
+        if policy_guided and root_selector is None:
+            roots = selector(selector_endpoints, target_policy=target_policy)
+        else:
+            roots = selector(selector_endpoints)
+    except FfufRootSelectionError as exc:
+        print(
+            "  [경고] ffuf Root 선택 Agent 실패, "
+            + (f"정책 검토 불가로 ffuf 건너뜀: {type(exc).__name__}" if policy_guided
+               else f"기존 Prefix 방식으로 대체: {type(exc).__name__}")
+        )
+        roots = []
+
+    minimum_root_allowed = policy_guided and _minimum_ffuf_root_allowed(
+        target_policy,
+        ffuf_origin=ffuf_origin,
+    )
+    if minimum_root_allowed and "/" not in roots:
+        print(
+            "  [보완] 알려진 정책 제한과 충돌하지 않는 최소 ffuf Root '/' 적용"
+        )
+        roots = ["/", *roots]
+
+    if not roots:
+        print(
+            "  [경고] 선택된 ffuf Root가 없어 "
+            + ("ffuf 건너뜀" if policy_guided else "기존 Prefix 방식으로 대체")
+        )
+        roots = []
+
+    roots = list(dict.fromkeys(roots if policy_guided else baseline_roots + roots))[:50]
+    if target_policy is not None:
+        roots = [
+            root for root in roots
+            if target_policy.allows_url(
+                ffuf_origin + (root if root.startswith("/") else "/" + root)
+            )
+        ]
+    # The origin root carries generic deployment endpoints such as /healthz,
+    # /metrics, and security.txt.  AI-selected prefixes can already contain
+    # ``/`` in an arbitrary position, so make its priority deterministic.
+    if "/" in roots:
+        roots = ["/", *(root for root in roots if root != "/")]
+
+    print(
+        f"  ffuf Root : "
+        f"{len(roots)}개"
+    )
+    if diagnostic_callback is not None:
+        diagnostic_callback(
+            "ffuf_roots", component="endpoint_discovery",
+            root_count=len(roots), roots=roots,
+            wordlist_lines=wordlist_lines,
+            max_time_seconds=max_time_seconds,
+            planned_requests=wordlist_lines * len(roots),
+            minimum_duration_seconds=(wordlist_lines * len(roots) / target_policy.limits.requests_per_second
+                                      if target_policy is not None else None),
+            request_budget=(target_policy.limits.max_requests if target_policy is not None else None),
+            coverage_may_be_limited=bool(target_policy is not None and (
+                wordlist_lines * len(roots) > target_policy.limits.max_requests
+                or (max_time_seconds > 0 and wordlist_lines / target_policy.limits.requests_per_second > max_time_seconds))),
+        )
+
+    results: list[
+        dict
+    ] = []
+
+    priority_directory, effective_wordlist, priority_preview = _priority_ffuf_wordlist(wordlist)
+    if diagnostic_callback is not None:
+        diagnostic_callback(
+            "ffuf_wordlist_priority", component="endpoint_discovery",
+            priority_entries=priority_preview,
+        )
+
+    ffuf_started_at = time.monotonic()
+    for (
+        index,
+        root,
+    ) in enumerate(
+        roots,
+        start=1,
+    ):
+        if budget_available is not None and not budget_available():
+            if diagnostic_callback is not None:
+                diagnostic_callback('phase_completed', phase='ffuf', reason='active_request_budget_exhausted')
+            break
+        if max_time_seconds > 0:
+            total_time_remaining = math.floor(
+                max_time_seconds - (time.monotonic() - ffuf_started_at))
+            if total_time_remaining <= 0:
+                if diagnostic_callback is not None:
+                    diagnostic_callback(
+                        "phase_completed", phase="ffuf", reason="total_time_budget_exhausted")
+                break
+        else:
+            total_time_remaining = max_time_seconds
+        if diagnostic_callback is not None:
+            diagnostic_callback("ffuf_root_started", index=index, total=len(roots))
+
+        if root == "/":
+
+            fuzz_url = (
+                ffuf_origin
+                + "/FUZZ"
+            )
+
+        else:
+
+            fuzz_url = (
+                ffuf_origin
+                + f"{root.rstrip('/')}"
+                + "/FUZZ"
+            )
+
+        print(
+            f"  [ffuf "
+            f"{index}/{len(roots)}] "
+            f"{fuzz_url}"
+        )
+
+        tmp = (
+            tempfile
+            .NamedTemporaryFile(
+                suffix=".json",
+                delete=False,
+            )
+        )
+
+        tmp_path = (
+            Path(
+                tmp.name
+            )
+        )
+
+        tmp.close()
+
+        command = [
+            "ffuf",
+
+            "-u",
+            fuzz_url,
+
+            "-w",
+            effective_wordlist,
+
+            "-of",
+            "json",
+
+            "-o",
+            str(
+                tmp_path
+            ),
+
+            "-s",
+
+            # SPA Soft-404 보정
+            "-ac",
+        ]
+
+        if proxy_url:
+            # Internal scheduling marker. The policy proxy removes it before
+            # forwarding requests to the target.
+            command += ["-H", "X-AIDAST-Source: ffuf"]
+
+        if proxy_url:
+            command += ["-x", proxy_url]
+            # The policy proxy returns this body for requests it did not
+            # forward. Exclude those responses before ffuf reports endpoints.
+            command += ["-fr", "Blocked by AI-DAST TargetPolicy"]
+
+        roots_remaining = len(roots) - index + 1
+        effective_max_time = (
+            max(1, total_time_remaining // roots_remaining)
+            if total_time_remaining > 0 else total_time_remaining
+        )
+        if (root == "/" and target_policy is not None
+                and total_time_remaining > roots_remaining):
+            # ffuf auto-calibration consumes part of each slice.  Reserve enough
+            # time for the root pass to reach the prefixed high-signal entries,
+            # while leaving at least one second for every selected child root.
+            root_reservation = min(
+                _FFUF_ROOT_PRIORITY_MIN_SECONDS,
+                total_time_remaining - (roots_remaining - 1),
+            )
+            effective_max_time = max(effective_max_time, root_reservation)
+        if target_policy is not None and budget_remaining is not None:
+            remaining = budget_remaining()
+            if remaining is not None:
+                budget_seconds = max(1, math.ceil(
+                    remaining / target_policy.limits.requests_per_second
+                ) + 1)
+                if effective_max_time <= 0 or budget_seconds < effective_max_time:
+                    effective_max_time = budget_seconds
+        command += ["-maxtime", str(effective_max_time)]
+        if target_policy is not None:
+            command += [
+                "-t", str(target_policy.limits.concurrency),
+                "-timeout", str(target_policy.limits.timeout_seconds),
+            ]
+            command += _tool_rate_args(
+                "ffuf", target_policy.limits.requests_per_second
+            )
+
+        run_timeout = effective_max_time + 30 if effective_max_time > 0 else None
+
+        _append_headers(
+            command,
+            auth_headers,
+        )
+
+        try:
+
+            completed = (
+                subprocess.run(
+                    command,
+
+                    capture_output=True,
+
+                    text=True,
+
+                    timeout=run_timeout,
+                )
+            )
+
+        except (
+            subprocess.TimeoutExpired,
+            OSError,
+        ) as exc:
+
+            print(
+                "    [경고] "
+                f"ffuf 실패: {type(exc).__name__}"
+            )
+
+            tmp_path.unlink(
+                missing_ok=True
+            )
+
+            if diagnostic_callback is not None:
+                diagnostic_callback("phase_error", phase="ffuf")
+
+            continue
+
+        if (
+            completed.returncode
+            != 0
+        ):
+
+            print(
+                "    [경고] "
+                "ffuf 종료 code="
+                f"{completed.returncode}"
+            )
+
+        if diagnostic_callback is not None:
+            diagnostic_callback(
+                "ffuf_process", component="endpoint_discovery",
+                fuzz_url=fuzz_url, returncode=completed.returncode,
+                stdout_line_count=len(completed.stdout.splitlines()),
+                stderr=completed.stderr or "",
+            )
+
+        try:
+
+            payload = json.loads(
+                tmp_path
+                .read_text(
+                    encoding="utf-8"
+                )
+            )
+
+        except (
+            json.JSONDecodeError,
+            OSError,
+        ):
+
+            payload = {
+                "results": []
+            }
+
+        finally:
+
+            tmp_path.unlink(
+                missing_ok=True
+            )
+
+        discovered_count = 0
+
+        for entry in (
+            payload.get(
+                "results",
+                [],
+            )
+        ):
+
+            discovered_url = (
+                entry.get(
+                    "url"
+                )
+            )
+
+            if not discovered_url:
+
+                fuzz_value = (
+                    entry
+                    .get(
+                        "input",
+                        {},
+                    )
+                    .get(
+                        "FUZZ",
+                        "",
+                    )
+                )
+
+                if not fuzz_value:
+                    continue
+
+                discovered_url = (
+                    fuzz_url.replace(
+                        "FUZZ",
+                        fuzz_value,
+                    )
+                )
+
+            path = (
+                _normalize_route(
+                    discovered_url,
+                    base_url,
+                )
+            )
+
+            if path is None:
+                continue
+
+            if target_policy is not None and not target_policy.allows_url(ffuf_origin + path):
+                continue
+            from aidast.recon.annotations import sanitize_evidence, safe_url
+            evidence = sanitize_evidence({
+                'fuzz_root': root,
+                'seed_paths': [item.get('path') for item in seed_endpoints
+                               if isinstance(item.get('path'), str)
+                               and (root == '/' or item['path'] == root.rstrip('/')
+                                    or item['path'].startswith(root.rstrip('/') + '/'))][:10],
+                'response_status': entry.get('status'),
+                'content_type': entry.get('content-type'),
+                'content_length': entry.get('length'),
+                'word_count': entry.get('words'), 'line_count': entry.get('lines'),
+                'redirect_url': entry.get('redirectlocation'),
+            })
+            results.append(
+                {
+                    "method": "GET",
+
+                    "path": path,
+
+                    "content_type": (
+                        entry.get(
+                            "content-type"
+                        )
+                    ),
+
+                    "source": "ffuf",
+                    "url": safe_url(discovered_url),
+                    "discovery_kind": "http_response" if evidence.get('response_status') else "tool_report",
+                    "evidence": evidence,
+                    "context": {
+                        "context_key": f"ffuf:root:{root}",
+                        "action_type": "tool_run",
+                        "action_target": safe_url(fuzz_url),
+                        "association_method": "fuzz_root",
+                    },
+                }
+            )
+
+            discovered_count += 1
+
+        print(
+            f"    -> "
+            f"{discovered_count}건"
+        )
+        if diagnostic_callback is not None:
+            diagnostic_callback("ffuf_root_finished", index=index, total=len(roots), count=discovered_count)
+
+    unique = (
+        _deduplicate_results(
+            results
+        )
+    )
+
+    print(
+        f"  ffuf Unique : "
+        f"{len(unique)}건"
+    )
+
+    priority_directory.cleanup()
+
+    return unique
+
+
+# =========================================================
+# Default Session File
+# =========================================================
+
+def _make_default_session_file(
+    base_url: str,
+    *,
+    run_id: str | None = None,
+    identity_id: str | None = None,
+    auth_bootstrap: dict | None = None,
+) -> str:
+
+    parsed = urlparse(
+        base_url
+    )
+
+    hostname = (
+        parsed.hostname
+        or "target"
+    )
+
+    port = (
+        parsed.port
+
+        or
+        _effective_port(
+            parsed
+        )
+
+        or 0
+    )
+
+    safe_host = re.sub(
+        r"[^a-zA-Z0-9_.-]",
+        "_",
+        hostname,
+    )
+
+    # Hash identifiers so caller input cannot escape the session directory or
+    # disclose identity labels. An omitted run ID deliberately starts fresh.
+    run_key = hashlib.sha256((run_id or uuid.uuid4().hex).encode()).hexdigest()[:24]
+    identity_key = hashlib.sha256((identity_id or "manual").encode()).hexdigest()[:24]
+    origin_value = f"{parsed.scheme.lower()}://{hostname.lower()}:{port}"
+    origin_key = hashlib.sha256(origin_value.encode()).hexdigest()[:16]
+    return str(RESULT_ROOT / ".aidast_sessions" / run_key / identity_key
+               / f"{safe_host}_{port}_{origin_key}.json")
+
+
+# =========================================================
+# Main
+# =========================================================
+
+def discover_endpoints(
+    base_url: str,
+    *,
+    ffuf_wordlist: str | None = None,
+    mitm_capture_path: Path | None = None,
+    ffuf_max_time_seconds: int = 150,
+    recon_model: str | None = None,
+    request_headers: dict[str, str] | None = None,
+
+    # None이면 base_url을 Browser에 표시
+    login_url: str | None = None,
+
+    # None이면 Target 기준 자동 생성
+    session_file: str | None = None,
+
+    # 알고 있으면 설정 권장
+    auth_check_url: str | None = None,
+
+    # 사이트별 Token Mapping
+    storage_header_map: (
+        dict[
+            str,
+            tuple[str, str],
+        ]
+        | None
+    ) = None,
+
+    interaction_config: (
+        InteractionConfig
+        | None
+    ) = None,
+
+    # mitmproxy 사용 시
+    #
+    # http://127.0.0.1:8080
+    playwright_proxy_url: (
+        str | None
+    ) = None,
+
+    # katana/ffuf도 같이 이 프록시를 거치게 하려면 지정.
+    # playwright_proxy_url이 따로 없으면 Playwright도 이 값을 같이 씀.
+    mitm_proxy_url: (
+        str | None
+    ) = None,
+
+    enable_playwright_interaction: bool = True,
+
+    zap_executable: str = "zaproxy",
+    target_policy: TargetPolicy | None = None,
+    observation_callback=None,
+    run_id: str | None = None,
+    identity_id: str | None = None,
+    auth_bootstrap: dict | None = None,
+    preauthenticated: bool = False,
+    interactive_login: bool = False,
+    automatic_login: bool = False,
+    browser_context_token: str | None = None,
+    external_auth_handoff: Callable[[dict[str, str]], bool | None] | None = None,
+    diagnostic_callback=None,
+    authentication_endpoint_callback=None,
+) -> list[dict]:
+
+    if target_policy is not None and not mitm_proxy_url:
+        raise ValueError("policy-enforced endpoint discovery requires a proxy")
+    if target_policy is not None and playwright_proxy_url and playwright_proxy_url != mitm_proxy_url:
+        raise ValueError("policy-enforced browser must use the shared enforcement proxy")
+    if target_policy is not None and not target_policy.allows_url(base_url):
+        raise ValueError(f"TargetPolicy가 base URL을 허용하지 않음: {base_url}")
+    if sum(bool(value) for value in (
+        preauthenticated, interactive_login, automatic_login,
+    )) > 1:
+        raise ValueError("authentication startup modes are mutually exclusive")
+
+    from aidast.recon.diagnostics import diagnostic_endpoint
+
+    def diagnose(event, **details):
+        if diagnostic_callback is not None:
+            diagnostic_callback(event, component="endpoint_discovery", **details)
+
+    def external_tool_headers(headers: dict[str, str]) -> dict[str, str] | None:
+        if mitm_proxy_url and external_auth_handoff is not None:
+            published = external_auth_handoff(headers)
+            if published is False:
+                raise RuntimeError("policy proxy authentication handoff is unavailable")
+            return None
+        return headers
+
+    katana_states: dict[str, str] = {}
+    katana_error_types: dict[str, str] = {}
+
+    def katana_diagnostic(event, **details):
+        mode = details.get("mode")
+        if isinstance(mode, str) and mode in {"standard", "headless"}:
+            if event == "tool_unavailable":
+                katana_states[mode] = "skipped"
+            elif event == "tool_error" or (event == "katana_process" and details.get("returncode") != 0):
+                katana_states[mode] = "failed"
+                error_type = details.get("error_type")
+                if isinstance(error_type, str):
+                    katana_error_types[mode] = error_type
+            elif event == "katana_process":
+                katana_states[mode] = "finished"
+        if diagnostic_callback is not None:
+            diagnostic_callback(event, **details)
+
+    def endpoint_rows(items):
+        return [diagnostic_endpoint(item) for item in items]
+
+    def observe(phase, items, *, passive_metadata=False):
+        filtered = _filter_results_by_policy(
+            items, base_url=base_url, target_policy=target_policy,
+            passive_metadata=passive_metadata,
+        )
+        diagnose(
+            "phase_results", phase=phase, raw_count=len(items),
+            policy_allowed_count=len(filtered), removed_count=len(items) - len(filtered),
+            raw_endpoints=endpoint_rows(items), allowed_endpoints=endpoint_rows(filtered),
+        )
+        if observation_callback is not None:
+            observation_callback(phase, filtered)
+
+    def observe_browser(phase):
+        if observation_callback is not None and driver is not None:
+            passive = _filter_results_by_policy(
+                driver.drain_authentication_observations(),
+                base_url=base_url,
+                target_policy=target_policy,
+                passive_metadata=True,
+            )
+            if passive:
+                observation_callback("auth_bootstrap", passive)
+            observe(phase, driver.drain_observations())
+
+    driver: (
+        PlaywrightDriver
+        | None
+    ) = None
+
+    diagnose(
+        "endpoint_discovery_started", base_url=base_url,
+        ffuf_wordlist_configured=bool(ffuf_wordlist),
+        preauthenticated=preauthenticated,
+        interactive_login=interactive_login,
+        automatic_login=automatic_login,
+        playwright_interaction_enabled=enable_playwright_interaction,
+        policy_enforced=target_policy is not None,
+    )
+
+    try:
+
+        # =================================================
+        # PHASE 1
+        # Playwright Authentication
+        # =================================================
+
+        print()
+        print(
+            "  =================================="
+        )
+        phase_one = (
+            "Playwright Session Restore" if preauthenticated
+            else "Playwright Authentication" if interactive_login
+            else "Playwright Automatic Login Capability Detection" if automatic_login
+            else "Playwright Unauthenticated Bootstrap"
+        )
+        print(f"  PHASE 1 - {phase_one}")
+        print(
+            "  =================================="
+        )
+
+        actual_session_file = (
+            session_file
+
+            or
+            _make_default_session_file(
+                base_url, run_id=run_id, identity_id=identity_id,
+            )
+        )
+
+        session_config = (
+            ManualSessionConfig(
+                login_url=(
+                    login_url
+                    or base_url
+                ),
+
+                session_file=(
+                    actual_session_file
+                ),
+
+                auth_check_url=(
+                    auth_check_url
+                ),
+
+                storage_header_map=(
+                    storage_header_map
+                    or {}
+                ),
+                authentication_endpoint_callback=authentication_endpoint_callback,
+            )
+        )
+
+        if run_id and os.environ.get("AIDAST_DASHBOARD_MANUAL_LOGIN") == "1":
+            from aidast.auth.manual_login import ManualLoginGate, ManualLoginStore
+            from aidast.auth.endpoints import normalize_origin
+            # Five minutes was too short for a rate-limited SPA to finish
+            # loading and for an operator to create or enter a lab account.
+            # Keep the browser policy-routed while allowing a practical HITL
+            # window; the dashboard confirmation remains mandatory.
+            gate = ManualLoginGate(
+                ManualLoginStore(RESULT_ROOT), run_id, normalize_origin(base_url),
+                timeout_seconds=900,
+            )
+            def confirm_login(browser_problem):
+                def poll_browser():
+                    # A Playwright-managed visible browser shares this worker's
+                    # sync event loop.  Dispatch it while waiting for dashboard
+                    # confirmation so SPA scripts, routing and operator input
+                    # continue instead of freezing on the loading screen.
+                    if driver is not None and driver.page is not None:
+                        driver.page.wait_for_timeout(50)
+
+                confirmed = gate.wait(browser_problem, poll_browser=poll_browser)
+                diagnose("operator_login_confirmed", auth_state="operator_confirmed",
+                         target_origin=normalize_origin(base_url))
+                return confirmed
+            session_config.operator_confirmation = confirm_login
+            def confirm_runtime_action(problem, browser_problem, poll_browser):
+                action_kind = {'login_form_visible': 'recon_login', 'mfa_required': 'mfa',
+                               'captcha_required': 'captcha', 'access_required': 'access'}[problem]
+                if poll_browser is None:
+                    request = gate.store.begin(run_id, normalize_origin(base_url), gate.timeout_seconds,
+                        action_kind=action_kind, problem='runtime_browser_required')
+                    gate.store.finish(run_id, request['request_id'], 'failed')
+                    diagnose('operator_action_unavailable', action_kind=action_kind,
+                             reason='runtime_browser_required')
+                    return False
+                diagnose('operator_action_waiting', action_kind=action_kind)
+                try:
+                    confirmed = gate.wait(browser_problem, action_kind=action_kind,
+                                          problem=problem, poll_browser=poll_browser)
+                except Exception:
+                    diagnose('operator_action_unavailable', action_kind=action_kind,
+                             reason='operator_confirmation_incomplete')
+                    return False
+                diagnose('operator_action_completed', action_kind=action_kind)
+                return confirmed
+            session_config.operator_action_confirmation = confirm_runtime_action
+
+        effective_interaction_config = interaction_config or InteractionConfig()
+        effective_interaction_config = replace(
+            effective_interaction_config,
+            allow_form_submission=bool(
+                target_policy is not None
+                and target_policy.tools.form_submission
+                and effective_interaction_config.allow_form_submission
+            ),
+        )
+
+        driver = (
+            PlaywrightDriver(
+                base_url,
+
+                session_config,
+
+                interaction_config=(
+                    effective_interaction_config
+                ),
+
+                proxy_url=(
+                    playwright_proxy_url
+                    or mitm_proxy_url
+                ),
+                target_policy=target_policy,
+                auth_bootstrap=auth_bootstrap,
+                preauthenticated=preauthenticated,
+                request_headers=request_headers,
+                browser_context_token=browser_context_token,
+            )
+        )
+
+        # ---------------------------------------------
+        # 실제 Chromium 실행
+        #
+        # 사용자가 직접 로그인
+        #
+        # Enter
+        #
+        # Session 저장
+        # ---------------------------------------------
+
+        authenticated_run = preauthenticated or interactive_login
+        diagnose("phase_started", phase="playwright_bootstrap")
+        if preauthenticated:
+            driver.start_from_session()
+        elif interactive_login:
+            driver.capture_and_start()
+        elif automatic_login:
+            authenticated_run = driver.start_automatic()
+        else:
+            driver.start_unauthenticated()
+        observe_browser(
+            "playwright_login" if authenticated_run
+            else "playwright_unauthenticated"
+        )
+
+        auth_headers = (
+            driver.get_auth_headers()
+        )
+
+        print()
+        print(
+            "  [Playwright] "
+            "외부 도구용 인증정보 생성 완료"
+        )
+
+        print(
+            "  Header 종류 : "
+            f"{list(auth_headers.keys())}"
+        )
+
+        # 로그인 과정에서 발생한
+        # XHR / Fetch / Document
+        login_raw_results = (
+            driver.get_http_results()
+        )
+        login_results = _filter_results_by_policy(
+            login_raw_results, base_url=base_url, target_policy=target_policy
+        )
+        diagnose(
+            "phase_results", phase="playwright_login_http",
+            raw_count=len(login_raw_results), policy_allowed_count=len(login_results),
+            removed_count=len(login_raw_results) - len(login_results),
+            raw_endpoints=endpoint_rows(login_raw_results),
+            allowed_endpoints=endpoint_rows(login_results),
+        )
+        diagnose("phase_completed", phase="playwright_bootstrap", count=len(login_results))
+
+        print(
+            "  초기 브라우저 HTTP : "
+            f"{len(login_results)}건"
+        )
+
+        # Spend the first endpoint-discovery budget on the already-authenticated
+        # browser page and its safe UI/API traffic before crawler requests.
+        if enable_playwright_interaction and (
+            target_policy is None or target_policy.tools.playwright_interaction
+        ):
+            print()
+            print("  [Priority 1/2] Playwright 현재 페이지/API 관측")
+            diagnose("phase_started", phase="playwright_priority")
+            try:
+                driver.ensure_session()
+                driver.run_interaction_pass([])
+                diagnose("phase_completed", phase="playwright_priority",
+                         reason=getattr(driver, "last_interaction_stop_reason", None),
+                         duplicate_count=getattr(driver, "last_interaction_duplicate_screens", 0))
+            except Exception as exc:
+                print(f"  [경고] 초기 Playwright 관측 실패: {type(exc).__name__}")
+                diagnose(
+                    "phase_error", phase="playwright_priority",
+                    error_type=type(exc).__name__,
+                )
+            observe_browser("playwright_priority")
+        else:
+            diagnose("phase_skipped", phase="playwright_priority")
+
+        # =================================================
+        # PHASE 2
+        # Authenticated Katana
+        # =================================================
+
+        print()
+        print(
+            "  =================================="
+        )
+        print(
+            "  PHASE 2 - "
+            +
+            ("Authenticated Katana" if authenticated_run else "Katana")
+        )
+        print(
+            "  =================================="
+        )
+
+        # ---------------------------------------------
+        # Standard
+        # ---------------------------------------------
+
+        driver.ensure_session()
+
+        auth_headers = (
+            driver.get_auth_headers()
+        )
+
+        print()
+        print(
+            "  [1/2] Katana Standard"
+        )
+        diagnose("phase_started", phase="katana_standard")
+
+        standard_results = (
+            discover_with_katana(
+                base_url,
+
+                mode="standard",
+
+                auth_headers=external_tool_headers(auth_headers),
+
+                proxy_url=(
+                    mitm_proxy_url
+                ),
+                target_policy=target_policy,
+                diagnostic_callback=katana_diagnostic,
+            )
+        )
+
+        observe("katana_standard", standard_results, passive_metadata=True)
+        diagnose({"skipped": "phase_skipped", "failed": "phase_error"}.get(katana_states.get("standard"), "phase_completed"),
+                 phase="katana_standard", count=len(standard_results),
+                 error_type=katana_error_types.get("standard"))
+
+        # ---------------------------------------------
+        # Headless
+        # ---------------------------------------------
+
+        headless_configured = (
+            target_policy is None or target_policy.tools.katana_headless
+        )
+        # Katana's cloned CDP browser cannot install Playwright's per-request
+        # exclusion guard.  Keep endpoint discovery usable under an exclusion
+        # policy by running the governed collectors and holding only this
+        # incompatible optional mode.
+        headless_held = has_request_exclusions(target_policy)
+        if headless_configured and not headless_held:
+            diagnose("phase_started", phase="katana_headless")
+            driver.ensure_session()
+            auth_headers = driver.get_auth_headers()
+            print()
+            print("  [2/2] Katana Headless")
+            # Katana's Fetch subscription conflicts with Playwright routing
+            # when both attach to the login context. Give it a separate,
+            # policy-proxied browser and leave the live session untouched.
+            katana_browser = open_katana_browser(
+                driver, mitm_proxy_url, target_policy,
+                diagnostic_callback=katana_diagnostic,
+            )
+            try:
+                headless_results = discover_with_katana(
+                    base_url,
+                    mode="headless",
+                    auth_headers=external_tool_headers(auth_headers),
+                    chrome_ws_url=katana_browser.chrome_ws_url if katana_browser else None,
+                    proxy_url=mitm_proxy_url,
+                    target_policy=target_policy,
+                    diagnostic_callback=katana_diagnostic,
+                )
+            finally:
+                if katana_browser is not None:
+                    katana_browser.close()
+            diagnose({"skipped": "phase_skipped", "failed": "phase_error"}.get(katana_states.get("headless"), "phase_completed"),
+                     phase="katana_headless", count=len(headless_results),
+                     error_type=katana_error_types.get("headless"))
+        elif headless_held:
+            print("  [보류] 요청 제외 규칙 때문에 Katana Headless를 사용하지 않음")
+            diagnose(
+                "phase_held", phase="katana_headless",
+                reason="request_exclusions",
+            )
+            headless_results = []
+        else:
+            print("  [건너뜀] TargetPolicy에서 Katana Headless가 허용되지 않음")
+            diagnose("phase_skipped", phase="katana_headless")
+            headless_results = []
+
+        # Keep the live Chromium context across phases.  Restarting it here
+        # invalidates Shopify's browser-bound Admin session.  Runtime
+        # recovery remains available through ensure_session() if the context
+        # was genuinely closed.
+
+        observe("katana_headless", headless_results, passive_metadata=True)
+        observe_browser("playwright_katana")
+        if headless_configured and not headless_held:
+            driver.restore_runtime()
+
+        auth_headers = (
+            driver.get_auth_headers()
+        )
+
+        # ---------------------------------------------
+        # Katana Merge
+        # ---------------------------------------------
+
+        katana_results = (
+            _deduplicate_results(
+                standard_results
+                + headless_results
+            )
+        )
+        diagnose(
+            "deduplication", phase="katana_merge",
+            input_count=len(standard_results) + len(headless_results),
+            unique_count=len(katana_results), endpoints=endpoint_rows(katana_results),
+        )
+
+        print()
+        print(
+            "  ----------------------------------"
+        )
+
+        print(
+            f"  Standard      : "
+            f"{len(standard_results)}"
+        )
+
+        print(
+            f"  Headless      : "
+            f"{len(headless_results)}"
+        )
+
+        print(
+            f"  Katana Unique : "
+            f"{len(katana_results)}"
+        )
+
+        # =================================================
+        # PHASE 3
+        # Playwright UI Interaction
+        # =================================================
+
+        print()
+        print(
+            "  =================================="
+        )
+        print(
+            "  PHASE 3 - "
+            "Playwright UI Interaction"
+        )
+        print(
+            "  =================================="
+        )
+
+        interaction_failed = False
+        if enable_playwright_interaction and (
+            target_policy is None or target_policy.tools.playwright_interaction
+        ):
+            diagnose("phase_started", phase="playwright_interaction")
+
+            driver.ensure_session()
+
+            # Expand browser interactions over new Katana pages. The driver
+            # shares its visited set and page budget with the priority pass.
+            interaction_seed = (
+                _deduplicate_results(
+                    katana_results + login_results
+                )
+            )
+
+            try:
+
+                driver.run_interaction_pass(
+                    interaction_seed
+                )
+
+            except Exception as exc:
+                interaction_failed = True
+
+                print(f"  [경고] Playwright Interaction 실패: {type(exc).__name__}")
+                diagnose("phase_error", phase="playwright_interaction",
+                         error_type=type(exc).__name__)
+        else:
+            diagnose("phase_skipped", phase="playwright_interaction")
+
+        # 로그인 과정 + Interaction 과정
+        playwright_raw_results = (
+            driver.get_http_results()
+        )
+        playwright_results = _filter_results_by_policy(
+            playwright_raw_results, base_url=base_url, target_policy=target_policy
+        )
+        diagnose(
+            "phase_results", phase="playwright_http",
+            raw_count=len(playwright_raw_results), policy_allowed_count=len(playwright_results),
+            removed_count=len(playwright_raw_results) - len(playwright_results),
+            raw_endpoints=endpoint_rows(playwright_raw_results),
+            allowed_endpoints=endpoint_rows(playwright_results),
+        )
+
+        observe_browser("playwright_interaction")
+        if enable_playwright_interaction and not interaction_failed and (
+            target_policy is None or target_policy.tools.playwright_interaction
+        ):
+            diagnose("phase_completed", phase="playwright_interaction", count=len(playwright_results),
+                     reason=getattr(driver, "last_interaction_stop_reason", None),
+                     duplicate_count=getattr(driver, "last_interaction_duplicate_screens", 0))
+
+        ffuf_results: list[dict] = []
+
+        # Recover literal API routes from first-party scripts declared by captured
+        # documents, including HTML discovered by ffuf.
+        from .adaptive_state import AdaptiveDiscoveryState
+        from .mitm_proxy import ReconCaptureCursor
+        adaptive_state = AdaptiveDiscoveryState()
+        capture_cursor = ReconCaptureCursor()
+        adaptive_js_results: list[dict] = []
+        if authenticated_run:
+            driver.ensure_session()
+        try:
+            adaptive_js_results = discover_adaptive_js_api_candidates(
+                base_url,
+                _deduplicate_results(katana_results + login_results + playwright_results + ffuf_results),
+                observed_responses=read_observed_recon_responses(mitm_capture_path, cursor=capture_cursor),
+                headers=driver.get_auth_headers(),
+                target_policy=target_policy,
+                proxy_url=mitm_proxy_url,
+                diagnostic_callback=diagnostic_callback,
+                ai_pattern_planner=CodexPatternPlanner() if target_policy is not None and mitm_proxy_url else None,
+                state=adaptive_state,
+                include_passive_writes=True,
+            )
+        except Exception as exc:
+            diagnose(
+                "phase_error", phase="adaptive_js",
+                error_type=type(exc).__name__,
+            )
+        observe("adaptive_js", adaptive_js_results)
+
+        websocket_results = (
+            driver.get_websocket_results()
+        )
+
+        print()
+        print(
+            "  Playwright HTTP Unique : "
+            f"{len(playwright_results)}"
+        )
+
+        print(
+            "  WebSocket Connections  : "
+            f"{len(websocket_results)}"
+        )
+
+        # =================================================
+        # Primary Surface
+        # =================================================
+
+        primary_results = (
+            _deduplicate_results(
+                katana_results
+                + ffuf_results
+                + playwright_results
+                + adaptive_js_results
+            )
+        )
+        diagnose(
+            "deduplication", phase="primary_surface",
+            input_count=len(katana_results) + len(ffuf_results) + len(playwright_results),
+            unique_count=len(primary_results), endpoints=endpoint_rows(primary_results),
+        )
+
+        print()
+        print(
+            "  =================================="
+        )
+        print(
+            "  1차 Surface"
+        )
+        print(
+            "  =================================="
+        )
+
+        print(
+            f"  Katana     : "
+            f"{len(katana_results)}"
+        )
+
+        print(
+            f"  ffuf       : "
+            f"{len(ffuf_results)}"
+        )
+
+        print(
+            f"  Playwright : "
+            f"{len(playwright_results)}"
+        )
+
+        print(
+            f"  Unique     : "
+            f"{len(primary_results)}"
+        )
+
+        # =================================================
+        # PHASE 5
+        # OpenAPI / GraphQL
+        # =================================================
+
+        print()
+        print(
+            "  =================================="
+        )
+        print(
+            "  PHASE 5 - "
+            "API Secondary Discovery"
+        )
+        print(
+            "  =================================="
+        )
+
+        driver.ensure_session()
+
+        auth_headers = (
+            driver.get_auth_headers()
+        )
+
+        secondary_results: list[
+            dict
+        ] = []
+
+        diagnose("phase_started", phase="api_secondary")
+        try:
+            secondary_results = discover_api_secondary(
+                base_url,
+
+                primary_results,
+                observed_responses=read_observed_recon_responses(mitm_capture_path),
+
+                headers=(
+                    auth_headers
+                ),
+
+                zap_executable=(
+                    zap_executable
+                ),
+                target_policy=target_policy,
+                proxy_url=mitm_proxy_url,
+                diagnostic_callback=diagnostic_callback,
+            )
+            diagnose("phase_completed", phase="api_secondary", count=len(secondary_results))
+
+        except Exception as exc:
+
+            print(
+                "  [경고] "
+                "API Secondary Discovery 실패: "
+                f"{type(exc).__name__}"
+            )
+            diagnose(
+                "phase_error", phase="api_secondary",
+                error_type=type(exc).__name__,
+            )
+
+        observe("api_secondary", secondary_results)
+        # Spend the finite active quota on observed JS/DOM/schema reads before
+        # wordlist traffic; the same Scope, governor and count gates still apply.
+        # =================================================
+        # PHASE 4
+        # Authenticated ffuf
+        # =================================================
+
+        print()
+        print("  ==================================")
+        print(
+            "  ffuf - "
+            + ("Authenticated ffuf" if authenticated_run else "ffuf")
+        )
+        print("  ==================================")
+
+        driver.ensure_session()
+        auth_headers = driver.get_auth_headers()
+        # Feed ffuf with crawler, login, and browser-observed paths.
+        ffuf_seed_results = _deduplicate_results(
+            katana_results + login_results + playwright_results + adaptive_js_results + secondary_results
+        )
+        diagnose(
+            "deduplication", phase="ffuf_seeds",
+            input_count=(
+                len(katana_results) + len(login_results) + len(playwright_results)
+            ),
+            unique_count=len(ffuf_seed_results),
+            endpoints=endpoint_rows(ffuf_seed_results),
+        )
+        diagnose("phase_started", phase="ffuf")
+        ffuf_results = discover_with_ffuf(
+            base_url,
+            wordlist=ffuf_wordlist,
+            seed_endpoints=ffuf_seed_results,
+            root_selector=(
+                (lambda endpoints: select_ffuf_roots_from_endpoints(
+                    endpoints, model=recon_model, target_policy=target_policy,
+                ))
+                if recon_model is not None else None
+            ),
+            auth_headers=external_tool_headers(auth_headers),
+            proxy_url=mitm_proxy_url,
+            target_policy=target_policy,
+            max_time_seconds=ffuf_max_time_seconds,
+            diagnostic_callback=diagnostic_callback,
+            budget_available=lambda: _active_proxy_budget_available(mitm_capture_path),
+            budget_remaining=lambda: _active_proxy_budget_remaining(mitm_capture_path),
+        )
+        observe("ffuf", ffuf_results)
+        if (target_policy is None or target_policy.tools.ffuf_enabled) and ffuf_wordlist and shutil.which("ffuf") and Path(ffuf_wordlist).is_file():
+            diagnose("phase_completed", phase="ffuf", count=len(ffuf_results))
+
+        primary_results = _deduplicate_results(primary_results + ffuf_results)
+        observe_browser("playwright_final")
+
+        # Fuzzing may reveal a document or script unavailable in the first pass.
+        # Reuse earlier modules/requests while consuming only appended captures.
+        # A bounded follow-up also lets newly fetched JSON supply argument values.
+        for followup in range(3):
+            new_capture = read_observed_recon_responses(mitm_capture_path, cursor=capture_cursor)
+            diagnose('phase_started', phase='adaptive_js_followup', pass_number=followup + 1)
+            try:
+                extra = discover_adaptive_js_api_candidates(
+                    base_url, _deduplicate_results(primary_results + secondary_results),
+                    observed_responses=new_capture, headers=driver.get_auth_headers(),
+                    target_policy=target_policy, proxy_url=mitm_proxy_url,
+                    diagnostic_callback=diagnostic_callback, state=adaptive_state,
+                    ai_pattern_planner=CodexPatternPlanner() if target_policy is not None and mitm_proxy_url else None,
+                    include_passive_writes=True,
+                )
+                observe('adaptive_js_followup', extra)
+                adaptive_js_results = _deduplicate_results(adaptive_js_results + extra)
+                primary_results = _deduplicate_results(primary_results + extra)
+                diagnose('phase_completed', phase='adaptive_js_followup', count=len(extra),
+                         capture_evictions=capture_cursor.evicted_records,
+                         evidence_evictions=adaptive_state.evicted_evidence)
+            except Exception as exc:
+                diagnose('phase_error', phase='adaptive_js_followup', error_type=type(exc).__name__)
+                break
+
+        diagnose("phase_started", phase="observed_json_recovery")
+        try:
+            recovery_headers = driver.get_auth_headers()
+            if target_policy is not None:
+                from aidast.core.http_safety import merge_hackerone_identity
+                recovery_headers = merge_hackerone_identity(recovery_headers, target_policy.hackerone_username,
+                    required_identity_headers=target_policy.required_identity_headers)
+            adaptive_state.observe(read_observed_recon_responses(mitm_capture_path, cursor=capture_cursor),
+                                   recovery_headers)
+            recovered = recover_observed_json_gets(
+                base_url, primary_results + secondary_results,
+                observed_responses=adaptive_state.observations(recovery_headers),
+                headers=recovery_headers, target_policy=target_policy, proxy_url=mitm_proxy_url,
+                    state=adaptive_state,
+            )
+            observe("observed_json_recovery", recovered)
+            secondary_results.extend(recovered)
+            diagnose("phase_completed", phase="observed_json_recovery", count=len(recovered),
+                     verified_count=sum(item.get("verification_status") == "verified" for item in recovered))
+        except Exception as exc:
+            diagnose("phase_error", phase="observed_json_recovery", error_type=type(exc).__name__)
+
+        # =================================================
+        # Final
+        # =================================================
+
+        secondary_candidates = [
+            item for item in secondary_results
+            if item.get("verification_status") == "candidate"
+        ]
+        secondary_verified = [
+            item for item in secondary_results
+            if item.get("verification_status") != "candidate"
+        ]
+
+        final_results = (
+            _deduplicate_results(
+                primary_results
+                + secondary_verified
+            )
+        )
+        diagnose(
+            "deduplication", phase="final_surface",
+            input_count=len(primary_results) + len(secondary_verified),
+            unique_count=len(final_results), endpoints=endpoint_rows(final_results),
+        )
+
+        secondary_new = (
+            len(final_results)
+            - len(primary_results)
+        )
+
+        print()
+        print(
+            "  =================================="
+        )
+        print(
+            "  Endpoint Discovery FINAL"
+        )
+        print(
+            "  =================================="
+        )
+
+        print(
+            f"  Katana Standard   : "
+            f"{len(standard_results)}"
+        )
+
+        print(
+            f"  Katana Headless   : "
+            f"{len(headless_results)}"
+        )
+
+        print(
+            f"  Katana Unique     : "
+            f"{len(katana_results)}"
+        )
+
+        print(
+            f"  ffuf              : "
+            f"{len(ffuf_results)}"
+        )
+
+        print(
+            f"  Playwright HTTP   : "
+            f"{len(playwright_results)}"
+        )
+
+        print(
+            f"  WebSocket 연결    : "
+            f"{len(websocket_results)}"
+        )
+
+        print(
+            f"  API Secondary     : "
+            f"{len(secondary_results)}"
+        )
+
+        print(f"  API 후보          : {len(secondary_candidates)}")
+        print(f"  API 검증 결과     : {len(secondary_verified)}")
+
+        print(
+            f"  API 신규 Endpoint : "
+            f"{secondary_new}"
+        )
+
+        print(
+            f"  최종 Unique       : "
+            f"{len(final_results)}"
+        )
+
+        print(
+            "  =================================="
+        )
+
+        return final_results
+
+    finally:
+
+        if driver is not None:
+            try:
+                observe_browser("playwright_cleanup")
+            finally:
+                driver.close()
+        diagnose("endpoint_discovery_finished", driver_created=driver is not None)

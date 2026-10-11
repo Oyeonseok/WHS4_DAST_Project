@@ -1,0 +1,1342 @@
+"""Project persisted AI DAST state into the WebUI snapshot/event contract.
+
+The projector never writes to Recon.db or Pipeline.db.  A separate derived
+event ledger provides durable, per-scan replay cursors for WebSocket clients.
+It is an observability cache, not an execution state machine.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import re
+import sqlite3
+import threading
+from contextlib import closing
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+from urllib.parse import urlsplit, urlunsplit
+
+from aidast.core.model_calls import read_model_call_events, read_scan_token_usage
+from aidast.pipeline.locations import iter_run_directories, scan_run_directory
+from aidast.recon.activity import validated_activity
+from aidast.recon.tagging_progress import tagging_counts, tagging_progress_params
+
+STAGES = ("Scope", "Recon", "Attack", "Chaining", "Validation", "Report")
+_RECON_ACTIVITY = {
+    "ASSET_DISCOVERY": "Asset discovery",
+    "DNS_RESOLUTION": "DNS resolution",
+    "HOST_PORT_DISCOVERY": "Host and port discovery",
+    "HTTP_PROBE": "HTTP probing",
+    "ORIGIN_DISCOVERY": "Origin discovery",
+    "ENDPOINT_DISCOVERY": "Endpoint discovery",
+}
+_SCAN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+_STAGE_MAP = {
+    "scope": "Scope",
+    "recon": "Recon",
+    "tagging": "Recon",
+    "handoff": "Recon",
+    "offline_review": "Attack",
+    "attack": "Attack",
+    "chaining": "Chaining",
+    "validation": "Validation",
+    "report": "Report",
+}
+_STATUS_MAP = {
+    "pending": "pending",
+    "created": "pending",
+    "ready": "pending",
+    "awaiting_approval": "pending",
+    "running": "running",
+    "planning": "running",
+    "verifying_handoff": "running",
+    "completed": "completed",
+    "completed_with_errors": "failed",
+    "failed": "failed",
+    "blocked": "failed",
+    "paused": "paused",
+    "cancelled": "cancelled",
+    "skipped": "completed",
+}
+
+
+class ProjectionError(RuntimeError):
+    """Base error for safe dashboard projections."""
+
+
+class ScanNotFoundError(ProjectionError):
+    """The selected scan has no supported persisted database."""
+
+
+@dataclass(frozen=True)
+class ScopeInfo:
+    approved: bool = False
+    scope_id: str = ""
+    program_name: str = ""
+    program_id: str = ""
+    budget: int = 0
+    per_target_budget: int | None = None
+
+
+def _utc(value: Any) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    if raw.endswith("Z"):
+        return raw
+    try:
+        parsed = datetime.fromisoformat(raw.replace(" ", "T"))
+    except ValueError:
+        return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _json_object(value: Any) -> dict[str, Any]:
+    try:
+        parsed = json.loads(value or "{}")
+    except (TypeError, json.JSONDecodeError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _tables(conn: sqlite3.Connection) -> set[str]:
+    return {
+        str(row[0])
+        for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+    }
+
+
+def _columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    return {str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})")}
+
+
+def _has_columns(conn: sqlite3.Connection, table: str, *required: str) -> bool:
+    """Optional projection tables may come from an older or partial schema."""
+    return set(required).issubset(_columns(conn, table))
+
+
+def _stage(value: Any) -> str:
+    return _STAGE_MAP.get(str(value or "").strip().lower(), "Recon")
+
+
+def _status(value: Any) -> str:
+    return _STATUS_MAP.get(str(value or "").strip().lower(), "pending")
+
+
+def _scan_status(conn: sqlite3.Connection, scan_id: str, raw_status: Any, *, has_stages: bool) -> str:
+    status = _status(raw_status)
+    if status == "paused":
+        return status
+    if not has_stages or not _has_columns(conn, "stage_runs", "scan_id", "stage", "status"):
+        return status
+    latest: dict[str, str] = {}
+    for stage, stage_status in conn.execute(
+        "SELECT stage,status FROM stage_runs WHERE scan_id=? ORDER BY rowid", (scan_id,)
+    ):
+        latest[str(stage)] = str(stage_status)
+    if any(value in {"pending", "running"} for value in latest.values()):
+        return "running"
+    if any(value in {"failed", "blocked"} for value in latest.values()):
+        return "failed"
+    return status
+
+
+def _scan_finished_at(
+    conn: sqlite3.Connection, scan_id: str, scan_finished_at: Any, *, has_stages: bool
+) -> str | None:
+    finished = _utc(scan_finished_at) if scan_finished_at else None
+    if has_stages and _has_columns(conn, "stage_runs", "scan_id", "finished_at"):
+        for row in conn.execute(
+            "SELECT finished_at FROM stage_runs WHERE scan_id=? AND finished_at IS NOT NULL",
+            (scan_id,),
+        ):
+            stage_finished = _utc(row[0])
+            if finished is None or stage_finished > finished:
+                finished = stage_finished
+    return finished
+
+
+def _observed_url(base_url: str, normalized_path: str) -> str | None:
+    """Show an origin and normalized path only; omit URL credentials and query values."""
+    base = urlsplit(base_url)
+    path = normalized_path.split("?", 1)[0].split("#", 1)[0]
+    if base.scheme not in {"http", "https"} or not base.hostname or "@" in base.netloc or not path.startswith("/") or path.startswith("//"):
+        return None
+    return urlunsplit((base.scheme, base.netloc, path, "", ""))[:1024]
+
+
+def _level(event_type: str) -> str:
+    lowered = event_type.lower()
+    if any(word in lowered for word in ("failed", "invalid", "error")):
+        return "error"
+    if any(word in lowered for word in ("cancelled", "blocked", "denied", "expired")):
+        return "warning"
+    if any(word in lowered for word in ("completed", "confirmed", "approved")):
+        return "success"
+    return "info"
+
+
+def _audit_level(event_type: str, details_json: Any) -> str:
+    """Preserve terminal policy/evidence dispositions as warnings.
+
+    Older Attack workers could only move a running task to ``failed`` after a
+    request-bound denial. Coverage reconciliation correctly classifies those
+    structured blockers as terminal non-errors, so the dashboard must not
+    present them as pipeline failures.
+    """
+    if event_type == "task.failed":
+        reason = _json_object(details_json).get("reason")
+        if isinstance(reason, str) and reason.lstrip().casefold().startswith(
+            ("[policy]", "[auth]", "[budget]", "[evidence]")
+        ):
+            return "warning"
+    return _level(event_type)
+
+
+def _audit_message(event_type: str) -> str:
+    # Never interpolate details_json, URLs, headers, bodies, or credentials.
+    readable = event_type.replace("_", " ").replace(".", " · ").strip()
+    return f"Pipeline event · {readable[:180]}"
+
+
+def _event_payload(row: sqlite3.Row) -> dict[str, Any]:
+    payload = _json_object(row["payload_json"])
+    source_key = str(row["source_key"])
+    if row["event_type"] == "log.appended" and source_key.startswith("audit:"):
+        payload["audit_id"] = source_key.removeprefix("audit:")[:256]
+    return payload
+
+
+def _failure_category(message: object) -> str | None:
+    """Classify an internal error without returning its potentially sensitive text."""
+    if not isinstance(message, str) or not message.strip():
+        return None
+    lowered = message.casefold()
+    if "timeout" in lowered or "timed out" in lowered:
+        return "timeout"
+    if "rate limit" in lowered or "request budget" in lowered or "429" in lowered:
+        return "rate_limit"
+    if any(word in lowered for word in ("permission denied", "unauthorized", "forbidden")):
+        return "access_denied"
+    if any(word in lowered for word in ("dns", "connection refused", "name resolution", "network unreachable")):
+        return "network"
+    if any(word in lowered for word in ("command not found", "executable not found", "no such file or directory")):
+        return "tool_unavailable"
+    return None
+
+
+class DashboardProjector:
+    """Read source databases and maintain a sanitized replay ledger."""
+
+    def __init__(
+        self,
+        result_root: Path,
+        *,
+        event_database: Path | None = None,
+        database: Path | None = None,
+    ) -> None:
+        self.result_root = result_root.expanduser().resolve()
+        self.event_database = (
+            event_database or self.result_root / ".webui" / "events.db"
+        ).expanduser().resolve()
+        self.database = database.expanduser().resolve() if database else None
+        self._lock = threading.RLock()
+        self.event_database.parent.mkdir(parents=True, exist_ok=True)
+        self._init_events()
+
+    def _init_events(self) -> None:
+        with closing(sqlite3.connect(self.event_database)) as conn:
+            conn.executescript(
+                """
+                PRAGMA journal_mode=DELETE;
+                CREATE TABLE IF NOT EXISTS web_events (
+                    scan_id TEXT NOT NULL,
+                    event_id INTEGER NOT NULL CHECK(event_id > 0),
+                    source_key TEXT NOT NULL,
+                    occurred_at TEXT NOT NULL,
+                    event_type TEXT NOT NULL,
+                    payload_json TEXT NOT NULL CHECK(json_valid(payload_json)),
+                    PRIMARY KEY(scan_id, event_id),
+                    UNIQUE(scan_id, source_key)
+                );
+                CREATE TABLE IF NOT EXISTS web_projection_state (
+                    scan_id TEXT PRIMARY KEY NOT NULL,
+                    state_json TEXT NOT NULL CHECK(json_valid(state_json)),
+                    updated_at TEXT NOT NULL
+                );
+                """
+            )
+
+    @staticmethod
+    def validate_scan_id(scan_id: str) -> str:
+        if not _SCAN_ID.fullmatch(scan_id):
+            raise ScanNotFoundError("invalid scan identifier")
+        return scan_id
+
+    def _inside_root(self, path: Path) -> bool:
+        try:
+            path.resolve().relative_to(self.result_root)
+            return True
+        except ValueError:
+            return False
+
+    def locate_database(self, scan_id: str) -> Path:
+        self.validate_scan_id(scan_id)
+        candidates: list[Path] = []
+        if self.database is not None:
+            candidates.append(self.database)
+        for root_name, names in (
+            ("AttackRuns", ("Pipeline.db",)),
+            ("Runs", ("Pipeline.db", "Recon.db")),
+            ("ValidationRuns", ("Pipeline.db",)),
+        ):
+            run = scan_run_directory(self.result_root / root_name, scan_id)
+            if run is not None:
+                candidates.extend(run / name for name in names)
+        for candidate in candidates:
+            if not candidate.is_file():
+                continue
+            if self.database is None and not self._inside_root(candidate):
+                continue
+            try:
+                with closing(self._source(candidate)) as conn:
+                    if conn.execute(
+                        "SELECT 1 FROM scans WHERE scan_id=?", (scan_id,)
+                    ).fetchone():
+                        return candidate.resolve()
+            except sqlite3.Error:
+                continue
+        raise ScanNotFoundError(f"scan database not found: {scan_id}")
+
+    def _source(self, path: Path) -> sqlite3.Connection:
+        conn = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=2)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA query_only=ON")
+        conn.execute("PRAGMA foreign_keys=ON")
+        return conn
+
+    def _scope_info(self, scope_id: str) -> ScopeInfo:
+        if not scope_id:
+            return ScopeInfo()
+        scope_root = self.result_root / "Scope"
+        if not scope_root.is_dir():
+            return ScopeInfo(scope_id=scope_id)
+        for scope_path in scope_root.glob("*/*/Scope.json"):
+            try:
+                raw = scope_path.read_bytes()
+                document = json.loads(raw)
+                if not isinstance(document, dict):
+                    continue
+                if document.get("scope_id") != scope_id:
+                    continue
+                approval_path = scope_path.with_name("Approval.json")
+                approval = json.loads(approval_path.read_text(encoding="utf-8"))
+                if not isinstance(approval, dict):
+                    continue
+                digest = hashlib.sha256(raw).hexdigest()
+                approved = (
+                    approval.get("scope_id") == scope_id
+                    and approval.get("scope_json_sha256") == digest
+                )
+                policy_path = scope_path.with_name("TargetPolicy.json")
+                budget = 0
+                values: list[int] = []
+                if policy_path.is_file():
+                    policy = json.loads(policy_path.read_text(encoding="utf-8"))
+                    policies = policy.get("policies", []) if isinstance(policy, dict) else []
+                    if not isinstance(policies, list):
+                        policies = []
+                    for item in policies:
+                        limits = item.get("limits") if isinstance(item, dict) else None
+                        if not isinstance(limits, dict):
+                            continue
+                        maximum = limits.get("max_requests")
+                        if type(maximum) is int:
+                            values.append(maximum)
+                        elif isinstance(maximum, str) and re.fullmatch(r"[0-9]{1,20}", maximum.strip()):
+                            values.append(int(maximum))
+                    budget = sum(value for value in values if value > 0)
+                relative = scope_path.relative_to(scope_root)
+                platform, slug = relative.parts[:2]
+                platform_prefix = {
+                    "hackerone": "h1",
+                    "yeswehack": "ywh",
+                }.get(platform, platform)
+                program_id = f"{platform_prefix}-{slug.replace('_', '-')}"
+                analysis = document.get("analysis")
+                analysis = analysis if isinstance(analysis, dict) else {}
+                program_name = (
+                    "PRISM VDP"
+                    if program_id == "h1-prism-vdp"
+                    else str(analysis.get("program_name") or slug)[:160]
+                )
+                per_target_budget = values[0] if values and values[0] > 0 and len(set(values)) == 1 else None
+                return ScopeInfo(approved, scope_id, program_name, program_id, budget, per_target_budget)
+            except (OSError, ValueError, TypeError, json.JSONDecodeError):
+                continue
+        return ScopeInfo(scope_id=scope_id)
+
+    def _read_state(
+        self, conn: sqlite3.Connection, scan_id: str
+    ) -> tuple[dict[str, Any], list[sqlite3.Row]]:
+        tables = _tables(conn)
+        if "scans" not in tables:
+            raise ScanNotFoundError("database has no scans table")
+        scan = conn.execute("SELECT * FROM scans WHERE scan_id=?", (scan_id,)).fetchone()
+        if scan is None:
+            raise ScanNotFoundError(f"unknown scan: {scan_id}")
+        scan_columns = set(scan.keys())
+        raw_scan_status = scan["status"] if "status" in scan_columns else "pending"
+        scope = self._scope_info(str(scan["scope_value"]) if "scope_value" in scan_columns else "")
+
+        stages: list[sqlite3.Row] = []
+        if _has_columns(conn, "stage_runs", "scan_id", "stage_run_id", "stage", "status"):
+            stage_columns = _columns(conn, "stage_runs")
+            timestamps = [name for name in ("started_at", "created_at") if name in stage_columns]
+            ordering = (f"COALESCE({','.join(timestamps)})" if len(timestamps) > 1
+                        else timestamps[0] if timestamps else "rowid")
+            stages = list(
+                conn.execute(
+                    f"SELECT rowid,* FROM stage_runs WHERE scan_id=? ORDER BY {ordering},rowid",
+                    (scan_id,),
+                )
+            )
+        active = next((row for row in reversed(stages) if row["status"] == "running"), None)
+        current = active or (stages[-1] if stages else None)
+        stage_name = _stage(current["stage"] if current else "recon")
+        activity: str | None = None
+        if stage_name == "Recon" and current is not None and current["status"] == "running":
+            activity = "Preparing Recon"
+            if _has_columns(conn, "pipeline_runs", "stage", "scan_id", "status", "task_id"):
+                active_task = conn.execute(
+                    """SELECT p.stage FROM pipeline_runs p
+                    WHERE p.scan_id=? AND p.status='running' AND p.task_id IS NOT NULL
+                    AND NOT EXISTS (
+                        SELECT 1 FROM pipeline_runs terminal
+                        WHERE terminal.scan_id=p.scan_id AND terminal.task_id=p.task_id
+                        AND terminal.rowid>p.rowid
+                        AND terminal.status IN ('success','failed','skipped','completed')
+                    ) ORDER BY p.rowid DESC LIMIT 1""",
+                    (scan_id,),
+                ).fetchone()
+                if active_task is not None:
+                    activity = _RECON_ACTIVITY.get(str(active_task["stage"]).upper(), "Running Recon task")
+                elif conn.execute(
+                    """SELECT 1 FROM pipeline_runs WHERE scan_id=? AND
+                    status IN ('success','failed','skipped','completed') LIMIT 1""",
+                    (scan_id,),
+                ).fetchone():
+                    activity = "Processing Recon results"
+        stage_statuses: dict[str, str] = {}
+        for row in stages:
+            stage_statuses[_stage(row["stage"])] = str(row["status"])
+        if raw_scan_status == "completed_with_errors" and stage_name == "Recon" and active is None:
+            stage_statuses["Recon"] = "failed"
+        if scope.approved:
+            stage_statuses["Scope"] = "completed"
+
+        task_total = task_done = 0
+        if current is not None and _has_columns(conn, "attack_tasks", "stage_run_id", "status"):
+            task_total = int(
+                conn.execute(
+                    "SELECT count(*) FROM attack_tasks WHERE stage_run_id=?",
+                    (current["stage_run_id"],),
+                ).fetchone()[0]
+            )
+            task_done = int(
+                conn.execute(
+                    """SELECT count(*) FROM attack_tasks WHERE stage_run_id=?
+                    AND status IN ('completed','skipped')""",
+                    (current["stage_run_id"],),
+                ).fetchone()[0]
+            )
+        if stage_name == "Recon" and _has_columns(conn, "pipeline_runs", "status", "scan_id", "task_id"):
+            task_total, task_done = conn.execute(
+                """SELECT count(*), count(*) FILTER (
+                    WHERE p.status IN ('success','failed','skipped','completed')
+                ) FROM pipeline_runs p JOIN (
+                    SELECT max(rowid) AS latest_row FROM pipeline_runs
+                    WHERE scan_id=? AND task_id IS NOT NULL GROUP BY task_id
+                ) latest ON latest.latest_row=p.rowid""",
+                (scan_id,),
+            ).fetchone()
+        if stage_name == "Validation" and current is not None and _has_columns(
+            conn, "validation_cases", "scan_id", "latest_stage_run_id", "processing_phase"
+        ):
+            task_total, task_done = conn.execute(
+                """SELECT count(*), COALESCE(sum(CASE processing_phase
+                    WHEN 'blind_replay' THEN 25
+                    WHEN 'developing' THEN 25
+                    WHEN 'unblinding' THEN 75
+                    WHEN 'completed' THEN 100
+                    ELSE 0 END), 0)
+                FROM validation_cases WHERE scan_id=? AND latest_stage_run_id=?""",
+                (scan_id, current["stage_run_id"]),
+            ).fetchone()
+            task_total *= 100
+        if stage_name == "Report" and _has_columns(
+            conn, "validation_cases", "scan_id", "case_id", "current_status", "processing_phase",
+            "decision_stage_run_id", "latest_stage_run_id"
+        ):
+            cases = conn.execute(
+                """SELECT case_id FROM validation_cases WHERE scan_id=?
+                AND current_status='CONFIRMED' AND processing_phase='completed'
+                AND decision_stage_run_id=latest_stage_run_id""",
+                (scan_id,),
+            ).fetchall()
+            task_total, task_done = len(cases) * 2, 0
+            for case in cases:
+                case_id = str(case["case_id"])
+                directory = (case_id if re.fullmatch(r"[A-Za-z0-9_-]{1,128}", case_id)
+                             else "case_" + hashlib.sha256(case_id.encode()).hexdigest())
+                report_path = self.result_root / "ReportRun" / scan_id / directory / "Report.db"
+                if not report_path.is_file() or report_path.is_symlink():
+                    continue
+                try:
+                    report_path.resolve().relative_to(self.result_root)
+                    with closing(self._source(report_path)) as report:
+                        run = report.execute(
+                            "SELECT report_id FROM report_runs WHERE scan_id=? AND case_id=?",
+                            (scan_id, case_id),
+                        ).fetchone()
+                        if run is not None:
+                            task_done += 1
+                            if report.execute(
+                                "SELECT 1 FROM report_drafts WHERE report_id=?",
+                                (run["report_id"],),
+                            ).fetchone():
+                                task_done += 1
+                except (OSError, sqlite3.Error, ValueError):
+                    continue
+        if current is not None and current["status"] in {"completed", "skipped"}:
+            progress = 100
+        elif task_total:
+            # Recon still tags observations, reviews results and exports its
+            # surface after the last network task. Reserve room for that work.
+            ceiling = 75 if stage_name == "Recon" else 95
+            share = 75 if stage_name == "Recon" else 100
+            progress = min(ceiling, round(task_done / task_total * share))
+        else:
+            progress = 0
+
+        from aidast.attack.coverage_snapshot import read_coverage_snapshot
+        attack_coverage = read_coverage_snapshot(conn, scan_id, include_gaps=False) if stage_name == 'Attack' else None
+        if attack_coverage and attack_coverage['total']:
+            # Planning owns the first fifth of Attack progress.  Once the
+            # durable coverage ledger exists, advance through its terminal
+            # dispositions without ever displaying 100% before the stage is
+            # actually closed.
+            progress = min(
+                99,
+                20 + round(
+                    79 * attack_coverage['resolved'] / attack_coverage['total']
+                ),
+            )
+            if (not attack_coverage['unfinished']
+                    and stage_statuses.get('Attack') in {'completed', 'skipped'}):
+                progress = 100
+            if attack_coverage['unfinished'] and stage_statuses.get('Attack') == 'completed':
+                stage_statuses['Attack'] = 'running'
+
+        requests = 0
+        scoped_endpoints = all((
+            _has_columns(conn, "endpoints", "endpoint_id", "origin_id"),
+            _has_columns(conn, "origins", "origin_id", "asset_id"),
+            _has_columns(conn, "assets", "asset_id", "scan_id"),
+        ))
+        for table in ("http_transactions", "attack_http_requests", "validation_http_requests"):
+            if table in tables:
+                columns = _columns(conn, table)
+                if "scan_id" in columns:
+                    requests += int(
+                        conn.execute(f"SELECT count(*) FROM {table} WHERE scan_id=?", (scan_id,)).fetchone()[0]
+                    )
+
+                elif (
+                    table == "http_transactions"
+                    and "endpoint_id" in columns
+                    and scoped_endpoints
+                ):
+                    requests += int(
+                        conn.execute(
+                            """SELECT count(*) FROM http_transactions h
+                            JOIN endpoints e ON e.endpoint_id=h.endpoint_id
+                            JOIN origins o ON o.origin_id=e.origin_id
+                            JOIN assets a ON a.asset_id=o.asset_id WHERE a.scan_id=?""",
+                            (scan_id,),
+                        ).fetchone()[0]
+                    )
+
+        if stage_name == "Recon":
+            source_path = Path(conn.execute("PRAGMA database_list").fetchone()[2])
+            progress_path = source_path.parent / f"mitm_capture_{scan_id}.progress.json"
+            try:
+                capture_progress = json.loads(progress_path.read_text(encoding="utf-8"))
+                if capture_progress.get("version") == 1 and all(
+                    type(capture_progress.get(key)) is int and 0 <= capture_progress[key] <= 1_000_000
+                    for key in ("allowed_requests", "used_before")
+                ):
+                    requests = max(requests, min(scope.budget, capture_progress["allowed_requests"] + capture_progress["used_before"]))
+            except (OSError, ValueError, TypeError, AttributeError):
+                pass
+
+        endpoints = 0
+        service_endpoints = 0
+        live_endpoints = 0
+        if "endpoints" in tables:
+            endpoint_columns = _columns(conn, "endpoints")
+            if scoped_endpoints:
+                endpoints = int(
+                    conn.execute(
+                        """SELECT count(*) FROM endpoints e
+                        JOIN origins o ON o.origin_id=e.origin_id
+                        JOIN assets a ON a.asset_id=o.asset_id WHERE a.scan_id=?""",
+                        (scan_id,),
+                    ).fetchone()[0]
+                )
+            elif "scan_id" in endpoint_columns:
+                endpoints = int(conn.execute(
+                    "SELECT count(*) FROM endpoints WHERE scan_id=?", (scan_id,),
+                ).fetchone()[0])
+            elif int(conn.execute("SELECT count(*) FROM scans").fetchone()[0]) == 1:
+                endpoints = int(conn.execute("SELECT count(*) FROM endpoints").fetchone()[0])
+            source = ("FROM endpoints e JOIN origins o ON o.origin_id=e.origin_id "
+                      "JOIN assets a ON a.asset_id=o.asset_id" if scoped_endpoints else "FROM endpoints e")
+            if scoped_endpoints:
+                where, parameters = "a.scan_id=?", (scan_id,)
+            elif "scan_id" in endpoint_columns:
+                where, parameters = "e.scan_id=?", (scan_id,)
+            else:
+                where, parameters = ("1=1" if endpoints else "1=0"), ()
+            where += " AND e.is_excluded=0" if "is_excluded" in endpoint_columns else ""
+            service_endpoints = int(conn.execute(
+                f"SELECT count(*) {source} WHERE {where}", parameters,
+            ).fetchone()[0])
+            evidence: list[str] = []
+            if "endpoint_id" in endpoint_columns and "endpoint_observations" in tables and {
+                "endpoint_id", "discovery_kind"
+            }.issubset(_columns(conn, "endpoint_observations")):
+                evidence.append("EXISTS (SELECT 1 FROM endpoint_observations v "
+                                "WHERE v.endpoint_id=e.endpoint_id AND v.discovery_kind='http_response')")
+            if "endpoint_id" in endpoint_columns and "http_transactions" in tables and {
+                "endpoint_id", "response_status"
+            }.issubset(_columns(conn, "http_transactions")):
+                evidence.append("EXISTS (SELECT 1 FROM http_transactions h "
+                                "WHERE h.endpoint_id=e.endpoint_id AND h.response_status BETWEEN 200 AND 499)")
+            if evidence:
+                live_endpoints = int(conn.execute(
+                    f"SELECT count(*) {source} WHERE {where} AND ({' OR '.join(evidence)})",
+                    parameters,
+                ).fetchone()[0])
+
+        findings: list[dict[str, Any]] = []
+        if _has_columns(conn, "findings", "finding_id", "scan_id", "title", "severity"):
+            finding_columns = _columns(conn, "findings")
+            has_endpoints = "endpoint_id" in finding_columns and _has_columns(
+                conn, "endpoints", "endpoint_id", "method", "normalized_path"
+            )
+            fields = ("finding_id", "title", "severity", "status", "cwe_id", "endpoint_id")
+            query = "SELECT " + ",".join(
+                f"f.{name}" if name in finding_columns else f"NULL AS {name}" for name in fields
+            )
+            if has_endpoints:
+                query += ",e.method,e.normalized_path FROM findings f LEFT JOIN endpoints e ON e.endpoint_id=f.endpoint_id"
+            else:
+                query += ",NULL AS method,NULL AS normalized_path FROM findings f"
+            ordering = "f.created_at" if "created_at" in finding_columns else "f.rowid"
+            query += f" WHERE f.scan_id=? ORDER BY {ordering} DESC LIMIT 500"
+            for row in conn.execute(query, (scan_id,)):
+                endpoint = " ".join(
+                    part for part in (str(row["method"] or ""), str(row["normalized_path"] or "")) if part
+                ) or str(row["endpoint_id"] or "unavailable")
+                findings.append(
+                    {
+                        "id": str(row["finding_id"])[:256],
+                        "title": str(row["title"])[:500],
+                        "severity": str(row["severity"]),
+                        "status": str(row["status"] or "unavailable"),
+                        "endpoint": endpoint[:1000],
+                        "cwe": str(row["cwe_id"] or "Unclassified")[:128],
+                    }
+                )
+
+        audits: list[sqlite3.Row] = []
+        if _has_columns(conn, "audit_events", "audit_event_id", "scan_id", "event_type"):
+            audit_columns = _columns(conn, "audit_events")
+            fields = ("audit_event_id", "event_type", "details_json", "created_at", "task_id")
+            query = "SELECT a.rowid," + ",".join(
+                f"a.{name}" if name in audit_columns else f"NULL AS {name}" for name in fields
+            )
+            has_stage_join = "stage_run_id" in audit_columns and _has_columns(
+                conn, "stage_runs", "stage_run_id", "stage"
+            )
+            if has_stage_join:
+                error = "s.error_message" if _has_columns(conn, "stage_runs", "error_message") else "NULL"
+                query += (f",COALESCE(s.stage,'recon') AS stage,{error} AS stage_error "
+                          "FROM audit_events a LEFT JOIN stage_runs s ON s.stage_run_id=a.stage_run_id")
+            else:
+                query += ",'recon' AS stage,NULL AS stage_error FROM audit_events a"
+            audits = list(
+                conn.execute(
+                    query + " WHERE a.scan_id=? ORDER BY a.rowid",
+                    (scan_id,),
+                )
+            )
+
+        state = {
+            "version": 1,
+            "scan_id": scan_id,
+            "status": _scan_status(
+                conn, scan_id, raw_scan_status,
+                has_stages="stage_runs" in tables,
+            ),
+            "stage": stage_name,
+            "stage_statuses": stage_statuses,
+            "progress": progress,
+            "activity": activity,
+            "requests": requests,
+            "budget": scope.budget,
+            "per_target_budget": scope.per_target_budget,
+            "endpoints": endpoints,
+            "service_endpoints": service_endpoints,
+            "live_endpoints": live_endpoints,
+            "findings": findings,
+            "scope_approved": scope.approved,
+            "scope_id": scope.scope_id,
+            "program_id": scope.program_id,
+            "program_name": scope.program_name,
+        }
+        if (attack_coverage and attack_coverage['unfinished'] and state['status'] == 'completed'
+                and stage_statuses.get('Attack') == 'running'):
+            state['status'] = 'running'
+        if (state["stage"] == "Recon" and state["status"] == "running"
+                and {"endpoint_observations", "endpoint_annotations"} <= tables):
+            state["_tagging_counts"] = tagging_counts(conn, scan_id)
+        return state, audits
+
+    def model_call_events(
+        self, *, before: int | None = None, limit: int = 100,
+    ) -> dict[str, Any]:
+        events, next_before = read_model_call_events(
+            self.result_root, before=before, limit=limit,
+        )
+        return {"events": events, "next_before": next_before}
+
+    def scan_token_usage(self, scan_id: str) -> dict[str, Any]:
+        self.validate_scan_id(scan_id)
+        return read_scan_token_usage(self.result_root, scan_id)
+
+    def audit_log(self, scan_id: str) -> list[dict[str, Any]]:
+        """Return audit metadata with only validated activity and error categories."""
+        database = self.locate_database(scan_id)
+        with closing(self._source(database)) as conn:
+            _state, audits = self._read_state(conn, scan_id)
+        entries: list[dict[str, Any]] = []
+        for row in reversed(audits[-500:]):
+            event_type = str(row["event_type"])[:256]
+            activity = validated_activity(_json_object(row["details_json"])) if event_type == "recon.activity" else None
+            entries.append({
+                "id": str(row["audit_event_id"])[:256],
+                "event_type": event_type,
+                "stage": _stage(row["stage"]),
+                "created_at": _utc(row["created_at"]),
+                "task_id": str(row["task_id"])[:128] if row["task_id"] else None,
+                "level": ("error" if activity["state"] == "failed" else
+                          "success" if activity["state"] == "finished" else "info")
+                if activity else _audit_level(event_type, row["details_json"]),
+                "message_code": "recon.activity" if activity else "pipeline.audit_event",
+                "message_params": activity or {"event_type": event_type[:180]},
+                "failure_code": _failure_category(row["stage_error"]) if event_type == "stage.failed" else None,
+            })
+        return entries
+
+    @staticmethod
+    def _next_id(conn: sqlite3.Connection, scan_id: str) -> int:
+        return int(
+            conn.execute(
+                "SELECT COALESCE(max(event_id),0)+1 FROM web_events WHERE scan_id=?",
+                (scan_id,),
+            ).fetchone()[0]
+        )
+
+    def _append(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        scan_id: str,
+        source_key: str,
+        occurred_at: str,
+        event_type: str,
+        payload: dict[str, Any],
+    ) -> None:
+        conn.execute(
+            """INSERT OR IGNORE INTO web_events
+            (scan_id,event_id,source_key,occurred_at,event_type,payload_json)
+            VALUES (?,?,?,?,?,?)""",
+            (
+                scan_id,
+                self._next_id(conn, scan_id),
+                source_key,
+                occurred_at,
+                event_type,
+                json.dumps(payload, ensure_ascii=False, allow_nan=False),
+            ),
+        )
+
+    def record_event(
+        self,
+        scan_id: str,
+        *,
+        source_key: str,
+        event_type: str,
+        payload: dict[str, Any],
+        occurred_at: str | None = None,
+    ) -> None:
+        """Append a pre-projection event whose payload is already sanitized."""
+        self.validate_scan_id(scan_id)
+        with self._lock, closing(sqlite3.connect(self.event_database)) as conn, conn:
+            conn.execute("BEGIN IMMEDIATE")
+            self._append(
+                conn,
+                scan_id=scan_id,
+                source_key=source_key,
+                occurred_at=_utc(occurred_at),
+                event_type=event_type,
+                payload=payload,
+            )
+
+    def stored_events_after(self, scan_id: str, after: int) -> list[dict[str, Any]]:
+        """Replay durable events without requiring a pipeline database yet."""
+        self.validate_scan_id(scan_id)
+        if after < 0:
+            raise ProjectionError("event cursor must be non-negative")
+        with self._lock, closing(sqlite3.connect(self.event_database)) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                """SELECT event_id,source_key,occurred_at,event_type,payload_json FROM web_events
+                WHERE scan_id=? AND event_id>? ORDER BY event_id LIMIT 256""",
+                (scan_id, after),
+            ).fetchall()
+        return [
+            {
+                "version": 1,
+                "event_id": int(row["event_id"]),
+                "scan_id": scan_id,
+                "occurred_at": row["occurred_at"],
+                "type": row["event_type"],
+                "payload": _event_payload(row),
+            }
+            for row in rows
+        ]
+
+    def _sync(
+        self,
+        event_conn: sqlite3.Connection,
+        scan_id: str,
+        state: dict[str, Any],
+        audits: list[sqlite3.Row],
+    ) -> None:
+        counts = state.pop("_tagging_counts", None)
+        for row in audits:
+            activity = (
+                validated_activity(_json_object(row["details_json"]))
+                if row["event_type"] == "recon.activity" else None
+            )
+            self._append(
+                event_conn,
+                scan_id=scan_id,
+                source_key=f"audit:{row['audit_event_id']}",
+                occurred_at=_utc(row["created_at"]),
+                event_type="log.appended",
+                payload={
+                    "stage": _stage(row["stage"]),
+                    "level": ("error" if activity["state"] == "failed" else
+                              "success" if activity["state"] == "finished" else "info")
+                    if activity else _audit_level(
+                        str(row["event_type"]), row["details_json"]
+                    ),
+                    "message": "Recon activity" if activity else _audit_message(str(row["event_type"])),
+                    "message_code": "recon.activity" if activity else "pipeline.audit_event",
+                    "message_params": activity or {"event_type": str(row["event_type"])[:180]},
+                },
+            )
+
+        if state["stage"] == "Recon" and state["status"] == "running":
+            work_row = event_conn.execute(
+                """SELECT event_id,payload_json
+                FROM web_events WHERE scan_id=? AND event_type='log.appended'
+                AND json_extract(payload_json,'$.message_code')='agent.work'
+                AND json_extract(payload_json,'$.stage')='Recon'
+                ORDER BY event_id DESC LIMIT 1""",
+                (scan_id,),
+            ).fetchone()
+            if work_row:
+                params = _json_object(work_row["payload_json"]).get("message_params", {})
+                progress = params.get("progress")
+                if type(progress) is int and 0 <= progress <= 98:
+                    state["progress"] = max(state["progress"], progress)
+                # Older workers only publish the start milestone. Recover their
+                # committed results, gated by the latest work step so review and
+                # export can never be replaced by stale tagging activity.
+                if (counts and counts[0] > 0 and params.get("agent") == "recon"
+                        and params.get("step") == "tagging" and params.get("state") in {"started", "progress"}):
+                    total, processed = counts
+                    previous_processed = params.get("processed")
+                    if previous_processed is None or processed > previous_processed:
+                        details = {"agent": "recon", "step": "tagging", "state": "progress",
+                                   **tagging_progress_params(total, processed)}
+                        if type(params.get("failed")) is int:
+                            details["failed"] = params["failed"]
+                        self._append(event_conn, scan_id=scan_id,
+                            source_key=f"tagging-counts:{work_row['event_id']}:{total}:{processed}",
+                            occurred_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                            event_type="log.appended", payload={"stage": "Recon", "level": "info",
+                                "message": "Agent work", "message_code": "agent.work", "message_params": details})
+                        state["progress"] = max(state["progress"], details["progress"])
+
+        if state["stage"] == "Attack" and state["status"] == "running":
+            work_row = event_conn.execute(
+                """SELECT payload_json FROM web_events WHERE scan_id=?
+                AND event_type='log.appended'
+                AND json_extract(payload_json,'$.message_code')='agent.work'
+                AND json_extract(payload_json,'$.stage')='Attack'
+                ORDER BY event_id DESC LIMIT 1""",
+                (scan_id,),
+            ).fetchone()
+            if work_row:
+                params = _json_object(work_row["payload_json"]).get("message_params", {})
+                processed, total = params.get("processed"), params.get("endpoint_total")
+                if (params.get("step") == "planning"
+                        and type(processed) is int and type(total) is int
+                        and total > 0 and 0 <= processed <= total):
+                    state["progress"] = max(
+                        state["progress"], min(20, round(20 * processed / total))
+                    )
+
+        previous_row = event_conn.execute(
+            "SELECT state_json FROM web_projection_state WHERE scan_id=?", (scan_id,)
+        ).fetchone()
+        previous = _json_object(previous_row[0]) if previous_row else {}
+        now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        if previous:
+            changes: list[tuple[str, dict[str, Any]]] = []
+            if (state["stage"] != previous.get("stage")
+                    or state["stage_statuses"] != previous.get("stage_statuses")):
+                changes.append(("stage.status.changed", {
+                    "stage": state["stage"],
+                    "stage_statuses": state["stage_statuses"],
+                }))
+            if state["status"] != previous.get("status"):
+                changes.append(("scan.status.changed", {"status": state["status"]}))
+            if any(state[key] != previous.get(key) for key in (
+                "progress", "requests", "activity", "endpoints", "service_endpoints", "live_endpoints"
+            )):
+                changes.append(
+                    (
+                        "task.progress.updated",
+                        {key: state[key] for key in (
+                            "progress", "requests", "activity", "endpoints", "service_endpoints", "live_endpoints"
+                        )},
+                    )
+                )
+            old_findings = {item.get("id"): item for item in previous.get("findings", [])}
+            for finding in state["findings"]:
+                if old_findings.get(finding["id"]) != finding:
+                    changes.append(("finding.updated", finding))
+            for event_type, payload in changes:
+                sequence = self._next_id(event_conn, scan_id)
+                self._append(
+                    event_conn,
+                    scan_id=scan_id,
+                    source_key=f"projection:{sequence}",
+                    occurred_at=now,
+                    event_type=event_type,
+                    payload=payload,
+                )
+        serialized = json.dumps(state, ensure_ascii=False, allow_nan=False, sort_keys=True)
+        event_conn.execute(
+            """INSERT INTO web_projection_state(scan_id,state_json,updated_at)
+            VALUES (?,?,?) ON CONFLICT(scan_id) DO UPDATE SET
+            state_json=excluded.state_json,updated_at=excluded.updated_at""",
+            (scan_id, serialized, now),
+        )
+
+    def snapshot(self, scan_id: str) -> dict[str, Any]:
+        with self._lock:
+            database = self.locate_database(scan_id)
+            with closing(self._source(database)) as source:
+                state, audits = self._read_state(source, scan_id)
+            with closing(sqlite3.connect(self.event_database)) as events, events:
+                events.row_factory = sqlite3.Row
+                events.execute("BEGIN IMMEDIATE")
+                self._sync(events, scan_id, state, audits)
+                last_event_id = int(
+                    events.execute(
+                        "SELECT COALESCE(max(event_id),0) FROM web_events WHERE scan_id=?",
+                        (scan_id,),
+                    ).fetchone()[0]
+                )
+                logs = []
+                for row in events.execute(
+                    """SELECT event_id,source_key,occurred_at,event_type,payload_json FROM web_events
+                    WHERE scan_id=? AND event_type='log.appended'
+                    ORDER BY event_id DESC LIMIT 500""",
+                    (scan_id,),
+                ).fetchall()[::-1]:
+                    payload = _event_payload(row)
+                    logs.append({
+                        "id": int(row["event_id"]),
+                        "time": row["occurred_at"],
+                        "stage": payload.get("stage", "Recon"),
+                        "level": payload.get("level", "info"),
+                        "message": payload.get("message", "Pipeline event"),
+                        "message_code": payload.get("message_code"),
+                        "message_params": payload.get("message_params", {}),
+                        **({"audit_id": payload["audit_id"]} if "audit_id" in payload else {}),
+                    })
+            return {**state, "last_event_id": last_event_id, "logs": logs}
+
+    def attack_tasks(self, scan_id: str) -> dict[str, Any]:
+        """Expose the latest Attack work queue without request bodies or credentials."""
+        from aidast.attack.coverage_snapshot import read_coverage_snapshot
+        from aidast.recon.annotations import safe_text
+        with self._lock:
+            database = self.locate_database(scan_id)
+            with closing(self._source(database)) as source:
+                tables = _tables(source)
+                if "stage_runs" not in tables or "attack_tasks" not in tables:
+                    return {"scan_id": scan_id, "stage_run_id": None, "tasks": [], "attempt_count": 0, "coverage": read_coverage_snapshot(source, scan_id)}
+                stage = source.execute(
+                    """SELECT stage_run_id,status FROM stage_runs
+                    WHERE scan_id=? AND stage='attack' ORDER BY rowid DESC LIMIT 1""",
+                    (scan_id,),
+                ).fetchone()
+                if stage is None:
+                    return {"scan_id": scan_id, "stage_run_id": None, "tasks": [], "attempt_count": 0, "coverage": read_coverage_snapshot(source, scan_id)}
+                has_attempts = "attack_attempts" in tables
+                attempt_select = "count(a.attempt_id)" if has_attempts else "0"
+                attempt_join = "LEFT JOIN attack_attempts a ON a.task_id=t.task_id" if has_attempts else ""
+                endpoint_urls = {}
+                endpoint_methods = {}
+                observed: dict[str, list[dict[str, str]]] = {}
+                if {"endpoints", "origins", "assets"}.issubset(tables):
+                    endpoints = source.execute(
+                        """SELECT e.endpoint_id,e.method,e.normalized_path,e.auth_required,o.base_url
+                        FROM endpoints e JOIN origins o ON o.origin_id=e.origin_id
+                        JOIN assets a ON a.asset_id=o.asset_id
+                        WHERE a.scan_id=? AND e.is_excluded=0 LIMIT 2000""",
+                        (scan_id,),
+                    ).fetchall()
+                    endpoint_urls = {
+                        row["endpoint_id"]: _observed_url(row["base_url"], row["normalized_path"])
+                        for row in endpoints
+                    }
+
+                    endpoint_methods = {row['endpoint_id']: row['method'] for row in endpoints}
+
+                    def add_evidence(skill: str, method: str, url: str | None, hint: str) -> None:
+                        if not url:
+                            return
+                        items = observed.setdefault(skill, [])
+                        item = {"method": method[:12], "url": url, "hint": hint}
+                        if item not in items and len(items) < 5:
+                            items.append(item)
+
+                    for row in endpoints:
+                        url = endpoint_urls[row["endpoint_id"]]
+                        value = str(row["normalized_path"] or "").casefold()
+                        method = str(row["method"] or "GET").upper()
+                        if any(token in value for token in ("/login", "/signin", "/auth", "/account", "/admin")):
+                            add_evidence("hunt-auth-bypass", method, url, "인증 관련 경로")
+                        if row["auth_required"]:
+                            add_evidence("hunt-auth-bypass", method, url, "인증 필요 표시")
+                        if any(token in value for token in ("session", "token", "jwt")):
+                            add_evidence("hunt-session", method, url, "세션 관련 경로")
+                    if "http_transactions" in tables:
+                        for row in source.execute(
+                            """SELECT t.endpoint_id,t.method,t.response_headers
+                            FROM http_transactions t JOIN endpoints e ON e.endpoint_id=t.endpoint_id
+                            JOIN origins o ON o.origin_id=e.origin_id
+                            JOIN assets a ON a.asset_id=o.asset_id
+                            WHERE a.scan_id=? LIMIT 2000""",
+                            (scan_id,),
+                        ):
+                            url = endpoint_urls.get(row["endpoint_id"])
+                            headers = {
+                                str(key).casefold(): str(value).casefold()
+                                for key, value in _json_object(row["response_headers"]).items()
+                            }
+                            method = str(row["method"] or "GET").upper()
+                            if "access-control-allow-origin" in headers:
+                                add_evidence("hunt-cors", method, url, "Access-Control-Allow-Origin 응답 헤더")
+                            elif "origin" in headers.get("vary", ""):
+                                add_evidence("hunt-cors", method, url, "Vary: Origin 응답 헤더")
+                            if "set-cookie" in headers:
+                                add_evidence("hunt-session", method, url, "Set-Cookie 응답 헤더")
+                rows = source.execute(
+                    f"""SELECT t.task_id,t.endpoint_id,t.skill_name,t.status,t.payload_json,t.created_at,
+                    {attempt_select} AS attempt_count FROM attack_tasks t {attempt_join}
+                    WHERE t.stage_run_id=? GROUP BY t.task_id ORDER BY t.rowid LIMIT 100""",
+                    (stage["stage_run_id"],),
+                ).fetchall()
+                tasks = []
+                for row in rows:
+                    payload = _json_object(row["payload_json"])
+                    reasons = payload.get("selection_reasons", [])
+                    attempts = []
+                    if has_attempts and {"endpoints", "origins"}.issubset(tables):
+                        for attempt in source.execute(
+                            """SELECT a.method,a.outcome,e.normalized_path,o.base_url
+                            FROM attack_attempts a
+                            LEFT JOIN endpoints e ON e.endpoint_id=a.endpoint_id
+                            LEFT JOIN origins o ON o.origin_id=e.origin_id
+                            WHERE a.scan_id=? AND a.task_id=? ORDER BY a.rowid DESC LIMIT 5""",
+                            (scan_id, row["task_id"]),
+                        ):
+                            attempts.append({
+                                "method": str(attempt["method"] or "")[:12],
+                                "url": _observed_url(attempt["base_url"], attempt["normalized_path"])
+                                if attempt["base_url"] and attempt["normalized_path"] else None,
+                                "outcome": str(attempt["outcome"] or "unknown")[:32],
+                            })
+                    task_coverage = None
+                    if payload.get('coverage_id') and 'attack_coverage_items' in tables:
+                        coverage_row = source.execute("SELECT vuln_class,injection_location,parameter_name,required_identity_role,status,disposition_reason FROM attack_coverage_items WHERE scan_id=? AND coverage_id=? AND endpoint_id=?", (scan_id, payload['coverage_id'], row['endpoint_id'])).fetchone()
+                        if coverage_row:
+                            task_coverage = dict(coverage_row)
+                            task_coverage['disposition_reason'] = safe_text(task_coverage['disposition_reason'] or '')[:1000]
+                    linked_url = endpoint_urls.get(row['endpoint_id'])
+                    linked_method = endpoint_methods.get(row['endpoint_id'], '')
+                    if row['endpoint_id']:
+                        exact_endpoint = source.execute("SELECT e.method,e.normalized_path,o.base_url FROM endpoints e JOIN origins o ON o.origin_id=e.origin_id JOIN assets a ON a.asset_id=o.asset_id WHERE e.endpoint_id=? AND a.scan_id=?", (row['endpoint_id'], scan_id)).fetchone()
+                        if exact_endpoint:
+                            linked_method = exact_endpoint['method']
+                            linked_url = _observed_url(exact_endpoint['base_url'], exact_endpoint['normalized_path'])
+                            if 'endpoint_observations' in tables:
+                                for capture in source.execute('SELECT observed_url FROM endpoint_observations WHERE endpoint_id=? AND observed_url IS NOT NULL ORDER BY rowid DESC LIMIT 16', (row['endpoint_id'],)):
+                                    captured = urlsplit(str(capture['observed_url']))
+                                    base = urlsplit(exact_endpoint['base_url'])
+                                    if (captured.scheme, captured.hostname, captured.port or (443 if captured.scheme == 'https' else 80)) == (base.scheme, base.hostname, base.port or (443 if base.scheme == 'https' else 80)):
+                                        linked_url = _observed_url(exact_endpoint['base_url'], captured.path)
+                                        break
+                    linked_urls = ([{'method': linked_method, 'url': linked_url, 'hint': 'Endpoint hypothesis'}]
+                                   if linked_url else []) if row['endpoint_id'] else observed.get(str(row['skill_name']), [])
+                    tasks.append({
+                        "task_id": str(row["task_id"])[:128],
+                        "skill_name": str(row["skill_name"])[:128],
+                        "status": str(row["status"])[:32],
+                        "selection_reasons": [str(reason)[:160] for reason in reasons[:3]]
+                        if isinstance(reasons, list) else [],
+                        "attempt_count": int(row["attempt_count"]),
+                        "created_at": _utc(row["created_at"]),
+                        "observed_urls": linked_urls,
+                        "coverage": task_coverage,
+                        "recent_attempts": attempts,
+                    })
+                return {
+                    "scan_id": scan_id,
+                    "stage_run_id": str(stage["stage_run_id"]),
+                    "stage_status": str(stage["status"]),
+                    "tasks": tasks,
+                    "attempt_count": sum(task["attempt_count"] for task in tasks),
+                    "total_attempt_count": source.execute("SELECT count(*) FROM attack_attempts WHERE scan_id=?", (scan_id,)).fetchone()[0] if has_attempts else 0,
+                    "coverage": read_coverage_snapshot(source, scan_id),
+                }
+
+    def validations(self, scan_id: str) -> dict[str, Any]:
+        """Expose per-case Validation verdicts with a compact, allowlisted evidence summary."""
+        from aidast.validation.persistence.evidence_policy import redact_text
+
+        with self._lock:
+            database = self.locate_database(scan_id)
+            with closing(self._source(database)) as source:
+                if "validation_cases" not in _tables(source):
+                    return {"scan_id": scan_id, "cases": []}
+                has_attempts = "validation_attempts" in _tables(source)
+                has_evidence = "validation_evidence" in _tables(source)
+                cases = []
+                for row in source.execute(
+                    """SELECT case_id,target_kind,finding_id,chain_id,processing_phase,current_status,
+                    decision_json,decision_stage_run_id,latest_stage_run_id,known_source_case_id,
+                    severity,impact_score,updated_at FROM validation_cases
+                    WHERE scan_id=? ORDER BY created_at,case_id LIMIT 1000""",
+                    (scan_id,),
+                ):
+                    item: dict[str, Any] = {
+                        "case_id": str(row["case_id"])[:128],
+                        "target_kind": str(row["target_kind"]),
+                        "target_id": str(row["finding_id"] or row["chain_id"])[:128],
+                        "processing_phase": str(row["processing_phase"]),
+                        "current_status": row["current_status"],
+                        "updated_at": _utc(row["updated_at"]),
+                    }
+                    if row["current_status"] is not None:
+                        decision = _json_object(row["decision_json"])
+                        summary: dict[str, Any] = {}
+                        assessment = decision.get("blind_assessment")
+                        assessment = assessment if isinstance(assessment, dict) else {}
+                        reason = decision.get("reason") or assessment.get("conclusion")
+                        if isinstance(reason, str):
+                            summary["reason"] = str(redact_text(reason))[:1000]
+                        if type(assessment.get("reproduced")) is bool:
+                            summary["reproduced"] = assessment["reproduced"]
+                        axes = {}
+                        for axis_name in ("boundary", "sensitivity", "actor_requirements"):
+                            axis = assessment.get("impact_" + axis_name)
+                            if (isinstance(axis, dict) and type(axis.get("score")) is int
+                                    and 0 <= axis["score"] <= 3):
+                                axes[axis_name] = {"score": axis["score"]}
+                                if isinstance(axis.get("reason"), str):
+                                    axes[axis_name]["reason"] = str(redact_text(axis["reason"]))[:500]
+                        if axes:
+                            summary["impact_axes"] = axes
+                        for key in ("match_kind", "failed_check"):
+                            if isinstance(decision.get(key), str):
+                                summary[key] = str(redact_text(decision[key]))[:64]
+                        if row["known_source_case_id"]:
+                            summary["known_source_case_id"] = str(row["known_source_case_id"])[:128]
+                        if row["severity"]:
+                            summary["severity"] = str(row["severity"])
+                        if row["impact_score"] is not None:
+                            summary["impact_score"] = int(row["impact_score"])
+                        item["decision"] = summary
+                    stage_run = row["decision_stage_run_id"] or row["latest_stage_run_id"]
+                    if has_attempts:
+                        attempts: dict[str, dict[str, int]] = {}
+                        for attempt in source.execute(
+                            """SELECT attempt_kind,outcome,count(*) AS n FROM validation_attempts
+                            WHERE case_id=? AND stage_run_id=? GROUP BY attempt_kind,outcome""",
+                            (row["case_id"], stage_run),
+                        ):
+                            bucket = attempts.setdefault(str(attempt["attempt_kind"]), {})
+                            bucket[str(attempt["outcome"])] = int(attempt["n"])
+                        if attempts:
+                            evidence: dict[str, Any] = {"attempts": attempts}
+                            if has_evidence:
+                                evidence["evidence_count"] = int(source.execute(
+                                    "SELECT count(*) FROM validation_evidence WHERE case_id=? AND stage_run_id=?",
+                                    (row["case_id"], stage_run),
+                                ).fetchone()[0])
+                            item["evidence"] = evidence
+                    cases.append(item)
+                return {"scan_id": scan_id, "cases": cases}
+
+    def events_after(self, scan_id: str, after: int) -> list[dict[str, Any]]:
+        if after < 0:
+            raise ProjectionError("event cursor must be non-negative")
+        self.snapshot(scan_id)
+        return self.stored_events_after(scan_id, after)
+
+    RECON_ACTIVITY_PAGE = 200
+
+    def recon_activity(self, scan_id: str, before: int | None = None) -> dict[str, Any]:
+        """Page sanitized Recon activity log events newest-first by event_id cursor."""
+        if before is not None and before < 1:
+            raise ProjectionError("event cursor must be positive")
+        self.snapshot(scan_id)
+        upper = before if before is not None else 2**62
+        events: list[dict[str, Any]] = []
+        with self._lock, closing(sqlite3.connect(self.event_database)) as conn:
+            conn.row_factory = sqlite3.Row
+            for row in conn.execute(
+                """SELECT event_id,source_key,occurred_at,event_type,payload_json FROM web_events
+                WHERE scan_id=? AND event_id<? AND event_type='log.appended'
+                AND json_extract(payload_json,'$.message_code')='recon.activity'
+                ORDER BY event_id DESC""",
+                (scan_id, upper),
+            ):
+                stored = _event_payload(row)
+                activity = validated_activity(stored.get("message_params"))
+                if activity is None:
+                    continue
+                payload: dict[str, Any] = {
+                    "stage": _stage(stored.get("stage")),
+                    "level": "error" if activity["state"] == "failed"
+                    else "success" if activity["state"] == "finished" else "info",
+                    "message": "Recon activity",
+                    "message_code": "recon.activity",
+                    "message_params": activity,
+                }
+                events.append({
+                    "version": 1,
+                    "event_id": int(row["event_id"]),
+                    "scan_id": scan_id,
+                    "occurred_at": row["occurred_at"],
+                    "type": "log.appended",
+                    "payload": payload,
+                })
+                if len(events) > self.RECON_ACTIVITY_PAGE:
+                    break
+        more = len(events) > self.RECON_ACTIVITY_PAGE
+        events = events[: self.RECON_ACTIVITY_PAGE]
+        return {"events": events, "next_before": events[-1]["event_id"] if more else None}
+
+    def cursor(self, scan_id: str) -> int:
+        with self._lock, closing(sqlite3.connect(self.event_database)) as conn:
+            return int(
+                conn.execute(
+                    "SELECT COALESCE(max(event_id),0) FROM web_events WHERE scan_id=?",
+                    (scan_id,),
+                ).fetchone()[0]
+            )
+
+    def list_scans(self) -> list[dict[str, Any]]:
+        found: dict[str, dict[str, Any]] = {}
+        roots = (
+            (self.result_root / "Runs", ("Pipeline.db", "Recon.db")),
+            (self.result_root / "AttackRuns", ("Pipeline.db",)),
+            (self.result_root / "ValidationRuns", ("Pipeline.db",)),
+        )
+        for root, names in roots:
+            if not root.is_dir():
+                continue
+            for directory in iter_run_directories(root):
+                for name in names:
+                    database = directory / name
+                    if not database.is_file() or not self._inside_root(database):
+                        continue
+                    try:
+                        with closing(self._source(database)) as conn:
+                            row = conn.execute(
+                                "SELECT * FROM scans WHERE scan_id=?",
+                                (directory.name,),
+                            ).fetchone()
+                            if row:
+                                tables = _tables(conn)
+                                has_stages = "stage_runs" in tables
+                                status = _scan_status(
+                                    conn, row["scan_id"], row["status"] if "status" in row.keys() else "pending",
+                                    has_stages=has_stages,
+                                )
+                                targets = []
+                                if "assets" in tables and {
+                                    "scan_id", "identifier"
+                                }.issubset(_columns(conn, "assets")):
+                                    targets = [
+                                        str(asset[0])[:256]
+                                        for asset in conn.execute(
+                                            """SELECT DISTINCT identifier FROM assets
+                                            WHERE scan_id=? AND identifier IS NOT NULL
+                                            ORDER BY identifier LIMIT 10""",
+                                            (row["scan_id"],),
+                                        )
+                                    ]
+                                found[row["scan_id"]] = {
+                                    "scan_id": row["scan_id"],
+                                    "status": status,
+                                    "targets": targets,
+                                    "started_at": _utc(row["started_at"] if "started_at" in row.keys() else None),
+                                    "finished_at": _scan_finished_at(
+                                        conn, row["scan_id"], row["finished_at"] if "finished_at" in row.keys() else None,
+                                        has_stages=has_stages,
+                                    ) if status in {"completed", "failed", "cancelled"} else None,
+                                }
+                                break
+                    except sqlite3.Error:
+                        continue
+        return sorted(found.values(), key=lambda item: item["started_at"], reverse=True)

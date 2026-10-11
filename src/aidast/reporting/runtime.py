@@ -1,0 +1,199 @@
+"""Shared-case report preparation, immutable persistence, and injected writing."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import tempfile
+from pathlib import Path
+from typing import Protocol
+
+from aidast.core.model_calls import model_call_context
+
+from .models import ReportDraft
+
+PLATFORMS = ("hackerone", "bugcrowd", "intigriti", "generic")
+SCHEMA_VERSION = "2.0"
+
+
+class ReportError(ValueError):
+    """Invalid report input, provenance, or persistence state."""
+
+
+class ReportWriterError(RuntimeError):
+    """An offline writer failed after the report source was verified."""
+
+    def __init__(self, cause: Exception):
+        self.cause_type = type(cause).__name__
+        # Writer exceptions can contain untrusted prompts or credentials.
+        super().__init__(f"report writer failed ({self.cause_type})")
+
+
+class ReportDraftError(ValueError):
+    """Writer output was rejected before it reached immutable storage."""
+
+
+def _json(value: object) -> str:
+    encoded = json.dumps(
+        value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False,
+    )
+    if len(encoded.encode()) > 2_000_000:
+        raise ReportError("report document exceeds 2 MB")
+    return encoded
+
+
+def _sha(value: str | bytes) -> str:
+    return hashlib.sha256(value.encode() if isinstance(value, str) else value).hexdigest()
+
+
+def _path(value: Path, *, existing: bool = False) -> Path:
+    path = Path(value).expanduser().absolute()
+    # macOS exposes its system temporary directories through root-owned
+    # aliases (/var -> /private/var and /tmp -> /private/tmp).  Canonicalize
+    # only those fixed OS aliases before checking the remaining path so a
+    # caller-created symlink is still rejected.
+    for alias in (Path("/var"), Path("/tmp")):
+        if alias.is_symlink() and path.is_relative_to(alias):
+            path = alias.resolve(strict=True) / path.relative_to(alias)
+            break
+    if any(item.is_symlink() for item in (path, *path.parents)):
+        raise ReportError("report paths must not traverse symlinks")
+    path = path.resolve(strict=existing)
+    if existing and not path.is_file():
+        raise ReportError("expected an existing regular file")
+    return path
+
+
+def _publish(path: Path, text: str) -> None:
+    """Publish once; identical bytes make retries idempotent."""
+    _path(path)
+    raw = text.encode("utf-8")
+    if path.exists():
+        if not path.is_file() or path.read_bytes() != raw:
+            raise ReportError(f"existing {path.name} has different contents")
+        return
+    handle, name = tempfile.mkstemp(prefix=".report-", dir=path.parent)
+    staging = Path(name)
+    try:
+        with os.fdopen(handle, "wb") as stream:
+            stream.write(raw)
+            stream.flush()
+            os.fsync(stream.fileno())
+        try:
+            os.link(staging, path)
+        except FileExistsError:
+            if path.is_symlink() or path.read_bytes() != raw:
+                raise ReportError(
+                    f"concurrent publication of {path.name} has different contents"
+                )
+    finally:
+        staging.unlink(missing_ok=True)
+
+
+def prepare_report(
+    pipeline_db: Path, output_dir: Path, *, platform: str, case_id: str,
+) -> dict:
+    from .case_runtime import prepare_case_report
+
+    return prepare_case_report(pipeline_db, output_dir, platform=platform, case_id=case_id)
+
+
+def record_report(report_db: Path, draft: dict) -> dict:
+    from .case_runtime import record_case_report
+
+    return record_case_report(report_db, draft)
+
+
+def report_status(report_db: Path) -> dict:
+    from .case_runtime import case_report_status
+
+    return case_report_status(report_db)
+
+
+class ReportWriter(Protocol):
+    def write(self, context: dict) -> dict: ...
+
+
+class ReportAgent:
+    """Prepare one report from a shared Validation case and optionally draft it."""
+
+    def __init__(self, writer: ReportWriter | None = None):
+        self.writer = writer
+
+    def run(
+        self, pipeline_db: Path, output_dir: Path, *, platform: str, case_id: str,
+        language: str | None = None,
+    ) -> dict:
+        result = self.prepare(
+            pipeline_db, output_dir, platform=platform, case_id=case_id,
+            language=language,
+        )
+        if result.get("eligibility") in {"known", "review_only"} or result["status"] == "drafted":
+            return result
+        if self.writer is None:
+            return result
+        draft = self.draft(result, case_id=case_id, platform=platform)
+        from .case_runtime import record_case_report
+
+        return record_case_report(Path(result["report_db"]), draft)
+
+    def prepare(
+        self, pipeline_db: Path, output_dir: Path, *, platform: str, case_id: str,
+        language: str | None = None,
+    ) -> dict:
+        """Prepare one isolated case directory without invoking the writer."""
+        from .case_runtime import prepare_case_report
+        from .presentation import report_language
+
+        if language is not None and language not in ("ko", "en"):
+            raise ReportError("report language must be ko or en")
+        if language is not None and platform != "generic":
+            raise ReportError("language selection is supported for generic reports")
+        result = prepare_case_report(
+            pipeline_db, output_dir, platform=platform, case_id=case_id,
+        )
+        if result.get("eligibility") in {"known", "review_only"}:
+            return result
+        database = Path(result["report_db"])
+        if result["status"] == "drafted":
+            if language is not None and language != report_language(database, platform=platform):
+                raise ReportError("a translated report requires a separate output directory")
+            return result
+        if platform == "generic":
+            locale = language or report_language(database, platform=platform)
+            _publish(database.parent / "Report.language.json", _json({"language": locale}) + "\n")
+        return result
+
+    def draft(self, prepared: dict, *, case_id: str, platform: str) -> dict:
+        """Invoke and validate the writer without mutating report storage."""
+        from .case_runtime import _load
+        from .presentation import report_language
+
+        if self.writer is None:
+            raise ReportError("report drafting requires a writer")
+        database = Path(prepared["report_db"])
+        _, context, stored, _ = _load(database)
+        if stored is not None:
+            raise ReportError("report already contains an immutable draft")
+        from .submission import sanitize_writer_context
+
+        writer_context = sanitize_writer_context(context)
+        writer_context["language"] = report_language(database, platform=platform)
+        writer_context["output_schema"] = ReportDraft.model_json_schema()
+        with model_call_context(
+            scan_id=writer_context["source"]["scan_id"],
+            stage="Report",
+            case_id=case_id,
+        ):
+            try:
+                draft = self.writer.write(writer_context)
+            except Exception as exc:
+                raise ReportWriterError(exc) from exc
+        from .models import validate_draft
+
+        try:
+            validate_draft(draft, context)
+        except ValueError as exc:
+            raise ReportDraftError(str(exc)) from exc
+        return draft

@@ -1,0 +1,129 @@
+--- a/src/aidast/recon/tools/api_secondary_discovery.py
++++ b/src/aidast/recon/tools/api_secondary_discovery.py
+@@ -1288,6 +1288,15 @@
+     return None
+ 
+ 
++def _bind_collection_template(template: str, collection_detail_url: str) -> str | None:
++    """Bind one complete path segment using an ID from the same named resource."""
++    match = re.fullmatch(r"/(?:api|rest)/(?P<resource>[^/]+)/\$\{[\w.$]+\}(?P<suffix>(?:/[^{}?#]*)?)", template, re.I)
++    segments = urlparse(collection_detail_url).path.strip("/").split("/")
++    if match is None or len(segments) != 3 or segments[1].casefold() != match.group("resource").casefold():
++        return None
++    return re.sub(r"\$\{[\w.$]+\}", segments[2], template, count=1)
++
++
+ def discover_adaptive_js_api_candidates(
+     base_url: str,
+     endpoints: list[dict],
+@@ -1327,6 +1336,7 @@
+         broker = _request_broker(target_policy, proxy_url)
+ 
+     candidates: dict[str, int] = {}
++    templates: set[str] = set()
+     for script_url in scripts:
+         status, _, body = _http_request(
+             script_url, headers=headers, target_policy=target_policy,
+@@ -1336,8 +1346,16 @@
+             continue
+         script = body.decode("utf-8", errors="replace")
+         for path, method in extract_js_api_paths(script, _literal_call_method):
+-            if method not in {None, "GET"} or "{" in path or "}" in path:
++            if method not in {None, "GET"}:
+                 continue
++            if "{" in path or "}" in path:
++                # Query-only expressions need no invented values to identify
++                # a path. Bind path expressions later using real collection IDs.
++                path = path.split("?", 1)[0]
++                if "{" in path or "}" in path:
++                    if method == "GET" and len(templates) < ADAPTIVE_MAX_EXTRACTED_CANDIDATES:
++                        templates.add(path)
++                    continue
+             candidate_url = urljoin(base_url, path)
+             if urlparse(candidate_url)._replace(query="", fragment="").geturl() in observed_get_urls:
+                 continue
+@@ -1365,11 +1383,14 @@
+     results: list[dict] = []
+     unverified_count = 0
+     detail_probes = 0
++    collection_details: dict[str, str] = {}
++    probed_urls = set(observed_get_urls)
+     for url in selected_candidates:
+         if not _same_origin(url, base_url):
+             continue
+         if target_policy is not None and not target_policy.allows_url(url, method="GET"):
+             continue
++        probed_urls.add(url)
+         status, response_headers, body = _http_request(
+             url, headers=headers, target_policy=target_policy,
+             proxy_url=proxy_url, broker=broker, timeout=5.0,
+@@ -1411,14 +1432,17 @@
+         })
+ 
+         # Probe one real item per collection within the global request cap.
+-        if detail_probes >= ADAPTIVE_MAX_DETAIL_PROBES:
+-            continue
+         detail_url = _collection_detail_url(
+             url, status, response_headers, body, target_policy,
+         )
+         if detail_url is None:
+             continue
++        resource = urlparse(url).path.rstrip("/").rsplit("/", 1)[-1].casefold()
++        collection_details.setdefault(resource, detail_url)
++        if detail_probes >= ADAPTIVE_MAX_DETAIL_PROBES:
++            continue
+         detail_probes += 1
++        probed_urls.add(detail_url)
+         detail_status, detail_headers, detail_body = _http_request(
+             detail_url, headers=headers, target_policy=target_policy,
+             proxy_url=proxy_url, broker=broker, timeout=5.0,
+@@ -1428,6 +1452,49 @@
+         )
+         if detail is not None:
+             results.append(detail)
++    template_controls: dict[str, tuple[int | None, dict[str, str], bytes]] = {}
++    for template in sorted(templates):
++        resource = template.strip("/").split("/")[1].casefold()
++        detail_url = collection_details.get(resource)
++        if detail_url is None:
++            continue
++        bound = _bind_collection_template(template, detail_url)
++        if bound is None:
++            continue
++        url = urljoin(base_url, bound)
++        if url in probed_urls or detail_probes >= ADAPTIVE_MAX_DETAIL_PROBES:
++            continue
++        if target_policy is not None and not target_policy.allows_url(url, method="GET"):
++            continue
++        probed_urls.add(url)
++        detail_probes += 1
++        parent = url.rpartition("/")[0]
++        control_url = parent + "/__aidast_missing_control__"
++        if control_url not in template_controls:
++            template_controls[control_url] = _http_request(
++                control_url, headers=headers, target_policy=target_policy,
++                proxy_url=proxy_url, broker=broker, timeout=5.0,
++            )
++        control_status, control_headers, control_body = template_controls[control_url]
++        if control_status is None or (control_status == 403 and control_body == _POLICY_BLOCK_BODY):
++            continue
++        status, response_headers, body = _http_request(
++            url, headers=headers, target_policy=target_policy,
++            proxy_url=proxy_url, broker=broker, timeout=5.0,
++        )
++        if not _positive_json_response(status, response_headers, body):
++            continue
++        candidate_fp = _fingerprint(status, response_headers, body, request_url=url)
++        control_fp = _fingerprint(control_status, control_headers, control_body, request_url=control_url)
++        if candidate_fp == control_fp or (control_status >= 500 and candidate_fp[1:] == control_fp[1:]):
++            continue
++        results.append({
++            "method": "GET", "path": urlparse(url).path, "url": url,
++            "source": "adaptive_js_template", "discovery_kind": "js_template_bound",
++            "content_type": _media_type(response_headers),
++            "evidence": {"response_status": status, "path_template": template,
++                         "id_source": detail_url.rpartition("/")[0]},
++        })
+     if diagnostic_callback is not None:
+         diagnostic_callback(
+             "completed", component="adaptive_js",

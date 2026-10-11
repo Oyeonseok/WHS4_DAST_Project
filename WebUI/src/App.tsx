@@ -1,0 +1,1732 @@
+import { useEffect, useReducer, useRef, useState, type ReactNode } from 'react';
+import { DEMO_SCAN, DEMO_VALIDATIONS } from './data/demo';
+import { transportMode, useScanSocket } from './hooks/useScanSocket';
+import {
+  advanceEstimatedProgress,
+  currentStageProgressStatus,
+  estimatedProgressDelay,
+  formatActivityElapsed,
+  hideAcknowledgedActivity,
+  initialEstimatedProgress,
+  initialScopeActivityState,
+  isScopeActivityActive,
+  mergeActivityLogs,
+  reduceScopeActivity,
+  scopeCollectionProgress,
+  reconCollectionProgress,
+  startScopeElapsedClock,
+  startScopeJobPolling,
+  shouldPollScopeJob,
+  type ScopeActivityEvent,
+} from './lib/activity';
+import { displayStageStatus, mergeReconActivityLogs, parseReconActivityPage, reconDiscoveries, stages, type Finding, type Log, type ReportDraftStatus, type Snapshot } from './lib/events';
+import { coverageMetrics, coverageStatusLabels, type AttackCoverage, type HypothesisCoverage } from './lib/attackCoverage';
+import { agentNames, agentNamesEn, agentOrder, localizeActivityMessage, localizeAuditEventType, reconActivityPurpose } from './lib/activityMessages';
+import { auditLevel, readAuditAcknowledgements, saveAuditAcknowledgements, type AuditEntry } from './lib/audit';
+import { initialLanguage, translate, type Language } from './lib/i18n';
+import {
+  canLaunchWithHeaderInputs,
+  createHeaderRequirementsResolver,
+  headerIdentityValues,
+  applicablePolicyRequirements,
+  canLaunchWithPolicyInputs,
+  policyLaunchValues,
+  policyConfirmationKeys,
+  validPolicyInput,
+  sharedPolicyInputConflicts,
+  type ScopeExecutionRules,
+  type ExclusionPreparation,
+  isValidTagBatchSize,
+  bugBountyTargetReady,
+  resolveExecutionLimits,
+  scanRetryAction,
+  type ExecutionProfileId,
+  type RequiredRequestHeader,
+  type ScopeExecutionRequirements,
+  approvedScopeSelection,
+  validStartUrl,
+} from './lib/scan';
+import { createScopeResponseGuard, isValidScopeModel, programRegistrationUrlError, scopeRequestForStatus, selectApprovedScope } from './lib/scope';
+import type { PolicyReferenceSummary } from './lib/scope';
+import { ScopePolicyReferences } from './components/ScopePolicyReferences';
+import { apiErrorMessage } from './lib/transport';
+import { activityHeightBounds, clampPanelWidth, panelBounds } from './lib/layout';
+import { filterFindings, findingVerdict, findingValidationStatus, knownSourceCase, parseValidationCases, reportCaseForFinding, type FindingVerdict, type ValidationCase, type ValidationStatus } from './lib/validation';
+import { ResizeHandle } from './components/ResizeHandle';
+import { ManualLoginNotice } from './components/ManualLoginNotice';
+import { OperatorActions } from './components/OperatorActions';
+import { ScopeExecutionRules as ScopeExecutionRulesView, ScopeExclusionStatus, ScopePolicyAdvisories } from './components/ScopeExecutionRules';
+import { ScopeHeaderRequirements } from './components/ScopeHeaderRequirements';
+import { ReportSubmission } from './components/ReportSubmission';
+import { reportLanguageChoices } from './lib/reportSubmission';
+import { confirmedReportSummaries, requestReportSummaries, requestScanExecutionSummary, type ReportSummary, type ScanExecutionSummary } from './lib/reports';
+import { useManualLogin } from './hooks/useManualLogin';
+import { useOperatorActions } from './hooks/useOperatorActions';
+import { parseScanTokenUsage, type ScanTokenUsage, type TokenBucket } from './lib/modelCalls';
+import { ModelCallLog } from './components/ModelCallLog';
+
+const pages = ['Overview', 'Scopes / Programs', 'Scans', 'Findings', 'Validation', 'Reports', 'Audit log', 'LLM log', 'Settings'] as const;
+type Page = typeof pages[number];
+type ScanSummary = { scan_id: string; status: Snapshot['status']; started_at: string; finished_at: string | null; targets?: string[] };
+type AttackTask = { coverage?: HypothesisCoverage | null; task_id: string; skill_name: string; status: string; selection_reasons: string[]; observed_urls: { method: string; url: string; hint: string }[]; attempt_count: number; recent_attempts: { method: string; url: string | null; outcome: string }[] };
+type AttackTaskSnapshot = { coverage?: AttackCoverage | null; total_attempt_count?: number; scan_id: string; stage_run_id: string | null; stage_status?: string; tasks: AttackTask[]; attempt_count: number };
+type ScopeTarget = { asset_type: string; asset: string; description: string; maximum_severity: string };
+type ApprovedScope = { scope_id: string; program_id: string; program_name: string; platform: string; targets: ScopeTarget[]; identity_header: 'hackerone' | 'intigriti' | null; approved_by: string; execution_requirements: ScopeExecutionRequirements };
+type ScopeStatus = 'scope_required' | 'collecting' | 'awaiting_browser' | 'paused' | 'cancelling' | 'cancelled' | 'review_required' | 'approved' | 'rejected' | 'failed';
+type RegisteredProgram = { id: string; platform: string; program: string; visibility: 'public' | 'private'; scope_status: ScopeStatus; scope_job_id?: string; scope_model?: string | null; scope_error?: string | null; scope_updated_at?: string; created_at: string };
+type ScopeDraftAsset = ScopeTarget & { eligibility: string };
+type ScopeDraft = { scope_id: string; created_at: string; source_url: string; program_name: string; program_description: string; in_scope_assets: ScopeDraftAsset[]; out_of_scope_assets: ScopeDraftAsset[]; allowed_activities: string[]; prohibited_activities: string[]; submission_requirements: string[]; operational_constraints: string[]; safe_harbor: string; ambiguities: string[]; source_evidence: { section: string; quote: string }[]; required_request_headers?: RequiredRequestHeader[] | null; execution_rules?: ScopeExecutionRules | null; policy_references?: PolicyReferenceSummary[] };
+type ScopeApproval = { approved_by: string; approved_at: string };
+type ThemeChoice = 'system' | 'dark' | 'light';
+type TokenUsageState = { scanId: string; data: ScanTokenUsage | null; error: boolean };
+const scopeStatusLabel: Record<ScopeStatus, string> = { scope_required: 'Scope required', collecting: 'Collecting', awaiting_browser: 'Login required', paused: 'Paused', cancelling: 'Cancelling', cancelled: 'Cancelled', review_required: 'Review Yes / No', approved: 'Approved', rejected: 'Rejected', failed: 'Failed' };
+const scopeStatusTone = (status: ScopeStatus) => status === 'approved' ? 'success' : status === 'failed' || status === 'rejected' ? 'critical' : status === 'cancelled' ? '' : 'warning';
+const THEME_KEY = 'aidast-theme';
+const modelNamePattern = /^[A-Za-z0-9][A-Za-z0-9_.:/-]{0,127}$/;
+const codexModels = [
+  'gpt-5.6-luna', 'gpt-5.6-terra', 'gpt-5.6-sol',
+  'gpt-6.1-sol', 'gpt-6-luna', 'gpt-6-sol', 'gpt-6-astra',
+] as const;
+function ScanModelField({ label, value, onChange, customLabel, disabled = false }: {
+  label: string; value: string; onChange: (value: string) => void; customLabel: string; disabled?: boolean;
+}) {
+  const selected = codexModels.some(model => model === value) ? value : '';
+  return <div className="form-field">
+    <span>{label}</span>
+    <select aria-label={label} disabled={disabled} value={selected} onChange={event => onChange(event.target.value)}>
+      {codexModels.map(model => <option key={model} value={model}>{model}</option>)}
+      <option value="">{customLabel}</option>
+    </select>
+    {!selected && <input aria-label={`${label} · ${customLabel}`} disabled={disabled} value={value} onChange={event => onChange(event.target.value)} maxLength={128} autoComplete="off" spellCheck={false}/>}
+  </div>;
+}
+const attackSkillLabels: Record<string, string> = {
+  'hunt-auth-bypass': '인증 우회 점검',
+  'hunt-cors': 'CORS 설정 점검',
+  'hunt-session': '세션 관리 점검',
+};
+const attackReasonLabels: Record<string, string> = {
+  'authentication endpoint': '인증 관련 엔드포인트 발견',
+  'authenticated endpoint': '인증이 필요한 엔드포인트 발견',
+  'CORS response signal': 'CORS 관련 응답 헤더 발견',
+  'session response signal': '세션 관련 응답 헤더 발견',
+  'session endpoint': '세션 관련 엔드포인트 발견',
+};
+const attackTaskStatusLabels: Record<string, string> = { pending: '대기', running: '진행 중', completed: '완료', skipped: '건너뜀', failed: '실패', cancelled: '취소' };
+const attackTaskStatusLabelsEn: Record<string, string> = { pending: 'Pending', running: 'Running', completed: 'Completed', skipped: 'Skipped', failed: 'Failed', cancelled: 'Cancelled' };
+const attackOutcomeLabels: Record<string, string> = { negative: '취약점 징후 없음', confirmed: '확인됨', lead: '추가 확인 필요', inconclusive: '판단 보류', blocked: '차단됨', error: '오류' };
+const attackOutcomeLabelsEn: Record<string, string> = { negative: 'No vulnerability signal', confirmed: 'Confirmed', lead: 'Needs further review', inconclusive: 'Inconclusive', blocked: 'Blocked', error: 'Error' };
+const attackSkillLabelsEn: Record<string, string> = { 'hunt-auth-bypass': 'Authentication bypass check', 'hunt-cors': 'CORS configuration check', 'hunt-session': 'Session management check' };
+const attackReasonLabelsEn: Record<string, string> = { 'authentication endpoint': 'Authentication endpoint found', 'authenticated endpoint': 'Authenticated endpoint found', 'CORS response signal': 'CORS response header found', 'session response signal': 'Session response header found', 'session endpoint': 'Session endpoint found' };
+const demoAuditEntries: AuditEntry[] = [
+  { id: 'demo-4', created_at: '2026-09-20T05:28:24Z', event_type: 'finding.created', stage: 'Attack' },
+  { id: 'demo-3', created_at: '2026-09-20T05:28:12Z', event_type: 'request.authorized', stage: 'Attack' },
+  { id: 'demo-2', created_at: '2026-09-20T05:28:09Z', event_type: 'pipeline.materialized', stage: 'Recon' },
+  { id: 'demo-1', created_at: '2026-09-20T05:28:00Z', event_type: 'scope.verified', stage: 'Scope' },
+];
+const auditFailureLabels: Record<string, [string, string]> = {
+  timeout: ['시간 초과', 'Timed out'],
+  rate_limit: ['요청 제한 또는 예산 초과', 'Rate limit or request budget reached'],
+  access_denied: ['접근 권한 거부', 'Access denied'],
+  network: ['네트워크 또는 DNS 연결 문제', 'Network or DNS connection problem'],
+  tool_unavailable: ['실행 도구를 찾을 수 없음', 'Required tool unavailable'],
+};
+function savedTheme(): ThemeChoice {
+  const value = localStorage.getItem(THEME_KEY);
+  return value === 'dark' || value === 'light' || value === 'system' ? value : 'system';
+}
+const slugs = ['overview', 'scopes', 'scans', 'findings', 'validation', 'reports', 'audit', 'llm', 'settings'];
+const symbols = ['overview', 'scope', 'scan', 'shield', 'check', 'report', 'logs', 'terminal', 'settings'];
+function Icon({ name, size = 18 }: { name: string; size?: number }) {
+  const paths: Record<string, ReactNode> = {
+    overview: <><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></>,
+    scope: <><circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="3"/><path d="M12 1v4M12 19v4M1 12h4M19 12h4"/></>,
+    scan: <><path d="M4 8V4h4M16 4h4v4M20 16v4h-4M8 20H4v-4M7 12h10M12 7v10"/></>,
+    shield: <><path d="m12 3 8 4v5c0 5-5 8-8 9-3-1-8-4-8-9V7z"/><path d="M12 8v5M12 16h.01"/></>,
+    check: <path d="m5 12 4 4L19 6"/>,
+    report: <><path d="M6 3h9l4 4v14H6zM14 3v5h5M9 12h7M9 16h7"/></>,
+    logs: <><path d="M4 5h16M4 12h16M4 19h16M8 3v4M15 10v4M10 17v4"/></>,
+    settings: <><circle cx="12" cy="12" r="4"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M5 5l2 2M17 17l2 2M5 19l2-2M17 7l2-2"/></>,
+    arrow: <path d="M4 12h16m-6-6 6 6-6 6"/>,
+    search: <><circle cx="10" cy="10" r="6"/><path d="m15 15 5 5"/></>,
+    lock: <><rect x="5" y="10" width="14" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3M12 14v3"/></>,
+    pulse: <path d="M2 12h5l3-8 4 16 3-8h5"/>,
+    plus: <path d="M12 5v14M5 12h14"/>,
+    terminal: <><path d="m4 6 6 6-6 6M13 18h7"/></>,
+    sun: <><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></>,
+    moon: <path d="M20 15.2A8 8 0 0 1 8.8 4 8.5 8.5 0 1 0 20 15.2z"/>,
+  };
+  return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.65" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{paths[name] || paths.shield}</svg>;
+}
+function Badge({ children, tone = '' }: { children: ReactNode; tone?: string }) { return <span className={`badge ${tone}`}>{children}</span>; }
+function tokenUsageLabel(language: Language, bucket: TokenBucket | undefined, state: 'loading' | 'ready' | 'error'): string {
+  const tr = (key: string) => translate(language, key);
+  if (state === 'loading') return tr('Loading token usage');
+  if (state === 'error') return tr('Token usage could not load');
+  if (!bucket || bucket.measured_calls + bucket.unreported_calls === 0) return tr('No token records');
+  const tokens = bucket.measured_calls ? `${bucket.total_tokens.toLocaleString(language === 'ko' ? 'ko-KR' : 'en-US')} ${tr('tokens')}` : '';
+  const missing = bucket.unreported_calls ? tr('{count} calls unmeasured').replace('{count}', String(bucket.unreported_calls)) : '';
+  return [tokens, missing].filter(Boolean).join(' · ');
+}
+function Panel({ title, subtitle, action, children, className = '' }: { title: string; subtitle?: string; action?: ReactNode; children: ReactNode; className?: string }) {
+  return <section className={`panel ${className}`}><div className="panel-heading"><div><h2>{title}</h2>{subtitle && <p>{subtitle}</p>}</div>{action}</div>{children}</section>;
+}
+function VerifiedScopeDetails({ draft, approval, language, onScan }: { draft: ScopeDraft; approval: ScopeApproval; language: Language; onScan: () => void }) {
+  const tr = (label: string) => translate(language, label);
+  const groups = [
+    ['Allowed', draft.allowed_activities], ['Prohibited', draft.prohibited_activities],
+    ['Submission requirements', draft.submission_requirements], ['Operational constraints', draft.operational_constraints],
+    ['Ambiguities to verify', draft.ambiguities],
+  ] as const;
+  return <div className="scope-workflow">
+    <div className="scope-review-heading"><div><span>{tr('APPROVED SCOPE')}</span><h3>{draft.program_name}</h3></div><code>{draft.scope_id}</code></div>
+    <div className="scope-catalog-meta"><p>{draft.program_description}</p><p>{tr('Collected from')}: {draft.source_url}</p><p>{tr('Approved by')} {approval.approved_by} · {new Date(approval.approved_at).toLocaleString(language === 'ko' ? 'ko-KR' : undefined)}</p></div>
+    {([['In scope', draft.in_scope_assets], ['Out of scope', draft.out_of_scope_assets]] as const).map(([title, assets]) => <details className="scope-review-section" key={title} open={title === 'In scope'}><summary>{tr(title)} <span>{assets.length}</span></summary><div className="scope-asset-list">{assets.map((asset, index) => <div key={`${asset.asset}:${index}`}><Badge tone={title === 'In scope' ? 'success' : 'critical'}>{asset.asset_type}</Badge><div><strong className="mono">{asset.asset}</strong><p>{asset.description || asset.eligibility || tr('No additional description.')}</p></div><small>{asset.maximum_severity || tr('Policy limit')}</small></div>)}</div></details>)}
+    <div className="scope-rule-grid">{groups.map(([title, items]) => <details className="scope-rule-item" key={title}><summary>{tr(title)} <span>{items.length}</span></summary><ul>{items.length ? items.map((item, index) => <li key={index}>{item}</li>) : <li>{tr('None extracted.')}</li>}</ul></details>)}</div>
+    <ScopeHeaderRequirements headers={draft.required_request_headers} open tr={tr}/>
+    <ScopeExecutionRulesView rules={draft.execution_rules} open/>
+    <ScopePolicyReferences references={draft.policy_references} language={language}/>
+    <details className="scope-evidence"><summary>{tr('Source evidence and safe harbor')} <span>{draft.source_evidence.length}</span></summary><div className="scope-evidence-section"><strong>{tr('Safe harbor')}</strong><p>{draft.safe_harbor || tr('No safe-harbor text was extracted.')}</p></div><div className="scope-evidence-section"><strong>{tr('Source evidence')}</strong>{draft.source_evidence.map((item, index) => <blockquote key={index}><strong>{item.section}</strong>{item.quote}</blockquote>)}</div></details>
+    <div className="button-row"><button className="primary-button" onClick={onScan}>{language === 'ko' ? '이 Scope로 새 스캔' : 'New scan with this Scope'} <Icon name="arrow" size={14}/></button></div>
+  </div>;
+}
+function Empty({ title, children }: { title: string; children: ReactNode }) { return <div className="empty"><Icon name="lock" size={26}/><h3>{title}</h3><p>{children}</p></div>; }
+function Pipeline({ snapshot, language, reportDraft, tokenUsage, tokenStatus }: {
+  snapshot: Snapshot; language: Language; reportDraft: ReportDraftStatus;
+  tokenUsage?: ScanTokenUsage | null; tokenStatus: 'loading' | 'ready' | 'error';
+}) {
+  const labels: Record<string, string> = language === 'ko'
+    ? { completed: '완료', skipped: '건너뜀', failed: '실패', blocked: '차단', pending: '대기', running: '진행 중', paused: '일시정지', cancelled: '취소됨', not_created: '미작성', unknown: '확인 중' }
+    : { completed: 'Completed', skipped: 'Skipped', failed: 'Failed', blocked: 'Blocked', pending: 'Pending', running: 'Running', paused: 'Paused', cancelled: 'Cancelled', not_created: 'Not drafted', unknown: 'Checking' };
+  return <ol className="pipeline" aria-label={translate(language, 'Scan workflow')}>{stages.map((stage, index) => {
+    const status = displayStageStatus(snapshot, stage, reportDraft);
+    const done = status === 'completed';
+    return <li key={stage} className={done ? 'done' : status === 'running' ? 'current' : status === 'skipped' ? 'skipped' : ''}>
+      <span className="stage-number">{done ? <Icon name="check" size={13}/> : String(index + 1).padStart(2,'0')}</span>
+      <strong>{translate(language, stage)}</strong>
+      <small>{status === 'running' && stage === snapshot.stage ? `${snapshot.progress}% · ${labels[status]}` : labels[status] || status}</small>
+      {tokenUsage !== undefined && (done || status === 'running' || !!tokenUsage?.stages[stage]?.measured_calls || !!tokenUsage?.stages[stage]?.unreported_calls)
+        && <small className="stage-token-usage">{stage === 'Scope'
+          ? translate(language, 'Scope tokens separate from scan')
+          : tokenUsageLabel(language, tokenUsage?.stages[stage], tokenStatus)}</small>}
+    </li>;
+  })}</ol>;
+}
+function useEstimatedProgress(identity: string, actual: number, status: string): number {
+  const baseline = initialEstimatedProgress(actual, status);
+  const [state, setState] = useState(() => ({ identity, value: baseline, status }));
+  const shown = state.identity === identity ? state.value : baseline;
+  useEffect(() => {
+    if (state.identity !== identity) {
+      setState({ identity, value: baseline, status });
+      return;
+    }
+    const mode = status === 'running' ? 'running' : status === 'completed' ? 'completed' : 'paused';
+    const delay = estimatedProgressDelay(shown, actual, mode);
+    if (delay === null) {
+      if (state.status !== status) setState({ identity, value: shown, status });
+      return;
+    }
+    const next = advanceEstimatedProgress(shown, mode);
+    const timer = window.setTimeout(() => {
+      setState({ identity, value: next, status });
+    }, delay);
+    return () => window.clearTimeout(timer);
+  }, [identity, actual, status, state.identity, state.status, shown, baseline]);
+  return shown;
+}
+function download(name: string, content: string) {
+  const url = URL.createObjectURL(new Blob([content], { type: 'text/markdown;charset=utf-8' }));
+  const a = document.createElement('a'); a.href = url; a.download = name; a.click(); window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+const sampleReport = '# 데모 — 로컬 보고서 초안\n\n합성 픽스처만 사용했습니다. 실제 프로그램이나 대상은 테스트하지 않았습니다.\n\n## 취약점 F-0040\n응답 헤더의 서버 버전 노출(CWE-200)\n심각도: 낮음 · 픽스처 검토 상태: 확정\n\n## 재현\n합성 GET /health 픽스처에 서버 버전 헤더가 포함됩니다.\n반복 픽스처와 대조군 픽스처를 비교했습니다.\n\n## 영향\n격리된 데모 환경에서 제한적인 정보 노출이 발생합니다.\n실제 운영 환경에 대한 영향은 주장하지 않습니다.\n\n## 조치 방법\n불필요한 서버 버전 헤더를 제거합니다.\n\n이 로컬 초안은 어떤 플랫폼에도 제출되지 않았습니다.\n';
+const sampleReportEn = "# Demo — local report draft\n\nOnly synthetic fixtures were used. No real program or target was tested.\n\n## Finding F-0040\nServer version disclosed in response header (CWE-200)\nSeverity: Low · Fixture review status: Confirmed\n\n## Reproduction\nThe synthetic GET /health fixture includes a server version header.\nRepeated fixtures were compared with a control fixture.\n\n## Impact\nLimited information disclosure occurs in the isolated demo environment.\nNo impact on a production environment is claimed.\n\n## Remediation\nRemove unnecessary server version headers.\n\nThis local draft was not submitted to any platform.\n";
+const demoFindingTitleEn: Record<string, string> = {
+  'F-0042': 'Object access differs across test accounts',
+  'F-0041': 'Input reflected in search response',
+  'F-0040': 'Server version disclosed in response header',
+  'F-0039': 'Response security header missing',
+  'F-0038': 'Server version disclosed again',
+};
+const verdictLabels: Record<FindingVerdict, string> = {
+  tp: 'TP · verified',
+  fp: 'FP · disproven',
+  duplicate: 'Matched earlier case',
+  pending: 'Awaiting validation',
+  inconclusive: 'No final verdict',
+};
+const validationStatusLabels: Record<ValidationStatus, string> = {
+  CONFIRMED: 'TP · verified', DISPROVEN: 'FP · disproven', KNOWN: 'Matched earlier case',
+  OUT_OF_SCOPE: 'Out of scope verdict', UNDERPOWERED: 'Insufficient impact proof',
+  BLOCKED: 'Validation blocked', INCONCLUSIVE: 'No final verdict', CONTESTED: 'Conflicting verdict',
+};
+const demoReport: ReportSummary = {
+  report_id: 'DEMO-Report', scan_id: DEMO_SCAN, case_id: 'case-demo-40',
+  platform: 'local', title: '서버 버전 노출', created_at: '2026-09-20T05:26:24Z',
+};
+
+function ValidationImpact({ decision, language }: { decision: ValidationCase['decision']; language: 'ko' | 'en' }) {
+  const tk = (ko: string, en: string) => language === 'ko' ? ko : en;
+  if (!decision) return null;
+  const labels = { boundary: tk('권한 경계', 'Boundary'), sensitivity: tk('보호 정보·행위', 'Sensitivity'), actor_requirements: tk('공격 조건', 'Actor requirements') };
+  return <div className="validation-impact">
+    {decision.reason === 'http_runtime_contract_missing' && <p>{tk('재현 명세가 없어 검증 요청을 실행하지 못한 기록입니다. 현재 버전은 재검증 시 명세 보완을 시도합니다.', 'This record stopped without requests because replay metadata was missing. The current version attempts to prepare it during revalidation.')}</p>}
+    {decision.reason === 'replay_preparation_insufficient_context' && <p>{tk('재현 요청 보완을 시도했지만 수집된 정보가 부족했습니다.', 'Replay preparation was attempted, but captured context was insufficient.')}</p>}
+    {decision.reason === 'replay_preparation_invalid' && <p>{tk('재현 요청 보완을 시도했지만 실행 가능한 명세를 구성하지 못했습니다.', 'Replay preparation was attempted, but a runnable contract could not be constructed.')}</p>}
+    {decision.reason === 'replay_preparation_failed' && <p>{tk('재현 요청 보완 단계에서 오류가 발생했습니다. 검증 요청은 실행되지 않았습니다.', 'Replay preparation failed. Verification requests were not executed.')}</p>}
+    {decision.reason === 'replay_preparation_runtime_unsupported' && <p>{tk('이 검증 유형은 HTTP 외의 재현 방식이 필요하여 명세를 자동 보완하지 못했습니다.', 'This validation type needs a non-HTTP runtime, so replay metadata could not be prepared automatically.')}</p>}
+    {typeof decision.reproduced === 'boolean' && <p><strong>{tk('재현 여부', 'Reproduction')}</strong> · {decision.reproduced ? tk('재현됨', 'Reproduced') : tk('재현되지 않음', 'Not reproduced')}</p>}
+    {decision.severity && <p><strong>{tk('검증 영향 평가', 'Validation impact estimate')}</strong> · {translate(language, decision.severity)}{decision.impact_score !== undefined ? ` · ${decision.impact_score}/9` : ''}</p>}
+    {decision.impact_axes && <dl>{(Object.keys(labels) as (keyof typeof labels)[]).map(key => {
+      const axis = decision.impact_axes?.[key];
+      return axis ? <div key={key}><dt>{labels[key]} · {axis.score}/3</dt>{axis.reason && <dd>{axis.reason}</dd>}</div> : null;
+    })}</dl>}
+  </div>;
+}
+
+export default function App() {
+  const getPage = () => pages[Math.max(0, slugs.indexOf(location.hash.slice(1)))];
+  const [page, setPage] = useState<Page>(getPage);
+  const [search, setSearch] = useState('');
+  const [severity, setSeverity] = useState('All severities');
+  const [verdictFilter, setVerdictFilter] = useState<FindingVerdict | 'all'>('all');
+  const [privateVisible, setPrivateVisible] = useState(false);
+  const [modal, setModal] = useState<'new' | 'scan-progress' | 'scope' | 'scope-workflow' | 'verified-scope' | 'finding' | 'report' | null>(null);
+  const [selectedFinding, setSelectedFinding] = useState<Finding | null>(null);
+  const [level, setLevel] = useState('All levels');
+  const [stageFilter, setStageFilter] = useState('All stages');
+  const [logSearch, setLogSearch] = useState('');
+  const [paused, setPaused] = useState(false);
+  const [compact, setCompact] = useState(false);
+  const [collapsed, setCollapsed] = useState(() => window.matchMedia('(max-width: 900px)').matches);
+  const [viewportWidth, setViewportWidth] = useState(() => window.innerWidth);
+  const [viewportHeight, setViewportHeight] = useState(() => window.innerHeight);
+  const [navigationPreference, setNavigationPreference] = useState(() => Number(localStorage.getItem('aidast:navigation-width')) || 214);
+  const [activityPreference, setActivityPreference] = useState(() => Number(localStorage.getItem('aidast:activity-width')) || 350);
+  const [activityHeightPreference, setActivityHeightPreference] = useState(() => Number(localStorage.getItem('aidast:activity-height')) || 620);
+  const [theme, setTheme] = useState<ThemeChoice>(savedTheme);
+  const [resolvedTheme, setResolvedTheme] = useState<'dark' | 'light'>('dark');
+  const [language, setLanguage] = useState<Language>(initialLanguage);
+  const dialog = useRef<HTMLDialogElement>(null);
+  const navigation = useRef<HTMLElement>(null);
+  const stream = useRef<HTMLDivElement>(null);
+  const demo = transportMode === 'demo';
+  const samplePreview = demo && import.meta.env.VITE_TRANSPORT === 'live';
+  const sampleUrl = new URL(location.href);
+  sampleUrl.searchParams.set('sample', '1');
+  const liveUrl = new URL(location.href);
+  liveUrl.searchParams.delete('sample');
+  const configuredScanId = demo ? DEMO_SCAN : import.meta.env.VITE_SCAN_ID || '';
+  const [scanId, setScanId] = useState<string>(configuredScanId);
+  const [scanOptions, setScanOptions] = useState<ScanSummary[]>([]);
+  const [scopes, setScopes] = useState<ApprovedScope[]>([]);
+  const [scopesLoading, setScopesLoading] = useState(!demo);
+  const [catalogScopeId, setCatalogScopeId] = useState('');
+  const [catalogScopeDraft, setCatalogScopeDraft] = useState<ScopeDraft | null>(null);
+  const [catalogScopeApproval, setCatalogScopeApproval] = useState<ScopeApproval | null>(null);
+  const [catalogScopeError, setCatalogScopeError] = useState('');
+  const [catalogScopeSummaryOnly, setCatalogScopeSummaryOnly] = useState(false);
+  const [registeredPrograms, setRegisteredPrograms] = useState<RegisteredProgram[]>([]);
+  const [scopeProgramUrl, setScopeProgramUrl] = useState('');
+  const [scopeVisibility, setScopeVisibility] = useState<'public' | 'private'>('public');
+  const [scopeSubmitting, setScopeSubmitting] = useState(false);
+  const [scopeError, setScopeError] = useState('');
+  const [workflowProgram, setWorkflowProgram] = useState<RegisteredProgram | null>(null);
+  const [scopeActivity, dispatchScopeActivity] = useReducer(reduceScopeActivity, initialScopeActivityState);
+  const scopeEvents = scopeActivity.events;
+  const scopePolling = scopeActivity.polling;
+  const [scopeClock, setScopeClock] = useState(() => Date.now());
+  const [scanClock, setScanClock] = useState(() => Date.now());
+  const [scopeDraft, setScopeDraft] = useState<ScopeDraft | null>(null);
+  const [scopeApproval, setScopeApproval] = useState<ScopeApproval | null>(null);
+  const [scopeReviewer, setScopeReviewer] = useState('');
+  const [scopeConfirmed, setScopeConfirmed] = useState(false);
+  const [scopeActionBusy, setScopeActionBusy] = useState(false);
+  const [scopeResponses] = useState(createScopeResponseGuard);
+  const [scopeWorkflowError, setScopeWorkflowError] = useState('');
+  const [scopeModel, setScopeModel] = useState('gpt-5.6-sol');
+  const [scopeId, setScopeId] = useState('');
+  const [selectedTargets, setSelectedTargets] = useState<string[]>([]);
+  const [scanProfile, setScanProfile] = useState<ExecutionProfileId>('bug-bounty-safe');
+  const [reconModel, setReconModel] = useState('gpt-6.1-sol');
+  const [attackModel, setAttackModel] = useState('gpt-6.1-sol');
+  const [validationModel, setValidationModel] = useState('gpt-6-sol');
+  const [reportModel, setReportModel] = useState('gpt-6.1-sol');
+  const [maxRequests, setMaxRequests] = useState(300);
+  const [maxRps, setMaxRps] = useState(0.2);
+  const [maxConcurrency, setMaxConcurrency] = useState(1);
+  const [timeoutSeconds, setTimeoutSeconds] = useState(15);
+  const [maxDepth, setMaxDepth] = useState(2);
+  const [ffufMaxTimeSeconds, setFfufMaxTimeSeconds] = useState(60);
+  const [startUrl, setStartUrl] = useState('');
+  const [tagBatchSize, setTagBatchSize] = useState(25);
+  const [policyValues, setPolicyValues] = useState<Record<string, string>>({});
+  const [identityValues, setIdentityValues] = useState<Record<string, string>>({});
+  const [headerResolution, setHeaderResolution] = useState<{ scopeId: string; error: string } | null>(null);
+  const [resolveHeaderRequirements] = useState(() => createHeaderRequirementsResolver(async (id: string) => {
+    const base = import.meta.env.VITE_API_BASE_URL || location.origin;
+    const response = await fetch(new URL(`/api/v1/scopes/${encodeURIComponent(id)}/execution-requirements`, base), {
+      method: 'POST', credentials: 'same-origin', cache: 'no-store',
+    });
+    const body = await response.json() as { scope?: ApprovedScope; detail?: unknown };
+    if (!response.ok || !body.scope) throw new Error(apiErrorMessage(body.detail, `Scope execution interpretation returned ${response.status}`));
+    const scope = body.scope;
+    if (scope.scope_id !== id || scope.execution_requirements.execution_requirements_status !== 'ready'
+      || scope.execution_requirements.execution_rules == null
+      || !Array.isArray(scope.execution_requirements.policy_inputs) || !Array.isArray(scope.execution_requirements.policy_confirmations)
+      || !Array.isArray(scope.execution_requirements.policy_blockers)
+      || !Array.isArray(scope.execution_requirements.required_headers) || !Array.isArray(scope.execution_requirements.header_inputs)) {
+      throw new Error('Scope execution requirements are not ready.');
+    }
+    return scope;
+  }));
+  const [loginMode, setLoginMode] = useState<'none' | 'runtime-browser'>('none');
+  const [authorizationConfirmed, setAuthorizationConfirmed] = useState(false);
+  const [launching, setLaunching] = useState(false);
+  const [launchError, setLaunchError] = useState('');
+  const [exclusionPreparation, setExclusionPreparation] = useState<ExclusionPreparation | null>(null);
+  const [preparingExclusions, setPreparingExclusions] = useState(false);
+  const exclusionGeneration = useRef(0);
+  const [repeatSource, setRepeatSource] = useState<{ scanId: string; scopeId: string; targets: string[] } | null>(null);
+  const [resuming, setResuming] = useState(false);
+  const [resumeError, setResumeError] = useState('');
+  const [cancelRequest, setCancelRequest] = useState<{ scanId: string; phase: 'requesting' | 'cancelling' } | null>(null);
+  const [cancelError, setCancelError] = useState('');
+  const [pauseBusy, setPauseBusy] = useState<'pause' | 'continue' | null>(null);
+  const [pauseError, setPauseError] = useState('');
+  const [attackTaskSnapshot, setAttackTaskSnapshot] = useState<AttackTaskSnapshot | null>(null);
+  const [attackTaskError, setAttackTaskError] = useState('');
+  const [attackTaskRevision, setAttackTaskRevision] = useState(0);
+  const [tokenUsageState, setTokenUsageState] = useState<TokenUsageState | null>(null);
+  const [reconHistory, setReconHistory] = useState<{ scanId: string; logs: Log[]; nextBefore: number | null } | null>(null);
+  const [reconLoading, setReconLoading] = useState(false);
+  const [reconError, setReconError] = useState('');
+  const [reconRevision, setReconRevision] = useState(0);
+  const reconAbort = useRef<AbortController | null>(null);
+  const [auditEntries, setAuditEntries] = useState<AuditEntry[]>([]);
+  const [auditError, setAuditError] = useState('');
+  const [auditSearch, setAuditSearch] = useState('');
+  const [auditLevelFilter, setAuditLevelFilter] = useState('all');
+  const [showAcknowledgedAudit, setShowAcknowledgedAudit] = useState(false);
+  const [acknowledgedAudit, setAcknowledgedAudit] = useState(() => readAuditAcknowledgements(localStorage, scanId));
+  const [auditAckError, setAuditAckError] = useState('');
+  const [auditRevision, setAuditRevision] = useState(0);
+  const [reports, setReports] = useState<ReportSummary[]>([]);
+  const [executionSummary, setExecutionSummary] = useState<ScanExecutionSummary | null>(null);
+  const [executionSummaryError, setExecutionSummaryError] = useState('');
+  const [validationCases, setValidationCases] = useState<readonly ValidationCase[]>(demo ? DEMO_VALIDATIONS : []);
+  const [validationScanId, setValidationScanId] = useState<string | null>(demo ? DEMO_SCAN : null);
+  const [validationError, setValidationError] = useState('');
+  const [validationRevision, setValidationRevision] = useState(0);
+  const [reportError, setReportError] = useState('');
+  const [reportScanId, setReportScanId] = useState<string | null>(null);
+  const [selectedReport, setSelectedReport] = useState<ReportSummary | null>(null);
+  const [resultRoot, setResultRoot] = useState(demo ? 'Synthetic demo data (memory)' : '');
+  const { snapshot, state, error, refresh } = useScanSocket(scanId);
+  const manualLogin = useManualLogin(scanId, snapshot?.status || '', !demo && !!scanId);
+  const operatorActions = useOperatorActions(
+    scanId, !demo && !!scanId, snapshot?.status || '',
+  );
+  const tokenUsage = tokenUsageState?.scanId === scanId ? tokenUsageState.data : null;
+  const tokenStatus = tokenUsageState?.scanId === scanId
+    ? tokenUsageState.error ? 'error' : tokenUsage ? 'ready' : 'loading'
+    : 'loading';
+  const currentStageStatus = snapshot?.stage_statuses?.[snapshot.stage];
+  const scanProgressStatus = currentStageProgressStatus(snapshot?.status, currentStageStatus);
+  const scanProgressTarget = snapshot?.stage === 'Recon'
+    ? reconCollectionProgress(snapshot.progress, snapshot.logs) : snapshot?.progress ?? 0;
+  const estimatedScanProgress = useEstimatedProgress(snapshot ? `${snapshot.scan_id}:${snapshot.stage}` : scanId, scanProgressTarget, scanProgressStatus);
+  const retryAction = snapshot ? scanRetryAction(snapshot) : null;
+  const cancelling = cancelRequest?.scanId === scanId;
+  const cancelPhase = cancelling ? cancelRequest.phase : null;
+  const scopeActive = isScopeActivityActive(workflowProgram?.scope_status);
+  const scopeProgress = scopeCollectionProgress(workflowProgram?.scope_status, scopeEvents);
+  const scopeProgressStatus = workflowProgram?.scope_status;
+  const scanProgress = snapshot?.stage === 'Attack' && attackTaskSnapshot?.scan_id === snapshot.scan_id && attackTaskSnapshot.coverage?.total
+    ? snapshot.progress : estimatedScanProgress;
+  const displayedScopeProgress = useEstimatedProgress(
+    workflowProgram?.scope_job_id ?? '',
+    scopeProgress,
+    scopeProgressStatus === 'collecting' ? 'running'
+      : scopeProgressStatus === 'review_required' || scopeProgressStatus === 'approved' || scopeProgressStatus === 'rejected' ? 'completed' : 'paused',
+  );
+  const scopeWorkLabel = workflowProgram?.scope_status === 'paused' ? (language === 'ko' ? '일시정지' : 'Paused')
+    : workflowProgram?.scope_status === 'cancelling' ? (language === 'ko' ? '취소 중' : 'Cancelling') : (language === 'ko' ? '작업 중' : 'Working');
+  const scopeStartedAt = scopeEvents[0]?.occurred_at || workflowProgram?.scope_updated_at;
+  const scopeElapsedSeconds = scopeActive && scopeStartedAt
+    ? Math.max(0, Math.floor((scopeClock - Date.parse(scopeStartedAt)) / 1000))
+    : 0;
+  const scopeElapsedLabel = formatActivityElapsed(scopeElapsedSeconds, language);
+  const navigationWidth = clampPanelWidth(navigationPreference, panelBounds('navigation', viewportWidth, activityPreference));
+  const activityWidth = clampPanelWidth(activityPreference, panelBounds('activity', viewportWidth, navigationWidth));
+  const activityHeight = clampPanelWidth(activityHeightPreference, activityHeightBounds(viewportHeight, viewportWidth <= 660 ? 144 : 80));
+  const scanSummary = scanOptions.find(item => item.scan_id === scanId);
+  const scanTargets = scanSummary?.targets || [];
+  const scanTargetLabel = scanTargets.length
+    ? `${scanTargets.slice(0, 2).join(', ')}${scanTargets.length > 2 ? ` 외 ${scanTargets.length - 2}개` : ''}`
+    : snapshot?.program_name || scanId;
+  const scanElapsedSeconds = scanSummary
+    ? Math.max(0, Math.floor(((scanSummary.finished_at ? Date.parse(scanSummary.finished_at) : scanClock) - Date.parse(scanSummary.started_at)) / 1000))
+    : 0;
+  const reportDraftStatus: ReportDraftStatus = demo ? 'present' : reportScanId === scanId
+    ? validationScanId !== scanId ? 'loading'
+      : reports.some(item => item.scan_id === scanId && validationCases.some(validation => validation.case_id === item.case_id && validation.processing_phase === 'completed' && validation.current_status === 'CONFIRMED')) ? 'present' : 'absent'
+    : reportError ? 'unavailable' : 'loading';
+  useEffect(() => {
+    if (workflowProgram) {
+      dispatchScopeActivity({ type: 'program-status', status: workflowProgram.scope_status });
+    }
+  }, [workflowProgram?.scope_status]);
+  const tr = (text: string) => translate(language, text);
+  const tk = (ko: string, en: string) => language === 'ko' ? ko : en;
+  const scopeProgressBar = <div className="scope-progress"><span>{tr('Estimated Scope collection progress')}</span><strong>{displayedScopeProgress}%</strong><progress aria-label={tr('Estimated Scope collection progress')} max="100" value={displayedScopeProgress}/></div>;
+  const acknowledgeAudit = (id: string) => {
+    const next = new Set(acknowledgedAudit);
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
+    setAcknowledgedAudit(next);
+    setAuditAckError(saveAuditAcknowledgements(localStorage, scanId, next) ? '' : tk('확인 상태를 이 브라우저에 저장하지 못했습니다.', 'Could not save the acknowledgement in this browser.'));
+  };
+  const findingTitle = (finding: Finding) => demo && language === 'en' ? demoFindingTitleEn[finding.id] || finding.title : finding.title;
+  const auditMessage = (item: AuditEntry) => item.message_code === 'recon.activity' && item.message_params?.phase
+    ? localizeActivityMessage(language, { message: 'Recon activity', message_code: item.message_code, message_params: item.message_params })
+    : localizeAuditEventType(language, item.event_type);
+  const auditProblem = (item: AuditEntry) => auditLevel(item) === 'error'
+    ? item.failure_code && auditFailureLabels[item.failure_code]
+      ? auditFailureLabels[item.failure_code][language === 'ko' ? 0 : 1]
+      : tk('상세 원인은 이 기록에 남지 않았습니다.', 'The detailed cause was not recorded in this entry.')
+    : '';
+  const auditItems = demo ? demoAuditEntries : auditEntries;
+  const auditPendingCount = auditItems.filter(item => !acknowledgedAudit.has(item.id)).length;
+  const visibleAuditEntries = auditItems.filter(item => {
+    if (acknowledgedAudit.has(item.id) !== showAcknowledgedAudit) return false;
+    if (auditLevelFilter !== 'all' && auditLevel(item) !== auditLevelFilter) return false;
+    const text = `${auditMessage(item)} ${auditProblem(item)} ${item.event_type} ${item.stage} ${item.task_id || ''}`;
+    return text.toLowerCase().includes(auditSearch.trim().toLowerCase());
+  });
+  const pageLabel = (value: Page) => tr(value);
+  const go = (destination: Page) => { location.hash = slugs[pages.indexOf(destination)]; setPage(destination); setSearch(''); };
+  const refreshRegisteredPrograms = async (signal?: AbortSignal) => {
+    if (demo) return;
+    const base = import.meta.env.VITE_API_BASE_URL || location.origin;
+    const response = await fetch(new URL('/api/v1/programs', base), { signal, credentials: 'same-origin', cache: 'no-store' });
+    if (!response.ok) return;
+    const body = await response.json() as { programs?: RegisteredProgram[] };
+    if (!Array.isArray(body.programs)) return;
+    setRegisteredPrograms(body.programs);
+    setWorkflowProgram(current => current ? body.programs!.find(item => item.id === current.id) || current : null);
+  };
+  useEffect(() => { const changed = () => { setPage(getPage()); setSearch(''); }; window.addEventListener('hashchange', changed); return () => window.removeEventListener('hashchange', changed); }, []);
+  useEffect(() => {
+    const media = window.matchMedia('(max-width: 900px)');
+    const changed = () => setCollapsed(media.matches);
+    media.addEventListener('change', changed);
+    return () => media.removeEventListener('change', changed);
+  }, []);
+  useEffect(() => {
+    const resized = () => { setViewportWidth(window.innerWidth); setViewportHeight(window.innerHeight); };
+    window.addEventListener('resize', resized);
+    return () => window.removeEventListener('resize', resized);
+  }, []);
+  useEffect(() => { localStorage.setItem('aidast:navigation-width', String(navigationPreference)); }, [navigationPreference]);
+  useEffect(() => { localStorage.setItem('aidast:activity-width', String(activityPreference)); }, [activityPreference]);
+  useEffect(() => { localStorage.setItem('aidast:activity-height', String(activityHeightPreference)); }, [activityHeightPreference]);
+  useEffect(() => {
+    if (!window.matchMedia('(max-width: 660px)').matches) return;
+    navigation.current?.querySelector<HTMLElement>('.nav-item.active')?.scrollIntoView({ block: 'nearest', inline: 'center' });
+  }, [page]);
+  useEffect(() => {
+    if (!scopeActive) return;
+    const clock = startScopeElapsedClock({ onTick: setScopeClock });
+    return clock.stop;
+  }, [scopeActive, workflowProgram?.scope_job_id]);
+  useEffect(() => {
+    if (modal !== 'scan-progress' || snapshot?.status !== 'running') return;
+    setScanClock(Date.now());
+    const timer = window.setInterval(() => setScanClock(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [modal, snapshot?.status]);
+  useEffect(() => {
+    const media = window.matchMedia('(prefers-color-scheme: dark)');
+    const apply = () => {
+      const resolved = theme === 'system' ? (media.matches ? 'dark' : 'light') : theme;
+      document.documentElement.dataset.theme = resolved;
+      document.documentElement.style.colorScheme = resolved;
+      document.querySelector('meta[name="theme-color"]')?.setAttribute('content', resolved === 'dark' ? '#101419' : '#f4f7f5');
+      setResolvedTheme(resolved);
+    };
+    localStorage.setItem(THEME_KEY, theme);
+    apply();
+    media.addEventListener('change', apply);
+    return () => media.removeEventListener('change', apply);
+  }, [theme]);
+  useEffect(() => {
+    localStorage.setItem('aidast-language', language);
+    document.documentElement.lang = language;
+    document.title = language === 'ko' ? 'DDalGak — AI DAST 도구' : 'DDalGak — AI DAST tool';
+  }, [language]);
+  useEffect(() => {
+    if (demo) return;
+    const abort = new AbortController();
+    void (async () => {
+      try {
+        const base = import.meta.env.VITE_API_BASE_URL || location.origin;
+        const response = await fetch(new URL('/api/v1/health', base), { signal: abort.signal, credentials: 'same-origin', cache: 'no-store' });
+        const body = await response.json() as { result_root?: string };
+        if (response.ok && typeof body.result_root === 'string') setResultRoot(body.result_root);
+      } catch { /* Connection status is displayed separately. */ }
+    })();
+    return () => abort.abort();
+  }, [demo]);
+  useEffect(() => {
+    if (demo || !scanId || (modal !== 'scan-progress' && page !== 'Scans')) return;
+    const abort = new AbortController();
+    let fetching = false;
+    const load = async () => {
+      if (fetching) return;
+      fetching = true;
+      try {
+        const base = import.meta.env.VITE_API_BASE_URL || location.origin;
+        const response = await fetch(new URL(`/api/v1/scans/${encodeURIComponent(scanId)}/token-usage`, base), {
+          signal: abort.signal, credentials: 'same-origin', cache: 'no-store',
+        });
+        if (!response.ok) throw new Error('Token usage request failed');
+        const data = parseScanTokenUsage(await response.json(), scanId);
+        if (!data) throw new Error('Invalid token usage response');
+        if (!abort.signal.aborted) setTokenUsageState({ scanId, data, error: false });
+      } catch {
+        if (!abort.signal.aborted) setTokenUsageState({ scanId, data: null, error: true });
+      } finally {
+        fetching = false;
+      }
+    };
+    void load();
+    const timer = snapshot?.status === 'running' || snapshot?.status === 'paused'
+      ? window.setInterval(() => void load(), 4000) : undefined;
+    return () => { abort.abort(); if (timer !== undefined) window.clearInterval(timer); };
+  }, [demo, scanId, page, modal, snapshot?.status]);
+  useEffect(() => {
+    if (demo || !scanId || (modal !== 'scan-progress' && page !== 'Scans')) return;
+    if (!snapshot || snapshot.scan_id !== scanId) return;
+    if (snapshot.stage === 'Scope' || snapshot.stage === 'Recon') {
+      setAttackTaskSnapshot({ scan_id: scanId, stage_run_id: null, tasks: [], attempt_count: 0 });
+      setAttackTaskError('');
+      return;
+    }
+    const abort = new AbortController();
+    const load = async () => {
+      try {
+        const base = import.meta.env.VITE_API_BASE_URL || location.origin;
+        const response = await fetch(new URL(`/api/v1/scans/${encodeURIComponent(scanId)}/attack-tasks`, base), { signal: abort.signal, credentials: 'same-origin', cache: 'no-store' });
+        if (!response.ok) throw new Error(tk(`공격 작업 조회 실패 (${response.status})`, `Attack task lookup failed (${response.status})`));
+        const body = await response.json() as AttackTaskSnapshot;
+        if (!abort.signal.aborted && body.scan_id === scanId && Array.isArray(body.tasks)) {
+          setAttackTaskSnapshot(body); setAttackTaskError('');
+        }
+      } catch (e) {
+        if (!abort.signal.aborted) setAttackTaskError(e instanceof Error ? e.message : tk("공격 작업을 불러올 수 없습니다.", "Could not load attack tasks."));
+      }
+    };
+    void load();
+    const timer = snapshot?.status === 'running' ? window.setInterval(() => void load(), 3000) : undefined;
+    return () => { abort.abort(); if (timer !== undefined) window.clearInterval(timer); };
+  }, [demo, scanId, modal, page, snapshot?.status, snapshot?.stage, attackTaskRevision]);
+  useEffect(() => {
+    if (demo || !scanId || modal !== 'scan-progress' || snapshot?.scan_id !== scanId) return;
+    const abort = new AbortController();
+    reconAbort.current = abort;
+    setReconHistory({ scanId, logs: [], nextBefore: null });
+    setReconLoading(true);
+    setReconError('');
+    void (async () => {
+      try {
+        const base = import.meta.env.VITE_API_BASE_URL || location.origin;
+        const response = await fetch(new URL(`/api/v1/scans/${encodeURIComponent(scanId)}/recon-activity`, base), { signal: abort.signal, credentials: 'same-origin', cache: 'no-store' });
+        if (!response.ok) throw new Error(response.status === 404
+          ? tr('Recon scan not found') : `${tr('Recon history server error')} (HTTP ${response.status})`);
+        const page = parseReconActivityPage(await response.json(), scanId);
+        if (!page) throw new Error(tr('Recon history format error'));
+        if (!abort.signal.aborted) setReconHistory({ scanId, logs: page.logs, nextBefore: page.nextBefore });
+      } catch (e) {
+        if (!abort.signal.aborted) setReconError(e instanceof Error ? e.message : tr('Recon history connection error'));
+      } finally {
+        if (!abort.signal.aborted) setReconLoading(false);
+      }
+    })();
+    return () => { abort.abort(); reconAbort.current = null; };
+  }, [demo, scanId, modal, snapshot?.scan_id, reconRevision]);
+  const loadMoreRecon = async () => {
+    const before = reconHistory?.scanId === scanId ? reconHistory.nextBefore : null;
+    const abort = reconAbort.current;
+    if (before === null || !abort || reconLoading) return;
+    setReconLoading(true);
+    setReconError('');
+    try {
+      const base = import.meta.env.VITE_API_BASE_URL || location.origin;
+      const url = new URL(`/api/v1/scans/${encodeURIComponent(scanId)}/recon-activity`, base);
+      url.searchParams.set('before', String(before));
+      const response = await fetch(url, { signal: abort.signal, credentials: 'same-origin', cache: 'no-store' });
+      if (!response.ok) throw new Error(response.status === 404
+        ? tr('Recon scan not found') : `${tr('Recon history server error')} (HTTP ${response.status})`);
+      const page = parseReconActivityPage(await response.json(), scanId);
+      if (!page || page.logs.some(log => log.id >= before)) throw new Error(tr('Recon history format error'));
+      if (!abort.signal.aborted) setReconHistory(current => current?.scanId === scanId
+        ? { scanId, logs: mergeReconActivityLogs(current.logs, page.logs), nextBefore: page.nextBefore }
+        : current);
+    } catch (e) {
+      if (!abort.signal.aborted) setReconError(e instanceof Error ? e.message : tr('Recon history connection error'));
+    } finally {
+      if (!abort.signal.aborted) setReconLoading(false);
+    }
+  };
+  useEffect(() => {
+    if (demo) return;
+    const abort = new AbortController();
+    const load = async () => {
+      try {
+        const base = import.meta.env.VITE_API_BASE_URL || location.origin;
+        const response = await fetch(new URL('/api/v1/scans', base), { signal: abort.signal, credentials: 'same-origin', cache: 'no-store' });
+        if (!response.ok) return;
+        const body: unknown = await response.json();
+        if (!body || typeof body !== 'object' || !Array.isArray((body as { scans?: unknown }).scans)) return;
+        const scans = (body as { scans: unknown[] }).scans.filter((item): item is ScanSummary => {
+          if (!item || typeof item !== 'object') return false;
+          const row = item as Record<string, unknown>;
+          return typeof row.scan_id === 'string' && row.scan_id.length > 0 && row.scan_id.length <= 128 && typeof row.status === 'string' && typeof row.started_at === 'string' && (row.finished_at === null || typeof row.finished_at === 'string') && (row.targets === undefined || (Array.isArray(row.targets) && row.targets.every(target => typeof target === 'string' && target.length <= 256)));
+        });
+        setScanOptions(scans);
+        setScanId(current => scans.some(item => item.scan_id === current) ? current : scans[0]?.scan_id || current);
+      } catch { /* The snapshot hook owns visible connection errors. */ }
+    };
+    void load();
+    return () => abort.abort();
+  }, [demo]);
+  useEffect(() => {
+    if (demo) return;
+    const abort = new AbortController();
+    const load = () => void refreshRegisteredPrograms(abort.signal).catch(() => { /* Mutations surface errors in the workflow dialog. */ });
+    load();
+    const timer = page === 'Scopes / Programs' ? window.setInterval(load, 1500) : undefined;
+    return () => { abort.abort(); if (timer !== undefined) window.clearInterval(timer); };
+  }, [demo, page]);
+  useEffect(() => {
+    const programId = workflowProgram?.id;
+    if (demo || !shouldPollScopeJob({
+      hasJob: !!workflowProgram?.scope_job_id,
+      polling: scopePolling,
+      dialogOpen: modal === 'scope-workflow',
+    }) || !programId) return;
+    const poller = startScopeJobPolling({
+      repeat: scopePolling,
+      load: async signal => {
+        const base = import.meta.env.VITE_API_BASE_URL || location.origin;
+        const response = await fetch(new URL(`/api/v1/programs/${encodeURIComponent(programId)}/scope-job?after=0`, base), { signal, credentials: 'same-origin', cache: 'no-store' });
+        const body = await response.json() as { job?: Partial<RegisteredProgram>; events?: ScopeActivityEvent[]; detail?: unknown };
+        if (!response.ok || !body.job) throw new Error(tr(apiErrorMessage(body.detail, `Scope status returned ${response.status}`)));
+        let draft: ScopeDraft | undefined;
+        if (body.job.scope_status === 'review_required' && modal === 'scope-workflow') {
+          const draftResponse = await fetch(new URL(`/api/v1/programs/${encodeURIComponent(programId)}/scope-draft`, base), { signal, credentials: 'same-origin', cache: 'no-store' });
+          const draftBody = await draftResponse.json() as { draft?: ScopeDraft; detail?: unknown };
+          if (!draftResponse.ok || !draftBody.draft) throw new Error(tr(apiErrorMessage(draftBody.detail, `Scope draft returned ${draftResponse.status}`)));
+          draft = draftBody.draft;
+        }
+        return {
+          status: body.job.scope_status,
+          payload: { job: body.job, events: Array.isArray(body.events) ? body.events : [], draft },
+        };
+      },
+      onResponse: result => {
+        setWorkflowProgram(current => current ? { ...current, ...result.payload.job } : current);
+        dispatchScopeActivity({ type: 'job-response', status: result.status, events: result.payload.events });
+        if (result.payload.draft) setScopeDraft(result.payload.draft);
+      },
+      onError: error => setScopeWorkflowError(error instanceof Error ? error.message : 'Scope status could not be loaded.'),
+    });
+    return poller.stop;
+  }, [demo, modal, scopePolling, workflowProgram?.id, workflowProgram?.scope_job_id]);
+  useEffect(() => {
+    if (demo || modal !== 'scope-workflow' || workflowProgram?.scope_status !== 'approved') return;
+    const abort = new AbortController();
+    void (async () => {
+      try {
+        const base = import.meta.env.VITE_API_BASE_URL || location.origin;
+        const response = await fetch(new URL(`/api/v1/programs/${encodeURIComponent(workflowProgram.id)}/approved-scope`, base), { signal: abort.signal, credentials: 'same-origin', cache: 'no-store' });
+        const body = await response.json() as { scope?: ScopeDraft; approval?: ScopeApproval; detail?: unknown };
+        if (!response.ok || !body.scope || !body.approval) throw new Error(tr(apiErrorMessage(body.detail, `Approved Scope returned ${response.status}`)));
+        if (abort.signal.aborted) return;
+        setScopeDraft(body.scope);
+        setScopeApproval(body.approval);
+        setScopeId(body.scope.scope_id);
+        setScopeWorkflowError('');
+      } catch (error) { if (!abort.signal.aborted) setScopeWorkflowError(error instanceof Error ? error.message : tk("승인된 Scope를 불러오지 못했습니다.", "Could not load approved Scopes.")); }
+    })();
+    return () => abort.abort();
+  }, [demo, modal, workflowProgram?.id, workflowProgram?.scope_status]);
+  useEffect(() => {
+    const element = dialog.current;
+    if (modal) {
+      element?.style.removeProperty('width');
+      element?.style.removeProperty('height');
+      if (!element?.open) element?.showModal();
+      element?.scrollTo(0, 0);
+    } else if (element?.open) element.close();
+  }, [modal]);
+  useEffect(() => {
+    setAcknowledgedAudit(readAuditAcknowledgements(localStorage, scanId));
+    setAuditAckError('');
+    setShowAcknowledgedAudit(false);
+  }, [scanId]);
+  useEffect(() => {
+    if (demo || page !== 'Audit log' || !scanId) return;
+    const abort = new AbortController();
+    setAuditError('');
+    setAuditEntries([]);
+    void (async () => {
+      try {
+        const base = import.meta.env.VITE_API_BASE_URL || location.origin;
+        const response = await fetch(new URL(`/api/v1/scans/${encodeURIComponent(scanId)}/audit`, base), { signal: abort.signal, credentials: 'same-origin', cache: 'no-store' });
+        const body = await response.json() as { events?: AuditEntry[]; detail?: string };
+        if (!response.ok || !Array.isArray(body.events)) throw new Error(body.detail || `Audit request returned ${response.status}`);
+        setAuditEntries(body.events);
+      } catch (e) { if (!abort.signal.aborted) setAuditError(e instanceof Error ? e.message : 'The audit log could not be loaded.'); }
+    })();
+    return () => abort.abort();
+  }, [demo, page, scanId, auditRevision]);
+  useEffect(() => {
+    if (demo) return;
+    const abort = new AbortController();
+    setReportError('');
+    setReportScanId(null);
+    setReports([]);
+    setExecutionSummary(null);
+    setExecutionSummaryError('');
+    if (!scanId) return () => abort.abort();
+    const base = import.meta.env.VITE_API_BASE_URL || location.origin;
+    void requestReportSummaries(base, scanId, abort.signal).then(reports => {
+      if (abort.signal.aborted) return;
+      setReports(reports);
+      setReportScanId(scanId);
+    }).catch(error => {
+      if (!abort.signal.aborted) setReportError(error instanceof Error ? error.message : 'Reports could not be loaded.');
+    });
+    void requestScanExecutionSummary(base, scanId, abort.signal).then(summary => {
+      if (!abort.signal.aborted) setExecutionSummary(summary);
+    }).catch(error => {
+      if (!abort.signal.aborted) setExecutionSummaryError(error instanceof Error ? error.message : 'Scan summary could not be loaded.');
+    });
+    return () => abort.abort();
+  }, [demo, page, scanId, validationRevision, snapshot?.stage, snapshot?.status, snapshot?.stage_statuses?.Report]);
+  useEffect(() => {
+    if (demo || !scanId || !['Findings', 'Validation', 'Reports'].includes(page)) return;
+    const abort = new AbortController();
+    setValidationScanId(current => current === scanId ? current : null);
+    setValidationError('');
+    void (async () => {
+      try {
+        const base = import.meta.env.VITE_API_BASE_URL || location.origin;
+        const response = await fetch(new URL(`/api/v1/scans/${encodeURIComponent(scanId)}/validations`, base), { signal: abort.signal, credentials: 'same-origin', cache: 'no-store' });
+        if (!response.ok) throw new Error(`Validation request returned ${response.status}`);
+        const cases = parseValidationCases(await response.json(), scanId);
+        if (!cases) throw new Error('The backend returned invalid validation cases');
+        setValidationCases(cases);
+        setValidationScanId(scanId);
+      } catch (e) {
+        if (!abort.signal.aborted) {
+          setValidationScanId(null);
+          setValidationError(e instanceof Error ? e.message : 'Validation results unavailable');
+        }
+      }
+    })();
+    return () => abort.abort();
+  }, [demo, page, scanId, snapshot?.stage, snapshot?.status, snapshot?.last_event_id, validationRevision]);
+  useEffect(() => {
+    if (demo || (modal !== null && modal !== 'new')) return;
+    const abort = new AbortController();
+    setLaunchError('');
+    setScopesLoading(true);
+    void (async () => {
+      try {
+        const base = import.meta.env.VITE_API_BASE_URL || location.origin;
+        const response = await fetch(new URL('/api/v1/scopes', base), { signal: abort.signal, credentials: 'same-origin', cache: 'no-store' });
+        if (!response.ok) throw new Error(`Approved scope request returned ${response.status}`);
+        const body = await response.json() as { scopes?: ApprovedScope[] };
+        const loaded = Array.isArray(body.scopes) ? body.scopes : [];
+        if (abort.signal.aborted) return;
+        setScopes(loaded);
+        setScopeId(current => repeatSource && !loaded.some(item => item.scope_id === current) ? '' : selectApprovedScope(loaded, current));
+        if (repeatSource) {
+          const approved = loaded.find(item => item.scope_id === repeatSource.scopeId);
+          setSelectedTargets(approved ? repeatSource.targets.filter(target => approved.targets.some(item => item.asset === target)) : []);
+        }
+      } catch (e) { if (!abort.signal.aborted) setLaunchError(e instanceof Error ? e.message : 'Approved scopes could not be loaded.'); }
+      finally { if (!abort.signal.aborted) setScopesLoading(false); }
+    })();
+    return () => abort.abort();
+  }, [modal, demo, repeatSource]);
+  useEffect(() => {
+    if (modal !== 'verified-scope' || !catalogScopeId) return;
+    const abort = new AbortController();
+    setCatalogScopeDraft(null);
+    setCatalogScopeApproval(null);
+    setCatalogScopeError('');
+    setCatalogScopeSummaryOnly(false);
+    void (async () => {
+      try {
+        const base = import.meta.env.VITE_API_BASE_URL || location.origin;
+        const response = await fetch(new URL(`/api/v1/scopes/${encodeURIComponent(catalogScopeId)}`, base), { signal: abort.signal, credentials: 'same-origin', cache: 'no-store' });
+        const body = await response.json() as { scope?: ScopeDraft; approval?: ScopeApproval; detail?: unknown };
+        if (response.status === 404 && body.detail === 'Not Found') {
+          setCatalogScopeSummaryOnly(true);
+          return;
+        }
+        if (!response.ok || !body.scope || !body.approval) throw new Error(tr(apiErrorMessage(body.detail, `Scope detail returned ${response.status}`)));
+        setCatalogScopeDraft(body.scope);
+        setCatalogScopeApproval(body.approval);
+      } catch (error) { if (!abort.signal.aborted) setCatalogScopeError(error instanceof Error ? error.message : 'Scope details could not be loaded.'); }
+    })();
+    return () => abort.abort();
+  }, [modal, catalogScopeId]);
+  const selectedScope = scopes.find(item => item.scope_id === scopeId);
+  useEffect(() => {
+    setIdentityValues({});
+    setPolicyValues({});
+    setAuthorizationConfirmed(false);
+  }, [scopeId]);
+  useEffect(() => {
+    if (demo || modal !== 'new' || !selectedScope || selectedScope.execution_requirements.execution_requirements_status === 'ready') return;
+    const id = selectedScope.scope_id;
+    let active = true;
+    setHeaderResolution({ scopeId: id, error: '' });
+    void resolveHeaderRequirements(id).then(scope => {
+      setAuthorizationConfirmed(false);
+      setScopes(current => current.map(item => item.scope_id === id ? scope : item));
+    }).catch(error => {
+      if (active) setHeaderResolution({ scopeId: id, error: error instanceof Error ? error.message : 'Scope execution interpretation failed.' });
+    });
+    return () => { active = false; };
+  }, [demo, modal, selectedScope?.scope_id, selectedScope?.execution_requirements.execution_requirements_status, resolveHeaderRequirements]);
+  useEffect(() => {
+    setAuthorizationConfirmed(false);
+  }, [selectedTargets, selectedScope?.execution_requirements]);
+  useEffect(() => {
+    exclusionGeneration.current += 1;
+    setExclusionPreparation(null);
+  }, [scopeId, selectedTargets, startUrl, identityValues, policyValues, loginMode, scanProfile, modal]);
+  const policyConfirmations = selectedScope
+    ? policyConfirmationKeys(selectedScope.execution_requirements, selectedTargets, authorizationConfirmed)
+    : [];
+  const selectedLimits = selectedScope
+    ? resolveExecutionLimits(selectedScope.execution_requirements, scanProfile)
+    : null;
+  const requestInterval = maxRps > 0 && maxRps < 1
+    ? Number((1 / maxRps).toFixed(1))
+    : null;
+  useEffect(() => {
+    if (!selectedLimits) return;
+    setMaxRequests(selectedLimits.max_requests);
+    setMaxRps(selectedLimits.requests_per_second);
+    setMaxConcurrency(selectedLimits.concurrency);
+    setTimeoutSeconds(selectedLimits.timeout_seconds);
+    setMaxDepth(selectedLimits.max_depth);
+    setFfufMaxTimeSeconds(scanProfile === 'bug-bounty-safe' ? 60 : 150);
+  }, [selectedScope?.scope_id, scanProfile, selectedLimits?.max_requests, selectedLimits?.requests_per_second, selectedLimits?.concurrency, selectedLimits?.timeout_seconds, selectedLimits?.max_depth]);
+  const registerProgram = async () => {
+    if (!scopeProgramUrl.trim()) return;
+    const urlError = programRegistrationUrlError(scopeProgramUrl);
+    if (urlError) { setScopeError(tr(urlError)); return; }
+    setScopeSubmitting(true); setScopeError('');
+    try {
+      const base = import.meta.env.VITE_API_BASE_URL || location.origin;
+      const response = await fetch(new URL('/api/v1/programs', base), {
+        method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ program_url: scopeProgramUrl.trim(), visibility: scopeVisibility }),
+      });
+      const body = await response.json() as { program?: RegisteredProgram; detail?: unknown };
+      if (!response.ok || !body.program) throw new Error(tr(apiErrorMessage(body.detail, `Program registration returned ${response.status}`)));
+      setRegisteredPrograms(current => [body.program!, ...current.filter(item => item.id !== body.program!.id)]);
+      setScopeProgramUrl(''); setModal(null); go('Scopes / Programs');
+    } catch (e) { setScopeError(e instanceof Error ? e.message : 'The program could not be registered.'); }
+    finally { setScopeSubmitting(false); }
+  };
+  const openScopeWorkflow = (item: RegisteredProgram) => {
+    scopeResponses.invalidate();
+    setScopeActionBusy(false);
+    setScopeModel(item.scope_model || 'gpt-5.6-sol');
+    setWorkflowProgram(item); dispatchScopeActivity({ type: 'job-selected', status: item.scope_status }); setScopeDraft(null); setScopeApproval(null); setScopeReviewer(''); setScopeConfirmed(false); setScopeWorkflowError(''); setModal('scope-workflow');
+  };
+  const startScopeCollection = async () => {
+    if (!workflowProgram || scopeActionBusy || !isValidScopeModel(scopeModel)) return;
+    const isCurrent = scopeResponses.capture();
+    setScopeActionBusy(true); setScopeWorkflowError('');
+    try {
+      const base = import.meta.env.VITE_API_BASE_URL || location.origin;
+      const response = await fetch(new URL(`/api/v1/programs/${encodeURIComponent(workflowProgram.id)}/scope-collection`, base), {
+        method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(scopeRequestForStatus(workflowProgram.scope_status, scopeModel)),
+      });
+      const body = await response.json() as { job?: Partial<RegisteredProgram>; detail?: unknown };
+      if (!response.ok || !body.job) throw new Error(tr(apiErrorMessage(body.detail, `Scope collection returned ${response.status}`)));
+      if (!isCurrent()) return;
+      setWorkflowProgram(current => current?.id === workflowProgram.id ? { ...current, ...body.job } : current);
+      if (body.job.scope_status !== 'approved') {
+        dispatchScopeActivity({ type: 'reset' });
+        setScopeDraft(null); setScopeApproval(null);
+        dispatchScopeActivity({ type: 'collection-started' });
+      }
+      await refreshRegisteredPrograms();
+    } catch (e) { if (isCurrent()) setScopeWorkflowError(e instanceof Error ? e.message : 'Scope collection could not start.'); }
+    finally { if (isCurrent()) setScopeActionBusy(false); }
+  };
+  const confirmScopeBrowser = async () => {
+    if (!workflowProgram || scopeActionBusy) return;
+    const isCurrent = scopeResponses.capture();
+    setScopeActionBusy(true); setScopeWorkflowError('');
+    try {
+      const base = import.meta.env.VITE_API_BASE_URL || location.origin;
+      const response = await fetch(new URL(`/api/v1/programs/${encodeURIComponent(workflowProgram.id)}/scope-browser-ready`, base), { method: 'POST', credentials: 'same-origin' });
+      const body = await response.json() as { job?: Partial<RegisteredProgram>; detail?: unknown };
+      if (!response.ok || !body.job) throw new Error(tr(apiErrorMessage(body.detail, `Browser confirmation returned ${response.status}`)));
+      if (!isCurrent()) return;
+      setWorkflowProgram(current => current?.id === workflowProgram.id ? { ...current, ...body.job } : current);
+      dispatchScopeActivity({ type: 'external-mutation' });
+    } catch (e) { if (isCurrent()) setScopeWorkflowError(e instanceof Error ? e.message : 'Browser confirmation failed.'); }
+    finally { if (isCurrent()) setScopeActionBusy(false); }
+  };
+  const controlScope = async (action: 'pause' | 'continue' | 'cancel') => {
+    if (!workflowProgram || scopeActionBusy) return;
+    const isCurrent = scopeResponses.capture();
+    setScopeActionBusy(true); setScopeWorkflowError('');
+    try {
+      const base = import.meta.env.VITE_API_BASE_URL || location.origin;
+      const response = await fetch(new URL(`/api/v1/programs/${encodeURIComponent(workflowProgram.id)}/scope-${action}`, base), { method: 'POST', credentials: 'same-origin' });
+      const body = await response.json() as { job?: Partial<RegisteredProgram>; detail?: unknown };
+      if (!response.ok || !body.job) throw new Error(tr(apiErrorMessage(body.detail, `Scope ${action} returned ${response.status}`)));
+      if (!isCurrent()) return;
+      setWorkflowProgram(current => current?.id === workflowProgram.id ? { ...current, ...body.job } : current);
+      dispatchScopeActivity({ type: 'external-mutation' });
+      await refreshRegisteredPrograms();
+    } catch (e) { if (isCurrent()) setScopeWorkflowError(e instanceof Error ? e.message : `Scope ${action} failed.`); }
+    finally { if (isCurrent()) setScopeActionBusy(false); }
+  };
+  const decideScope = async (decision: 'yes' | 'no') => {
+    if (!workflowProgram || scopeActionBusy) return;
+    const isCurrent = scopeResponses.capture();
+    setScopeActionBusy(true); setScopeWorkflowError('');
+    try {
+      const base = import.meta.env.VITE_API_BASE_URL || location.origin;
+      const response = await fetch(new URL(`/api/v1/programs/${encodeURIComponent(workflowProgram.id)}/scope-decision`, base), {
+        method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ decision, approved_by: decision === 'yes' ? scopeReviewer.trim() : null, confirmation: decision === 'yes' && scopeConfirmed }),
+      });
+      const body = await response.json() as { job?: Partial<RegisteredProgram>; detail?: unknown };
+      if (!response.ok || !body.job) throw new Error(tr(apiErrorMessage(body.detail, `Scope decision returned ${response.status}`)));
+      if (!isCurrent()) return;
+      setWorkflowProgram(current => current?.id === workflowProgram.id ? { ...current, ...body.job } : current);
+      dispatchScopeActivity({ type: 'external-mutation' });
+      setScopeDraft(null); setScopeConfirmed(false);
+      await refreshRegisteredPrograms();
+    } catch (e) { if (isCurrent()) setScopeWorkflowError(e instanceof Error ? e.message : 'Scope decision failed.'); }
+    finally { if (isCurrent()) setScopeActionBusy(false); }
+  };
+  const closeDialog = () => {
+    if (modal === 'scope-workflow') {
+      scopeResponses.invalidate();
+      setScopeActionBusy(false);
+      dispatchScopeActivity({ type: 'dialog-closed' });
+    }
+    setModal(null);
+  };
+  const prepareExclusions = async () => {
+    if (!selectedScope || !canLaunch || preparingExclusions) return;
+    const generation = exclusionGeneration.current;
+    setPreparingExclusions(true); setLaunchError('');
+    try {
+      const base = import.meta.env.VITE_API_BASE_URL || location.origin;
+      const response = await fetch(new URL(`/api/v1/scopes/${encodeURIComponent(selectedScope.scope_id)}/exclusion-preparation`, base), {
+        method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({...approvedScopeSelection(selectedScope.scope_id, selectedTargets), profile:scanProfile,
+          max_requests:maxRequests, max_rps:maxRps, max_concurrency:maxConcurrency, timeout_seconds:timeoutSeconds, max_depth:maxDepth,
+          login_mode:loginMode, start_url:startUrl.trim() || null, authorization_confirmed:true, refresh:true,
+          identity_values:headerIdentityValues(selectedScope.execution_requirements,identityValues),
+          ...policyLaunchValues(selectedScope.execution_requirements,selectedTargets,policyValues,policyConfirmations)}),
+      });
+      const body = await response.json() as { preparation?: ExclusionPreparation; detail?: unknown };
+      if (!response.ok || !body.preparation) throw new Error(apiErrorMessage(body.detail, 'Exclusion preparation failed.'));
+      if (generation === exclusionGeneration.current) setExclusionPreparation(body.preparation);
+    } catch (error) { if (generation === exclusionGeneration.current) setLaunchError(error instanceof Error ? error.message : 'Exclusion preparation failed.'); }
+    finally { setPreparingExclusions(false); }
+  };
+  const startScan = async () => {
+    if (!canLaunch || !selectedScope) return;
+    setLaunching(true); setLaunchError('');
+    try {
+      const base = import.meta.env.VITE_API_BASE_URL || location.origin;
+      const response = await fetch(new URL('/api/v1/scans', base), {
+        method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ...approvedScopeSelection(selectedScope.scope_id, selectedTargets), profile: scanProfile,
+          recon_model: reconModel, attack_model: attackModel,
+          validation_model: validationModel, report_model: reportModel,
+          max_requests: maxRequests, max_rps: maxRps, max_concurrency: maxConcurrency,
+          timeout_seconds: timeoutSeconds, max_depth: maxDepth, tag_batch_size: tagBatchSize,
+          ffuf_max_time_seconds: ffufMaxTimeSeconds,
+          login_mode: loginMode, start_url: startUrl.trim() || null, authorization_confirmed: true,
+          identity_values: headerIdentityValues(selectedScope.execution_requirements, identityValues),
+          ...policyLaunchValues(selectedScope.execution_requirements, selectedTargets, policyValues, policyConfirmations),
+        }),
+      });
+      const body = await response.json() as { scan_id?: string; status?: Snapshot['status']; started_at?: string; detail?: unknown };
+      if (!response.ok || !body.scan_id) throw new Error(apiErrorMessage(body.detail, `Scan start returned ${response.status}`));
+      const created: ScanSummary = { scan_id: body.scan_id, status: body.status || 'running', started_at: body.started_at || new Date().toISOString(), finished_at: null, targets: selectedTargets };
+      setScanOptions(current => [created, ...current.filter(item => item.scan_id !== created.scan_id)]);
+      setScanId(created.scan_id); setRepeatSource(null); go('Scans'); setModal('scan-progress');
+    } catch (e) { setLaunchError(e instanceof Error ? e.message : 'The scan could not be started.'); }
+    finally { setLaunching(false); }
+  };
+  const resumeScan = async () => {
+    if (demo || !scanId || resuming) return;
+    setResuming(true); setResumeError('');
+    try {
+      const base = import.meta.env.VITE_API_BASE_URL || location.origin;
+      const response = await fetch(new URL(`/api/v1/scans/${encodeURIComponent(scanId)}/resume`, base), {
+        method: 'POST', credentials: 'same-origin',
+      });
+      const body = await response.json() as { status?: string; detail?: string };
+      if (!response.ok || body.status !== 'running') throw new Error(body.detail || tk(`재실행 요청 실패 (${response.status})`, `Rerun request failed (${response.status})`));
+      if (snapshot) sessionStorage.removeItem(`aidast:estimated-progress:${scanId}:${snapshot.stage}`);
+      setScanOptions(current => current.map(item => item.scan_id === scanId ? { ...item, status: 'running', finished_at: null } : item));
+      setModal('scan-progress');
+      refresh();
+    } catch (e) { setResumeError(e instanceof Error ? e.message : tk("스캔을 재실행할 수 없습니다.", "Could not rerun the scan.")); }
+    finally { setResuming(false); }
+  };
+  const cancelScan = async () => {
+    if (demo || !scanId || cancelling || !['running', 'paused'].includes(snapshot?.status || '')) return;
+    if (!window.confirm(tk("현재 스캔을 취소할까요? 실행 프로세스가 종료되며, 다시 검사하려면 새 스캔을 시작해야 합니다.", "Cancel this scan? The process will exit. Start a new scan to test again."))) return;
+    setCancelRequest({ scanId, phase: 'requesting' }); setCancelError('');
+    try {
+      const base = import.meta.env.VITE_API_BASE_URL || location.origin;
+      const response = await fetch(new URL(`/api/v1/scans/${encodeURIComponent(scanId)}/cancel`, base), {
+        method: 'POST', credentials: 'same-origin',
+      });
+      const body = await response.json() as { status?: string; detail?: string };
+      if (response.status === 404) throw new Error(tk("현재 대시보드 서버에는 스캔 취소 기능이 적용되지 않았습니다.", "This dashboard server does not support scan cancellation."));
+      if (response.status === 409 && body.detail?.includes('no isolated active process')) throw new Error(tk("이 스캔의 실행 프로세스를 확인할 수 없습니다. 스캔 상태를 새로고침하세요.", "The process for this scan could not be found. Refresh the scan status."));
+      if (!response.ok || body.status !== 'cancelling') throw new Error(body.detail || tk(`스캔 취소 요청 실패 (${response.status})`, `Scan cancellation request failed (${response.status})`));
+      setCancelRequest({ scanId, phase: 'cancelling' });
+      refresh();
+    } catch (e) {
+      setCancelError(e instanceof Error ? e.message : tk("스캔을 취소할 수 없습니다.", "Could not cancel the scan."));
+      setCancelRequest(null);
+      setModal('scan-progress');
+    }
+  };
+  const changePause = async (next: 'pause' | 'continue') => {
+    if (demo || !scanId || pauseBusy || cancelling || snapshot?.status !== (next === 'pause' ? 'running' : 'paused')) return;
+    setPauseBusy(next); setPauseError('');
+    try {
+      const base = import.meta.env.VITE_API_BASE_URL || location.origin;
+      const response = await fetch(new URL(`/api/v1/scans/${encodeURIComponent(scanId)}/${next}`, base), {
+        method: 'POST', credentials: 'same-origin',
+      });
+      const body = await response.json() as { status?: string; detail?: string };
+      if (!response.ok || body.status !== (next === 'pause' ? 'paused' : 'running')) throw new Error(body.detail || tk(`스캔 ${next === 'pause' ? '일시정지' : '계속'} 실패 (${response.status})`, `Scan ${next === 'pause' ? 'pause' : 'continue'} failed (${response.status})`));
+      setScanOptions(current => current.map(item => item.scan_id === scanId ? { ...item, status: body.status as Snapshot['status'] } : item));
+      refresh();
+    } catch (e) {
+      setPauseError(e instanceof Error ? e.message : tk("스캔 상태를 변경할 수 없습니다.", "Could not change scan state."));
+      setModal('scan-progress');
+    } finally { setPauseBusy(null); }
+  };
+  useEffect(() => {
+    if (!cancelRequest || snapshot?.scan_id !== cancelRequest.scanId) return;
+    if (snapshot.status === 'cancelled') {
+      setScanOptions(current => current.map(item => item.scan_id === snapshot.scan_id ? { ...item, status: 'cancelled' } : item));
+      setCancelRequest(null);
+    } else if (snapshot.status === 'completed' || snapshot.status === 'failed') {
+      setCancelError(tk("취소가 확인되기 전에 스캔이 종료됐습니다. 현재 결과 상태를 확인하세요.", "The scan ended before cancellation was confirmed. Check its current result."));
+      setCancelRequest(null);
+    } else if (snapshot.logs.some(log => log.message_code === 'pipeline.cancel_persist_failed')) {
+      setCancelError(tk("실행 프로세스는 종료됐지만 저장된 스캔 상태를 취소됨으로 갱신하지 못했습니다. 활동 기록을 확인하세요.", "The process exited, but the saved scan status could not be marked cancelled. Check the activity log."));
+      setCancelRequest(null);
+    }
+  }, [cancelRequest, snapshot]);
+  const activityLogs = hideAcknowledgedActivity(mergeActivityLogs(snapshot?.logs || [], scopeEvents), acknowledgedAudit);
+  const hasDashboardError = Boolean(error && state !== 'idle');
+  const hasActivity = activityLogs.length > 0 || scopeActive || hasDashboardError;
+  const visibleLogs = activityLogs.filter(log => {
+    const sourceLabel = log.source === 'scope' ? tk("스코프 수집", "Scope collection") : `${tk("스캔", "Scan")} ${tr(log.stage)}`;
+    return (level === 'All levels' || log.level === level)
+      && (stageFilter === 'All stages' || log.stage === stageFilter)
+      && `${localizeActivityMessage(language, log)} ${log.stage} ${sourceLabel}`.toLowerCase().includes(logSearch.toLowerCase());
+  });
+  const showScopeWorking = scopeActive
+    && (level === 'All levels' || level === 'info')
+    && (stageFilter === 'All stages' || stageFilter === 'Scope')
+    && `${tk("스코프 수집", "Scope collection")} ${scopeWorkLabel} ${scopeElapsedLabel}`.includes(logSearch);
+  const showDashboardError = hasDashboardError
+    && (level === 'All levels' || level === 'error')
+    && stageFilter === 'All stages'
+    && `${tk('대시보드 연결', 'Dashboard connection')} ${tr(error)}`.toLowerCase().includes(logSearch.toLowerCase());
+  useEffect(() => { if (!paused && stream.current) stream.current.scrollTop = stream.current.scrollHeight; }, [activityLogs.at(-1)?.key, error, scopeClock, paused, logSearch, level, stageFilter, collapsed]);
+  const findings = snapshot?.findings || [];
+  const currentValidations = validationScanId === scanId ? validationCases : [];
+  const validationReady = demo || validationScanId === scanId;
+  const validatedReports = demo ? [demoReport] : reportScanId === scanId
+    ? confirmedReportSummaries(reports, currentValidations, scanId) : [];
+  const selectedReportLanguages = selectedReport ? reportLanguageChoices(validatedReports, selectedReport) : {};
+  const shownFindings = filterFindings(findings, currentValidations, validationReady ? verdictFilter : 'all').filter(f => `${f.id} ${f.title} ${findingTitle(f)} ${f.endpoint}`.toLowerCase().includes(search.toLowerCase()) && (severity === 'All severities' || f.severity === severity));
+  const reviewCount = findings.filter(f => findingVerdict(f, currentValidations) === 'pending').length;
+  const selectedValidation = selectedFinding && currentValidations.find(item => item.target_kind === 'finding' && item.target_id === selectedFinding.id);
+  const selectedKnownSource = selectedValidation ? knownSourceCase(selectedValidation, currentValidations) : undefined;
+  const relatedReportCaseId = selectedFinding ? reportCaseForFinding(selectedFinding, currentValidations) : null;
+  const relatedReport = validatedReports.find(item => item.case_id === relatedReportCaseId);
+  const approvedScopeCount = demo ? 0 : scopes.length;
+  const totalProgramCount = registeredPrograms.length;
+  const visiblePrograms = registeredPrograms.filter(item => `${item.visibility === 'private' && !privateVisible ? 'Private program' : item.program} ${item.platform}`.toLowerCase().includes(search.toLowerCase()));
+  const inspect = (f: Finding) => { setSelectedFinding(f); setModal('finding'); };
+  const openNewScan = () => {
+    setRepeatSource(null);
+    setSelectedTargets([]);
+    setIdentityValues({});
+    setPolicyValues({});
+    setReconModel('gpt-6.1-sol');
+    setAttackModel('gpt-6.1-sol');
+    setValidationModel('gpt-6-sol');
+    setReportModel('gpt-6.1-sol');
+    setAuthorizationConfirmed(false);
+    setLaunchError('');
+    setModal('new');
+  };
+  const openRepeatScan = () => {
+    if (!snapshot || retryAction !== 'rescan') return;
+    const source = { scanId: snapshot.scan_id, scopeId: snapshot.scope_id || '', targets: scanTargets };
+    setRepeatSource(source);
+    setScopeId(source.scopeId);
+    const approved = scopes.find(item => item.scope_id === source.scopeId);
+    setSelectedTargets(approved ? source.targets.filter(target => approved.targets.some(item => item.asset === target)) : []);
+    setIdentityValues({});
+    setPolicyValues({});
+    setReconModel('gpt-6.1-sol');
+    setAttackModel('gpt-6.1-sol');
+    setValidationModel('gpt-6-sol');
+    setReportModel('gpt-6.1-sol');
+    setAuthorizationConfirmed(false);
+    setLaunchError('');
+    setModal('new');
+  };
+  const openReport = (item: ReportSummary) => {
+    setReportError('');
+    setSelectedReport(item);
+    setModal('report');
+  };
+  const findingTable = (rows: Finding[]) => <div className="table-wrap finding-table"><table>
+    <thead><tr><th>{tk('Attack 추정 심각도', 'Attack severity estimate')}</th><th>{tr('Finding')}</th><th>{tr('Validation verdict')}</th><th><span className="sr-only">{tr('Details')}</span></th></tr></thead>
+    <tbody>{rows.map(f => {
+      const verdict = findingVerdict(f, currentValidations);
+      const status = findingValidationStatus(f, currentValidations);
+      const validation = currentValidations.find(item => item.target_kind === 'finding' && item.target_id === f.id);
+      return <tr key={f.id}>
+        <td><Badge tone={f.severity.toLowerCase()}>{tr(f.severity)}</Badge></td>
+        <td><button className="text-button finding-title" onClick={() => inspect(f)}>{findingTitle(f)}</button><small className="mono">{f.id} <span>·</span> {f.endpoint}</small></td>
+        <td><Badge tone={verdict === 'tp' ? 'success' : verdict === 'fp' ? 'critical' : verdict === 'duplicate' ? 'warning' : ''}>{validationReady ? tr(status ? validationStatusLabels[status] : verdictLabels[verdict]) : tr('Checking validation verdict')}</Badge>
+          {validationReady && validation?.processing_phase === 'completed' && validation.decision?.reason === 'http_runtime_contract_missing' && <small>{tk('재현 명세 누락 · 검증 실행 전 중단', 'Replay contract missing · stopped before verification')}</small>}
+        </td>
+        <td><button className="icon-button" aria-label={`${tr('Details')} ${f.id}`} onClick={() => inspect(f)}><Icon name="arrow" size={16}/></button></td>
+      </tr>;
+    })}</tbody>
+  </table>{rows.length === 0 && <p className="table-empty">{tr('No findings match this view.')}</p>}</div>;
+  const currentAttackTasks = attackTaskSnapshot?.scan_id === scanId ? attackTaskSnapshot : null;
+  const attackTasksContent = <section className="scan-attack-tasks" aria-label={tk("공격 작업과 선택 근거", "Attack tasks and selection evidence")}>
+    <div className="scan-attack-tasks-heading"><h3>{tk("공격 작업", "Attack tasks")} <small>{tk(`현재 배치 ${currentAttackTasks?.tasks.length ?? 0}개 · 전체 기록된 시도 ${currentAttackTasks?.total_attempt_count ?? currentAttackTasks?.attempt_count ?? 0}건`, `Current batch: ${currentAttackTasks?.tasks.length ?? 0} tasks · ${currentAttackTasks?.total_attempt_count ?? currentAttackTasks?.attempt_count ?? 0} total recorded attempts`)}</small></h3></div>
+    <p className="scan-attack-tasks-note">{tk("관찰 URL은 정찰 결과에서 작업 선택의 근거가 된 주소입니다. 실제 공격 요청 대상은 시도 기록이 생기면 별도로 표시됩니다. URL의 쿼리 값과 응답 헤더 값은 표시하지 않습니다.", "Observed URLs explain why a task was selected from recon. Actual attack targets appear in the attempt history. Query values and response header values are hidden.")}</p>
+    {currentAttackTasks?.coverage && <div className="scan-coverage-summary">
+      <p><strong>{tk("URL별 가설 검토", "Endpoint hypothesis review")}</strong> {currentAttackTasks.coverage.endpoints_reviewed}/{currentAttackTasks.coverage.endpoints_total} · {tk("처리 상태 확정", "Resolved dispositions")} {currentAttackTasks.coverage.resolved}/{currentAttackTasks.coverage.total}</p>
+      <div className="scan-stats">{coverageMetrics(currentAttackTasks.coverage).map(item => <div key={item.key}><span>{language === 'ko' ? item.ko : item.en}</span><strong>{item.value}</strong></div>)}</div>
+      <p className="scan-attack-tasks-note">{tk("가설은 취약점 확정이 아닙니다. 인증·정책·예산 등의 사유로 건너뛴 작업은 실제 검증 수에 포함하지 않습니다. 8개씩 배치로 실행하며 전체 가설을 추적합니다.", "Hypotheses are not confirmed vulnerabilities. Authentication, policy and budget skips do not count as tested. Work runs in batches of eight while tracking the entire queue.")}</p>
+      {currentAttackTasks.coverage.gaps_total > 0 && <details><summary>{tk(`미검증·제외 사유 ${currentAttackTasks.coverage.gaps_total}건`, `${currentAttackTasks.coverage.gaps_total} untested or excluded items`)}</summary>
+        {currentAttackTasks.coverage.gaps.map((gap, index) => <p key={index}><code>{gap.method} {gap.url}</code> · {gap.vuln_class && `${gap.vuln_class} · `}{coverageStatusLabels[gap.status]?.[language === 'ko' ? 0 : 1] ?? gap.status}<br/>{gap.reason}</p>)}
+        {currentAttackTasks.coverage.gaps_truncated && <p>{tk("첫 200건을 표시합니다. 전체 기록은 Pipeline.db에 저장됩니다.", "Showing the first 200 items. The full record is stored in Pipeline.db.")}</p>}
+      </details>}
+    </div>}
+    {attackTaskError && <p className="form-error" role="alert">{attackTaskError}</p>}
+    {currentAttackTasks?.tasks.map(task => <article className="scan-attack-task" key={task.task_id}>
+      <div className="scan-attack-task-title"><strong>{(language === 'ko' ? attackSkillLabels : attackSkillLabelsEn)[task.skill_name] || task.skill_name}</strong><Badge tone={task.status === 'failed' ? 'critical' : task.status === 'completed' ? 'success' : 'warning'}>{(language === 'ko' ? attackTaskStatusLabels : attackTaskStatusLabelsEn)[task.status] || task.status}</Badge></div>
+      <small className="mono">{task.skill_name} · {task.task_id}</small>
+      {task.coverage && <p><b>{tk("검증 입력", "Test input")}</b> <code>{task.coverage.injection_location}{task.coverage.parameter_name ? `: ${task.coverage.parameter_name}` : ''}</code> · {task.coverage.required_identity_role === 'authenticated' ? tk("인증된 사용자 조건", "Authenticated baseline") : tk("비인증 조건", "Unauthenticated baseline")} · {coverageStatusLabels[task.coverage.status]?.[language === 'ko' ? 0 : 1] ?? task.coverage.status}{task.coverage.disposition_reason && <><br/>{task.coverage.disposition_reason}</>}</p>}
+      <p><b>{tk("선택 힌트", "Selection hints")}</b> {task.selection_reasons.map(reason => (language === 'ko' ? attackReasonLabels : attackReasonLabelsEn)[reason] || reason).join(', ') || tk("기록 없음", "No record")}</p>
+      <div><b>{tk("관련 정찰 URL", "Related recon URLs")}</b>{task.observed_urls.length ? <ul>{task.observed_urls.map((item, index) => <li key={`${item.url}-${index}`}><code>{item.method} {item.url}</code><span>{item.hint}</span></li>)}</ul> : <p>{tk("이 작업에 연결된 URL 근거가 없습니다. 선택 힌트를 재검토하세요.", "This task has no linked URL evidence. Review the selection hints.")}</p>}</div>
+      <div><b>{tk("실제 시도", "Actual attempts")}</b> {tk(`${task.attempt_count}건`, `${task.attempt_count} attempts`)}{task.recent_attempts.length > 0 && <ul>{task.recent_attempts.map((item, index) => <li key={index}><code>{item.method} {item.url || tk("URL 기록 없음", "No URL recorded")}</code><span>{(language === 'ko' ? attackOutcomeLabels : attackOutcomeLabelsEn)[item.outcome] || item.outcome}</span></li>)}</ul>}</div>
+    </article>)}
+    {currentAttackTasks && currentAttackTasks.tasks.length === 0 && <p className="scan-progress-empty">{snapshot?.stage === 'Scope' || snapshot?.stage === 'Recon' ? tk("정찰이 끝나면 공격 작업이 생성됩니다.", "Attack tasks will be created after recon finishes.") : tk("아직 생성된 공격 작업이 없습니다.", "No attack tasks have been created yet.")}</p>}
+    {!currentAttackTasks && !attackTaskError && <p className="scan-progress-empty">{tk("공격 작업을 불러오는 중입니다.", "Loading attack tasks.")}</p>}
+  </section>;
+  const reconActivity = mergeReconActivityLogs(snapshot?.logs ?? [], reconHistory?.scanId === scanId ? reconHistory.logs : []);
+  const latestReconActivity = reconActivity[0];
+  const discoveredUrls = reconDiscoveries(reconActivity);
+  const observedUrls = discoveredUrls.filter(item => item.responseStatus !== null && item.responseStatus >= 200 && item.responseStatus < 400).length;
+  const latestReconPhase = latestReconActivity?.message_params?.phase;
+  const latestReconState = latestReconActivity?.message_params?.state;
+  const manualLoginNotice = <ManualLoginNotice {...manualLogin} language={language}/>;
+  const operatorActionNotice = <OperatorActions {...operatorActions} language={language}/>;
+  const workLogs = snapshot?.logs.filter(log => log.message_code === 'agent.work') ?? [];
+  const currentWork = [...(snapshot?.logs ?? [])].reverse().find(log =>
+    log.stage === snapshot?.stage && (log.message_code === 'agent.work' || log.message_code === 'recon.activity'));
+  const agentBoard = <section className="scan-agent-board" aria-label={tk("에이전트별 실제 작업", "Agent work by role")}>
+    <h3>{tk("에이전트별 작업", "Agent work")}</h3>
+    <div className="scan-agent-grid">{agentOrder.map(agent => {
+      const last = [...workLogs].reverse().find(log => log.message_params?.agent === agent);
+      const activity = agent === 'recon' && latestReconActivity && (!last || latestReconActivity.id > last.id)
+        ? latestReconActivity : last;
+      const name = language === 'ko' ? agentNames[agent] : agentNamesEn[agent];
+      const message = activity ? localizeActivityMessage(language, activity) : '';
+      const running = snapshot?.status === 'running'
+        && ['started', 'progress'].includes(String(activity?.message_params?.state))
+        && (agent === 'main' ? snapshot.stage === 'Recon' : activity?.stage === snapshot.stage);
+      return <article key={agent} className={running ? 'is-active' : ''}>
+        <div><strong>{name}</strong>
+          <small>{running ? tk("진행 중", "In progress") : activity ? tk("최근 작업", "Last work") : tk("대기", "Waiting")}</small></div>
+        <p>{activity ? activity.message_code === 'agent.work' && message.startsWith(`${name} · `)
+          ? message.slice(name.length + 3) : message : tk("앞 단계가 끝나면 시작합니다.", "Starts after the preceding stage.")}</p>
+      </article>;
+    })}</div>
+  </section>;
+  const scanControls = !demo && (snapshot?.status === 'running' || snapshot?.status === 'paused') ? <>
+    <button className="secondary-button" onClick={() => void changePause(snapshot.status === 'running' ? 'pause' : 'continue')} disabled={!!pauseBusy || cancelling}>{pauseBusy === 'pause' ? tk("일시정지 처리 중…", "Pausing…") : pauseBusy === 'continue' ? tk("계속 처리 중…", "Continuing…") : snapshot.status === 'running' ? tk("일시정지", "Pause") : tk("계속", "Continue")}</button>
+    <button className="secondary-button" onClick={() => void cancelScan()} disabled={cancelling || !!pauseBusy}>{cancelPhase === 'requesting' ? tk("취소 요청 전달 중…", "Sending cancellation request…") : cancelling ? tk("취소 확인 중…", "Confirming cancellation…") : tk("스캔 취소", "Cancel scan")}</button>
+  </> : null;
+  const scanPanel = <Panel className="scan-summary-panel" title={demo ? tr('Local lab · API assessment') : scanTargetLabel} subtitle={demo ? tr('Synthetic fixture · isolated from program inventory') : `${snapshot?.program_name ? `${snapshot.program_name} · ` : ''}${scanId}`} action={<div className="scan-panel-actions"><Badge tone={snapshot?.status === 'failed' ? 'critical' : snapshot?.status === 'completed' ? 'success' : 'warning'}><span className="dot"/>{cancelling ? tk("취소 처리 중", "Cancelling") : tr(snapshot?.status || state)}</Badge>{scanControls}{!demo && retryAction === 'resume' && <button className="secondary-button" onClick={resumeScan} disabled={resuming}>{resuming ? tk("재실행 요청 중…", "Requesting rerun…") : snapshot?.stage === 'Report' ? tk("보고서만 다시 생성", "Retry report only") : tk("실패 단계부터 재실행", "Rerun from failed stage")}</button>}{!demo && retryAction === 'rescan' && <button className="secondary-button" onClick={openRepeatScan}>{tk("정찰부터 다시 스캔", "Rescan from recon")}</button>}{!demo && scanId && <button className="secondary-button" onClick={() => setModal('scan-progress')}>{snapshot?.stage === 'Recon' ? tk("도구 작업·발견 URL 보기", "View tools and URLs") : tk("진행 창 열기", "Open progress window")}</button>}</div>}>
+    {snapshot ? <>
+      <Pipeline snapshot={{ ...snapshot, progress: scanProgress }} language={language} reportDraft={reportDraftStatus}
+        tokenUsage={demo ? undefined : tokenUsage} tokenStatus={tokenStatus}/>
+      {!demo && <><p className="scan-current-activity" role="status"><strong>{tk("현재 작업", "Current work")}</strong> {currentWork ? localizeActivityMessage(language, currentWork) : tk("스캔 프로세스를 시작하고 승인된 스코프를 확인하고 있습니다.", "Starting the scan process and checking the approved scope.")}</p>{agentBoard}</>}
+      {cancelling && <p className="scan-stop-status" role="status">{cancelPhase === 'requesting' ? tk("취소 요청을 서버에 전달하고 있습니다.", "Sending the cancellation request to the server.") : tk("취소 요청을 접수했습니다. 실행 프로세스 종료와 저장된 상태 갱신을 확인하고 있습니다.", "Cancellation requested. Checking the process exit and saved status.")}</p>}
+      {snapshot.status === 'paused' && !cancelling && <p className="scan-stop-status" role="status">{tk("스캔 일시정지 중 · 같은 실행을 이어가려면 ‘계속’을 누르세요.", "Scan paused. Select Continue to resume the same run.")}</p>}
+      {snapshot.status === 'cancelled' && <p className="scan-stop-status is-done" role="status">{tk("스캔 취소 완료 · 실행 프로세스가 종료됐고 스캔 상태가 취소됨으로 저장됐습니다.", "Scan cancelled. The process exited and the cancelled status was saved.")}</p>}
+      <div className="scan-stats"><div><span>{tr('Scan ID')}</span><strong className="mono">{snapshot.scan_id}</strong></div><div><span>{tr('Endpoints')}</span><strong>{snapshot.endpoints}</strong></div><div><span>{tk('기록된 HTTP 요청', 'Recorded HTTP requests')}</span><strong>{snapshot.requests.toLocaleString()}</strong>{snapshot.per_target_budget != null && <small>{tk('대상별 상한', 'Per-target limit')} {snapshot.per_target_budget.toLocaleString()}</small>}</div><div className="progress-stat"><span>{tr(snapshot.stage)} {tr('Estimated progress')} <b>{scanProgress}%</b></span><progress max="100" value={scanProgress} aria-label={`${tr(snapshot.stage)} ${tr('Estimated progress')}`}/></div></div>
+      {snapshot.service_endpoints !== undefined && <p className="scan-recon-summary">
+        <strong>{tk("서비스 URL 후보", "Candidate service URLs")}</strong> {tk(`${snapshot.service_endpoints}개`, `${snapshot.service_endpoints} candidates`)}
+        <span>{tk(`· 실제 HTTP 응답 관측 ${snapshot.live_endpoints ?? 0}개`, `· ${snapshot.live_endpoints ?? 0} observed HTTP responses`)}</span>
+        {!demo && <span className="scan-token-inline">· <strong>{tr('Accumulated LLM tokens (measured)')}</strong> {tokenUsageLabel(language, tokenUsage?.total, tokenStatus)}
+          {tokenUsage && tokenUsage.unattributed.measured_calls + tokenUsage.unattributed.unreported_calls > 0 && <> · {tr('Unclassified LLM calls')} {tokenUsage.unattributed.measured_calls + tokenUsage.unattributed.unreported_calls}</>}
+        </span>}
+      </p>}
+      {snapshot.stage === 'Recon' && <p className="scan-recon-summary"><strong>{tk("최근 정찰 작업", "Latest recon task")}</strong> {latestReconActivity ? localizeActivityMessage(language, latestReconActivity) : tk('DNS와 도구 작업 전 단계는 위의 에이전트별 작업에서 확인하세요.', 'Check agent work above for the steps before DNS and tools.')}</p>}
+      {resumeError && <p className="form-error" role="alert">{resumeError}</p>}
+      {pauseError && <p className="form-error" role="alert">{pauseError}</p>}
+      {cancelError && <p className="form-error" role="alert">{cancelError}</p>}
+    </> : <Empty title={tr(state === 'offline' ? 'Backend unavailable' : state === 'idle' ? 'No scan selected' : 'Loading scan snapshot')}>{tr(state === 'idle' ? 'Start a scan from an approved Scope to show its snapshot and activity here.' : 'Connect the REST snapshot endpoint to display scan state. Demo data is never substituted in live mode.')}</Empty>}
+  </Panel>;
+  const scanProgressContent = <div className="scan-progress-dialog">
+    {manualLoginNotice}
+    {operatorActionNotice}
+    {cancelError && <p className="scan-progress-failed" role="alert"><strong>{tk("스캔 취소 실패 ·", "Scan cancellation failed ·")} </strong>{cancelError}</p>}
+    {pauseError && <p className="scan-progress-failed" role="alert"><strong>{tk("일시정지 상태 변경 실패 ·", "Pause state change failed ·")} </strong>{pauseError}</p>}
+    <div className="scan-progress-overview">
+      <div><span>{tk("스캔 대상", "Scan target")}</span><strong>{scanTargetLabel || tk("불러오는 중", "Loading")}</strong><small>{snapshot?.program_name} <span className="mono">· {scanId}</span></small></div>
+      <Badge tone={snapshot?.status === 'failed' ? 'critical' : snapshot?.status === 'completed' ? 'success' : 'warning'}>{cancelling ? tk("취소 처리 중", "Cancelling") : tr(snapshot?.status || state)}</Badge>
+    </div>
+    <div className="scan-progress-stats"><div><span>{tk("현재 단계", "Current stage")}</span><strong>{tr(snapshot?.stage || 'Waiting')}</strong></div><div><span>{tr("Estimated stage progress")}</span><strong>{scanProgress}%</strong></div><div><span>{tk("경과 시간", "Elapsed time")}</span><strong role="timer">{formatActivityElapsed(scanElapsedSeconds, language)}</strong></div><div><span>{tk("기록된 HTTP 요청", "Recorded HTTP requests")}</span><strong>{snapshot?.requests.toLocaleString() ?? 0}</strong>{snapshot?.per_target_budget != null && <small>{tk("대상별 상한", "Per-target limit")} {snapshot.per_target_budget.toLocaleString()}</small>}</div></div>
+    {!demo && <p className="scan-token-progress"><strong>{tr('Accumulated LLM tokens (measured)')}</strong> {tokenUsageLabel(language, tokenUsage?.total, tokenStatus)} <span>· {tr('Current stage')} {snapshot?.stage === 'Scope' ? tr('Scope tokens separate from scan') : tokenUsageLabel(language, snapshot?.stage ? tokenUsage?.stages[snapshot.stage] : undefined, tokenStatus)}</span></p>}
+    {snapshot?.service_endpoints !== undefined && <p className="scan-recon-summary"><strong>{tk("정찰 URL", "Recon URLs")}</strong> {tk(`전체 ${snapshot.endpoints}개 · 서비스 후보 ${snapshot.service_endpoints}개 · HTTP 응답 관측 ${snapshot.live_endpoints ?? 0}개 (404 포함 가능)`, `${snapshot.endpoints} total · ${snapshot.service_endpoints} service candidates · ${snapshot.live_endpoints ?? 0} HTTP responses observed (may include 404)`)}</p>}
+    <progress aria-label={tr("Estimated stage progress")} max="100" value={scanProgress}/>
+    {cancelling && <p className="scan-stop-status" role="status">{cancelPhase === 'requesting' ? tk("취소 요청을 서버에 전달하고 있습니다.", "Sending the cancellation request to the server.") : tk("취소 요청 접수됨 · 실행 프로세스 종료와 저장된 상태 갱신을 확인하는 중입니다.", "Cancellation requested. Checking that the process exited and the saved status updated.")}</p>}
+    {snapshot?.status === 'running' && !cancelling && <p className="scan-progress-working" role="status"><span className="dot"/> {tk(`${tr(snapshot.stage)} 단계 작업 중 · ${formatActivityElapsed(scanElapsedSeconds, language)}`, `${tr(snapshot.stage)} stage running · ${formatActivityElapsed(scanElapsedSeconds, language)}`)}</p>}
+    {!demo && agentBoard}
+    {snapshot?.status === 'paused' && !cancelling && <p className="scan-stop-status" role="status">{tk("스캔 일시정지 중 · 작업을 멈춘 상태입니다. 같은 실행을 이어가려면 ‘계속’을 누르세요.", "Scan paused. Work is stopped. Select Continue to resume this run.")}</p>}
+    {snapshot?.status === 'failed' && <p className="scan-progress-failed" role="alert">{retryAction === 'rescan' ? tk(`${tr(snapshot.stage)} 단계에서 스캔이 실패했습니다. 정찰부터 새 스캔을 시작하세요. 아래 활동 기록에서 마지막 오류를 확인할 수 있습니다.`, `Scan failed during ${tr(snapshot.stage)}. Start a new scan from recon. Check the last error in activity below.`) : snapshot.stage === 'Report' ? tk('보고서 생성이 실패했습니다. 정찰·공격·체이닝·검증 결과는 재실행하지 않고 현재 검증 결과에서 보고서만 다시 생성합니다. 아래 활동 기록에서 마지막 오류를 확인하세요.', 'Report generation failed. Recon, Attack, Chaining, and Validation are not rerun; only the report is regenerated from the current validation results. Check the last error in activity below.') : tk(`${tr(snapshot.stage)} 단계에서 스캔이 실패했습니다. 완료된 정찰 결과를 재사용하고, 실패한 단계의 작업을 새로 생성해 실행합니다. 아래 활동 기록에서 마지막 오류를 확인하세요.`, `Scan failed during ${tr(snapshot.stage)}. Completed recon results are reused and work for the failed stage is recreated. Check the last error in activity below.`)}</p>}
+    {snapshot?.status === 'cancelled' && <p className="scan-stop-status is-done" role="status">{tk("스캔 취소 완료 · 실행 프로세스가 종료됐고 스캔 상태가 취소됨으로 저장됐습니다. 다시 검사하려면 새 스캔을 시작하세요.", "Scan cancelled. The process exited and the cancelled status was saved. Start a new scan to test again.")}</p>}
+    {resumeError && <p className="form-error" role="alert">{resumeError}</p>}
+    {error && <p className="form-error" role="alert">{tr(error)}</p>}
+    {(snapshot?.stage === 'Recon' || reconActivity.length > 0) && <section className="scan-discoveries" aria-label={tk("발견 URL과 HTTP 응답", "Discovered URLs and HTTP responses")}>
+      <div className="scan-discoveries-heading"><h3>{tk("발견 URL", "Discovered URLs")}</h3><span>{tk(`기록 ${discoveredUrls.length}개 · HTTP 2xx/3xx ${observedUrls}개`, `${discoveredUrls.length} recorded · ${observedUrls} HTTP 2xx/3xx`)}</span></div>
+      <p className="scan-discoveries-note">{tk("HTTP 상태는 해당 요청의 응답 기록입니다. 404는 유효 경로로 확인되지 않았으며, 200 응답도 기능 동작까지 검증한 것은 아닙니다.", "HTTP status is the recorded response to that request. A 404 does not confirm a valid route, and a 200 does not prove the feature works.")}</p>
+      {discoveredUrls.length ? <ul className="scan-discoveries-list">{discoveredUrls.map(item => <li key={`${item.method} ${item.url}`}>
+        <div><code>{item.method} {item.url}</code><span className={item.responseStatus === 404 || item.responseStatus === null || item.responseStatus >= 500 ? 'uncertain' : ''}>{item.responseStatus === null ? tk("HTTP 응답 미확인", "No HTTP response") : item.responseStatus === 404 ? tk("404 · 유효 경로 미확인", "404 · route unconfirmed") : `HTTP ${item.responseStatus} ${tk("응답 관측", "observed")}`}</span></div>
+        {item.source && <small>{tk("발견 출처", "Discovery source")} · {item.source}</small>}
+      </li>)}</ul> : <p className="scan-discoveries-empty">{snapshot?.service_endpoints ? tk("서비스 후보 수는 갱신됐지만 개별 URL 기록은 아직 도착하지 않았습니다. 정찰 결과가 정리되면 여기에 표시됩니다.", "Service counts updated, but individual URL records have not arrived yet. They appear after recon results are consolidated.") : tk("아직 기록된 URL이 없습니다.", "No URLs have been recorded yet.")}</p>}
+    </section>}
+    {(snapshot?.stage === 'Recon' || reconActivity.length > 0 || reconLoading || !!reconError) && <section className="scan-recon-activity" aria-label={tk("정찰 작업", "Recon tasks")}>
+      <h3>{tk("정찰 작업", "Recon tasks")} <small>{tk(`${reconActivity.length}개 기록`, `${reconActivity.length} records`)}</small></h3>
+      {latestReconActivity && <div className="scan-recon-current"><p><strong>{latestReconState === 'started' ? tk("진행 중인 도구 작업", "Tool task in progress") : tk("최근 도구 기록", "Latest tool record")}</strong> {localizeActivityMessage(language, latestReconActivity)}</p>{reconActivityPurpose(language, latestReconPhase) && <p>{reconActivityPurpose(language, latestReconPhase)}</p>}</div>}
+      {reconActivity.length > 0 ? <div className="scan-recon-timeline">{reconActivity.map(log => <article key={log.id} className={log.level}><time dateTime={log.time}>{new Date(log.time).toLocaleTimeString('en-GB',{hour12:false})}</time><span>{localizeActivityMessage(language, log)}{log.message_params?.state === 'started' && reconActivityPurpose(language, log.message_params.phase) && <small>{reconActivityPurpose(language, log.message_params.phase)}</small>}</span></article>)}</div> : !reconLoading && <p className="scan-progress-empty">{snapshot?.status === 'running' && snapshot.stage === 'Recon'
+        ? tr('Recon tools have not started yet. Follow agent work above.')
+        : tr('No tool-level recon records were saved for this scan.')}</p>}
+      {(reconLoading || reconError || reconHistory?.scanId === scanId && reconHistory.nextBefore !== null) && <div className="scan-recon-pagination">
+        {reconLoading && <span role="status">{tr('Loading recon history…')}</span>}
+        {reconError && <span role="alert">{tr(reconError)}</span>}
+        {reconError && <button className="secondary-button" onClick={() => setReconRevision(value => value + 1)}>{tr('Retry loading recon history')}</button>}
+        {reconHistory?.scanId === scanId && reconHistory.nextBefore !== null && <button className="secondary-button" onClick={() => void loadMoreRecon()} disabled={reconLoading}>{tr('Load earlier recon records')}</button>}
+      </div>}
+    </section>}
+    {!demo && attackTasksContent}
+    <div className="scan-progress-log"><h3>{tk("스캔 활동", "Scan activity")} <small>{tk(`${snapshot?.logs.length ?? 0}개 기록`, `${snapshot?.logs.length ?? 0} records`)}</small></h3><div>{snapshot?.logs.slice(-50).map(log => <article key={log.id} className={log.level}><time dateTime={log.time}>{new Date(log.time).toLocaleTimeString(language === 'ko' ? 'ko-KR' : 'en-GB',{hour12:false})}</time><span>{tr(log.stage)}</span><p>{localizeActivityMessage(language, log)}</p></article>)}{!snapshot?.logs.length && <p className="scan-progress-empty">{tk("스캔 상태를 불러오는 중입니다. 기록이 도착하면 여기에 표시됩니다.", "Loading scan status. New records will appear here.")}</p>}</div></div>
+    <div className="button-row"><button className="secondary-button" onClick={() => { refresh(); setAttackTaskRevision(value => value + 1); }}>{tk("상태 새로고침", "Refresh status")}</button>{scanControls}{!demo && retryAction === 'resume' && <button className="primary-button" onClick={resumeScan} disabled={resuming}>{resuming ? tk("재실행 요청 중…", "Requesting rerun…") : snapshot?.stage === 'Report' ? tk("보고서만 다시 생성", "Retry report only") : tk("실패 단계부터 재실행", "Rerun from failed stage")}</button>}{!demo && retryAction === 'rescan' && <button className="primary-button" onClick={openRepeatScan}>{tk("정찰부터 다시 스캔", "Rescan from recon")}</button>}<button className="secondary-button" onClick={closeDialog}>{tk("스캔 화면에서 계속 보기", "Continue in scan view")}</button></div>
+  </div>;
+  const scanFromScope = (id: string) => {
+    scopeResponses.invalidate();
+    setScopeActionBusy(false);
+    setRepeatSource(null);
+    setScopeId(id);
+    setSelectedTargets([]);
+    setIdentityValues({});
+    setPolicyValues({});
+    setAuthorizationConfirmed(false);
+    setLaunchError('');
+    go('Scans');
+    setModal('new');
+  };
+  const verifiedScopesPanel = <Panel title={language === 'ko' ? tk("검증된 Scope", "Verified Scope") : 'Verified Scopes'} subtitle={language === 'ko' ? tk("저장된 승인 산출물 · 프로그램 대기열과 별도로 표시됩니다", "Saved approved artifacts · shown separately from the program queue") : 'Stored approved artifacts · separate from the program queue'}>
+    {launchError && <p className="form-error scope-list-error" role="alert">{launchError}</p>}
+    {scopes.length ? <div className="verified-scope-list">{scopes.map(scope => <article className="verified-scope-row" key={scope.scope_id}>
+      <div className="verified-scope-info"><strong>{scope.program_name}</strong><p>{scope.platform} · {scope.targets.length}{language === 'ko' ? '개 실행 대상' : ' executable targets'}</p><small className="mono">{scope.scope_id}</small></div>
+      <div className="verified-scope-actions"><Badge tone="success">{language === 'ko' ? tk("승인 검증됨", "Approval verified") : 'Verified'}</Badge><button className="secondary-button" onClick={() => { setCatalogScopeId(scope.scope_id); setModal('verified-scope'); }}>{language === 'ko' ? tk("내용 보기", "View details") : 'View Scope'}</button><button className="primary-button" onClick={() => scanFromScope(scope.scope_id)}>{language === 'ko' ? tk("새 스캔", "New scan") : 'New scan'}</button></div>
+    </article>)}</div> : !launchError && <p className="table-empty">{language === 'ko' ? tk("검증된 Scope가 없습니다.", "No verified Scopes are available.") : 'No verified Scopes are available.'}</p>}
+  </Panel>;
+  const catalogScopeSummary = scopes.find(scope => scope.scope_id === catalogScopeId);
+  const catalogScopeSummaryContent = catalogScopeSummary && <div className="scope-workflow">
+    <div className="notice"><Icon name="scope"/><div><strong>{language === 'ko' ? tk("현재 서버에서 요약 정보만 확인할 수 있습니다.", "Only summary information is available from this server.") : 'Only the Scope summary is available from this server.'}</strong><p>{language === 'ko' ? tk("대시보드 백엔드를 재시작하면 승인 정책 전체를 볼 수 있습니다.", "Restart the dashboard backend to view the full approved policy.") : 'Restart the dashboard backend to view the complete approved policy.'}</p></div></div>
+    <div className="scope-review-heading"><div><span>{tr('APPROVED SCOPE')}</span><h3>{catalogScopeSummary.program_name}</h3></div><code>{catalogScopeSummary.scope_id}</code></div>
+    <div className="scope-catalog-meta"><p>{catalogScopeSummary.platform} · {tr('Approved by')} {catalogScopeSummary.approved_by}</p></div>
+    <div className="scope-review-section"><div className="scope-asset-list">{catalogScopeSummary.targets.map((target, index) => <div key={`${target.asset}:${index}`}><Badge tone="success">{target.asset_type}</Badge><div><strong className="mono">{target.asset}</strong><p>{target.description}</p></div><small>{target.maximum_severity}</small></div>)}</div></div>
+    <div className="button-row"><button className="primary-button" onClick={() => scanFromScope(catalogScopeSummary.scope_id)}>{language === 'ko' ? tk("이 Scope로 새 스캔", "New scan with this Scope") : 'New scan with this Scope'} <Icon name="arrow" size={14}/></button></div>
+  </div>;
+  const headerRequirementsReady = selectedScope?.execution_requirements.execution_requirements_status === 'ready';
+  const headerResolutionError = headerResolution?.scopeId === scopeId ? headerResolution.error : '';
+  const sharedInputConflicts = selectedScope ? sharedPolicyInputConflicts(selectedScope.execution_requirements, selectedTargets, identityValues, policyValues) : [];
+  const limitsValid = !!selectedLimits
+    && maxRequests >= 1 && maxRequests <= selectedLimits.max_requests
+    && maxRps > 0 && maxRps <= selectedLimits.requests_per_second
+    && maxConcurrency >= 1 && maxConcurrency <= selectedLimits.concurrency
+    && timeoutSeconds >= 1 && timeoutSeconds <= selectedLimits.timeout_seconds
+    && maxDepth >= 0 && maxDepth <= selectedLimits.max_depth
+    && Number.isInteger(ffufMaxTimeSeconds) && ffufMaxTimeSeconds >= 0 && ffufMaxTimeSeconds <= 86400
+    && isValidTagBatchSize(tagBatchSize);
+  const modelsValid = [reconModel, attackModel, validationModel, reportModel].every(
+    model => modelNamePattern.test(model) && !model.includes('://'),
+  );
+  const startUrlReady = validStartUrl(startUrl, scanProfile === 'bug-bounty-safe')
+    && (!startUrl.trim() || selectedTargets.length === 1);
+  const bugBountyReady = selectedScope
+    ? bugBountyTargetReady(scanProfile, selectedTargets, selectedScope.targets, startUrl)
+    : false;
+  const canLaunch = !demo && !!selectedScope && selectedTargets.length > 0
+    && selectedTargets.every(target => selectedScope.targets.some(item => item.asset === target))
+    && authorizationConfirmed && limitsValid && modelsValid && startUrlReady && bugBountyReady
+    && canLaunchWithHeaderInputs(selectedScope.execution_requirements, identityValues)
+    && canLaunchWithPolicyInputs(selectedScope.execution_requirements, selectedTargets, policyValues, policyConfirmations, identityValues) && !launching;
+  const journeySteps = [
+    { title: tk("프로그램 등록", "Register program"), description: tk("버그바운티 프로그램 URL과 공개 여부를 등록합니다.", "Register a bug bounty program URL and visibility.") },
+    { title: tk("스코프 승인", "Approve Scope"), description: tk("정책과 대상 자산을 원문과 대조한 뒤 승인합니다.", "Compare the policy and target assets with the source before approval.") },
+    { title: tk("스캔 실행", "Run scan"), description: tk("승인된 대상과 정책 제한을 확인하고 스캔을 시작합니다.", "Check approved targets and policy limits, then start the scan.") },
+    { title: tk("검증과 보고서", "Validation and reports"), description: tk("후보를 재현하고 증거를 검토해 로컬 초안을 만듭니다.", "Reproduce candidates, review evidence, and create a local draft.") },
+  ];
+  const journeyIndex = demo ? 3 : totalProgramCount === 0 ? 0 : approvedScopeCount === 0 ? 1 : !snapshot ? 2 : 3;
+  const journeyAction = demo
+    ? { label: tk("데모 스캔 살펴보기", "Explore demo scan"), run: () => go('Scans') }
+    : journeyIndex === 0
+      ? { label: tk("프로그램 등록", "Register program"), run: () => { setScopeError(''); setModal('scope'); } }
+      : journeyIndex === 1
+        ? { label: tk("스코프 검토하기", "Review Scope"), run: () => go('Scopes / Programs') }
+        : journeyIndex === 2
+          ? { label: tk("새 스캔 설정", "Configure new scan"), run: openNewScan }
+          : { label: reviewCount ? tk("검증 대기열 열기", "Open validation queue") : tk("스캔 화면 열기", "Open scans"), run: () => go(reviewCount ? 'Validation' : 'Scans') };
+  const newScanContent = <div className="scan-form">
+    <div className="notice"><Icon name="lock"/><div><strong>{tr('Approved Scope only')}</strong><p>{tr('The backend re-verifies approval integrity and the Python orchestrator enforces TargetPolicy and request budgets.')}</p></div></div>
+    <div className="notice"><Icon name="search"/><div><strong>{tk('블랙박스 실행', 'Black-box execution')}</strong><p>{tk('실행 에이전트는 대상의 HTTP 응답, DOM, 브라우저 트래픽, 공개 클라이언트 자산만 사용합니다. 공개 정답 목록과 소스 기준 목록은 실행 입력으로 사용되지 않습니다.', 'Runtime agents use only target HTTP responses, DOM, browser traffic, and public client assets. Public answer catalogs and source baselines are never used as execution input.')}</p></div></div>
+    {demo ? <p className="form-error">{tr('Switch to the live local dashboard to start a scan.')}</p> : <>
+      {repeatSource && <div className="notice" role="status"><Icon name="scope"/><div><strong>{tk("정찰부터 새 스캔", "New scan from recon")}</strong><p>{tk(`기존 스캔 ${repeatSource.scanId}의 결과는 유지됩니다. 새 스캔 ID를 만들고 Scope·대상·실행 제한·로그인 방식을 확인한 뒤 정찰부터 다시 시작합니다. 이전 실행 설정은 저장되지 않아 현재 승인된 Scope와 프로필 기본값을 사용합니다.`, `Results for scan ${repeatSource.scanId} are kept. A new scan ID is created. Review the Scope, targets, limits, and login method before starting again from recon. Previous run settings were not saved, so the current approved Scope and profile defaults are used.`)}</p></div></div>}
+      {repeatSource && !scopes.some(scope => scope.scope_id === repeatSource.scopeId) && <p className="form-error" role="alert">{tk("기존 스캔의 승인된 Scope를 찾을 수 없습니다. 새로 승인된 Scope를 직접 선택하고 대상을 확인하세요.", "The approved Scope for the previous scan is unavailable. Select a newly approved Scope and check the targets.")}</p>}
+      {repeatSource && selectedScope?.scope_id === repeatSource.scopeId && repeatSource.targets.some(target => !selectedScope.targets.some(item => item.asset === target)) && <p className="form-error" role="alert">{tk("이전 스캔의 일부 대상은 현재 승인된 Scope에 없어 선택하지 않았습니다. 대상 목록을 확인하세요.", "Some targets from the previous scan are outside the currently approved Scope and were not selected. Check the target list.")}</p>}
+      <label className="form-field"><span>{tr('Verified Scope')}</span><select aria-label={tr('Approved program')} value={scopeId} onChange={event => { setScopeId(event.target.value); setSelectedTargets([]); setStartUrl(''); setIdentityValues({}); setAuthorizationConfirmed(false); }}><option value="">{tr('Select a recent approved scope')}</option>{scopes.map(scope => <option key={scope.scope_id} value={scope.scope_id}>{scope.program_name} · {scope.platform}</option>)}</select></label>
+      {selectedScope && <>
+        {!headerRequirementsReady && (headerResolutionError
+          ? <p className="form-error" role="alert">{tk('실행 요구 사항을 확인하지 못해 스캔을 시작할 수 없습니다.', 'The scan cannot start until execution requirements are resolved.')} {headerResolutionError}</p>
+          : <p className="requirements-note" role="status">{tk('승인된 정책에서 실행 요구 사항을 확인하는 중입니다…', 'Resolving execution requirements from the approved policy…')}</p>)}
+        <div className="form-grid">
+          <ScanModelField label={tr('Recon model')} value={reconModel} onChange={setReconModel} customLabel={tr('Custom model ID')}/>
+          <ScanModelField label={tr('Attack model')} value={attackModel} onChange={setAttackModel} customLabel={tr('Custom model ID')}/>
+          <ScanModelField label={tr('Validation model')} value={validationModel} onChange={setValidationModel} customLabel={tr('Custom model ID')}/>
+          <ScanModelField label={tr('Report model')} value={reportModel} onChange={setReportModel} customLabel={tr('Custom model ID')}/>
+        </div>
+        <p className="form-hint">{tr('Select Codex models from GPT-5.6 onward, or enter a custom model ID.')}</p>
+        {!modelsValid && <p className="form-error" role="alert">{tr('Enter valid model IDs before starting the scan.')}</p>}
+        <fieldset className="target-fieldset"><legend>{tr('Targets')} <small>{selectedTargets.length}{tr('selected')}</small></legend><div className="target-actions">{scanProfile !== 'bug-bounty-safe' && <button type="button" className="text-button" onClick={() => { setSelectedTargets(selectedScope.targets.map(item => item.asset)); setStartUrl(''); }}>{tr('Select all')}</button>}<button type="button" className="text-button" onClick={() => { setSelectedTargets([]); setStartUrl(''); }}>{tr('Clear')}</button></div><div className="target-list">{selectedScope.targets.map(target => <label key={`${target.asset_type}:${target.asset}`}><input type="checkbox" checked={selectedTargets.includes(target.asset)} onChange={() => { setSelectedTargets(current => scanProfile === 'bug-bounty-safe' ? (current.includes(target.asset) ? [] : [target.asset]) : (current.includes(target.asset) ? current.filter(item => item !== target.asset) : [...current, target.asset])); setStartUrl(''); }}/><span><strong>{target.asset}</strong><small>{target.asset_type} · {tk("최대", "maximum")} {tr(target.maximum_severity || 'program policy')}</small></span></label>)}</div></fieldset>
+        {selectedTargets.length > 0 && selectedLimits && <section className="execution-requirements"><div className="execution-requirements-heading"><div><h3>{tr('Execution requirements')}</h3></div><div className="stage-badges"><Badge>{tr('Recon')}</Badge><Badge>{tr('Attack')}</Badge><Badge>{tr('Validation')}</Badge></div></div><div className="requirements-summary"><div><span>{tr('Policy request-rate ceiling')}</span><strong>{selectedScope.execution_requirements.scope_max_requests_per_second ? `${selectedScope.execution_requirements.scope_max_requests_per_second} ${tr('requests per second unit')}` : tr('Not specified by policy')}</strong></div><div><span>{tr('Required request header')}</span><strong className="mono">{headerRequirementsReady ? (selectedScope.execution_requirements.required_headers.length ? selectedScope.execution_requirements.required_headers.map(header => <span key={header.name} title={header.source_quote}>{header.name}: {header.value_template}<br/></span>) : tr('None')) : tk('확인 중', 'Pending')}</strong></div></div></section>}
+        <div className="form-grid"><label className="form-field"><span>{tr('Execution profile')}</span><select value={scanProfile} onChange={event => { setScanProfile(event.target.value as ExecutionProfileId); setSelectedTargets([]); setStartUrl(''); }}><option value="bug-bounty-safe">{tk('버그바운티 안전', 'Bug bounty safe')}</option><option value="safe-recon">{tr('Safe recon')}</option><option value="focused-discovery">{tr('Focused discovery')}</option></select></label><label className="form-field"><span>{tk('공유 스캔 요청 예산', 'Shared scan request budget')} <small>≤ {selectedLimits?.max_requests.toLocaleString()}</small></span><input type="number" min="1" max={selectedLimits?.max_requests} value={maxRequests} onChange={event => setMaxRequests(Number(event.target.value))}/></label></div>
+        {scanProfile === 'bug-bounty-safe' && <div className="notice"><Icon name="scope"/><div><strong>{tk('실제 버그바운티 프로그램용 보수적 실행', 'Conservative execution for a real bug bounty program')}</strong><p>{tk('한 번에 승인된 자산 하나만 실행하며 일반 워드리스트 경로 대입은 사용하지 않습니다. 와일드카드는 아래에 정확한 HTTPS 시작 URL이 필요합니다.', 'Run one approved asset at a time without generic wordlist path guessing. Wildcards require an exact HTTPS start URL below.')}</p></div></div>}
+        {selectedTargets.length === 1 && <label className="form-field"><span>{tk('정확한 시작 URL', 'Exact start URL')} <small>{selectedScope.targets.find(item => item.asset === selectedTargets[0])?.asset_type === 'WILDCARD' && scanProfile === 'bug-bounty-safe' ? tk('필수', 'required') : tk('선택', 'optional')}</small></span><input type="url" placeholder="https://approved.example/path" value={startUrl} onChange={event => setStartUrl(event.target.value)} aria-invalid={!validStartUrl(startUrl, scanProfile === 'bug-bounty-safe')}/><small>{scanProfile === 'bug-bounty-safe' ? tk('승인된 자산 안의 HTTPS URL만 입력하세요.', 'Enter only an HTTPS URL inside the approved asset.') : tk('승인된 자산 안의 HTTP(S) URL만 입력하세요.', 'Enter only an HTTP(S) URL inside the approved asset.')}</small></label>}
+        {!startUrlReady && <p className="form-error" role="alert">{scanProfile === 'bug-bounty-safe' ? tk('시작 URL은 쿼리·프래그먼트·자격 증명이 없는 HTTPS URL이어야 하며 대상 하나를 선택해야 합니다.', 'The start URL must be an HTTPS URL without a query, fragment, or embedded credentials and requires one selected target.') : tk('시작 URL은 쿼리·프래그먼트·자격 증명이 없는 HTTP(S) URL이어야 하며 대상 하나를 선택해야 합니다.', 'The start URL must be an HTTP(S) URL without a query, fragment, or embedded credentials and requires one selected target.')}</p>}
+        {scanProfile === 'bug-bounty-safe' && selectedTargets.length === 1 && selectedScope.targets.find(item => item.asset === selectedTargets[0])?.asset_type === 'WILDCARD' && !startUrl.trim() && <p className="form-error" role="alert">{tk('와일드카드 대상에는 정확한 HTTPS 시작 URL이 필요합니다.', 'An exact HTTPS start URL is required for a wildcard target.')}</p>}
+        <div className="form-grid"><label className="form-field"><span>{tr('Requests per second')} <small>≤ {selectedLimits?.requests_per_second}</small></span><input type="number" min="0.1" step="0.1" max={selectedLimits?.requests_per_second} value={maxRps} onChange={event => setMaxRps(Number(event.target.value))}/></label><label className="form-field"><span>{tr('Concurrency')} <small>≤ {selectedLimits?.concurrency}</small></span><input type="number" min="1" max={selectedLimits?.concurrency} value={maxConcurrency} onChange={event => setMaxConcurrency(Number(event.target.value))}/></label></div>
+        <div className="scan-rate-summary" aria-live="polite"><span>{tk('이번 스캔의 공유 요청 속도 상한', 'This scan shared request-rate cap')}</span><strong>{maxRps > 0 ? `${maxRps} ${tr('requests per second unit')}` : tr('Enter a valid request rate')}</strong>{requestInterval !== null && <small>{language === 'ko' ? `평균 ${requestInterval}초에 1회 요청` : `Average one request every ${requestInterval} seconds`}</small>}</div>
+        <div className="form-grid"><label className="form-field"><span>{tr('Timeout seconds')} <small>≤ {selectedLimits?.timeout_seconds}</small></span><input type="number" min="1" max={selectedLimits?.timeout_seconds} value={timeoutSeconds} onChange={event => setTimeoutSeconds(Number(event.target.value))}/></label><label className="form-field"><span>{tr('Maximum depth')} <small>≤ {selectedLimits?.max_depth}</small></span><input type="number" min="0" max={selectedLimits?.max_depth} value={maxDepth} onChange={event => setMaxDepth(Number(event.target.value))}/></label></div>
+        <label className="form-field"><span>{tk('추가 경로 탐색 전체 시간 (초)', 'Total additional path discovery time (seconds)')} <small>{scanProfile === 'bug-bounty-safe' ? tk('일반 워드리스트 탐색 비활성', 'Generic wordlist discovery disabled') : tk('모든 루트가 공유 · 0 = 시간 제한 없음', 'Shared by all roots · 0 = no time limit')}</small></span><input type="number" min="0" max={scanProfile === 'bug-bounty-safe' ? 60 : 86400} value={ffufMaxTimeSeconds} disabled={scanProfile === 'bug-bounty-safe'} onChange={event => setFfufMaxTimeSeconds(Number(event.target.value))}/></label>
+        <div className="form-grid"><label className="form-field"><span>{tr('Tag batch size')} <small>1–200</small></span><input type="number" min="1" max="200" step="1" value={tagBatchSize} onChange={event => setTagBatchSize(Number(event.target.value))} aria-describedby="tag-batch-size-hint"/><small id="tag-batch-size-hint">{tr('Observations per model call · 25 recommended (300-second model timeout)')}</small></label><label className="form-field"><span>{tr('Login behavior')}</span><select value={loginMode} onChange={event => setLoginMode(event.target.value as 'none' | 'runtime-browser')}><option value="none">{tr('No login prompt')}</option><option value="runtime-browser">{tr('Open runtime browser')}</option></select></label></div>
+        {!!selectedScope.execution_requirements.execution_rules?.exclusions?.length && <div><ScopeExclusionStatus count={selectedScope.execution_requirements.execution_rules.exclusions.length} preparation={exclusionPreparation}/><button className="secondary-button" disabled={!canLaunch || preparingExclusions} onClick={() => void prepareExclusions()}>{tk(preparingExclusions ? '확인 중…' : '저장된 증거로 제외 조건 확인', preparingExclusions ? 'Checking…' : 'Check exclusions from saved evidence')}</button></div>}
+        {loginMode === 'runtime-browser' && <p className="requirements-note">{tk('스캔 중 열린 브라우저에서 5분 안에 로그인을 완료하세요. 인증 토큰과 로그인 화면 종료가 확인되면 자동으로 진행합니다. 토큰을 사용하지 않는 사이트는 자동 확인에 실패할 수 있습니다.', 'Complete login in the opened browser within five minutes. The scan continues when an authentication token is detected and the login form closes. Sites without a token may not be confirmed automatically.')}</p>}
+        <p className="requirements-note">{tk('요청 예산은 모든 대상과 정찰·공격·검증 단계가 공유합니다.', 'The request budget is shared across all targets and Recon, Attack, and Validation.')}</p>
+        {applicablePolicyRequirements(selectedScope.execution_requirements.policy_blockers, selectedTargets).map((blocker, index) => <div className="form-error" role="alert" key={index}><strong>{blocker.label}</strong><p>{blocker.reason}</p></div>)}
+        <ScopePolicyAdvisories advisories={selectedScope.execution_requirements.execution_rules?.advisories} selectedAssets={selectedTargets} language={language}/>
+        {headerRequirementsReady && applicablePolicyRequirements(selectedScope.execution_requirements.policy_inputs, selectedTargets).map(input => <label className="form-field" key={`policy-${input.key}`}><span>{input.label}</span><input type={input.kind === 'email' ? 'email' : 'text'} value={policyValues[input.key] ?? ''} onChange={event => setPolicyValues(current => ({...current, [input.key]: event.target.value}))} maxLength={input.kind === 'username' ? 64 : 256} autoComplete="off" required aria-invalid={!!policyValues[input.key] && !validPolicyInput(input, policyValues[input.key])}/>{!!input.allowed_email_domains?.length && <small>{input.allowed_email_domains.join(', ')}</small>}</label>)}
+        {sharedInputConflicts.length > 0 && <p className="form-error" role="alert">{tk('헤더와 정책에 같은 입력 키가 사용됩니다. 두 입력 값을 일치시켜 주세요:', 'The header and policy share these inputs. Enter matching values in both fields:')} {sharedInputConflicts.join(', ')}</p>}
+        {headerRequirementsReady && selectedScope.execution_requirements.header_inputs.map(input => <label className="form-field" key={input.key}><span>{input.label} <small>{tr('required for every request')}</small></span><input type={input.kind === 'email' ? 'email' : 'text'} value={identityValues[input.key] ?? ''} onChange={event => setIdentityValues(current => ({ ...current, [input.key]: event.target.value }))} autoComplete="off" maxLength={input.kind === 'username' ? 64 : 256} required aria-invalid={!!identityValues[input.key] && !canLaunchWithHeaderInputs({ header_requirements_status: 'ready', header_inputs: [input] }, identityValues)}/>{input.kind === 'username' && <small>{tk('1~64자 영문·숫자·점·밑줄·하이픈, 첫 글자는 영문 또는 숫자', '1–64 letters, digits, dots, underscores or hyphens; start with a letter or digit')}</small>}</label>)}
+      </>}
+      {launchError && <p className="form-error" role="alert">{launchError}</p>}
+      {!scopes.length && !launchError && <p className="form-empty">{tr(scopesLoading ? 'Loading verified scopes…' : 'No verified Scopes are available. Review and approve a program first.')}</p>}
+      <div className="dialog-action-dock">{selectedScope && <label className="confirm-field"><input type="checkbox" disabled={!headerRequirementsReady} checked={authorizationConfirmed} onChange={event => setAuthorizationConfirmed(event.target.checked)}/><span>{tk('선택한 대상의 테스트 권한과 승인된 정책의 필수 조건 충족을 확인합니다.', 'I confirm authorization for the selected targets and completion of the approved policy prerequisites.')}</span></label>}<div className="button-row"><button className="secondary-button" onClick={() => { setModal(null); go('Scopes / Programs'); }}>{tr('Review programs')}</button><button className="primary-button" disabled={!canLaunch} onClick={() => void startScan()}>{tr(launching ? 'Starting…' : 'Start scan')} <Icon name="arrow" size={14}/></button></div></div>
+    </>}
+  </div>;
+  const scopeIntakeContent = <div className="scope-intake-form">
+    <div className="notice"><Icon name="scope"/><div><strong>{tr('Register before collecting Scope')}</strong><p>{tr('Add the bug bounty program here. Scope extraction, evidence review, and approval stay separate from scan execution.')}</p></div></div>
+    <label className="form-field"><span>{tr('Program URL')}</span><input type="url" value={scopeProgramUrl} onChange={event => setScopeProgramUrl(event.target.value)} placeholder="https://hackerone.com/program-handle" autoComplete="off"/></label>
+    <fieldset className="visibility-options"><legend>{tr('Program visibility')}</legend><label><input type="radio" name="scope-visibility" value="public" checked={scopeVisibility === 'public'} onChange={() => setScopeVisibility('public')}/><span><strong>{tr('Public')}</strong><small>{tr('Program name may be shown in the workspace.')}</small></span></label><label><input type="radio" name="scope-visibility" value="private" checked={scopeVisibility === 'private'} onChange={() => setScopeVisibility('private')}/><span><strong>{tr('Private')}</strong><small>{tr('Name and URL remain masked in normal dashboard views.')}</small></span></label></fieldset>
+    {scopeError && <p className="form-error" role="alert">{scopeError}</p>}
+    <div className="button-row"><button className="secondary-button" onClick={() => setModal(null)}>{tr('Cancel')}</button><button className="primary-button" disabled={demo || !scopeProgramUrl.trim() || scopeSubmitting} onClick={() => void registerProgram()}>{tr(scopeSubmitting ? 'Registering…' : 'Add to Scope queue')} <Icon name="arrow" size={14}/></button></div>
+  </div>;
+  const scopeWorkflowContent = workflowProgram && <div className="scope-workflow">
+    <div className="workflow-summary"><div><span>{workflowProgram.platform}</span><strong>{workflowProgram.visibility === 'private' && !privateVisible ? tr('Private program') : workflowProgram.program}</strong></div><Badge tone={scopeStatusTone(workflowProgram.scope_status)}>{tr(scopeStatusLabel[workflowProgram.scope_status])}</Badge></div>
+    {['scope_required', 'approved', 'rejected', 'failed', 'cancelled'].includes(workflowProgram.scope_status) ? <div>
+      <ScanModelField label={tr('Scope model')} value={scopeModel} onChange={setScopeModel} customLabel={tr('Custom model ID')} disabled={scopeActionBusy}/>
+      <p className="form-hint">{tr('The selected model handles Scope navigation, collection and policy analysis.')}</p>
+      {!isValidScopeModel(scopeModel) && <p className="form-error" role="alert">{tr('Enter a valid model ID before collecting Scope.')}</p>}
+    </div> : <p className="form-hint">{tr('Scope model')}: {workflowProgram.scope_model || tr('Model was not recorded for this call')}</p>}
+    {(workflowProgram.scope_status === 'scope_required' || workflowProgram.scope_status === 'rejected' || workflowProgram.scope_status === 'failed' || workflowProgram.scope_status === 'cancelled') && <>
+      <div className="notice"><Icon name="scope"/><div><strong>{tr('Collect a policy snapshot')}</strong><p>{tr('AI DAST opens its own browser. Log in to the bug bounty platform, then continue here. AI DAST will open the registered program page and collect its scope. The result remains an unapproved draft until you review it.')}</p></div></div>
+      {workflowProgram.scope_error && <p className="form-error">{tr('Previous attempt:')} {workflowProgram.scope_error}</p>}
+      {workflowProgram.scope_status === 'cancelled' && <p role="status">{tr('Scope collection was cancelled. You can start a new collection.')}</p>}
+      {(workflowProgram.scope_status === 'failed' || workflowProgram.scope_status === 'cancelled') && displayedScopeProgress > 0 && scopeProgressBar}
+      <div className="button-row"><button className="secondary-button" onClick={closeDialog}>{tr('Cancel')}</button><button className="primary-button" disabled={scopeActionBusy || !isValidScopeModel(scopeModel)} onClick={() => void startScopeCollection()}>{tr(scopeActionBusy ? 'Starting…' : workflowProgram.scope_status === 'scope_required' ? 'Collect Scope' : 'Collect again')} <Icon name="arrow" size={14}/></button></div>
+    </>}
+    {(workflowProgram.scope_status === 'collecting' || workflowProgram.scope_status === 'awaiting_browser' || workflowProgram.scope_status === 'paused' || workflowProgram.scope_status === 'cancelling') && <>
+      <div className="notice"><Icon name="terminal"/><div><strong>{tr(workflowProgram.scope_status === 'awaiting_browser' ? 'Browser input required' : workflowProgram.scope_status === 'paused' ? 'Scope collection paused' : workflowProgram.scope_status === 'cancelling' ? 'Scope cancellation in progress' : 'Scope collection is running')} <span className="scope-elapsed" role="timer">· {scopeElapsedLabel}</span></strong><p>{tr(workflowProgram.scope_status === 'awaiting_browser' ? 'Check access in the opened local browser, then continue here. Log in only if the site requires it.' : workflowProgram.scope_status === 'paused' ? 'The Scope worker and its browser are paused. Continue to resume the same collection.' : workflowProgram.scope_status === 'cancelling' ? 'The Scope worker is shutting down. The result will show Cancelled after it exits.' : 'The dashboard is collecting and interpreting the program policy. Keep this dialog open to follow progress.')}</p></div></div>
+      {scopeProgressBar}
+      {workflowProgram.scope_status === 'awaiting_browser' && <button className="primary-button workflow-wide-button" disabled={scopeActionBusy} onClick={() => void confirmScopeBrowser()}>{tr(scopeActionBusy ? 'Continuing…' : 'I finished login · Continue')}</button>}
+      <div className="button-row"><button className="secondary-button" disabled={scopeActionBusy || workflowProgram.scope_status === 'cancelling'} onClick={() => void controlScope(workflowProgram.scope_status === 'paused' ? 'continue' : 'pause')}>{tr(workflowProgram.scope_status === 'paused' ? 'Continue Scope' : 'Pause Scope')}</button><button className="secondary-button" disabled={scopeActionBusy || workflowProgram.scope_status === 'cancelling'} onClick={() => void controlScope('cancel')}>{tr(workflowProgram.scope_status === 'cancelling' ? 'Cancelling Scope…' : 'Cancel Scope collection')}</button></div>
+    </>}
+    {scopeEvents.length > 0 && <div className="scope-event-list" aria-live="polite"><h3>{tr('Collection activity')}{scopeActive && <span className="scope-elapsed" role="timer">{scopeWorkLabel} · {scopeElapsedLabel}</span>}</h3>{scopeEvents.map(event => <div key={`${event.job_id}:${event.event_id}`} className={event.level}><time dateTime={event.occurred_at}>{new Date(event.occurred_at).toLocaleTimeString(language === 'ko' ? 'ko-KR' : 'en-GB', { hour12: false })}</time><span>{localizeActivityMessage(language, event)}</span></div>)}</div>}
+    {(workflowProgram.scope_status === 'review_required' || workflowProgram.scope_status === 'approved') && scopeProgressBar}
+    {workflowProgram.scope_status === 'approved' && !scopeDraft && !scopeWorkflowError && <p className="form-empty">{tr('Loading approved Scope…')}</p>}
+    {(workflowProgram.scope_status === 'review_required' || workflowProgram.scope_status === 'approved') && scopeDraft && <>
+      <div className="scope-review-heading"><div><span>{tr(scopeApproval ? 'APPROVED SCOPE' : 'UNAPPROVED DRAFT')}</span><h3>{scopeDraft.program_name}</h3></div><code>{scopeDraft.scope_id}</code></div>
+      <details className="scope-meta" open={workflowProgram.scope_status === 'review_required'}><summary>{tr('Collection details')}</summary><div><p>{scopeDraft.program_description}</p><p className="scope-review-meta">{tr('Collected from')}: {scopeDraft.source_url} · {new Date(scopeDraft.created_at).toLocaleString(language === 'ko' ? 'ko-KR' : undefined)}</p>{scopeApproval && <p className="scope-review-meta">{tr('Approved by')} {scopeApproval.approved_by} · {new Date(scopeApproval.approved_at).toLocaleString(language === 'ko' ? 'ko-KR' : undefined)}</p>}</div></details>
+      <details className="scope-review-section" open={workflowProgram.scope_status === 'review_required'}><summary>{tr('In scope')} <span>{scopeDraft.in_scope_assets.length}</span></summary><div className="scope-asset-list">{scopeDraft.in_scope_assets.map((asset, index) => <div key={`${asset.asset}:${index}`}><Badge tone="success">{asset.asset_type}</Badge><div><strong className="mono">{asset.asset}</strong><p>{asset.description || asset.eligibility || tr('No additional description.')}</p></div><small>{asset.maximum_severity || tr('Policy limit')}</small></div>)}</div></details>
+      <details className="scope-review-section" open={workflowProgram.scope_status === 'review_required'}><summary>{tr('Out of scope')} <span>{scopeDraft.out_of_scope_assets.length}</span></summary><div className="scope-asset-list">{scopeDraft.out_of_scope_assets.map((asset, index) => <div key={`${asset.asset}:${index}`}><Badge tone="critical">{asset.asset_type}</Badge><div><strong className="mono">{asset.asset}</strong><p>{asset.description || asset.eligibility || tr('Excluded by policy.')}</p></div></div>)}</div></details>
+      <div className="scope-rule-grid">
+        <details className="scope-rule-item" open={workflowProgram.scope_status === 'review_required'}><summary>{tr('Allowed')} <span>{scopeDraft.allowed_activities.length}</span></summary><ul>{scopeDraft.allowed_activities.length ? scopeDraft.allowed_activities.map((item, index) => <li key={index}>{item}</li>) : <li>{tr('None extracted.')}</li>}</ul></details>
+        <details className="scope-rule-item" open={workflowProgram.scope_status === 'review_required'}><summary>{tr('Prohibited')} <span>{scopeDraft.prohibited_activities.length}</span></summary><ul>{scopeDraft.prohibited_activities.length ? scopeDraft.prohibited_activities.map((item, index) => <li key={index}>{item}</li>) : <li>{tr('None extracted.')}</li>}</ul></details>
+        <details className="scope-rule-item" open={workflowProgram.scope_status === 'review_required'}><summary>{tr('Submission requirements')} <span>{scopeDraft.submission_requirements.length}</span></summary><ul>{scopeDraft.submission_requirements.length ? scopeDraft.submission_requirements.map((item, index) => <li key={index}>{item}</li>) : <li>{tr('None extracted.')}</li>}</ul></details>
+        <details className="scope-rule-item" open={workflowProgram.scope_status === 'review_required'}><summary>{tr('Operational constraints')} <span>{scopeDraft.operational_constraints.length}</span></summary><ul>{scopeDraft.operational_constraints.length ? scopeDraft.operational_constraints.map((item, index) => <li key={index}>{item}</li>) : <li>{tr('None extracted.')}</li>}</ul></details>
+        <details className="scope-rule-item" open={workflowProgram.scope_status === 'review_required'}><summary>{tr('Ambiguities to verify')} <span>{scopeDraft.ambiguities.length}</span></summary><ul>{scopeDraft.ambiguities.length ? scopeDraft.ambiguities.map((item, index) => <li key={index}>{item}</li>) : <li>{tr('None extracted.')}</li>}</ul></details>
+      </div>
+      <ScopeHeaderRequirements headers={scopeDraft.required_request_headers} open={workflowProgram.scope_status === 'review_required'} tr={tr}/>
+      <ScopeExecutionRulesView rules={scopeDraft.execution_rules} open={workflowProgram.scope_status === 'review_required'}/>
+      <ScopePolicyReferences references={scopeDraft.policy_references} open={workflowProgram.scope_status === 'review_required'} language={language}/>
+      <details className="scope-evidence"><summary>{tr('Source evidence and safe harbor')} <span>{scopeDraft.source_evidence.length}</span></summary><div className="scope-evidence-section"><strong>{tr('Safe harbor')}</strong><p>{tr('Program protections for policy-compliant research; approved Scope still defines permitted targets.')}</p><p>{scopeDraft.safe_harbor || tr('No safe-harbor text was extracted.')}</p></div><div className="scope-evidence-section"><strong>{tr('Source evidence')}</strong><p>{tr('Exact excerpts from the program page supporting the collected assets and rules.')}</p>{scopeDraft.source_evidence.map((item, index) => <blockquote key={index}><strong>{item.section}</strong>{item.quote}</blockquote>)}</div></details>
+      {workflowProgram.scope_status === 'review_required' && <div className="scope-decision"><h3>{tr('Is this Scope accurate and authorized?')}</h3><p>{language === 'ko' ? <><strong>Yes</strong>는 무결성이 결합된 Scope 산출물을 게시하고 스캔을 활성화합니다. <strong>No</strong>는 새 초안을 삭제합니다. 기존 승인된 Scope는 계속 사용할 수 있습니다.</> : <><strong>Yes</strong> publishes integrity-bound Scope artifacts and enables scanning. <strong>No</strong> deletes this draft. Previously approved Scopes remain available.</>}</p><label className="form-field"><span>{tr('Reviewer name')} <small>{tr('required for Yes')}</small></span><input value={scopeReviewer} onChange={event => setScopeReviewer(event.target.value)} maxLength={160} autoComplete="off" placeholder={tr('Local operator or team identity')}/></label><label className="confirm-field"><input type="checkbox" checked={scopeConfirmed} onChange={event => setScopeConfirmed(event.target.checked)}/><span>{tr('I reviewed the listed assets and rules against the source policy and confirm this Scope is authorized.')}</span></label><div className="decision-buttons"><button className="reject-button" disabled={scopeActionBusy} onClick={() => void decideScope('no')}>{tr('No · Reject draft')}</button><button className="primary-button" disabled={scopeActionBusy || !scopeReviewer.trim() || !scopeConfirmed} onClick={() => void decideScope('yes')}>{tr('Yes · Approve Scope')} <Icon name="check" size={14}/></button></div></div>}
+    </>}
+    {workflowProgram.scope_status === 'approved' && <div className="button-row"><button className="secondary-button" disabled={scopeActionBusy || !isValidScopeModel(scopeModel)} onClick={() => void startScopeCollection()}>{tr(scopeActionBusy ? 'Starting…' : 'Collect again')}</button>{scopeDraft && <button className="primary-button" onClick={() => scanFromScope(scopeDraft.scope_id)}>{tk('이 Scope로 새 스캔', 'New scan with this Scope')}</button>}</div>}
+    {((workflowProgram.scope_status === 'approved' && scopeDraft && scopeApproval) || workflowProgram.scope_status === 'rejected') && <div className={`workflow-result ${workflowProgram.scope_status}`}><Icon name={workflowProgram.scope_status === 'approved' ? 'check' : 'shield'} size={24}/><div><h3>{tr(workflowProgram.scope_status === 'approved' ? 'Scope approved' : 'Draft rejected')}</h3><p>{workflowProgram.scope_status === 'approved' ? tr('Integrity-bound artifacts were published. The verified targets are now available in New Scan.') : tk('새 초안은 삭제되었습니다. 기존 승인된 Scope는 계속 사용할 수 있습니다.', 'The new draft was discarded. Previously approved Scopes remain available.')}</p></div><button className="secondary-button" onClick={() => setModal(null)}>{tr('Done')}</button></div>}
+    {scopeWorkflowError && <p className="form-error" role="alert">{scopeWorkflowError}</p>}
+  </div>;
+
+  return <div className={`app-shell ${compact ? 'compact-mode' : ''}`}>
+    <a className="skip-link" href="#main-content">{tr('Skip to content')}</a>
+    <aside id="sidebar" className="sidebar" style={viewportWidth > 820 ? { width: navigationWidth } : undefined}><div className="brand" aria-label="DDalGak"><div className="brand-copy"><strong>DDalGak</strong><small>{tr('AI DAST tool')}</small></div><span className="brand-mobile" aria-hidden="true">DD</span></div>
+      <nav ref={navigation} aria-label={tr('Main navigation')}><p className="nav-label">{tr('OPERATIONS')}</p>{pages.map((p,i) => <button key={p} aria-label={pageLabel(p)} title={pageLabel(p)} className={`nav-item ${p === 'Settings' ? 'mobile-settings-nav' : ''} ${page === p ? 'active' : ''}`} onClick={() => go(p)} aria-current={page === p ? 'page' : undefined}><Icon name={symbols[i]}/><span>{p === 'Scopes / Programs' ? <><span className="desktop-nav-label">{pageLabel(p)}</span><span className="mobile-nav-label">{tk("스코프", "Scope")}</span></> : pageLabel(p)}</span>{i === 1 && <em>{totalProgramCount}</em>}{i === 3 && snapshot && <em>{findings.length}</em>}</button>)}</nav>
+      <div className="sidebar-bottom"><button aria-label={tr('Settings')} title={tr('Settings')} className={`nav-item ${page === 'Settings' ? 'active' : ''}`} aria-current={page === 'Settings' ? 'page' : undefined} onClick={() => go('Settings')}><Icon name="settings"/><span>{tr('Settings')}</span></button><div className="operator"><div className="avatar">LO</div><div><strong>{tr('Local operator')}</strong><small>{tr(demo ? 'Demo workspace' : 'Backend session')}</small></div><span className="dot"/></div></div>
+      {viewportWidth > 820 && <ResizeHandle className="navigation-resizer" label={tk('탐색 메뉴 너비 조절', 'Resize navigation menu')} controls="sidebar" value={navigationWidth} direction={1} bounds={() => panelBounds('navigation', window.innerWidth, activityWidth)} onResize={setNavigationPreference}/>}
+    </aside>
+      <div className="main-shell" style={viewportWidth > 820 ? { marginLeft: navigationWidth } : undefined}><header className="topbar"><div className="breadcrumb">{tr('Workspace')} <span>/</span> <strong>{pageLabel(page)}</strong></div><div className="top-actions"><label className="language-select"><span className="sr-only">{tr('Language')}</span><select aria-label={tr('Language')} value={language} onChange={event => setLanguage(event.target.value as Language)}><option value="ko">한국어</option><option value="en">English</option></select></label><button className="icon-button theme-toggle" title={tr(`Switch to ${resolvedTheme === 'dark' ? 'light' : 'dark'} mode`)} aria-label={tr(`Switch to ${resolvedTheme === 'dark' ? 'light' : 'dark'} mode`)} onClick={() => setTheme(resolvedTheme === 'dark' ? 'light' : 'dark')}><Icon name={resolvedTheme === 'dark' ? 'sun' : 'moon'} size={16}/></button></div></header>
+      {demo && <div className={`demo-strip ${samplePreview ? 'sample-preview' : ''}`}><Icon name="terminal" size={14}/><span>{tr('DEMO DATA')}<b>·</b>{tr('A synthetic workflow. No network scans or program activity.')}</span><button onClick={samplePreview ? () => location.assign(liveUrl.href) : () => go('Settings')}>{samplePreview ? tk('실제 데이터로 돌아가기', 'Return to live data') : tr('Connection details')} <Icon name="arrow" size={13}/></button></div>}
+      <div className={`workspace-grid ${collapsed ? 'activity-collapsed' : ''}`} style={viewportWidth > 1100 && !collapsed ? { gridTemplateColumns: `minmax(0,1fr) ${activityWidth}px` } : undefined}><main id="main-content" tabIndex={-1} className="content-column">
+        {manualLoginNotice}
+        <div className="page-heading"><div><p className="eyebrow">{tr(page === 'Overview' ? 'YOUR OPERATIONS, AT A GLANCE' : 'AI DAST / WORKSPACE')}</p><h1>{tr(page === 'Overview' ? 'Security overview' : page)}</h1><p>{tr(page === 'Overview' ? 'From approved scope to evidence you can stand behind.' : page === 'Scopes / Programs' ? 'Program inventory is a starting point. Approved scope defines execution.' : page === 'Scans' ? 'One deterministic pipeline. Traceable decisions at every stage.' : page === 'Findings' ? 'Signals become findings. Validation establishes the verdict.' : page === 'Validation' ? 'Reproduction, controls, and evidence before confirmation.' : page === 'Reports' ? 'Reviewable local drafts. Nothing is submitted automatically.' : page === 'Audit log' ? 'Trace the decisions and provenance behind each run.' : page === 'LLM log' ? 'Review Codex execution metadata without prompts or results.' : 'Connection, privacy, and display preferences.')}</p></div><span className="heading-tag">{demo ? tk("데모 / 042", "Demo / 042") : tk("라이브 / V1", "Live / V1")}</span></div>
+        {!demo && (page === 'Findings' || page === 'Validation' || page === 'Reports') && <div className="scope-page-actions"><div><strong>{tk('예시 데이터', 'Example data')}</strong><p>{tk('취약점 · 검증 · 보고서 예시를 실제 스캔 결과와 분리해 살펴봅니다.', 'Explore synthetic findings, validations, and reports separately from live scans.')}</p></div><a className="secondary-button" href={sampleUrl.href}>{tk('예시 보기', 'View examples')}</a></div>}
+        {page === 'Scopes / Programs' && <div className="scope-page-actions"><div><strong>{tr('Scope intake')}</strong><p>{tr('Register a bug bounty program before collecting and approving its executable Scope.')}</p></div><button className="primary-button" onClick={() => { setScopeError(''); setModal('scope'); }}><Icon name="plus" size={15}/>{tr('Add program')}</button></div>}
+        {page === 'Scans' && <div className="scope-page-actions"><div><strong>{tr('Start scan')}</strong><p>{tr('Choose a verified approved Scope and configure a new scan.')}</p></div><button className="primary-button" onClick={openNewScan}><Icon name="plus" size={15}/>{tr('New scan')}</button></div>}
+        {page === 'Overview' && <>
+          <section className="operator-next" aria-labelledby="operator-next-title"><div><p className="eyebrow">{tk("권장 작업", "Recommended action")}</p><h2 id="operator-next-title">{demo ? tk("데모 흐름을 따라 기능을 확인하세요", "Explore the demo workflow") : tk(`${journeyIndex + 1}단계 · ${journeySteps[journeyIndex].title}`, `Step ${journeyIndex + 1} · ${journeySteps[journeyIndex].title}`)}</h2><p>{demo ? tk("합성 데이터로 스캔·검증·보고서 화면을 안전하게 둘러볼 수 있습니다.", "Explore scan, validation, and report screens with synthetic data.") : journeySteps[journeyIndex].description}</p></div><button className="primary-button" onClick={journeyAction.run}>{journeyAction.label}<Icon name="arrow" size={14}/></button><ol className="journey-steps">{journeySteps.map((step, index) => <li key={step.title} className={index < journeyIndex ? 'complete' : index === journeyIndex ? 'current' : 'upcoming'}><span className="journey-marker">{index < journeyIndex ? <Icon name="check" size={13}/> : index + 1}</span><div><strong>{step.title}</strong><small>{index < journeyIndex ? tk("완료", "Completed") : index === journeyIndex ? tk("현재 단계", "Current stage") : tk("다음 단계", "Next step")}</small></div></li>)}</ol></section>
+          <section className="metrics" aria-label={tr('Workspace metrics')}>{[{ label: tr('Active scans'), value: snapshot?.status === 'running' ? '1' : '0', note: demo ? tr('1 synthetic workflow') : tr('Selected scan'), icon: 'pulse', color: 'green' },{ label: tr('Programs'), value: String(totalProgramCount), note: tk(`승인된 스코프 ${approvedScopeCount}개`, `${approvedScopeCount} approved Scopes`), icon: 'scope', color: 'blue' },{ label: tr('Awaiting review'), value: String(reviewCount), note: tr('Candidates, not verdicts'), icon: 'shield', color: 'amber' },{ label: tr('Confirmed findings'), value: String(findings.filter(f => f.status === 'confirmed').length), note: tr(demo ? 'Synthetic evidence only' : 'From backend snapshot'), icon: 'check', color: 'purple' }].map(m => <article className={`metric ${m.color}`} key={m.label}><div><span>{m.label}</span><Icon name={m.icon}/></div><strong>{m.value}</strong><small><span className="mini-line"/>{m.note}</small></article>)}</section>
+          <div className="section-caption"><span><span className="dot"/>{tr('IN PROGRESS')}</span><button className="text-button" onClick={() => go('Scans')}>{tr('Open scan workspace')} <Icon name="arrow" size={14}/></button></div>{scanPanel}
+          <div className="insight-grid"><Panel title={tr('Finding distribution')} subtitle={tr('Severity across this scan')}><div className="distribution"><div className="donut" style={{ background: findings.length ? `conic-gradient(${['CRITICAL','HIGH','MEDIUM','LOW','INFO'].flatMap((s,i,a) => { const start = a.slice(0,i).reduce((n,x) => n + findings.filter(f => f.severity === x).length,0)/findings.length*100; const end = start+findings.filter(f => f.severity === s).length/findings.length*100; return `${['#e98791','#e4a173','#dfc079','#89a9ce','#929bb3'][i]} ${start}% ${end}%`; }).join(',')})` : undefined }}><div><strong>{findings.length}</strong><span>{tr('findings')}</span></div></div><div className="legend">{['CRITICAL','HIGH','MEDIUM','LOW','INFO'].map(s => <div key={s}><i className={s.toLowerCase()}/><span>{tr(s)}</span><strong>{findings.filter(f => f.severity === s).length}</strong></div>)}</div></div></Panel>
+          <Panel title={tr('Scope readiness')} subtitle={tr('Verified executable Scope artifacts')} action={<Icon name="scope"/>}><div className="readiness-number"><strong>{approvedScopeCount}</strong><Badge tone={approvedScopeCount ? 'success' : 'warning'}>{tr(approvedScopeCount ? 'Integrity verified' : 'Approval required')}</Badge></div><p className="panel-copy">{approvedScopeCount ? tk(`${approvedScopeCount}개의 스코프 산출물이 매니페스트 및 승인 무결성 검증을 통과했습니다.`, `${approvedScopeCount} Scope artifacts passed manifest and approval integrity checks.`) : tr('Register a program, collect its policy, and explicitly approve the draft before execution.')}</p><div className="readiness-track"/><button className="panel-link" onClick={() => go('Scopes / Programs')}>{tr('Review registered programs')} <Icon name="arrow" size={15}/></button></Panel></div>
+          <Panel title={tr('Finding review queue')} subtitle={tr(demo ? 'Synthetic candidates from the local lab' : 'Findings from the selected scan')} action={<button className="text-button" onClick={() => go('Findings')}>{tr('View all')} <Icon name="arrow" size={14}/></button>}>{findingTable(findings.slice(0,3))}</Panel>
+          <div className="overview-summary">
+            <Panel title={language === 'ko' ? tk("최근 활동", "Recent activity") : 'Recent activity'} subtitle={language === 'ko' ? tk("선택한 스캔의 최근 이벤트", "Recent events from the selected scan") : 'Latest events from the selected scan'}>
+              <div className="overview-recent-activity">{(snapshot?.logs || []).slice(-3).reverse().map(log => <article className={`log-entry ${log.level}`} key={log.id}><div><time dateTime={log.time}>{new Date(log.time).toLocaleTimeString(language === 'ko' ? 'ko-KR' : 'en-GB', { hour12: false })}</time><span>{tr(log.stage)}</span><span className="sr-only">{tr(log.level)}</span></div><p>{localizeActivityMessage(language, log)}</p></article>)}{!snapshot?.logs.length && <p className="table-empty">{language === 'ko' ? tk("아직 활동 기록이 없습니다.", "No activity records yet.") : 'No activity yet.'}</p>}</div>
+            </Panel>
+          <Panel title={tr('Finding distribution')} subtitle={tr('Severity across this scan')}><div className="distribution"><div className="donut" style={{ background: findings.length ? `conic-gradient(${['CRITICAL','HIGH','MEDIUM','LOW','INFO'].flatMap((s,i,a) => { const start = a.slice(0,i).reduce((n,x) => n + findings.filter(f => f.severity === x).length,0)/findings.length*100; const end = start+findings.filter(f => f.severity === s).length/findings.length*100; return `${['#e98791','#e4a173','#dfc079','#89a9ce','#929bb3'][i]} ${start}% ${end}%`; }).join(',')})` : undefined }}><div><strong>{findings.length}</strong><span>{tr('findings')}</span></div></div><div className="legend">{['CRITICAL','HIGH','MEDIUM','LOW','INFO'].map(s => <div key={s}><i className={s.toLowerCase()}/><span>{s[0] + s.slice(1).toLowerCase()}</span><strong>{findings.filter(f => f.severity === s).length}</strong></div>)}</div></div></Panel>
+          </div>
+          <Panel title={tr('Scope readiness')} subtitle={tr('Verified executable Scope artifacts')} action={<Icon name="scope"/>}><div className="readiness-number"><strong>{approvedScopeCount}</strong><Badge tone={approvedScopeCount ? 'success' : 'warning'}>{tr(approvedScopeCount ? 'Integrity verified' : 'Approval required')}</Badge></div><p className="panel-copy">{approvedScopeCount ? (language === 'ko' ? `${approvedScopeCount}개의 Scope 산출물이 매니페스트 및 승인 무결성 검증을 통과했습니다.` : `${approvedScopeCount} Scope artifact${approvedScopeCount === 1 ? '' : 's'} passed manifest and approval integrity verification.`) : tr('Register a program, collect its policy, and explicitly approve the draft before execution.')}</p><div className="readiness-track"/><button className="panel-link" onClick={() => go('Scopes / Programs')}>{tr('Review registered programs')} <Icon name="arrow" size={15}/></button></Panel>
+          <div className="workspace-footer"><Icon name="lock" size={13}/><span>{tr('Python enforces scope, request budget, and authorization gates.')}</span><span>AI DAST · v0.1</span></div>
+        </>}
+        {page === 'Scopes / Programs' && <><div className="notice"><Icon name="lock"/><div><strong>{tk(`사용자가 등록한 프로그램 ${totalProgramCount}개. ${approvedScopeCount ? `검증된 스코프 산출물 ${approvedScopeCount}개를 불러왔습니다.` : tr('No executable assets.')}`, `${totalProgramCount} registered programs. ${approvedScopeCount ? `${approvedScopeCount} verified Scope artifacts loaded.` : tr('No executable assets.')}`)}</strong><p>{tr('No programs are preloaded. Registration does not establish authorization; only an explicitly approved, integrity-verified Scope becomes executable.')}</p></div></div>{verifiedScopesPanel}{registeredPrograms.length > 0 ? <><div className="toolbar"><label className="search-field"><Icon name="search" size={16}/><input aria-label={tr('Search programs')} value={search} onChange={e => setSearch(e.target.value)} placeholder={tr('Filter registered programs or platforms…')}/></label><button className="secondary-button" onClick={() => setPrivateVisible(v => !v)}>{tr(privateVisible ? 'Hide private name' : 'Reveal private name')}</button></div><Panel title={tr('Scope intake queue')} subtitle={tk(`로컬 등록 프로그램 ${registeredPrograms.length}개 · 명시적인 승인 또는 거절 결정이 필요합니다`, `${registeredPrograms.length} locally registered programs · explicit approval or rejection required`)}><div className="intake-list">{visiblePrograms.map(item => <div key={item.id}><span className="artifact-icon"><Icon name={item.visibility === 'private' ? 'lock' : 'scope'}/></span><div><strong>{item.visibility === 'private' && !privateVisible ? tr('Private program') : item.program}</strong><p>{item.platform} · {tk("등록", "registered")} {new Date(item.created_at).toLocaleString(language === 'ko' ? 'ko-KR' : 'en-GB')}{item.scope_error ? ` · ${item.scope_error}` : ''}</p></div><div className="intake-actions"><Badge tone={scopeStatusTone(item.scope_status)}>{tr(scopeStatusLabel[item.scope_status])}</Badge><button className="secondary-button" onClick={() => openScopeWorkflow(item)}>{tr(item.scope_status === 'review_required' ? 'Review Yes / No' : item.scope_status === 'collecting' || item.scope_status === 'awaiting_browser' || item.scope_status === 'paused' || item.scope_status === 'cancelling' ? 'View progress' : item.scope_status === 'approved' ? 'View result' : 'Collect Scope')}</button></div></div>)}{visiblePrograms.length === 0 && <p className="table-empty">{tr('No registered programs match this filter.')}</p>}</div></Panel></> : <Panel title={tr('No programs registered')} subtitle={tr('Start with a program policy URL')}><Empty title={tr('Your Scope queue is empty')}>{tr('Choose Add program, enter the bug bounty program URL, and select Public or Private. Nothing is added automatically.')}</Empty></Panel>}</>}
+        {page === 'Scans' && <>{!demo && <div className="toolbar"><label>{tr('Persisted scan')} <select aria-label={tr('Select persisted scan')} value={scanId} onChange={event => setScanId(event.target.value)}>{!scanOptions.some(item => item.scan_id === scanId) && scanId && <option value={scanId}>{scanId}</option>}{scanOptions.map(item => <option key={item.scan_id} value={item.scan_id}>{item.targets?.length ? `${item.targets[0]}${item.targets.length > 1 ? tk(` 외 ${item.targets.length - 1}개`, ` + ${item.targets.length - 1} more`) : ''} · ${item.scan_id.slice(0, 13)}` : item.scan_id} · {tr(item.status)}</option>)}</select></label><button className="secondary-button" onClick={refresh}>{tr('Reload snapshot')}</button></div>}{scanPanel}{!demo && attackTasksContent}<Panel title={tr('Run artifacts & provenance')} subtitle={tr('Mapped to the existing aidast pipeline')}><div className="artifact-list">{[['Scope.json + Approval.json','Scope',tr('Policy, approved assets, and integrity hashes')],['Recon.db + Surface.json','Recon',tr('Observed assets, origins, endpoints, and sessions')],['Handoff.json','Handoff',tr('Hashes and roles of immutable source artifacts')],['Pipeline.db','Attack → Validation','stage_runs · attack_tasks · findings · chain_candidates'],['Report.md + Report.json','Report',tr('Validated local draft; no automatic submission')]].map(([name,s,description]) => <div key={name}><span className="artifact-icon"><Icon name="report"/></span><div><strong className="mono">{name}</strong><p>{description}</p></div><Badge>{tr(s)}</Badge></div>)}</div></Panel></>}
+        {page === 'Findings' && <>
+          {validationError && <div className="error-banner" role="alert">{tr('Validation results unavailable')}</div>}
+          <div className="toolbar finding-filters">
+            <label className="search-field"><Icon name="search" size={16}/><input aria-label={tr('Search findings')} value={search} onChange={e => setSearch(e.target.value)} placeholder={tr('Search finding, ID, or endpoint…')}/></label>
+            <select aria-label={tr('Filter severity')} value={severity} onChange={e => setSeverity(e.target.value)}>{['All severities','CRITICAL','HIGH','MEDIUM','LOW','INFO'].map(s => <option key={s} value={s}>{tr(s)}</option>)}</select>
+            <select aria-label={tr('Filter validation verdict')} value={verdictFilter} onChange={e => {
+              const selected = e.target.value;
+              if (selected === 'all' || selected === 'tp' || selected === 'fp' || selected === 'duplicate' || selected === 'pending' || selected === 'inconclusive') setVerdictFilter(selected);
+            }} disabled={!validationReady}>
+              <option value="all">{tr('All verdicts')}</option>
+              {(['tp', 'fp', 'duplicate', 'pending', 'inconclusive'] as const).map(value => <option key={value} value={value}>{tr(verdictLabels[value])}</option>)}
+            </select>
+            {!demo && <button className="secondary-button" onClick={() => setValidationRevision(value => value + 1)}>{tr('Refresh validation results')}</button>}
+          </div>
+          <Panel title={tr('Scan findings')} subtitle={language === 'ko' ? `${shownFindings.length}개 결과 · ${demo ? '합성 데이터' : scanId}` : `${shownFindings.length} results · ${demo ? 'synthetic data' : scanId}`}>{findingTable(shownFindings)}</Panel>
+          <p className="muted footnote">{tr('TP and FP come from Validation cases, not Attack review status. Known matches point to an earlier confirmed case.')}</p>
+        </>}
+        {page === 'Validation' && <>
+          <div className="notice"><Icon name="check"/><div>
+            <strong>{tr('Candidates awaiting a verdict')} · {reviewCount}</strong>
+            <p>{tr('Validation shows persisted decisions and redacted evidence counts; a candidate is not a confirmed vulnerability.')}</p>
+          </div></div>
+          {validationError && <div className="error-banner" role="alert">{tr('Validation results unavailable')}</div>}
+          <Panel title={tr('Validation cases')} subtitle={tr('Reproduction, controls, and final decision')} action={!demo && <button className="secondary-button" onClick={() => setValidationRevision(value => value + 1)}>{tr('Refresh validation results')}</button>}>
+            {!validationReady ? <p className="table-empty">{tr('Checking validation verdict')}</p> : currentValidations.length ? <div className="validation-cases">{currentValidations.map(item => {
+              const finding = findings.find(candidate => item.target_kind === 'finding' && candidate.id === item.target_id);
+              const counts = item.evidence?.attempts;
+              const attempts = (kind: string) => Object.values(counts?.[kind] || {}).reduce((total, count) => total + count, 0);
+              const linked = validatedReports.find(report => report.case_id === item.case_id);
+              const known = knownSourceCase(item, currentValidations);
+              const statusLabel = item.current_status === 'KNOWN' && !known ? verdictLabels.inconclusive
+                : item.processing_phase === 'completed' && item.current_status ? validationStatusLabels[item.current_status] : verdictLabels.pending;
+              return <article className="validation-case" key={item.case_id}>
+                <div className="validation-case-heading"><div><strong>{finding ? findingTitle(finding) : item.target_id}</strong><small className="mono">{item.case_id} · {item.target_kind === 'chain' ? tr('Chain') : item.target_id}</small></div>
+                  <Badge tone={item.processing_phase === 'completed' && item.current_status === 'CONFIRMED' ? 'success' : item.processing_phase === 'completed' && item.current_status === 'DISPROVEN' ? 'critical' : known ? 'warning' : ''}>{tr(statusLabel)}</Badge>
+                </div>
+                <dl className="validation-facts"><div><dt>{tr('Target attempts')}</dt><dd>{attempts('target')}</dd></div><div><dt>{tr('Control attempts')}</dt><dd>{attempts('positive_control') + attempts('negative_control')}</dd></div><div><dt>{tr('Evidence references')}</dt><dd>{item.evidence?.evidence_count ?? 0}</dd></div></dl>
+                {item.processing_phase === 'completed' && item.decision?.reason && item.decision.reason !== 'http_runtime_contract_missing' && <p><strong>{tr('Decision reason')}</strong> {item.decision.reason}</p>}
+                {item.processing_phase === 'completed' && <ValidationImpact decision={item.decision} language={language}/>}
+                {known && <p><strong>{tr('Matched confirmed case')}</strong> <code>{item.decision?.known_source_case_id}</code></p>}
+                {item.processing_phase === 'completed' && linked && <button className="secondary-button" onClick={() => void openReport(linked)}>{tr('Open related report')} <Icon name="arrow" size={14}/></button>}
+              </article>;
+            })}</div> : <p className="table-empty">{tr('No validation cases for this scan.')}</p>}
+          </Panel>
+          <Panel title={tr('Findings awaiting validation')} subtitle={tr('No final Validation case yet')}>{findingTable(findings.filter(f => findingVerdict(f, currentValidations) === 'pending'))}</Panel>
+        </>}
+        {page === 'Reports' && <>
+          {reportError && <div className="error-banner" role="alert"><span>{reportError}</span><button onClick={() => setReportError('')}>{tr('Dismiss')}</button></div>}
+          {executionSummaryError && <div className="error-banner" role="alert">{tk('스캔 실행 요약을 불러오지 못했습니다.', 'The scan execution summary could not be loaded.')} {executionSummaryError}</div>}
+          {validationError && <div className="error-banner" role="alert">{tr('Validation results unavailable')}</div>}
+          {executionSummary?.scan_id === scanId && <Panel title={tk('스캔 실행 보고서', 'Scan execution report')} subtitle={tk('발견·단계·검증·오류를 포함한 전체 실행 결과', 'Complete run outcome including discovery, stages, validation, and errors')}>
+            <div className="scan-stats">
+              <div><span>{tk('실행 상태', 'Execution status')}</span><strong>{executionSummary.execution_status}</strong></div>
+              <div><span>{tr('Endpoints')}</span><strong>{executionSummary.inventory.endpoints ?? 0}</strong></div>
+              <div><span>{tk('후보 발견', 'Candidate findings')}</span><strong>{executionSummary.inventory.candidate_findings ?? 0}</strong></div>
+              <div><span>{tk('검증 확정', 'Validation confirmed')}</span><strong>{executionSummary.validation.current_confirmed}</strong></div>
+              <div><span>{tk('생성 보고서', 'Generated reports')}</span><strong>{executionSummary.reports.length}</strong></div>
+              <div><span>{tk('기록된 오류', 'Recorded errors')}</span><strong>{executionSummary.errors.length}</strong></div>
+            </div>
+            <details><summary>{tk('실행 보고서 전체 보기', 'View complete execution report')}</summary><pre className="report-preview">{executionSummary.markdown}</pre></details>
+          </Panel>}
+          <Panel title={tr('Local report drafts')} subtitle={tr('Integrity-checked local artifacts · never submitted automatically')} action={!demo && <button className="secondary-button" onClick={() => setValidationRevision(value => value + 1)}>{tr('Refresh validation results')}</button>}>
+            {!demo && !scanId ? <Empty title={tr('No scans yet')}>{tr('Start a scan from an approved Scope to view its reports.')}</Empty>
+              : !validationReady ? <p className="table-empty">{tr('Checking validation verdict')}</p>
+              : !demo && reportScanId !== scanId && !reportError ? <p className="table-empty">{tr('Loading report drafts…')}</p>
+              : validatedReports.length ? <div className="report-list">{validatedReports.map(item => <div className="report-card" key={item.report_id}>
+                <div className="report-illustration"><Icon name="report" size={42}/></div><div>
+                  <Badge tone={demo ? 'warning' : 'success'}>{tr(demo ? 'DEMO DRAFT' : 'LOCAL DRAFT')}{item.language ? ` · ${item.language.toUpperCase()}` : ''}</Badge>
+                  <h3>{demo ? tr('Server version disclosure') : item.title}</h3>
+                  <p>{demo ? tr('A synthetic report showing finding, evidence, impact, and remediation sections.') : `${item.platform} · ${tr('Case')} ${item.case_id}`}</p>
+                  <small className="mono">{demo ? 'F-0040 · LOW · Markdown' : item.report_id}</small>
+                  <div className="button-row"><button className="secondary-button" onClick={() => void openReport(item)}>{demo ? tr('Preview draft') : tk('보고서 검사 및 내보내기', 'Report checks and export')}</button></div>
+                </div>
+              </div>)}</div>
+              : <Empty title={tr('No report draft for this scan')}>{tr('Only reports linked to currently confirmed Validation cases are shown.')}</Empty>}
+          </Panel>
+        </>}
+        {page === 'Audit log' && <>
+          <div className="notice"><Icon name="logs"/><div><strong>{tk('작업과 문제 기록', 'Work and problem history')}</strong><p>{tk('선택한 스캔의 작업 단계, 결과, 실패 정보를 확인합니다. 요청 본문과 인증정보는 표시하지 않습니다.', 'Review the selected scan’s work, outcomes, and failures. Request bodies and credentials are not displayed.')}</p></div></div>
+          {auditError && <div className="error-banner" role="alert"><span>{auditError}</span><button onClick={() => setAuditRevision(value => value + 1)}>{tk('다시 불러오기', 'Retry')}</button></div>}
+          {auditAckError && <div className="error-banner" role="alert"><span>{auditAckError}</span></div>}
+          <div className="toolbar audit-toolbar">
+            <label className="search-field"><Icon name="search" size={16}/><input aria-label={tk('감사 로그 검색', 'Search audit log')} value={auditSearch} onChange={event => setAuditSearch(event.target.value)} placeholder={tk('작업, 문제, 단계 또는 ID 검색', 'Search work, problem, stage, or ID')}/></label>
+            <select aria-label={tk('기록 수준 필터', 'Filter audit level')} value={auditLevelFilter} onChange={event => setAuditLevelFilter(event.target.value)}><option value="all">{tk('모든 수준', 'All levels')}</option><option value="error">{tk('오류', 'Errors')}</option><option value="warning">{tk('경고', 'Warnings')}</option><option value="success">{tk('완료', 'Completed')}</option><option value="info">{tk('정보', 'Information')}</option></select>
+            <button className="secondary-button" aria-pressed={showAcknowledgedAudit} onClick={() => setShowAcknowledgedAudit(value => !value)}>{showAcknowledgedAudit ? tk('확인 대기 보기', 'Show pending') : tk('확인 완료 보기', 'Show acknowledged')}</button>
+            {!demo && <button className="secondary-button" onClick={() => setAuditRevision(value => value + 1)}>{tk('새로고침', 'Refresh')}</button>}
+          </div>
+          <Panel title={tr('Decision history')} subtitle={showAcknowledgedAudit ? tk('확인 완료 ' + visibleAuditEntries.length + '개', visibleAuditEntries.length + ' acknowledged') : tk('확인 대기 ' + auditPendingCount + '개', auditPendingCount + ' pending')}>
+            <div className="audit-list">{visibleAuditEntries.map(item => {
+              const itemLevel = auditLevel(item);
+              const acknowledged = acknowledgedAudit.has(item.id);
+              return <div key={item.id} className={'audit-entry ' + itemLevel}>
+                <span className="audit-point" aria-hidden="true"/>
+                <div className="audit-entry-body">
+                  <div className="audit-entry-meta"><time dateTime={item.created_at}>{new Date(item.created_at).toLocaleString(language === 'ko' ? 'ko-KR' : 'en-GB', { hour12: false })}</time><Badge tone={itemLevel === 'error' ? 'critical' : itemLevel === 'success' ? 'success' : itemLevel === 'warning' ? 'warning' : ''}>{tr(itemLevel)}</Badge><span>{tr(item.stage)}</span></div>
+                  <strong>{auditMessage(item)}</strong>
+                  {itemLevel === 'error' && <p className="audit-problem">{tk('문제:', 'Problem:')} {auditProblem(item)}</p>}
+                  {item.task_id && <p className="audit-task-id">{tk('작업 ID', 'Task ID')} · <code>{item.task_id}</code></p>}
+                  <small className="audit-event-id">{item.event_type} · {item.id}</small>
+                </div>
+                <button className="audit-check" aria-label={acknowledged ? tk('확인 취소: ', 'Restore: ') + auditMessage(item) : tk('확인 완료: ', 'Acknowledge: ') + auditMessage(item)} title={acknowledged ? tk('다시 표시', 'Restore') : tk('확인하고 목록에서 숨기기', 'Acknowledge and hide')} onClick={() => acknowledgeAudit(item.id)}>{acknowledged ? tk('복원', 'Restore') : <Icon name="check" size={17}/>}</button>
+              </div>;
+            })}</div>
+            {!visibleAuditEntries.length && !auditError && <p className="table-empty">{showAcknowledgedAudit ? tk('확인 완료한 기록이 없습니다.', 'No acknowledged records.') : auditItems.length && auditPendingCount === 0 ? tk('모든 기록을 확인했습니다.', 'All records acknowledged.') : tk('조건에 맞는 기록이 없습니다.', 'No matching records.')}</p>}
+          </Panel>
+          <p className="audit-note">{tk('체크한 기록은 이 브라우저의 기본 목록에서 숨겨집니다. 원본 감사 기록은 삭제되지 않으며 ‘확인 완료 보기’에서 복원할 수 있습니다.', 'Checked records are hidden from this browser’s default list. Source audit records remain intact and can be restored from Show acknowledged.')}</p>
+        </>}
+        {page === 'LLM log' && <ModelCallLog language={language} demo={demo}/>}
+        {page === 'Settings' && <><Panel title={tr('Connection')} subtitle={tr('Configured at build time; no secrets in browser settings')}><dl className="detail-grid"><div><dt>{tr('Transport')}</dt><dd><Badge tone={demo ? 'warning' : 'success'}>{tr(demo ? 'Demo / local fixture' : 'Live / read-only')}</Badge></dd></div><div><dt>{tr('Connection state')}</dt><dd>{tr(state)}</dd></div><div><dt>{tr('Result storage')}</dt><dd className="mono">{tr(resultRoot || 'Unavailable')}</dd></div><div><dt>{tr('Snapshot endpoint')}</dt><dd className="mono">GET /api/v1/scans/:id</dd></div><div><dt>{tr('Delta stream')}</dt><dd className="mono">/ws/scans/:id?after=:event_id</dd></div><div><dt>{tr('Protocol')}</dt><dd>{tr('Version 1 · contiguous event IDs')}</dd></div><div><dt>{tr('Activity retention')}</dt><dd>{tr('Latest 500 events in memory')}</dd></div></dl><div className="panel-bottom"><p>{tr('Set VITE_TRANSPORT=live and VITE_SCAN_ID to connect an implemented backend. Live mode never falls back to demo data.')}</p><button className="secondary-button" onClick={refresh}>{tr(demo ? 'Restart demo' : 'Reload snapshot')}</button></div></Panel><Panel title={tr('Workspace preferences')} subtitle={tr('Theme is saved locally; operational data is never uploaded')}><div className="setting-row"><div><h3>{tr('Appearance')}</h3><p>{tr('Follow the system theme or keep this workspace light or dark.')}</p></div><select aria-label={tr('Color theme')} value={theme} onChange={event => setTheme(event.target.value as ThemeChoice)}><option value="system">{tr('System')}</option><option value="dark">{tr('Dark')}</option><option value="light">{tr('Light')}</option></select></div><div className="setting-row"><div><h3>{tr('Language')}</h3><p>{tr('Choose the dashboard display language.')}</p></div><select aria-label={tr('Language')} value={language} onChange={event => setLanguage(event.target.value as Language)}><option value="ko">한국어</option><option value="en">English</option></select></div><div className="setting-row"><div><h3>{tr('Compact density')}</h3><p>{tr('Reduce spacing in data tables and activity.')}</p></div><input aria-label={tr('Compact density')} type="checkbox" checked={compact} onChange={e => setCompact(e.target.checked)}/></div><div className="setting-row"><div><h3>{tr('Reveal private program name')}</h3><p>{tr('Hidden by default. Resets when the page reloads.')}</p></div><input aria-label={tr('Reveal private program name')} type="checkbox" checked={privateVisible} onChange={e => setPrivateVisible(e.target.checked)}/></div></Panel><Panel title={tr('Backend integration remaining')} subtitle={tr('Implemented boundaries stay separate from future operator workflows')}><ul className="integration-list"><li>{tr('Authentication and authorization for any deployment beyond the loopback-only local operator.')}</li><li>{tr('Evidence-backed Validation case decisions and review actions.')}</li><li>{tr('Report generation and platform submission remain explicit CLI/operator actions.')}</li></ul></Panel></>}
+      </main>
+      <aside id="activity-panel" className={`activity-panel ${collapsed ? 'collapsed' : ''}`} aria-label={tr('Persistent live activity')} style={viewportWidth > 820 && viewportWidth <= 900 ? { left: navigationWidth, ...(!collapsed ? { height: activityHeight } : {}) } : viewportWidth <= 1100 && !collapsed ? { height: activityHeight } : undefined}>
+        {viewportWidth > 1100 && !collapsed && <ResizeHandle className="activity-resizer" label={tk('실시간 활동 패널 너비 조절', 'Resize live activity panel')} controls="activity-panel" value={activityWidth} direction={-1} bounds={() => panelBounds('activity', window.innerWidth, navigationWidth)} onResize={setActivityPreference}/>}
+        {viewportWidth <= 1100 && !collapsed && <ResizeHandle className="activity-height-resizer" axis="vertical" label={tk('실시간 활동 패널 높이 조절', 'Resize live activity panel height')} controls="activity-panel" value={activityHeight} direction={-1} bounds={() => activityHeightBounds(window.innerHeight, window.innerWidth <= 660 ? 144 : 80)} onResize={setActivityHeightPreference}/>}
+        <div className="activity-heading"><div><Icon name="terminal" size={17}/><h2>{tr('Live activity')}</h2></div><button className="icon-button" onClick={() => setCollapsed(v => !v)} aria-label={tr(collapsed ? 'Expand activity' : 'Collapse activity')} aria-expanded={!collapsed}>{collapsed ? '+' : '−'}</button></div>
+        {!collapsed && <>
+          {(scopeActive || scanId || demo) && <div className="activity-source">
+            {scopeActive && <Badge tone="warning"><span className="dot"/>{tk("스코프 수집", "Scope collection")} · {scopeWorkLabel} {scopeElapsedLabel}</Badge>}
+            {(demo || scanId) && <Badge tone={demo ? 'warning' : 'success'}><span className="dot"/>{demo ? tr('SIMULATED STREAM') : tr(state)}</Badge>}
+            <span className="mono">{snapshot?.scan_id || scanId || workflowProgram?.scope_job_id}</span>
+          </div>}
+          <div className="activity-stage">
+            {scopeActive && <div className="scope-working-summary"><span>{tk("스코프 수집", "Scope collection")}</span><strong role="timer">{scopeWorkLabel} · {scopeElapsedLabel}</strong></div>}
+            <div><span>{tr('Estimated stage progress')}</span><strong>{tr(snapshot?.stage || 'Waiting')} <small>{scanProgress}%</small></strong></div>
+            <progress aria-label={tr('Estimated stage progress')} max="100" value={scanProgress}/>
+          </div>
+          {hasActivity && <div className="activity-filters"><label className="search-field"><Icon name="search" size={14}/><input aria-label={tr('Search activity')} value={logSearch} onChange={e => setLogSearch(e.target.value)} placeholder={tr('Search activity…')}/></label><div><select aria-label={tr('Filter log level')} value={level} onChange={e => setLevel(e.target.value)}>{['All levels','info','success','warning','error'].map(l => <option key={l} value={l}>{tr(l)}</option>)}</select><select aria-label={tr('Filter log stage')} value={stageFilter} onChange={e => setStageFilter(e.target.value)}>{['All stages',...stages].map(s => <option key={s} value={s}>{tr(s)}</option>)}</select></div></div>}
+          {hasActivity && <div className="log-toolbar"><span>{visibleLogs.length + (showDashboardError ? 1 : 0)} {tr('events')}{scopeActive && <b> · {scopeWorkLabel} {scopeElapsedLabel}</b>}</span><button onClick={() => setPaused(v => !v)} aria-pressed={paused}>{tr(paused ? '▶ Resume following' : 'Ⅱ Pause scrolling')}</button></div>}
+          <div className="log-stream" ref={stream} tabIndex={0} aria-label={tr('Activity events')}>
+            {hasActivity && <div className="stream-start">{demo ? tr('SYNTHETIC SESSION STARTED') : tk("통합 활동 스트림 시작", "Combined activity stream started")}</div>}
+            {visibleLogs.map(log => <article key={log.key} className={`log-entry ${log.level}`}><div><time dateTime={log.time}>{new Date(log.time).toLocaleTimeString(language === 'ko' ? 'ko-KR' : 'en-GB',{hour12:false})}</time><span>{log.source === 'scope' ? tk("스코프 수집", "Scope collection") : `${tk('스캔', 'Scan')} · ${tr(log.stage)}`}</span><i title={tr(log.level)}/><span className="sr-only">{tr(log.level)}</span></div><p>{localizeActivityMessage(language, log)}</p></article>)}
+            {showDashboardError && <article className="log-entry error" role="alert"><div><span>{tk('대시보드 연결', 'Dashboard connection')}</span><i title={tr('error')}/><span className="sr-only">{tr('error')}</span></div><p>{tr(error)}</p></article>}
+            {showScopeWorking && <article className="log-entry scope-working"><div><time>{scopeElapsedLabel}</time><span>{tk("스코프 수집", "Scope collection")}</span><i title={scopeWorkLabel}/><span className="sr-only">{scopeWorkLabel}</span></div><p role="timer">{scopeWorkLabel} · {scopeElapsedLabel}</p></article>}
+            {!hasActivity && <div className="activity-empty"><strong>{tk("아직 활동이 없습니다", "No activity yet")}</strong><p>{tk("스코프 수집 또는 스캔을 시작하면 활동이 여기에 표시됩니다.", "Start Scope collection or a scan to see activity here.")}</p></div>}
+            {hasActivity && visibleLogs.length === 0 && !showDashboardError && !showScopeWorking && <p className="table-empty">{tr('No matching events.')}</p>}
+            {hasActivity && <div className="stream-end"><span className="dot"/>{scopeActive ? tk(`스코프 수집 진행 중 · ${scopeElapsedLabel}`, `Scope collection running · ${scopeElapsedLabel}`) : tr(paused ? 'Following paused · events still arrive' : snapshot?.status === 'running' ? 'Waiting for the next event' : 'End of available activity')}</div>}
+          </div>
+        </>}
+      </aside>
+      </div>
+    </div>
+    <dialog ref={dialog} onCancel={closeDialog} onClose={closeDialog} aria-labelledby="dialog-title">
+      <div className="dialog-heading"><h2 id="dialog-title">{modal === 'new' ? tr('Start a new scan') : modal === 'scan-progress' ? tk("스캔 진행 상황", "Scan progress") : modal === 'scope' ? tr('Add bug bounty program') : modal === 'scope-workflow' ? tr(workflowProgram?.scope_status === 'approved' ? 'View approved Scope' : 'Collect and review Scope') : modal === 'verified-scope' ? tk("검증된 Scope 내용", "Verified Scope details") : modal === 'report' ? demo ? tr('Demo report preview') : tk('보고서 검사 및 내보내기', 'Report checks and export') : selectedFinding?.id}</h2><button className="icon-button" aria-label={tr('Close dialog')} onClick={closeDialog}>×</button></div>
+      {modal === 'new' ? newScanContent : modal === 'scan-progress' ? scanProgressContent : modal === 'scope' ? scopeIntakeContent : modal === 'scope-workflow' ? scopeWorkflowContent : modal === 'verified-scope' ? (catalogScopeSummaryOnly ? catalogScopeSummaryContent : catalogScopeError ? <p className="form-error" role="alert">{catalogScopeError}</p> : catalogScopeDraft && catalogScopeApproval ? <VerifiedScopeDetails draft={catalogScopeDraft} approval={catalogScopeApproval} language={language} onScan={() => scanFromScope(catalogScopeDraft.scope_id)}/> : <p className="form-empty">{tk("검증된 Scope 내용을 불러오는 중입니다…", "Loading verified Scope details…")}</p>) : modal === 'report' ? demo ? <><pre className="report-preview">{language === 'ko' ? sampleReport : sampleReportEn}</pre><div className="button-row"><button className="primary-button" onClick={() => download(`${selectedReport?.report_id || 'DEMO-Report'}-draft.md`, language === 'ko' ? sampleReport : sampleReportEn)}>{tk('데모 초안 .md 내려받기', 'Download demo draft .md')} <Icon name="arrow" size={14}/></button></div></> : selectedReport && <ReportSubmission key={selectedReport.report_id} reportId={selectedReport.report_id} language={language}
+        availableLanguages={selectedReportLanguages}
+        onSelectLanguage={selectedLanguage => {
+          const reportId = selectedReportLanguages[selectedLanguage];
+          const matching = validatedReports.find(item => item.report_id === reportId);
+          if (matching) setSelectedReport(matching);
+        }}/> : selectedFinding && <><Badge tone={selectedFinding.severity.toLowerCase()}>{tr(selectedFinding.severity)}</Badge><h3 className="finding-detail-title">{findingTitle(selectedFinding)}</h3><dl className="detail-grid"><div><dt>{tr('Endpoint')}</dt><dd className="mono">{selectedFinding.endpoint}</dd></div><div><dt>{tr('Classification')}</dt><dd>{selectedFinding.cwe}</dd></div><div><dt>{tr('Review status')}</dt><dd>{tr(selectedFinding.status)}</dd></div><div><dt>{tr('Source')}</dt><dd>{tr(demo ? 'Synthetic fixture' : 'Pipeline finding')}</dd></div></dl><div className="notice"><Icon name="shield"/><p>{tr(demo ? 'This is synthetic evidence for UI demonstration. No listed program was tested.' : 'Evidence details require a redacted evidence endpoint. The summary alone is not proof of a vulnerability.')}</p></div><button className="secondary-button" onClick={() => { setModal(null); go('Validation'); }}>{tr('Open validation queue')} <Icon name="arrow" size={14}/></button></>}
+      {modal === 'finding' && selectedFinding && <section className="finding-verdict">
+        <h3>{tr('Validation verdict')}</h3>
+        <Badge tone={selectedValidation?.processing_phase === 'completed' && selectedValidation.current_status === 'CONFIRMED' ? 'success' : selectedValidation?.processing_phase === 'completed' && selectedValidation.current_status === 'DISPROVEN' ? 'critical' : selectedKnownSource ? 'warning' : ''}>
+          {validationReady ? tr(findingValidationStatus(selectedFinding, currentValidations) ? validationStatusLabels[findingValidationStatus(selectedFinding, currentValidations)!] : verdictLabels[findingVerdict(selectedFinding, currentValidations)]) : tr('Checking validation verdict')}
+        </Badge>
+        {selectedValidation?.processing_phase === 'completed' && selectedValidation.decision?.reason && selectedValidation.decision.reason !== 'http_runtime_contract_missing' && <p><strong>{tr('Decision reason')}</strong> {selectedValidation.decision.reason}</p>}
+        {selectedValidation?.processing_phase === 'completed' && <ValidationImpact decision={selectedValidation.decision} language={language}/>}
+        {selectedKnownSource && <p>
+          <strong>{tr('Matched confirmed case')}</strong> <code>{selectedKnownSource.case_id}</code>
+          {selectedKnownSource.target_kind === 'finding' && <span> · {findings.find(item => item.id === selectedKnownSource.target_id)?.title || selectedKnownSource.target_id}</span>}
+        </p>}
+        {selectedValidation?.evidence && <p>{tr('Target attempts')} {Object.values(selectedValidation.evidence.attempts.target || {}).reduce((total, count) => total + count, 0)} · {tr('Control attempts')} {['positive_control', 'negative_control'].reduce((total, kind) => total + Object.values(selectedValidation.evidence?.attempts[kind] || {}).reduce((sum, count) => sum + count, 0), 0)} · {tr('Evidence references')} {selectedValidation.evidence.evidence_count ?? 0}</p>}
+        {relatedReport && <button className="primary-button" onClick={() => void openReport(relatedReport)}>{tr('Open related report')} <Icon name="arrow" size={14}/></button>}
+        {reportError && <p className="form-error" role="alert">{reportError}</p>}
+      </section>}
+    </dialog>
+  </div>;
+}

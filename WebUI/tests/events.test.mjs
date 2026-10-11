@@ -1,0 +1,685 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { parseEvent, parseSnapshot, applyEvent, applyOrderedEvent, displayStageStatus, pipelineStageState, stages } from '../src/lib/events.ts';
+import { demoSnapshot, DEMO_SCAN } from '../src/data/demo.ts';
+import { initialLanguage, translate } from '../src/lib/i18n.ts';
+import { localizeActivityMessage, localizeAuditEventType } from '../src/lib/activityMessages.ts';
+import { isValidTagBatchSize, resolveExecutionLimits } from '../src/lib/scan.ts';
+import { scopeCollectionRequest } from '../src/lib/scope.ts';
+import { activityHeightBounds, clampPanelWidth, panelBounds } from '../src/lib/layout.ts';
+import { resolveTransportMode } from '../src/lib/transport.ts';
+import { auditLevel, readAuditAcknowledgements, saveAuditAcknowledgements } from '../src/lib/audit.ts';
+import { filterFindings, findingVerdict, findingValidationStatus, parseValidationCases, reportCaseForFinding } from '../src/lib/validation.ts';
+import { DEMO_VALIDATIONS } from '../src/data/demo.ts';
+
+test('completed validation distinguishes missing replay from reproduced insufficient impact', () => {
+  const finding = { id: 'f' };
+  const base = { case_id: 'c', target_kind: 'finding', target_id: 'f', processing_phase: 'completed', updated_at: '' };
+  assert.equal(findingValidationStatus(finding, [{ ...base, current_status: 'UNDERPOWERED' }]), 'UNDERPOWERED');
+  assert.equal(findingValidationStatus(finding, [{ ...base, current_status: 'INCONCLUSIVE' }]), 'INCONCLUSIVE');
+  assert.equal(findingValidationStatus(finding, [{ ...base, processing_phase: 'blind_replay', current_status: 'CONFIRMED' }]), null);
+});
+
+test('validation parser rejects malformed impact axes and reproduction flags', () => {
+  const base = { case_id: 'c', target_kind: 'finding', target_id: 'f', processing_phase: 'completed', current_status: 'UNDERPOWERED', updated_at: '' };
+  const parsed = decision => parseValidationCases({ scan_id: 's', cases: [{ ...base, decision }] }, 's');
+  assert.ok(parsed({ reproduced: true, impact_axes: { sensitivity: { score: 0, reason: 'Missing protected access' } } }));
+  for (const decision of [{ reproduced: 'true' }, { severity: {} }, { impact_score: 10 },
+    { impact_axes: null }, { impact_axes: { sensitivity: { score: 4 } } },
+    { impact_axes: { sensitivity: { score: 0, reason: {} } } }]) assert.equal(parsed(decision), null);
+});
+import {
+  advanceEstimatedProgress,
+  currentStageProgressStatus,
+  estimatedProgressDelay,
+  formatActivityElapsed,
+  initialEstimatedProgress,
+  initialScopeActivityState,
+  isScopeActivityActive,
+  mergeActivityLogs,
+  hideAcknowledgedActivity,
+  reduceScopeActivity,
+  startScopeElapsedClock,
+  startScopeJobPolling,
+  shouldPollScopeJob,
+  scopeCollectionProgress,
+  reconCollectionProgress,
+} from '../src/lib/activity.ts';
+
+const event = (id = 8, overrides = {}) => ({ version: 1, event_id: id, scan_id: DEMO_SCAN, occurred_at: '2026-09-20T06:00:00Z', type: 'log.appended', payload: { stage: 'Attack', level: 'info', message: 'Redacted fixture event' }, ...overrides });
+test('Recon activity distinguishes planned coverage and unverified detail candidates', () => {
+  const planned = {message: '', message_code: 'recon.activity', message_params: {
+    phase: 'ffuf', state: 'planned', root_count: 3, planned_requests: 14256,
+    request_budget: 500, coverage_may_be_limited: 1}};
+  assert.match(localizeActivityMessage('ko', planned), /14.?256/);
+  assert.match(localizeActivityMessage('ko', planned), /500/);
+  const deferred = {message: '', message_code: 'recon.activity', message_params: {
+    phase: 'adaptive_js', state: 'finished', detail_probe_limit: 20, detail_deferred_candidates: 3}};
+  assert.match(localizeActivityMessage('ko', deferred), /미검증 후보 3개/);
+  assert.match(localizeActivityMessage('en', deferred), /3 unverified candidates/);
+});
+test('sample preview selects demo transport without replacing the configured live mode', () => {
+  assert.equal(resolveTransportMode('live', ''), 'live');
+  assert.equal(resolveTransportMode('live', '?sample=0'), 'live');
+  assert.equal(resolveTransportMode('live', '?sample=1'), 'demo');
+  assert.equal(resolveTransportMode('demo', '?sample=1'), 'demo');
+});
+test('panel resizing preserves room for the main content at narrow desktop widths', () => {
+  const navigation = panelBounds('navigation', 1101, 350);
+  assert.deepEqual(navigation, { min: 174, max: 251 });
+  const navWidth = clampPanelWidth(320, navigation);
+  const activity = panelBounds('activity', 1101, navWidth);
+  assert.deepEqual(activity, { min: 280, max: 350 });
+  assert.equal(clampPanelWidth(540, activity), 350);
+  assert.equal(clampPanelWidth(10, activity), 280);
+  assert.deepEqual(panelBounds('navigation', 901, 540), { min: 174, max: 320 });
+  assert.deepEqual(panelBounds('navigation', 821, 540), { min: 174, max: 320 });
+});
+test('bottom activity panel height stays within the visible viewport', () => {
+  assert.deepEqual(activityHeightBounds(844, 144), { min: 220, max: 700 });
+  assert.equal(clampPanelWidth(800, activityHeightBounds(844, 144)), 700);
+  assert.deepEqual(activityHeightBounds(300, 144), { min: 160, max: 160 });
+});
+test('tag batch size accepts only whole observation counts from 1 to 200', () => {
+  for (const size of [1, 25, 200]) assert.equal(isValidTagBatchSize(size), true);
+  for (const size of [0, 201, 1.5, NaN, Infinity]) assert.equal(isValidTagBatchSize(size), false);
+});
+test('finding filters use Validation decisions, not the Attack review status', () => {
+  const findings = demoSnapshot().findings;
+  assert.equal(findingVerdict(findings.find(item => item.id === 'F-0040'), DEMO_VALIDATIONS), 'tp');
+  assert.deepEqual(filterFindings(findings, DEMO_VALIDATIONS, 'fp').map(item => item.id), ['F-0041']);
+  assert.deepEqual(filterFindings(findings, DEMO_VALIDATIONS, 'duplicate').map(item => item.id), ['F-0038']);
+  assert.deepEqual(filterFindings(findings, DEMO_VALIDATIONS, 'pending').map(item => item.id), ['F-0042', 'F-0039']);
+  assert.deepEqual(filterFindings(findings, DEMO_VALIDATIONS, 'tp').map(item => item.id), ['F-0040']);
+});
+test('validation responses must belong to the selected scan', () => {
+  assert.deepEqual(parseValidationCases({ scan_id: DEMO_SCAN, cases: DEMO_VALIDATIONS }, DEMO_SCAN), DEMO_VALIDATIONS);
+  assert.equal(parseValidationCases({ scan_id: 'other', cases: DEMO_VALIDATIONS }, DEMO_SCAN), null);
+  assert.equal(parseValidationCases({ scan_id: DEMO_SCAN, cases: [{ ...DEMO_VALIDATIONS[0], current_status: 'FUTURE_STATUS' }] }, DEMO_SCAN), null);
+});
+test('reports link only to currently confirmed cases, including known matches', () => {
+  const findings = demoSnapshot().findings;
+  assert.equal(reportCaseForFinding(findings.find(item => item.id === 'F-0040'), DEMO_VALIDATIONS), 'case-demo-40');
+  assert.equal(reportCaseForFinding(findings.find(item => item.id === 'F-0038'), DEMO_VALIDATIONS), 'case-demo-40');
+  assert.equal(reportCaseForFinding(findings.find(item => item.id === 'F-0041'), DEMO_VALIDATIONS), null);
+  const changed = DEMO_VALIDATIONS.map(item => item.case_id === 'case-demo-40' ? { ...item, current_status: 'CONTESTED' } : item);
+  assert.equal(reportCaseForFinding(findings.find(item => item.id === 'F-0038'), changed), null);
+  const revalidating = DEMO_VALIDATIONS.map(item => item.case_id === 'case-demo-40' ? { ...item, processing_phase: 'queued' } : item);
+  assert.equal(findingVerdict(findings.find(item => item.id === 'F-0040'), revalidating), 'pending');
+  assert.equal(findingVerdict(findings.find(item => item.id === 'F-0038'), revalidating), 'inconclusive');
+  assert.equal(reportCaseForFinding(findings.find(item => item.id === 'F-0040'), revalidating), null);
+  assert.equal(reportCaseForFinding(findings.find(item => item.id === 'F-0038'), revalidating), null);
+});
+test('audit acknowledgements persist per scan and invalid storage data is ignored', () => {
+  const items = new Map();
+  const storage = { getItem: key => items.get(key) ?? null, setItem: (key, value) => { items.set(key, value); } };
+  assert.equal(saveAuditAcknowledgements(storage, 'scan-one', new Set(['audit-1'])), true);
+  assert.deepEqual([...readAuditAcknowledgements(storage, 'scan-one')], ['audit-1']);
+  assert.deepEqual([...readAuditAcknowledgements(storage, 'scan-two')], []);
+  items.set('aidast:audit-ack:v1:scan-one', '{invalid');
+  assert.deepEqual([...readAuditAcknowledgements(storage, 'scan-one')], []);
+  assert.equal(auditLevel({ event_type: 'stage.failed' }), 'error');
+});
+test('acknowledged audit records disappear from scan activity and return when restored', () => {
+  const snapshot = demoSnapshot();
+  const merged = mergeActivityLogs(snapshot.logs, []);
+  assert.equal(merged.length, snapshot.logs.length);
+  assert.equal(hideAcknowledgedActivity(merged, new Set(['demo-4'])).length, snapshot.logs.length - 1);
+  assert.equal(hideAcknowledgedActivity(merged, new Set(['demo-4'])).some(log => log.audit_id === 'demo-4'), false);
+  assert.equal(hideAcknowledgedActivity(merged, new Set()).length, snapshot.logs.length);
+  assert.equal(parseSnapshot(snapshot, DEMO_SCAN)?.logs.find(log => log.audit_id === 'demo-4')?.id, 7);
+  assert.equal(parseEvent(event(8, { payload: { stage: 'Recon', level: 'info', message: 'safe', audit_id: 'audit-8' } }), DEMO_SCAN)?.type, 'log.appended');
+});
+test('dashboard labels use the Korean catalog and preserve English keys', () => {
+  for (const key of ['Scopes / Programs', 'Yes · Approve Scope']) {
+    assert.notEqual(translate('ko', key), key);
+    assert.equal(translate('en', key), key);
+  }
+});
+test('display language defaults to Korean and restores the saved choice', () => {
+  const original = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
+  try {
+    Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: { getItem: () => null } });
+    assert.equal(initialLanguage(), 'ko');
+    Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: { getItem: () => 'en' } });
+    assert.equal(initialLanguage(), 'en');
+    Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: { getItem: () => 'invalid' } });
+    assert.equal(initialLanguage(), 'ko');
+  } finally {
+    if (original) Object.defineProperty(globalThis, 'localStorage', original);
+    else delete globalThis.localStorage;
+  }
+});
+test('activity codes localize live messages and audit types without exposing raw English', () => {
+  const started = { message: 'AI DAST pipeline process started.', message_code: 'pipeline.started', message_params: {} };
+  assert.equal(localizeActivityMessage('ko', started), 'AI DAST 파이프라인을 시작했습니다.');
+  assert.equal(localizeActivityMessage('en', started), started.message);
+  assert.equal(localizeActivityMessage('ko', { message: 'old event', message_code: 'scope.review_required', message_params: { in_scope: 3, out_of_scope: 2 } }), '스코프 초안이 검토를 기다립니다. 허용 범위 3개, 제외 범위 2개입니다.');
+  assert.equal(localizeActivityMessage('ko', { message: 'Scope analysis started', message_code: 'scope.analysis_started' }), 'Scope Agent가 In-Scope, Out-of-Scope와 정책 제약을 읽고 분석합니다.');
+  assert.equal(localizeActivityMessage('ko', { message: 'Scope analysis completed', message_code: 'scope.analysis_completed', message_params: { in_scope: 4, out_of_scope: 2 } }), 'In-Scope 4개와 Out-of-Scope 2개를 읽고 분류했습니다.');
+  assert.equal(localizeActivityMessage('ko', { message: 'Scope failed', message_code: 'scope.failed', message_params: { reason: '원문 근거를 찾지 못했습니다.' } }), '스코프 수집 실패: 원문 근거를 찾지 못했습니다.');
+  assert.equal(localizeActivityMessage('ko', { message: 'Pipeline event · stage · started' }), '파이프라인 이벤트 · 단계 시작');
+  assert.equal(localizeActivityMessage('ko', { message: 'Scope draft ready for explicit Yes/No review: 5 in-scope and 16 out-of-scope assets.', message_code: null }), '스코프 초안이 검토를 기다립니다. 허용 범위 5개, 제외 범위 16개입니다.');
+  assert.equal(localizeActivityMessage('ko', { message: 'Scope collection started.', message_code: null }), '스코프 수집을 시작했습니다.');
+  assert.equal(localizeActivityMessage('ko', { message: 'Unexpected internal text' }), '활동이 기록되었습니다. 자세한 내용은 서버 로그를 확인하세요.');
+  assert.equal(localizeAuditEventType('ko', 'stage.started'), '단계 시작');
+  assert.equal(localizeActivityMessage('ko', { message: 'Recon activity', message_code: 'recon.activity', message_params: { phase: 'playwright_interaction', state: 'started' } }), 'Playwright 화면 상호작용 시작');
+  assert.equal(localizeActivityMessage('ko', { message: 'Recon activity', message_code: 'recon.activity', message_params: { phase: 'endpoint_discovery', state: 'found', method: 'GET', url: 'https://example.com/missing', response_status: 404, source: 'ffuf' } }), 'URL 발견 · GET https://example.com/missing · HTTP 404 응답 · 유효 경로 미확인 · 출처 ffuf');
+  assert.equal(localizeActivityMessage('en', { message: 'Recon activity', message_code: 'recon.activity', message_params: { phase: 'endpoint_discovery', state: 'found', method: 'GET', url: 'https://example.com/guess' } }), 'URL found · GET https://example.com/guess · candidate · no HTTP response observed');
+  assert.equal(localizeActivityMessage('ko', { message: 'Recon activity', message_code: 'recon.activity', message_params: { phase: 'ffuf', state: 'finished', index: 2, total: 3, count: 4 } }), 'ffuf 경로 탐색 종료 · 대상 2/3 · 결과 4건');
+  assert.equal(localizeActivityMessage('ko', { message: 'Scan paused by operator.', message_code: 'pipeline.paused' }), '스캔 실행이 일시정지됐습니다.');
+});
+test('AI tagging shows observation and batch progress in both languages', () => {
+  const log = { message: 'Agent work', message_code: 'agent.work', message_params: {
+    agent: 'recon', step: 'tagging', state: 'progress', progress: 82,
+    processed: 25, observation_total: 50, batch_number: 1, batch_total: 2, failed: 0,
+  } };
+  const parsed = parseEvent(event(8, { payload: { stage: 'Recon', level: 'info', ...log } }), DEMO_SCAN);
+  assert.ok(parsed, 'all tagging counters must survive the live event contract');
+  const snapshot = applyEvent(demoSnapshot(), parsed);
+  assert.ok(parseSnapshot(snapshot, DEMO_SCAN), 'tagging logs must not invalidate a refreshed snapshot');
+  assert.deepEqual(snapshot.logs.at(-1).message_params, log.message_params);
+  assert.equal(parseEvent(event(8, { payload: { stage: 'Recon', level: 'info', ...log,
+    message_params: { ...log.message_params, extra1: 1, extra2: 2, extra3: 3, extra4: 4 },
+  } }), DEMO_SCAN), null, 'metadata remains bounded');
+  assert.match(localizeActivityMessage('ko', log), /처리 25\/50건 · 배치 1\/2 완료/);
+  assert.match(localizeActivityMessage('ko', log), /AI 태깅 · 50%/);
+  assert.match(localizeActivityMessage('en', log), /processed 25\/50 · batches 1\/2 completed/);
+  assert.match(localizeActivityMessage('ko', { ...log, message_params: { ...log.message_params, failed: 3 } }), /실패 3건/);
+  const recovered = { ...log, message_params: { agent: 'recon', step: 'tagging', state: 'progress', processed: 25, observation_total: 50 } };
+  assert.match(localizeActivityMessage('ko', recovered), /처리 25\/50건/);
+  assert.doesNotMatch(localizeActivityMessage('ko', recovered), /undefined|배치/);
+});
+
+test('synthetic scan activity follows the selected display language', () => {
+  const event = demoSnapshot().logs[0];
+  assert.equal(localizeActivityMessage('en', event), 'Demo Scope and approval hashes match. Only synthetic lab data is used.');
+  assert.equal(localizeActivityMessage('ko', event), '데모 스코프와 승인 해시가 일치합니다. 합성 실습 환경만 사용합니다.');
+});
+test('English activity renders Korean-backed Scope and Recon events', () => {
+  assert.equal(localizeActivityMessage('en', { message: '스코프 수집을 시작했습니다.', message_code: 'scope.started' }), 'Scope collection started.');
+  assert.equal(localizeActivityMessage('en', { message: '프로그램 정책 화면 읽기를 완료했습니다. 단계 2/3, 텍스트 120자입니다.', message_code: 'scope.browser_progress' }), 'Finished reading the program policy page. Step 2/3, 120 characters.');
+  assert.equal(localizeActivityMessage('en', { message: '정찰 활동', message_code: 'recon.activity', message_params: { phase: 'playwright_interaction', state: 'started', index: 1, total: 2 } }), 'Playwright page interaction started · target 1/2');
+  assert.equal(localizeActivityMessage('en', { message: 'Scope Agent가 화면 이동 후보 3번(Scope)을 엽니다.', message_code: 'scope.browser_progress' }), 'Scope Agent is opening navigation candidate 3 (Scope).');
+  assert.equal(localizeActivityMessage('en', { message: 'Scope 관련 이동 후보: 3:Scope.', message_code: 'scope.browser_progress' }), 'Scope-related navigation candidates: 3:Scope.');
+  assert.equal(localizeActivityMessage('ko', { message: '스코프 수집 실패', message_code: 'scope.failed', message_params: { reason: 'Scope navigation exhausted its reviewed views before capture' } }), '스코프 수집 실패: 프로그램 화면을 이동했지만 자산 목록과 정책을 함께 확인하지 못했습니다.');
+  assert.equal(localizeAuditEventType('en', 'stage.started'), 'Stage started');
+});
+test('paused scan remains paused even while its current stage is running', () => {
+  const source = demoSnapshot();
+  const paused = parseSnapshot({ ...source, status: 'paused', stage: 'Recon', stage_statuses: { Recon: 'running' } }, DEMO_SCAN);
+  assert.ok(paused);
+  assert.equal(displayStageStatus(paused, 'Recon', 'absent'), 'paused');
+  const changed = parseEvent(event(8, { type: 'scan.status.changed', payload: { status: 'paused' } }), DEMO_SCAN);
+  assert.ok(changed);
+  assert.equal(applyEvent(source, changed).status, 'paused');
+});
+test('failed Recon restarts as a new scan while later failed stages can resume', async () => {
+  const { scanRetryAction } = await import('../src/lib/scan.ts');
+  assert.equal(scanRetryAction({ status: 'failed', stage: 'Recon' }), 'rescan');
+  for (const stage of ['Attack', 'Chaining', 'Validation', 'Report']) {
+    assert.equal(scanRetryAction({ status: 'failed', stage }), 'resume');
+  }
+  assert.equal(scanRetryAction({ status: 'cancelled', stage: 'Recon' }), 'rescan');
+  assert.equal(scanRetryAction({ status: 'running', stage: 'Recon' }), null);
+});
+test('structured scan log metadata survives event parsing and stream merging', () => {
+  const structured = event(8, { payload: { stage: 'Recon', level: 'info', message: 'started', message_code: 'pipeline.started', message_params: {} } });
+  const parsed = parseEvent(structured, DEMO_SCAN);
+  assert.ok(parsed);
+  const next = applyEvent(demoSnapshot(), parsed);
+  assert.equal(mergeActivityLogs(next.logs, []).at(-1).message_code, 'pipeline.started');
+  const work = parseEvent(event(9, {
+    payload: {
+      stage: 'Recon', level: 'info', message: 'Agent work',
+      message_code: 'agent.work',
+      message_params: { agent: 'main', step: 'recon_plan', state: 'started', progress: 7 },
+    },
+  }), DEMO_SCAN);
+  assert.ok(work);
+  const recorded = applyEvent(next, work);
+  assert.deepEqual(recorded.logs.at(-1).message_params, {
+    agent: 'main', step: 'recon_plan', state: 'started', progress: 7,
+  });
+});
+test('recon history pages preserve every URL event and reject invalid cursors', async () => {
+  const { parseReconActivityPage, mergeReconActivityLogs } = await import('../src/lib/events.ts');
+  const url = `https://example.com/${'a'.repeat(220)}`;
+  const discovery = id => event(id, {
+    payload: {
+      stage: 'Recon', level: 'info', message: 'Recon activity',
+      message_code: 'recon.activity',
+      message_params: { phase: 'endpoint_discovery', state: 'found', method: 'GET', url, response_status: 200 },
+    },
+  });
+  const page = { events: [discovery(604), discovery(603)], next_before: 603 };
+  assert.deepEqual(parseReconActivityPage(page, DEMO_SCAN)?.logs.map(log => [log.id, log.message_params.url]), [[604, url], [603, url]]);
+  assert.equal(parseReconActivityPage(page, DEMO_SCAN)?.nextBefore, 603);
+  assert.equal(parseReconActivityPage(page, 'other-scan'), null);
+  assert.equal(parseReconActivityPage({ ...page, events: [...page.events].reverse() }, DEMO_SCAN), null);
+  assert.equal(parseReconActivityPage({ ...page, next_before: 999 }, DEMO_SCAN), null);
+  const history = parseReconActivityPage(page, DEMO_SCAN).logs;
+  assert.deepEqual(mergeReconActivityLogs([history[0], { ...history[0], id: 605 }, { ...history[0], id: 601, message_code: 'stage.started' }], history).map(log => log.id), [605, 604, 603]);
+});
+test('discovered URL records retain HTTP evidence and ignore unrelated recon events', async () => {
+  const { reconDiscoveries } = await import('../src/lib/events.ts');
+  const makeLog = (id, url, response_status) => ({
+    id, time: '2026-09-25T07:00:00Z', stage: 'Recon', level: 'info',
+    message: 'Recon activity', message_code: 'recon.activity',
+    message_params: { phase: 'endpoint_discovery', state: 'found', method: 'GET', url, source: 'katana', response_status },
+  });
+  const logs = [
+    makeLog(4, 'https://example.com/ok', 200),
+    makeLog(3, 'https://example.com/missing', 404),
+    makeLog(2, 'https://example.com/ok', 404),
+    { ...makeLog(1, 'https://example.com/ignored', 200), message_params: { phase: 'katana_standard', state: 'finished', count: 3 } },
+  ];
+  assert.deepEqual(reconDiscoveries(logs), [
+    { method: 'GET', url: 'https://example.com/ok', source: 'katana', responseStatus: 200 },
+    { method: 'GET', url: 'https://example.com/missing', source: 'katana', responseStatus: 404 },
+  ]);
+});
+test('scope collection and scan logs merge into one chronological activity stream', () => {
+  const merged = mergeActivityLogs(
+    [{ id: 7, time: '2026-09-22T00:00:02Z', stage: 'Attack', level: 'info', message: '스캔 이벤트' }],
+    [{ job_id: 'scopejob_fixture', event_id: 2, occurred_at: '2026-09-22T00:00:01Z', level: 'warning', message: '스코프 이벤트' }],
+  );
+  assert.deepEqual(
+    merged.map(({ key, source, stage, message }) => ({ key, source, stage, message })),
+    [
+      { key: 'scope:scopejob_fixture:2', source: 'scope', stage: 'Scope', message: '스코프 이벤트' },
+      { key: 'scan:7', source: 'scan', stage: 'Attack', message: '스캔 이벤트' },
+    ],
+  );
+});
+test('active Scope collection elapsed time uses a TUI-style clock', () => {
+  assert.equal(formatActivityElapsed(1), '1초');
+  assert.equal(formatActivityElapsed(62), '1분 2초');
+  assert.equal(formatActivityElapsed(62, 'en'), '1m 2s');
+});
+test('elapsed milliseconds convert to whole seconds across minute boundaries', () => {
+  for (const [milliseconds, expected] of [
+    [0, '0초'], [999, '0초'], [1000, '1초'], [15255, '15초'],
+    [59999, '59초'], [60000, '1분 0초'], [75255, '1분 15초'],
+  ]) {
+    assert.equal(formatActivityElapsed(milliseconds / 1000), expected);
+  }
+});
+test('Scope collection progress follows persisted phase events across a pause', () => {
+  const phases = [
+    'scope.page_read_started', 'scope.page_read_completed', 'scope.analysis_started',
+    'scope.analysis_completed', 'scope.verification_started', 'scope.verification_completed',
+    'scope.draft_started', 'scope.draft_completed',
+  ];
+  const events = phases.map((message_code, index) => ({
+    job_id: 'scopejob_fixture', event_id: index + 1,
+    occurred_at: '2026-09-26T00:00:00Z', level: 'info', message: 'fixture', message_code,
+  }));
+  assert.equal(scopeCollectionProgress('collecting', []), 0);
+  assert.equal(scopeCollectionProgress('collecting', events.slice(0, 1)), 10);
+  assert.equal(scopeCollectionProgress('paused', events.slice(0, 3)), 40);
+  assert.equal(scopeCollectionProgress('collecting', events.slice(0, 6)), 80);
+  assert.equal(scopeCollectionProgress('review_required', events), 100);
+});
+test('Scope browser activity advances within the page-reading milestone', () => {
+  const events = [
+    { job_id: 'scopejob_fixture', event_id: 1, message_code: 'scope.page_read_started' },
+    ...Array.from({ length: 30 }, (_, index) => ({
+      job_id: 'scopejob_fixture', event_id: index + 2, message_code: 'scope.browser_progress',
+    })),
+  ];
+  const first = scopeCollectionProgress('collecting', events.slice(0, 2));
+  assert.ok(first > 10 && first < 25);
+  assert.ok(scopeCollectionProgress('collecting', events.slice(0, 4)) > first);
+  assert.ok(scopeCollectionProgress('collecting', events) < 25);
+  assert.equal(scopeCollectionProgress('collecting', [...events,
+    { message_code: 'scope.analysis_started' }]), 40);
+});
+test('Recon tool activity advances before its task finishes without claiming final completion', () => {
+  const activity = (id, phase, state) => ({
+    id, stage: 'Recon', message_code: 'recon.activity', message_params: { phase, state },
+  });
+  const started = [activity(1, 'dns_resolution', 'started')];
+  const working = [...started, activity(2, 'dnsx', 'started')];
+  assert.ok(reconCollectionProgress(0, started) > 0);
+  assert.ok(reconCollectionProgress(0, working) > reconCollectionProgress(0, started));
+  const discovery = Array.from({ length: 100 }, (_, index) => ({
+    ...activity(index + 3, 'endpoint_discovery', 'found'),
+    message_params: { phase: 'endpoint_discovery', state: 'found', method: 'GET', url: `https://example.test/${index}` },
+  }));
+  assert.ok(reconCollectionProgress(0, discovery) < 75);
+  assert.equal(reconCollectionProgress(93, discovery), 93);
+  assert.equal(reconCollectionProgress(0, [activity(1, 'dnsx', 'failed')]), 0);
+});
+test('estimated progress advances one percent per tick and stops at real completion', () => {
+  let shown = 0;
+  for (let expected = 1; expected <= 40; expected += 1) {
+    shown = advanceEstimatedProgress(shown, 'running');
+    assert.equal(shown, expected);
+  }
+  assert.equal(advanceEstimatedProgress(shown, 'paused'), 40);
+  for (let expected = 41; expected <= 99; expected += 1) {
+    shown = advanceEstimatedProgress(shown, 'running');
+    assert.equal(shown, expected);
+  }
+  assert.equal(advanceEstimatedProgress(shown, 'running'), 99);
+  assert.equal(advanceEstimatedProgress(shown, 'completed'), 100);
+  assert.equal(advanceEstimatedProgress(100, 'completed'), 100);
+  assert.equal(estimatedProgressDelay(10, 40, 'running'), 200);
+  assert.equal(estimatedProgressDelay(40, 40, 'running'), null);
+  assert.equal(estimatedProgressDelay(96, 40, 'running'), null);
+  assert.equal(estimatedProgressDelay(40, 100, 'completed'), 80);
+  assert.equal(estimatedProgressDelay(40, 40, 'paused'), null);
+  assert.equal(estimatedProgressDelay(99, 40, 'running'), null);
+});
+test('persisted idle progress survives reload and a completed stage reaches 100 before the scan ends', () => {
+  for (const status of ['paused', 'failed', 'cancelled']) {
+    assert.equal(initialEstimatedProgress(50, status), 50);
+  }
+  assert.equal(initialEstimatedProgress(50, 'running'), 50);
+  assert.equal(currentStageProgressStatus('running', 'completed'), 'completed');
+  assert.equal(currentStageProgressStatus('running', 'skipped'), 'completed');
+  assert.equal(currentStageProgressStatus('paused', 'running'), 'paused');
+  assert.equal(estimatedProgressDelay(99, 100, currentStageProgressStatus('running', 'completed')), 80);
+  assert.equal(advanceEstimatedProgress(99, currentStageProgressStatus('running', 'completed')), 100);
+});
+test('progress never outruns the most recently observed task milestone', () => {
+  assert.equal(initialEstimatedProgress(0, 'running'), 0);
+  assert.equal(initialEstimatedProgress(0, 'paused'), 0);
+  assert.equal(estimatedProgressDelay(74, 75, 'running'), 200);
+  assert.equal(estimatedProgressDelay(75, 75, 'running'), null);
+  assert.equal(initialEstimatedProgress(50, 'failed'), 50);
+});
+test('Scope elapsed clock advances each second across dialog close and cancels on terminal status', () => {
+  let now = 0;
+  let scheduled;
+  let schedulerActive = false;
+  let cancelCalls = 0;
+  const labels = [];
+  const clock = startScopeElapsedClock({
+    now: () => now,
+    onTick: current => labels.push(formatActivityElapsed(current / 1000)),
+    schedule: (callback, delay) => {
+      assert.equal(delay, 1000);
+      scheduled = callback;
+      schedulerActive = true;
+      return 9;
+    },
+    cancel: handle => {
+      assert.equal(handle, 9);
+      schedulerActive = false;
+      cancelCalls += 1;
+    },
+  });
+  let lifecycle = reduceScopeActivity(initialScopeActivityState, { type: 'job-selected', status: 'collecting' });
+  lifecycle = reduceScopeActivity(lifecycle, { type: 'dialog-closed' });
+  assert.equal(lifecycle.polling, true);
+  now = 1000;
+  if (schedulerActive) scheduled();
+  now = 2000;
+  if (schedulerActive) scheduled();
+  assert.deepEqual(labels, ['0초', '1초', '2초']);
+  assert.equal(isScopeActivityActive('approved'), false);
+  assert.equal(isScopeActivityActive('paused'), true);
+  assert.equal(isScopeActivityActive('cancelling'), true);
+  assert.equal(isScopeActivityActive('cancelled'), false);
+  clock.stop();
+  assert.equal(schedulerActive, false);
+  assert.equal(cancelCalls, 1);
+  now = 3000;
+  if (schedulerActive) scheduled();
+  assert.deepEqual(labels, ['0초', '1초', '2초'], 'terminal cleanup must prevent later elapsed updates');
+});
+test('unified activity preserves sub-millisecond and numeric event order', () => {
+  const merged = mergeActivityLogs([], [
+    { job_id: 'scopejob_fixture', event_id: 10, occurred_at: '2026-09-22T00:00:00.000200Z', level: 'info', message: '10' },
+    { job_id: 'scopejob_fixture', event_id: 2, occurred_at: '2026-09-22T00:00:00.000200Z', level: 'info', message: '2' },
+    { job_id: 'scopejob_fixture', event_id: 11, occurred_at: '2026-09-22T00:00:00.000200Z', level: 'info', message: '11' },
+    { job_id: 'scopejob_fixture', event_id: 1, occurred_at: '2026-09-22T00:00:00.000100Z', level: 'info', message: '1' },
+  ]);
+  assert.deepEqual(merged.map(item => item.message), ['1', '2', '10', '11']);
+});
+test('unified activity retains the newest 500 entries across both sources', () => {
+  const scanLogs = Array.from({ length: 251 }, (_, id) => ({
+    id,
+    time: `2026-09-22T00:00:${String(id % 60).padStart(2, '0')}.000Z`,
+    stage: 'Attack',
+    level: 'info',
+    message: `scan-${id}`,
+  }));
+  const scopeEvents = Array.from({ length: 251 }, (_, event_id) => ({
+    job_id: 'scopejob_fixture',
+    event_id,
+    occurred_at: `2026-09-22T00:01:${String(event_id % 60).padStart(2, '0')}.000Z`,
+    level: 'info',
+    message: `scope-${event_id}`,
+  }));
+  const merged = mergeActivityLogs(scanLogs, scopeEvents);
+  assert.equal(merged.length, 500);
+  assert.equal(merged.at(-1).message, 'scope-239');
+});
+test('Scope activity lifecycle drains final events before cancelling background polling', () => {
+  const initialEvent = { job_id: 'scopejob_fixture', event_id: 1, occurred_at: '2026-09-22T00:00:00Z', level: 'info', message: 'started' };
+  const finalEvent = { job_id: 'scopejob_fixture', event_id: 2, occurred_at: '2026-09-22T00:00:01Z', level: 'success', message: 'finished' };
+  let state = reduceScopeActivity(initialScopeActivityState, { type: 'job-selected', status: 'collecting' });
+  state = reduceScopeActivity(state, { type: 'job-response', status: 'collecting', events: [initialEvent] });
+  state = reduceScopeActivity(state, { type: 'dialog-closed' });
+  assert.equal(shouldPollScopeJob({ hasJob: true, polling: state.polling, dialogOpen: false }), true);
+  state = reduceScopeActivity(state, { type: 'program-status', status: 'approved' });
+  assert.equal(state.polling, true, 'program-list completion must not cancel the final job fetch');
+  state = reduceScopeActivity(state, { type: 'job-response', status: 'approved', events: [initialEvent, finalEvent] });
+  assert.equal(state.polling, false, 'terminal job response cancels the polling timer');
+  assert.deepEqual(state.events.map(event => event.message), ['started', 'finished']);
+  assert.equal(shouldPollScopeJob({ hasJob: true, polling: state.polling, dialogOpen: false }), false);
+});
+test('Scope job poller cancels its real scheduler after terminal delivery', async () => {
+  const responses = [
+    { status: 'collecting', payload: ['started'] },
+    { status: 'approved', payload: ['started', 'finished'] },
+  ];
+  const delivered = [];
+  let requests = 0;
+  let scheduled;
+  let schedulerActive = false;
+  let cancelCalls = 0;
+  let terminalDelivered;
+  const terminal = new Promise(resolve => { terminalDelivered = resolve; });
+  const poller = startScopeJobPolling({
+    repeat: true,
+    load: async () => responses[requests++],
+    onResponse: result => {
+      delivered.push(...result.payload);
+      if (result.status === 'approved') terminalDelivered();
+    },
+    onError: error => { throw error; },
+    schedule: callback => {
+      scheduled = callback;
+      schedulerActive = true;
+      return 7;
+    },
+    cancel: handle => {
+      assert.equal(handle, 7);
+      schedulerActive = false;
+      cancelCalls += 1;
+    },
+  });
+  await poller.first;
+  assert.equal(requests, 1);
+  assert.equal(schedulerActive, true);
+  if (schedulerActive) scheduled();
+  await terminal;
+  assert.equal(requests, 2);
+  assert.equal(schedulerActive, false);
+  assert.equal(cancelCalls, 1);
+  if (schedulerActive) scheduled();
+  await Promise.resolve();
+  assert.equal(requests, 2, 'terminal delivery must not schedule another request');
+  assert.deepEqual(delivered, ['started', 'started', 'finished']);
+});
+test('scope collection always uses the persistent operator browser', () => {
+  assert.deepEqual(scopeCollectionRequest, {
+    login_mode: 'runtime-browser',
+    identity: 'primary',
+  });
+});
+test('scan limits use the stricter Scope request rate', () => {
+  const requirements = {
+    scope_max_requests_per_second: 0.75,
+    required_header: null,
+    operational_constraints: [],
+    profiles: [{
+      id: 'focused-discovery',
+      limits: {
+        requests_per_second: 1,
+        concurrency: 3,
+        timeout_seconds: 20,
+        max_depth: 3,
+        max_requests: 2000,
+      },
+    }],
+  };
+  assert.deepEqual(
+    resolveExecutionLimits(requirements, 'focused-discovery'),
+    {
+      requests_per_second: 0.75,
+      concurrency: 3,
+      timeout_seconds: 20,
+      max_depth: 3,
+      max_requests: 2000,
+    },
+  );
+});
+test('pipeline includes report and preserves the real stage order', () => assert.deepEqual(stages, ['Scope','Recon','Attack','Chaining','Validation','Report']));
+test('Validation completion does not imply a generated report', () => {
+  const snapshot = { stage: 'Validation', status: 'completed' };
+  assert.equal(pipelineStageState('Validation', snapshot), 'done');
+  assert.equal(pipelineStageState('Report', snapshot), 'separate');
+});
+test('completion only marks stages through the last observed stage', () => {
+  const snapshot = { stage: 'Recon', status: 'completed' };
+  assert.equal(pipelineStageState('Scope', snapshot), 'done');
+  assert.equal(pipelineStageState('Recon', snapshot), 'done');
+  assert.equal(pipelineStageState('Attack', snapshot), 'pending');
+});
+test('running, failed and cancelled stages remain distinct from completed stages', () => {
+  for (const status of ['running', 'failed', 'cancelled']) {
+    const snapshot = { stage: 'Chaining', status };
+    assert.equal(pipelineStageState('Attack', snapshot), 'done');
+    assert.equal(pipelineStageState('Chaining', snapshot), 'current');
+    assert.equal(pipelineStageState('Validation', snapshot), 'pending');
+  }
+  assert.equal(pipelineStageState('Report', { stage: 'Report', status: 'completed' }), 'done');
+});
+test('completed validation does not imply a report draft or completed chaining', () => {
+  const scan = { ...demoSnapshot(), status: 'completed', stage: 'Validation', stage_statuses: { Scope: 'completed', Recon: 'completed', Attack: 'completed', Chaining: 'skipped', Validation: 'completed' } };
+  assert.equal(displayStageStatus(scan, 'Chaining', 'absent'), 'skipped');
+  assert.equal(displayStageStatus(scan, 'Validation', 'absent'), 'completed');
+  assert.equal(displayStageStatus(scan, 'Report', 'absent'), 'not_created');
+  assert.equal(displayStageStatus(scan, 'Report', 'present'), 'completed');
+});
+test('Report stage shows its running and completed state without reloading drafts', () => {
+  const running = { ...demoSnapshot(), stage: 'Report', status: 'running',
+    stage_statuses: { Validation: 'completed', Report: 'running' } };
+  assert.equal(displayStageStatus(running, 'Report', 'absent'), 'running');
+  const finished = applyEvent(running, event(8, { type: 'stage.status.changed',
+    payload: { stage: 'Report', stage_statuses: { Validation: 'completed', Report: 'completed' } } }));
+  assert.equal(displayStageStatus(finished, 'Report', 'absent'), 'completed');
+});
+test('snapshot validates the synthetic scan independently', () => {
+  const data = demoSnapshot();
+  assert.deepEqual(parseSnapshot(data, DEMO_SCAN), data);
+});
+test('invalid snapshots do not fall back to fixture data', () => {
+  for (const patch of [{ version: 2 }, { last_event_id: -1 }, { stage: 'unknown' }, { progress: 101 }, { budget: -1 }, { findings: [{}] }, { logs: [{}] }, { logs: [{ ...demoSnapshot().logs[0], id: 900 }] }]) assert.equal(parseSnapshot({ ...demoSnapshot(), ...patch }, DEMO_SCAN), null);
+  assert.equal(parseSnapshot(demoSnapshot(), 'other-scan'), null);
+});
+test('snapshot log history is sorted and deduplicated', () => {
+  const data = demoSnapshot(); data.logs = [data.logs[3], data.logs[0], data.logs[3]];
+  assert.deepEqual(parseSnapshot(data, DEMO_SCAN).logs.map(l => l.id), [1, 4]);
+});
+test('malformed JSON, foreign scans, versions, and unknown events are rejected', () => {
+  for (const raw of ['{', 'null', '[]', event(8,{version:2}), event(8,{scan_id:'other'}), event(-1), event(8,{type:'something.new'}), event(8,{occurred_at:'not-a-date'}), event(8,{payload:{}})]) assert.equal(parseEvent(raw, DEMO_SCAN), null);
+});
+test('valid event payload is preserved', () => assert.deepEqual(parseEvent(JSON.stringify(event()), DEMO_SCAN), event()));
+test('progress payloads reject NaN, negative requests and values beyond 100', () => {
+  for (const payload of [{progress:NaN,requests:1},{progress:101,requests:1},{progress:20,requests:-1}]) assert.equal(parseEvent(event(8,{type:'task.progress.updated',payload}), DEMO_SCAN), null);
+});
+test('activity updates reach the live snapshot without changing progress', () => {
+  const start = demoSnapshot();
+  const update = event(8, { type: 'task.progress.updated', payload: { progress: start.progress, requests: start.requests, activity: 'DNS resolution' } });
+  assert.deepEqual(parseEvent(update, DEMO_SCAN), update);
+  assert.equal(applyEvent(start, update).activity, 'DNS resolution');
+  assert.equal(parseEvent(event(8, { type: 'task.progress.updated', payload: { progress: 0, requests: 0, activity: 42 } }), DEMO_SCAN), null);
+});
+test('live endpoint counts update from scan events and reject malformed counts', () => {
+  const payload = { progress: 20, requests: 5, endpoints: 12, service_endpoints: 8, live_endpoints: 3 };
+  const parsed = parseEvent(event(8, { type: 'task.progress.updated', payload }), DEMO_SCAN);
+  assert.ok(parsed);
+  assert.equal(applyEvent(demoSnapshot(), parsed).live_endpoints, 3);
+  assert.equal(parseEvent(event(8, { type: 'task.progress.updated', payload: { ...payload, live_endpoints: -1 } }), DEMO_SCAN), null);
+});
+test('duplicate or old events never duplicate logs or regress the cursor', () => {
+  const next = applyEvent(demoSnapshot(), event());
+  assert.equal(next.last_event_id,8); assert.equal(next.logs.length,8);
+  assert.equal(applyEvent(next,event()),next);
+  assert.equal(applyEvent(next,event(3)),next);
+});
+test('out-of-order events buffer until the missing event arrives', () => {
+  const pending = new Map(); const start = demoSnapshot();
+  const waiting = applyOrderedEvent(start,event(10),pending);
+  assert.equal(waiting,start);
+  const partial = applyOrderedEvent(waiting,event(8),pending);
+  assert.equal(partial.last_event_id,8);
+  const complete = applyOrderedEvent(partial,event(9),pending);
+  assert.equal(complete.last_event_id,10);
+  assert.deepEqual(complete.logs.slice(-3).map(l=>l.id),[8,9,10]); assert.equal(pending.size,0);
+});
+test('a large event gap fails explicitly and does not grow the buffer', () => {
+  const pending = new Map(); assert.throws(() => applyOrderedEvent(demoSnapshot(),event(500),pending), /replay buffer/); assert.equal(pending.size,0);
+});
+test('heartbeats never consume durable event IDs', () => {
+  const start = demoSnapshot(); const heartbeat = event(99,{type:'heartbeat',payload:{}});
+  assert.equal(applyOrderedEvent(start,heartbeat,new Map()),start);
+});
+test('stage, scan status, and finding changes update the snapshot', () => {
+  let next = applyEvent(demoSnapshot(),event(8,{type:'stage.status.changed',payload:{stage:'Chaining'}}));
+  assert.equal(next.stage,'Chaining'); assert.equal(next.progress,0);
+  next = applyEvent(next,event(9,{type:'scan.status.changed',payload:{status:'completed'}})); assert.equal(next.status,'completed');
+  next = applyEvent(next,event(10,{type:'finding.updated',payload:{...next.findings[0],status:'confirmed'}}));
+  assert.equal(next.findings.length,demoSnapshot().findings.length); assert.equal(next.findings.find(f=>f.id==='F-0042').status,'confirmed');
+});
+test('same-stage completion updates recorded status without resetting progress', () => {
+  const current = { ...demoSnapshot(), stage: 'Recon', status: 'running', progress: 45,
+    stage_statuses: { Scope: 'completed', Recon: 'running' } };
+  const changed = parseEvent(event(8, { type: 'stage.status.changed',
+    payload: { stage: 'Recon', stage_statuses: { Scope: 'completed', Recon: 'completed' } } }), DEMO_SCAN);
+  assert.ok(changed);
+  const next = applyEvent(current, changed);
+  assert.equal(displayStageStatus(next, 'Recon', 'absent'), 'completed');
+  assert.equal(next.progress, 45);
+});
+test('live stage status events preserve completed skipped failed and cancelled states', () => {
+  for (const [stage, terminal] of [
+    ['Recon', 'completed'], ['Attack', 'failed'], ['Chaining', 'skipped'],
+    ['Validation', 'completed'], ['Report', 'cancelled'],
+  ]) {
+    const current = { ...demoSnapshot(), stage, status: 'running',
+      stage_statuses: { [stage]: 'running' } };
+    const changed = parseEvent(event(8, { type: 'stage.status.changed',
+      payload: { stage, stage_statuses: { [stage]: terminal } } }), DEMO_SCAN);
+    assert.ok(changed);
+    const next = applyEvent(current, changed);
+    assert.equal(next.stage_statuses[stage], terminal);
+    if (stage !== 'Report') assert.equal(displayStageStatus(next, stage, 'absent'), terminal);
+  }
+  const cancelled = { ...demoSnapshot(), status: 'cancelled',
+    stage_statuses: { Recon: 'cancelled' } };
+  assert.ok(parseSnapshot(cancelled, DEMO_SCAN));
+  assert.equal(parseEvent(event(8, { type: 'stage.status.changed',
+    payload: { stage: 'Recon', stage_statuses: { Recon: 'not-a-status' } } }), DEMO_SCAN), null);
+});
+test('log retention is bounded while event cursor keeps advancing', () => {
+  let next = demoSnapshot();
+  for (let i=8;i<=700;i++) next=applyEvent(next,event(i));
+  assert.equal(next.logs.length,500); assert.equal(next.last_event_id,700); assert.equal(next.logs[0].id,201);
+});

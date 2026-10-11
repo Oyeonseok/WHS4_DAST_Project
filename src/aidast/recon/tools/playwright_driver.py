@@ -1,0 +1,3793 @@
+"""PLAYWRIGHT DRIVER
+
+역할
+----
+1. 실제 Chromium 브라우저 실행
+2. 사용자가 직접 로그인
+3. Cookie / localStorage / sessionStorage 저장
+4. 로그인 과정 HTTP 요청 관찰
+5. Katana / ffuf / ZAP용 인증 Header 생성
+6. Katana Headless가 로그인 Browser를 사용할 수 있도록 CDP 제공
+7. Katana Headless 종료 후 Browser Context가 죽어도 저장된 세션으로 복구
+8. 로그인된 상태에서 안전한 UI Interaction 수행
+9. XHR / fetch / WebSocket 관찰
+
+Playwright는 메인 크롤러가 아니다.
+"""
+
+from __future__ import annotations
+
+from aidast.core.http_safety import has_request_exclusions, require_request_admission
+from aidast.core.request_governor import RequestGovernor
+
+import json
+import re
+import os
+import sys
+import socket
+import subprocess
+import time
+import urllib.request
+
+from dataclasses import dataclass, field
+from collections.abc import Callable
+from pathlib import Path
+from urllib.parse import parse_qsl, unquote, urljoin, urlparse
+
+from playwright.sync_api import (
+    Browser,
+    BrowserContext,
+    Page,
+    Playwright,
+    TimeoutError as PlaywrightTimeoutError,
+    sync_playwright,
+)
+
+from aidast.recon.policy import TargetPolicy
+from aidast.recon.judgment import is_probable_redirect_loop_path
+from aidast.auth.endpoints import AuthenticationEndpoint, AuthenticationEndpointError, normalize_origin
+from aidast.core.http_safety import merge_hackerone_identity
+from aidast.core.http_safety import (
+    BROWSER_MODE_HEADER, BROWSER_TOKEN_HEADER, scope_uses_loopback_host,
+)
+from aidast.recon.tools.api_secondary_discovery import _http_request
+from aidast.recon.tools.page_identity import canonical_visit_key, screen_fingerprint
+from aidast.recon.tools.user_action import visible_user_action
+
+
+def _wait_for_manual_login(
+    timeout_seconds: float = 300, *, auth_ready: Callable[[], bool] | None = None,
+) -> bool:
+    """Wait for terminal confirmation or detected browser authentication."""
+    try:
+        interactive = sys.stdin.isatty()
+    except (OSError, ValueError, AttributeError):
+        interactive = False
+    if not interactive and auth_ready is not None:
+        print("  [Playwright] 브라우저 로그인 인증 정보를 기다립니다.", flush=True)
+        deadline = time.monotonic() + timeout_seconds
+        while time.monotonic() < deadline:
+            if auth_ready():
+                return True
+            time.sleep(min(0.25, max(0.0, deadline - time.monotonic())))
+        raise RuntimeError("browser authentication was not detected before the login timeout")
+    print(f"  로그인 완료 후 Enter (미입력 시 {timeout_seconds // 60}분 후 자동 진행) > ", end="", flush=True)
+    if os.name == "nt":
+        import msvcrt
+        deadline = time.monotonic() + timeout_seconds
+        while time.monotonic() < deadline:
+            if msvcrt.kbhit():
+                msvcrt.getwch()
+                return True
+            time.sleep(0.2)
+        print("\n  [Playwright] 입력 시간 초과: 현재 세션으로 자동 진행합니다.")
+        return False
+    import select
+    try:
+        ready, _, _ = select.select([sys.stdin], [], [], timeout_seconds)
+    except (OSError, ValueError, TypeError, AttributeError):
+        # Embedded runners and test harnesses may replace stdin with an object
+        # that has no selectable file descriptor. There is no reliable way to
+        # wait for keyboard input in that case, so continue without blocking.
+        print("\n  [Playwright] 대화형 입력을 사용할 수 없어 현재 세션으로 자동 진행합니다.")
+        return False
+    if ready:
+        return bool(sys.stdin.readline())
+    print("\n  [Playwright] 입력 시간 초과: 현재 세션으로 자동 진행합니다.")
+    return False
+
+
+def _write_private_session(path: Path, value: object) -> None:
+    """Write browser credentials without exposing newly created files."""
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+    with os.fdopen(os.open(path, flags, 0o600), "w", encoding="utf-8") as handle:
+        if os.name == "posix":
+            os.fchmod(handle.fileno(), 0o600)
+        json.dump(value, handle, ensure_ascii=False, indent=2)
+
+# =========================================================
+# Configuration
+# =========================================================
+
+@dataclass
+class ManualSessionConfig:
+
+    # 최초로 열 페이지
+    #
+    # 로그인 URL을 알면 로그인 URL 지정
+    # 모르면 base_url 지정 후 사용자가 직접 이동
+    login_url: str
+
+    # 인증정보 저장 파일
+    session_file: str
+
+    # 인증 여부 확인 URL
+    #
+    # 예:
+    # /api/me
+    # /rest/user/whoami
+    #
+    # 모르면 None
+    auth_check_url: str | None = None
+
+    invalid_auth_statuses: tuple[int, ...] = (
+        401,
+    )
+
+    authentication_endpoint_callback: Callable[
+        [tuple[AuthenticationEndpoint, ...]], None
+    ] | None = None
+
+    # Dashboard confirmation is operator attestation, not an API auth check.
+    operator_confirmation: Callable[[Callable[[], str | None]], bool] | None = None
+
+    # Runtime HITL uses the already visible CDP browser. A missing event pump
+    # means the runtime is headless/unavailable; it must not open another GUI.
+    operator_action_confirmation: Callable[
+        [str, Callable[[], str | None], Callable[[], None] | None], bool
+    ] | None = None
+
+    # Storage 값을 HTTP Header로 변환
+    #
+    # 예:
+    #
+    # {
+    #     "token": (
+    #         "Authorization",
+    #         "Bearer ",
+    #     )
+    # }
+    #
+    storage_header_map: dict[
+        str,
+        tuple[str, str],
+    ] = field(
+        default_factory=dict
+    )
+
+    timeout_ms: int = 15_000
+
+
+_BASE_SAFE_ACTION_SELECTOR = (
+    '[role="tab"], button[aria-controls], button[aria-expanded], '
+    'button[aria-haspopup], [role="button"][aria-controls], '
+    '[role="button"][aria-expanded], [role="button"][aria-haspopup], summary, nav button'
+)
+_READ_ACTION_SELECTOR = (
+    _BASE_SAFE_ACTION_SELECTOR + ', button[aria-label], button[title], '
+    '[role="button"][aria-label], [tabindex="0"][aria-label]'
+)
+_DIALOG_CLOSE_SELECTOR = (
+    ':is(dialog, [role="dialog"], [aria-modal="true"]) '
+    ':is(button[aria-label*="close" i], button[title*="close" i], '
+    'button[mat-dialog-close], [role="button"][aria-label*="close" i])'
+)
+_READ_ACTION_LABEL = re.compile(r"\b(?:view|details?|show|read)\b|more information|상세|정보 보기", re.I)
+_REQUEST_FIELD_NAME = re.compile(r"[A-Za-z_$][\w$.-]{0,127}\Z")
+
+
+def _request_shape_parameters(request) -> tuple[str | None, list[dict[str, str]]]:
+    """Return field names/types from one browser request without its values."""
+    try:
+        headers = getattr(request, "headers", {}) or {}
+        if callable(headers):
+            headers = headers()
+    except Exception:
+        headers = {}
+    content_type = next(
+        (str(value).split(";", 1)[0].strip().casefold()
+         for name, value in headers.items() if str(name).casefold() == "content-type"),
+        "",
+    ) if isinstance(headers, dict) else ""
+    try:
+        raw = getattr(request, "post_data_buffer", None)
+        if callable(raw):
+            raw = raw()
+        if isinstance(raw, bytes):
+            raw = raw.decode("utf-8", errors="strict")
+    except Exception:
+        raw = None
+    if not isinstance(raw, str) or not raw or len(raw.encode("utf-8")) > 131_072:
+        return content_type or None, []
+
+    fields: dict[str, str] = {}
+    if "json" in content_type or raw.lstrip().startswith("{"):
+        try:
+            value = json.loads(raw)
+        except (ValueError, TypeError, RecursionError):
+            value = None
+        if isinstance(value, dict):
+            for name, item in value.items():
+                if not isinstance(name, str) or not _REQUEST_FIELD_NAME.fullmatch(name):
+                    continue
+                fields[name] = (
+                    "object" if isinstance(item, dict)
+                    else "array" if isinstance(item, list)
+                    else "boolean" if isinstance(item, bool)
+                    else "number" if isinstance(item, (int, float))
+                    else "string"
+                )
+    elif content_type == "application/x-www-form-urlencoded":
+        try:
+            for name, _ in parse_qsl(raw, keep_blank_values=True, max_num_fields=100):
+                if _REQUEST_FIELD_NAME.fullmatch(name):
+                    fields.setdefault(name, "string")
+        except ValueError:
+            fields = {}
+    return content_type or None, [
+        {"name": name, "location": "form" if content_type == "application/x-www-form-urlencoded" else "json",
+         "data_type": data_type}
+        for name, data_type in list(fields.items())[:100]
+    ]
+
+
+@dataclass
+class InteractionConfig:
+
+    enabled: bool = True
+
+    max_pages: int = 30
+
+    max_actions_per_page: int = 10
+
+    # By default the page and per-page limits provide the hard ceiling.
+    # A smaller explicit value can still be supplied for constrained runs.
+    max_total_actions: int | None = None
+
+    max_pass_seconds: float = 180.0
+
+    action_wait_ms: int = 500
+
+    # TargetPolicy가 Scope의 명시적인 금지 근거를 반영해 끄지 않은
+    # 경우 form 내부의 상호작용도 탐색 대상에 포함한다.
+    allow_form_submission: bool = True
+
+    # 자동으로 누르면 위험할 수 있는 Action
+    blocked_words: tuple[str, ...] = (
+
+        # English
+        "delete",
+        "remove",
+        "purchase",
+        "buy",
+        "checkout",
+        "payment",
+        "pay",
+        "submit",
+        "send",
+        "transfer",
+        "save",
+        "update",
+        "create",
+        "register",
+        "logout",
+        "sign out",
+        "unsubscribe",
+        "add to basket",
+        "add to cart",
+        "change password",
+        "reset password",
+
+        # Korean
+        "삭제",
+        "탈퇴",
+        "구매",
+        "결제",
+        "주문",
+        "전송",
+        "송금",
+        "이체",
+        "저장",
+        "수정",
+        "등록",
+        "로그아웃",
+        "장바구니",
+        "비밀번호 변경",
+        "비밀번호 재설정",
+    )
+
+    # Opt in only when broader read controls are useful for this target.
+    expand_read_controls: bool = False
+
+
+# =========================================================
+# Driver
+# =========================================================
+
+class PlaywrightDriver:
+
+    def __init__(
+        self,
+        base_url: str,
+        session_config: ManualSessionConfig,
+        *,
+        interaction_config: InteractionConfig | None = None,
+        proxy_url: str | None = None,
+        target_policy: TargetPolicy | None = None,
+        auth_bootstrap: dict | None = None,
+        preauthenticated: bool = False,
+        request_headers: dict[str, str] | None = None,
+        browser_context_token: str | None = None,
+    ):
+
+        if target_policy is not None and not proxy_url:
+            raise ValueError("policy-enforced browser requires a proxy")
+        self.preauthenticated = preauthenticated
+        self.request_headers = dict(request_headers or {})
+        self.target_policy = target_policy
+        self.auth_bootstrap = auth_bootstrap or {}
+        self.base_url = (
+            base_url.rstrip("/")
+        )
+
+        self.session_config = (
+            session_config
+        )
+
+        self.interaction_config = (
+            interaction_config
+            or InteractionConfig()
+        )
+
+        self.proxy_url = (
+            proxy_url
+        )
+        self.browser_context_token = browser_context_token
+
+        self.playwright: (
+            Playwright | None
+        ) = None
+
+        self.browser: (
+            Browser | None
+        ) = None
+
+        self.context: (
+            BrowserContext | None
+        ) = None
+
+        self.page: (
+            Page | None
+        ) = None
+
+        self.requests: list[dict] = []
+        self.authentication_observations: list[dict] = []
+        self.authentication_endpoints: list[AuthenticationEndpoint] = []
+        self._observation_cursor = 0
+        self._interaction_visited: set[str] = set()
+        self._interaction_seen_screens: set[str] = set()
+        self._interaction_page_count = 0
+        self.last_interaction_duplicate_screens = 0
+        self._context_serial = 0
+        self._action_context = None
+
+        self.websockets: list[dict] = []
+
+        self._phase = "runtime"
+
+        self._auth_expired = False
+        # Keep the approved pre-Recon credentials in memory. The live browser
+        # can clear storage during SPA navigation, and _load_auth_state writes
+        # that live state to the run-scoped session file.
+        self._auth_checkpoint_state: dict | None = None
+        self._auth_checkpoint_session_storage: dict | None = None
+        self._required_auth_headers: tuple[str, ...] = ()
+        # Public and missing pages must never fall through to a manual login
+        # wait. This is enabled only after an explicit or auto-detected auth
+        # flow has actually started.
+        self._interactive_authentication_enabled = bool(preauthenticated)
+        self._operator_confirmed_login = False
+        self._operator_action_failures: set[str] = set()
+
+        # 외부 Chromium Process
+        self._chrome_process: (
+            subprocess.Popen | None
+        ) = None
+
+        self._cdp_port: (
+            int | None
+        ) = None
+
+        self._chrome_ws_url: (
+            str | None
+        ) = None
+
+        # cdp / managed
+        self._browser_kind: (
+            str | None
+        ) = None
+
+        # WebSocket Handler 중복 방지
+        self._registered_pages: set[int] = set()
+
+    # =====================================================
+    # File Paths
+    # =====================================================
+
+    @property
+    def session_path(
+        self,
+    ) -> Path:
+
+        return Path(
+            self.session_config.session_file
+        )
+
+    @property
+    def session_storage_path(
+        self,
+    ) -> Path:
+
+        return Path(
+            self.session_config.session_file
+            + ".sessionstorage.json"
+        )
+
+    @property
+    def automatic_auth_marker_path(self) -> Path:
+        """Run-scoped proof that this origin already completed manual login."""
+        return Path(self.session_config.session_file + ".authenticated")
+
+    @property
+    def profile_path(
+        self,
+    ) -> Path:
+
+        return Path(
+            self.session_config.session_file
+            + ".profile"
+        )
+
+    # =====================================================
+    # URL / Origin
+    # =====================================================
+
+    @staticmethod
+    def _effective_port(
+        parsed,
+    ) -> int | None:
+
+        if parsed.port is not None:
+            return parsed.port
+
+        scheme = (
+            parsed.scheme.lower()
+        )
+
+        if scheme in {
+            "http",
+            "ws",
+        }:
+            return 80
+
+        if scheme in {
+            "https",
+            "wss",
+        }:
+            return 443
+
+        return None
+
+    @staticmethod
+    def _normalized_scheme(
+        scheme: str,
+    ) -> str:
+
+        scheme = scheme.lower()
+
+        if scheme == "ws":
+            return "http"
+
+        if scheme == "wss":
+            return "https"
+
+        return scheme
+
+    def _same_origin(
+        self,
+        url: str,
+    ) -> bool:
+
+        try:
+
+            parsed = urlparse(
+                url
+            )
+
+            base = urlparse(
+                self.base_url
+            )
+
+            return (
+                self._normalized_scheme(
+                    parsed.scheme
+                )
+                ==
+                self._normalized_scheme(
+                    base.scheme
+                )
+
+                and
+                (
+                    parsed.hostname
+                    or ""
+                ).lower()
+                ==
+                (
+                    base.hostname
+                    or ""
+                ).lower()
+
+                and
+                self._effective_port(
+                    parsed
+                )
+                ==
+                self._effective_port(
+                    base
+                )
+            )
+
+        except ValueError:
+
+            return False
+
+    def _base_origin(
+        self,
+    ) -> str:
+
+        parsed = urlparse(
+            self.base_url
+        )
+
+        origin = (
+            f"{parsed.scheme}://"
+            f"{parsed.hostname}"
+        )
+
+        if parsed.port is not None:
+
+            origin += (
+                f":{parsed.port}"
+            )
+
+        return origin
+
+    # =====================================================
+    # Playwright
+    # =====================================================
+
+    def _ensure_playwright(
+        self,
+    ) -> None:
+
+        if self.playwright is not None:
+            return
+
+        self.playwright = (
+            sync_playwright()
+            .start()
+        )
+
+    # =====================================================
+    # CDP
+    # =====================================================
+
+    @staticmethod
+    def _find_free_port(
+    ) -> int:
+
+        with socket.socket(
+            socket.AF_INET,
+            socket.SOCK_STREAM,
+        ) as sock:
+
+            sock.bind(
+                (
+                    "127.0.0.1",
+                    0,
+                )
+            )
+
+            return int(
+                sock.getsockname()[1]
+            )
+
+    def _wait_for_cdp(
+        self,
+        port: int,
+        *,
+        # A cold Chrome-for-Testing launch on macOS can take well over ten
+        # seconds while component caches are initialized.  Keep this above
+        # the observed cold-start time so a healthy browser is not mistaken
+        # for a refused CDP connection.
+        timeout_seconds: float = 30.0,
+    ) -> str:
+
+        endpoint = (
+            f"http://127.0.0.1:"
+            f"{port}/json/version"
+        )
+
+        deadline = (
+            time.time()
+            + timeout_seconds
+        )
+
+        last_error: (
+            Exception | None
+        ) = None
+
+        while time.time() < deadline:
+
+            try:
+
+                with urllib.request.urlopen(
+                    endpoint,
+                    timeout=1,
+                ) as response:
+
+                    payload = json.loads(
+                        response.read()
+                        .decode(
+                            "utf-8"
+                        )
+                    )
+
+                ws_url = payload.get(
+                    "webSocketDebuggerUrl"
+                )
+
+                if ws_url:
+                    return ws_url
+
+            except Exception as exc:
+
+                last_error = exc
+
+            time.sleep(
+                0.25
+            )
+
+        raise RuntimeError(
+            "Chromium CDP 연결 실패: "
+            f"{last_error}"
+        )
+
+    # =====================================================
+    # Runtime Shutdown
+    # =====================================================
+
+    def _shutdown_runtime(
+        self,
+    ) -> None:
+
+        # Do not call BrowserContext.unroute_all() while tearing down the
+        # complete runtime. Playwright can wait forever for an in-flight route
+        # callback even with ``ignoreErrors``. The managed browser close or
+        # external Chromium process termination below releases every route
+        # together with the context.
+
+        # -------------------------------------------------
+        # Playwright가 직접 실행한 Browser
+        # -------------------------------------------------
+
+        if (
+            self._browser_kind
+            == "managed"
+            and self.browser is not None
+        ):
+
+            try:
+                self.browser.close()
+            except Exception:
+                pass
+
+        # -------------------------------------------------
+        # CDP 외부 Chromium
+        #
+        # browser.close()를 호출하지 않고
+        # Process를 직접 종료한다.
+        # -------------------------------------------------
+
+        if self._chrome_process is not None:
+
+            try:
+
+                if (
+                    self._chrome_process.poll()
+                    is None
+                ):
+
+                    self._chrome_process.terminate()
+
+                    try:
+
+                        self._chrome_process.wait(
+                            timeout=3
+                        )
+
+                    except subprocess.TimeoutExpired:
+
+                        self._chrome_process.kill()
+
+            except Exception:
+                pass
+
+        self.browser = None
+        self.context = None
+        self.page = None
+
+        self._chrome_process = None
+
+        self._cdp_port = None
+        self._chrome_ws_url = None
+
+        self._browser_kind = None
+
+        self._registered_pages.clear()
+
+    # =====================================================
+    # Manual Chromium Launch
+    # =====================================================
+
+    def _launch_manual_browser(
+        self,
+        *,
+        manual_login: bool = False,
+    ) -> None:
+
+        if manual_login and has_request_exclusions(self.target_policy):
+            raise ValueError('exclusion hold: unmanaged manual browser login is unsupported')
+        self._ensure_playwright()
+
+        assert self.playwright is not None
+
+        # The operator-facing login flow needs a visible, directly connected
+        # Chromium.  Once a session snapshot exists, use Playwright's managed
+        # runtime instead of starting a GUI process and attaching over CDP.
+        # On macOS the latter can remain alive without ever opening its CDP
+        # port; managed headless launch avoids that GUI bootstrap dependency.
+        if not manual_login:
+            self._launch_managed_runtime()
+            return
+
+        # 기존 Runtime 종료
+        self._shutdown_runtime()
+
+        executable = self.playwright.chromium.executable_path
+
+        self.profile_path.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+
+        # Chromium can leave these profile-local symlinks behind when a CDP
+        # process is terminated during session restore.  A retry with the
+        # same run-scoped profile then exits before opening its debugging
+        # port.  This profile belongs exclusively to this driver/run, and the
+        # tracked process has already been stopped by _shutdown_runtime().
+        for name in ("SingletonLock", "SingletonSocket", "SingletonCookie"):
+            lock = self.profile_path / name
+            try:
+                if lock.is_symlink() or lock.exists():
+                    lock.unlink()
+            except OSError:
+                pass
+
+        self.session_path.parent.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+
+        port = (
+            self._find_free_port()
+        )
+
+        self._cdp_port = port
+
+        command = [
+            executable,
+
+            f"--remote-debugging-port={port}",
+
+            "--remote-allow-origins=*",
+
+            (
+                "--user-data-dir="
+                f"{self.profile_path}"
+            ),
+
+            "--no-first-run",
+
+            "--no-default-browser-check",
+
+            "--disable-dev-shm-usage",
+
+            # Keep WebGL/GPU available for Cloudflare and identity-provider
+            # browser checks.  Disabling it makes the login browser look like
+            # a software-rendered automation surface and can leave email
+            # challenge flows spinning forever.
+            "--disable-blink-features=AutomationControlled",
+
+            self.session_config.login_url if manual_login else "about:blank",
+        ]
+
+        if manual_login:
+            command.insert(-1, "--no-proxy-server")
+        elif self.proxy_url:
+            command.insert(-1, "--ignore-certificate-errors")
+            command.insert(
+                -1,
+                (
+                    "--proxy-server="
+                    f"{self.proxy_url}"
+                ),
+            )
+            # Chromium otherwise bypasses configured proxies for loopback.
+            command.insert(-1, "--proxy-bypass-list=<-loopback>")
+
+        self._chrome_process = (
+            subprocess.Popen(
+                command,
+
+                stdout=(
+                    subprocess.DEVNULL
+                ),
+
+                stderr=(
+                    subprocess.DEVNULL
+                ),
+            )
+        )
+
+    def _launch_managed_runtime(self, *, headless: bool = True) -> None:
+        self._ensure_playwright()
+        assert self.playwright is not None
+
+        self._shutdown_runtime()
+
+        launch_options: dict = {
+            "headless": headless,
+            "args": [
+                "--disable-dev-shm-usage",
+                "--disable-blink-features=AutomationControlled",
+                # Chromium otherwise bypasses configured proxies for loopback.
+                "--proxy-bypass-list=<-loopback>",
+            ],
+        }
+        if self.proxy_url:
+            launch_options["proxy"] = {"server": self.proxy_url}
+
+        self.browser = self.playwright.chromium.launch(**launch_options)
+        self._browser_kind = "managed"
+        self.context = self.browser.new_context(ignore_https_errors=True, **({"service_workers":"block"} if has_request_exclusions(self.target_policy) else {}))
+        self.context.add_init_script(
+            "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
+        )
+        self._register_context_handlers()
+        self.page = self.context.new_page()
+        self._register_page_handlers(self.page)
+
+    def _attach_manual_browser(self) -> None:
+        """Attach only after manual login, or to the policy-enforced runtime."""
+        if has_request_exclusions(self.target_policy):
+            raise ValueError('exclusion hold: unmanaged CDP attachment is unsupported')
+        port = self._cdp_port
+        if port is None or self.playwright is None:
+            raise RuntimeError("manual browser is not running")
+        self._chrome_ws_url = (
+            self._wait_for_cdp(
+                port
+            )
+        )
+
+        self.browser = (
+            self.playwright
+            .chromium
+            .connect_over_cdp(
+                (
+                    "http://127.0.0.1:"
+                    f"{port}"
+                )
+            )
+        )
+
+        self._browser_kind = "cdp"
+
+        contexts = (
+            self.browser.contexts
+        )
+
+        if not contexts:
+
+            raise RuntimeError(
+                "Chromium BrowserContext를 "
+                "찾을 수 없습니다."
+            )
+
+        self.context = contexts[0]
+
+        # CDP-attached Chromium can still expose webdriver to newly created
+        # documents.  Hide only this automation marker; do not spoof cookies,
+        # storage, or browser APIs involved in authentication.
+        self.context.add_init_script(
+            "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
+        )
+
+        if self._phase != "login" or has_request_exclusions(self.target_policy):
+            self._register_context_handlers()
+
+        pages = self.context.pages
+
+        if pages:
+
+            self.page = pages[0]
+
+        else:
+
+            self.page = (
+                self.context.new_page()
+            )
+
+        if self._phase != "login":
+            for page in self.context.pages:
+                self._register_page_handlers(page)
+
+    # =====================================================
+    # HTTP Network Observation
+    # =====================================================
+
+    def _guard_request(self, route) -> None:
+        """Apply policy before browser egress; the proxy also checks redirects.
+
+        Do not include URLs or headers in rejection messages: browser URLs may
+        contain session tokens. Handler errors abort rather than bypass policy.
+        """
+        try:
+            request = route.request
+            parsed = urlparse(request.url)
+            strictly_allowed = (
+                self.target_policy is not None
+                and not parsed.username and not parsed.password
+                and self.target_policy.allows_url(request.url, method=request.method)
+            )
+            support_mode = None if strictly_allowed else self._browser_support_mode(request)
+        except Exception:
+            strictly_allowed = False
+            support_mode = None
+        try:
+            if has_request_exclusions(self.target_policy):
+                if not strictly_allowed and not (support_mode and self.browser_context_token):
+                    route.abort('blockedbyclient')
+                    return
+                headers = dict(request.all_headers())
+                if strictly_allowed or support_mode == 'same-origin':
+                    headers.update(self.request_headers)
+                    headers = merge_hackerone_identity(headers, self.target_policy.hackerone_username,
+                        required_identity_headers=self.target_policy.required_identity_headers)
+                else:
+                    controlled = {k.casefold() for k in self.target_policy.required_identity_headers}
+                    headers = {k:v for k,v in headers.items() if k.casefold() not in controlled}
+                body = request.post_data_buffer
+                body = bytes(body) if body is not None else b''
+                def admit():
+                    require_request_admission(self.target_policy, url=request.url, method=request.method,
+                        headers=headers, body=body, identity_available=False)
+                admit()
+                count = getattr(self, '_exclusion_request_count', 0)
+                if count >= self.target_policy.limits.max_requests:
+                    raise ValueError('browser request budget exhausted')
+                # A configured proxy owns its shared permit; direct routes own theirs.
+                governor = RequestGovernor(None if self.proxy_url else self.target_policy.request_governor)
+                permit = governor.acquire(request.url, timeout_seconds=self.target_policy.limits.timeout_seconds)
+                fetched = None
+                try:
+                    permit.wait()
+                    admit()
+                    self._exclusion_request_count = count + 1
+                    sent_headers = dict(headers)
+                    if support_mode:
+                        sent_headers[BROWSER_TOKEN_HEADER] = self.browser_context_token
+                        sent_headers[BROWSER_MODE_HEADER] = support_mode
+                    fetched = route.fetch(headers=sent_headers, method=request.method,
+                        post_data=body, max_redirects=0, max_retries=0,
+                        timeout=permit.timeout_seconds * 1000)
+                    if fetched.status in {301,302,303,307,308} and any(k.lower()=='location' for k in fetched.headers):
+                        route.abort('blockedbyclient')
+                    else:
+                        route.fulfill(response=fetched)
+                finally:
+                    if fetched is not None:
+                        fetched.dispose()
+                    permit.complete()
+                return
+            if strictly_allowed:
+                if self.request_headers or self.target_policy.required_identity_headers or self.target_policy.hackerone_username:
+                    headers = dict(request.all_headers())
+                    headers.update(self.request_headers)
+                    if self.target_policy.required_identity_headers or self.target_policy.hackerone_username:
+                        headers = merge_hackerone_identity(headers, self.target_policy.hackerone_username,
+                            required_identity_headers=self.target_policy.required_identity_headers)
+                    route.continue_(headers=headers)
+                else:
+                    route.continue_()
+            elif support_mode and self.browser_context_token:
+                # A request can still be delivered to this callback while a
+                # CDP target is shutting down. Reading headers in that window
+                # raises TargetClosedError; never turn browser shutdown into a
+                # Recon failure or attempt to bypass the policy.
+                headers = dict(request.all_headers())
+                if support_mode == "same-origin":
+                    headers.update(self.request_headers)
+                    if self.target_policy.required_identity_headers or self.target_policy.hackerone_username:
+                        headers = merge_hackerone_identity(headers, self.target_policy.hackerone_username,
+                            required_identity_headers=self.target_policy.required_identity_headers)
+                else:
+                    controlled = {name.casefold() for name in self.target_policy.required_identity_headers}
+                    headers = {name: value for name, value in headers.items() if name.casefold() not in controlled}
+                headers[BROWSER_TOKEN_HEADER] = self.browser_context_token
+                headers[BROWSER_MODE_HEADER] = support_mode
+                route.continue_(headers=headers)
+            else:
+                route.abort("blockedbyclient")
+        except Exception:
+            try:
+                route.abort('blockedbyclient')
+            except Exception:
+                pass
+            return
+
+    def _browser_support_mode(self, request) -> str | None:
+        """Classify rendering traffic caused by a page inside the strict boundary."""
+        if self.target_policy is None or request.is_navigation_request():
+            return None
+        if not self.target_policy.allows_execution_method(request.method):
+            return None
+        try:
+            if not self.target_policy.allows_url(request.frame.url):
+                return None
+            parsed = urlparse(request.url)
+            if parsed.username or parsed.password:
+                return None
+            if self._same_origin(request.url):
+                method_allowed = self.target_policy.allows_browser_support_url(
+                    request.url, method=request.method
+                )
+                if (
+                    self.target_policy.execution_allowed_methods is None
+                    and request.method.upper() == "POST"
+                    and getattr(request, "resource_type", None) in {"xhr", "fetch"}
+                ):
+                    # Browser support deliberately ignores the endpoint path
+                    # (Admin SPAs call APIs outside /store/<id>) while still
+                    # enforcing the exact approved origin and exclusions.
+                    method_allowed = self.target_policy.allows_browser_support_url(
+                        request.url, method="GET"
+                    )
+                return "same-origin" if method_allowed else None
+            if (
+                not scope_uses_loopback_host(self.target_policy.allowed_hosts)
+                and request.method.upper() in {"GET", "HEAD"}
+                and parsed.scheme == "https"
+                and self._effective_port(parsed) == 443
+                and request.resource_type
+                in {"script", "stylesheet", "image", "font", "media"}
+            ):
+                return "passive"
+        except Exception:
+            return None
+        return None
+
+    @staticmethod
+    def _path_matches(path: str, prefix: str) -> bool:
+        prefix = str(prefix).rstrip("/") or "/"
+        return prefix == "/" or path == prefix or path.startswith(prefix + "/")
+
+    def pause_policy_routing(self) -> None:
+        """katana처럼 -cwu로 이 브라우저에 별도 CDP 세션을 붙이는 도구는
+        자기 자신도 같은 target에 Fetch 도메인을 직접 구독한다(katana
+        내부에서 요청/응답을 캡처해 크롤 결과를 쌓는 방식). CDP의 Fetch
+        도메인은 target당 구독자를 안정적으로 하나만 지원하는데, 우리
+        context.route()가 이미 같은 target의 Fetch 이벤트를 구독하고
+        있어서 katana 세션과 충돌한다 - Playwright가 이벤트를 먼저/대신
+        가져가면 katana 쪽 콜백이 전혀 안 불려서, 페이지는 정상 로드되는데
+        (그래서 hang은 없음) katana는 결과를 하나도 캡처하지 못해 exit 0 +
+        0건으로 조용히 끝난다. 실측으로 확인됨(katana subprocess가 도는
+        동안은 우리가 동기 대기만 해서 그 사이 이 브라우저로 우리 쪽
+        트래픽이 나갈 일이 없어, 그 창만 양보해도 정책이 실제로 뚫리는
+        구간은 생기지 않는다). 반드시 resume_policy_routing()으로 복원할
+        것(finally로 감쌀 것).
+        """
+        if has_request_exclusions(self.target_policy):
+            raise ValueError('exclusion hold: browser policy routing cannot be paused')
+        if self.context is None or self.target_policy is None:
+            return
+        try:
+            self.context.unroute("**/*", self._guard_request)
+        except Exception:
+            pass
+
+    def resume_policy_routing(self) -> None:
+        """pause_policy_routing()으로 내린 Fetch 정책 구독을 복원한다."""
+        if self.context is None or self.target_policy is None:
+            return
+        try:
+            self.context.route("**/*", self._guard_request)
+        except Exception as exc:
+            if has_request_exclusions(self.target_policy):
+                raise ValueError('exclusion hold: required browser routing could not be restored') from exc
+            pass
+
+    def _register_context_handlers(
+        self,
+    ) -> None:
+
+        if self.context is None:
+            return
+
+        if self.target_policy is not None:
+            if has_request_exclusions(self.target_policy):
+                if not callable(getattr(self.context, 'route_web_socket', None)):
+                    raise ValueError('exclusion hold: browser WebSocket interception unavailable')
+                self.context.route_web_socket('**/*', lambda route: None)
+            self.context.route("**/*", self._guard_request)
+            # WebSocket messages are outside the HTTP policy contract.  Do
+            # not call WebSocketRoute.close() from its synchronous callback:
+            # recent Playwright versions can deadlock by re-entering the sync
+            # dispatcher.  Blocking construction before application scripts
+            # run keeps the channel closed and lets Socket.IO fall back to
+            # proxy-observable HTTP polling.
+            self.context.add_init_script(
+                """
+                (() => {
+                    class PolicyBlockedWebSocket {
+                        static CONNECTING = 0;
+                        static OPEN = 1;
+                        static CLOSING = 2;
+                        static CLOSED = 3;
+                        constructor() {
+                            throw new DOMException(
+                                'WebSocket blocked by target policy',
+                                'SecurityError'
+                            );
+                        }
+                    }
+                    Object.defineProperty(globalThis, 'WebSocket', {
+                        value: PolicyBlockedWebSocket,
+                        configurable: false,
+                        writable: false
+                    });
+                })();
+                """
+            )
+
+        def on_request(
+            request,
+        ):
+
+            if not self._same_origin(
+                request.url
+            ):
+                return
+
+            # 정적 Resource 제외
+            if (
+                request.resource_type
+                not in {
+                    "document",
+                    "xhr",
+                    "fetch",
+                }
+            ):
+                return
+
+            parsed = urlparse(
+                request.url
+            )
+
+            from aidast.recon import db
+            from aidast.recon.annotations import safe_url, safe_text
+            page_url = ''
+            page_title = ''
+            try:
+                page = request.frame.page
+                page_url = safe_url(request.frame.url)
+                page_title = safe_text(page.title())
+            except Exception:
+                pass
+            context = dict(self._action_context or {})
+            context.setdefault('context_key', f'{self._phase}:{page_url}')
+            context.setdefault('action_type', 'navigation')
+            context.setdefault('association_method', 'request_frame')
+            context.update(page_url=page_url, page_title=page_title, auth_state='unknown')
+            self.requests.append(
+                {
+                    "context": context,
+                    "observed_at": db.now(),
+                    "url": safe_url(request.url),
+                    "discovery_kind": "http_request",
+                    "method": (
+                        request.method.upper()
+                    ),
+
+                    "path": (
+                        parsed.path
+                        or "/"
+                    ),
+
+                    "content_type": None,
+
+                    "source": (
+                        "playwright_"
+                        f"{self._phase}"
+                    ),
+                    "browser_supporting_request": (
+                        self.target_policy is not None
+                        and not self.target_policy.allows_url(
+                            request.url, method=request.method
+                        )
+                    ),
+                    "traffic_class": (
+                        "browser_observation"
+                        if self.target_policy is not None
+                        and not self.target_policy.allows_url(request.url, method=request.method)
+                        else "active"
+                    ),
+                }
+            )
+
+        def on_response(
+            response,
+        ):
+
+            # auth_check_url을 설정한 경우에만
+            # 특정 인증 검사 Endpoint의 실패를
+            # 세션 만료 신호로 사용한다.
+
+            check = (
+                self.session_config
+                .auth_check_url
+            )
+
+            if not check:
+                return
+
+            if not self._same_origin(
+                response.url
+            ):
+                return
+
+            check_url = urljoin(
+                self.base_url + "/",
+                check,
+            )
+
+            try:
+
+                response_parsed = (
+                    urlparse(
+                        response.url
+                    )
+                )
+
+                check_parsed = (
+                    urlparse(
+                        check_url
+                    )
+                )
+
+                same_check_endpoint = (
+                    response_parsed.path
+                    ==
+                    check_parsed.path
+                )
+
+            except ValueError:
+
+                same_check_endpoint = False
+
+            if (
+                same_check_endpoint
+                and response.status
+                in
+                self.session_config
+                .invalid_auth_statuses
+            ):
+
+                self._auth_expired = True
+
+        self.context.on(
+            "request",
+            on_request,
+        )
+
+        self.context.on(
+            "response",
+            on_response,
+        )
+
+        self.context.on(
+            "page",
+            self._register_page_handlers,
+        )
+
+    # =====================================================
+    # WebSocket Observation
+    # =====================================================
+
+    def _register_page_handlers(
+        self,
+        page: Page,
+    ) -> None:
+
+        page_id = id(
+            page
+        )
+
+        if (
+            page_id
+            in self._registered_pages
+        ):
+            return
+
+        self._registered_pages.add(
+            page_id
+        )
+
+        def on_websocket(
+            ws,
+        ):
+
+            if not self._same_origin(
+                ws.url
+            ):
+                return
+
+            info = {
+                "url": ws.url,
+
+                "source": (
+                    "playwright_"
+                    f"{self._phase}"
+                ),
+
+                "sent": [],
+
+                "received": [],
+            }
+
+            self.websockets.append(
+                info
+            )
+
+            ws.on(
+                "framesent",
+                lambda payload:
+                    info["sent"].append(
+                        payload
+                    ),
+            )
+
+            ws.on(
+                "framereceived",
+                lambda payload:
+                    info["received"].append(
+                        payload
+                    ),
+            )
+
+        page.on(
+            "websocket",
+            on_websocket,
+        )
+
+    # =====================================================
+    # Page
+    # =====================================================
+
+    def _ensure_page(
+        self,
+    ) -> Page:
+
+        if (
+            self.page is not None
+        ):
+
+            try:
+
+                if not self.page.is_closed():
+                    return self.page
+
+            except Exception:
+                pass
+
+        if self.context is None:
+
+            raise RuntimeError(
+                "BrowserContext가 없습니다."
+            )
+
+        try:
+
+            for page in self.context.pages:
+
+                if not page.is_closed():
+
+                    self.page = page
+
+                    self._register_page_handlers(
+                        page
+                    )
+
+                    return page
+
+        except Exception:
+
+            raise RuntimeError(
+                "BrowserContext가 종료되었습니다."
+            )
+
+        self.page = (
+            self.context.new_page()
+        )
+
+        self._register_page_handlers(
+            self.page
+        )
+
+        return self.page
+
+    # =====================================================
+    # Manual Authentication
+    # =====================================================
+
+    def _observe_authentication_request(self, request) -> None:
+        if self._phase != "login":
+            return
+        endpoint = AuthenticationEndpoint.from_request(
+            request.method, request.url, target_origin=normalize_origin(self.base_url)
+        )
+        if endpoint is None:
+            return
+        key = (endpoint.method, endpoint.origin, endpoint.path)
+        if not any(
+            (item.method, item.origin, item.path) == key
+            for item in self.authentication_endpoints
+        ):
+            self.authentication_endpoints.append(endpoint)
+        if not any(
+            item.get("method") == endpoint.method
+            and item.get("path") == endpoint.path
+            for item in self.authentication_observations
+        ):
+            from aidast.recon import db
+            content_type, parameters = _request_shape_parameters(request)
+            observation = {
+                "context": {
+                    "context_key": "auth_bootstrap",
+                    "action_type": "operator_login",
+                    "association_method": "passive_request",
+                    "auth_state": "authenticating",
+                },
+                "observed_at": db.now(),
+                "url": endpoint.origin + endpoint.path,
+                "discovery_kind": "passive_login_observation",
+                "method": endpoint.method,
+                "path": endpoint.path,
+                "content_type": content_type,
+                "source": "auth_bootstrap",
+                "traffic_class": "browser_observation",
+            }
+            if parameters:
+                observation["declared_parameters"] = parameters
+            self.authentication_observations.append(observation)
+
+    def _register_authentication_observer(self) -> None:
+        if self.context is not None:
+            self.context.on("request", self._observe_authentication_request)
+
+    def _browser_auth_ready(self) -> bool:
+        """Confirm the target has left its login form and exposed auth state."""
+        if self.context is None:
+            return False
+        headers = self.get_auth_headers()
+        authorization = headers.get("Authorization")
+        has_auth = bool(
+            authorization and authorization != self.request_headers.get("Authorization")
+        )
+        if not has_auth and self.session_config.auth_check_url:
+            has_auth = self.session_is_valid()
+        if not has_auth:
+            return False
+        target_page_seen = False
+        for page in self.context.pages:
+            try:
+                if (page.is_closed()
+                        or normalize_origin(page.url) != normalize_origin(self.base_url)):
+                    continue
+                target_page_seen = True
+                if (page.locator("input[type='password']:visible").count() > 0
+                        or self._page_indicates_login_required(page)):
+                    return False
+            except Exception:
+                return False
+        return target_page_seen
+
+    def _manual_login_problem(self) -> str | None:
+        """Check browser readiness without claiming server-side authentication."""
+        if self.context is None:
+            return "browser_unavailable"
+        target_page_seen = False
+        try:
+            # Sync Playwright properties are cached. A protocol round-trip
+            # dispatches navigation/new-tab events before inspecting origins.
+            self.context.cookies()
+            for page in self.context.pages:
+                if page.is_closed() or normalize_origin(page.url) != normalize_origin(self.base_url):
+                    continue
+                if self.target_policy is not None and not self.target_policy.allows_url(page.url):
+                    continue
+                target_page_seen = True
+                if page.locator("input[type='password']:visible").count() > 0:
+                    return "login_form_visible"
+                if self._login_path(page.url):
+                    return "login_form_visible"
+                if self._login_capability_reason(page, None) in {
+                    "visible login form", "visible login control",
+                }:
+                    return "login_form_visible"
+                required_action = visible_user_action(page)
+                if required_action is not None:
+                    return required_action
+                text = page.locator("body").inner_text(timeout=3000).lower()
+                if any(marker in text for marker in (
+                    "use the invitation code to get access", "invite code is required",
+                    "invitation code is required",
+                )):
+                    return "invite_required"
+                if self._page_indicates_login_required(page):
+                    return "access_required"
+        except Exception:
+            return "browser_unavailable"
+        return None if target_page_seen else "target_page_missing"
+
+    def resolve_user_action(self, page: Page | None = None, *, problem: str | None = None) -> bool:
+        """Wait for operator input in the same visible runtime BrowserContext.
+
+        Headless/login_mode=none runs do not become GUI sessions mid-run. A
+        blocked page is skipped and the dashboard explains that limitation.
+        Policy routing remains enabled throughout the operator interaction.
+        """
+        confirmation = self.session_config.operator_action_confirmation
+        if confirmation is None:
+            return True
+        page = page or self._ensure_page()
+        try:
+            if page.is_closed() or not self._same_origin(page.url):
+                return True
+            if self.target_policy is not None and not self.target_policy.allows_url(page.url):
+                return True
+            detected = visible_user_action(page, include_login=self._interactive_authentication_enabled)
+        except Exception:
+            return True
+        problem = problem or detected
+        if problem is None:
+            return True
+        if problem not in {'login_form_visible', 'mfa_required', 'captcha_required', 'access_required'}:
+            raise ValueError('unsupported operator UI action')
+        if problem in self._operator_action_failures:
+            return False
+        context = self.context
+        def browser_problem():
+            try:
+                if self.context is not context or page.is_closed():
+                    return 'browser_unavailable'
+                self.context.cookies()  # dispatch navigation before reading the current page
+                if not self._same_origin(page.url):
+                    return 'target_page_missing'
+                if self.target_policy is not None and not self.target_policy.allows_url(page.url):
+                    return 'target_page_missing'
+                return visible_user_action(page, include_login=True)
+            except Exception:
+                return 'browser_unavailable'
+        poll_browser = (lambda: page.wait_for_timeout(50)) if self._browser_kind == 'cdp' else None
+        try:
+            accepted = confirmation(problem, browser_problem, poll_browser)
+            if accepted and self.context is context and browser_problem() is None:
+                if not self.save_session():
+                    raise RuntimeError('could not save the operator-completed browser state')
+                self._auth_expired = False
+                return True
+        except Exception:
+            # Keep the browser/session and partial Recon evidence available.
+            # Expiry or closure only stops automatic actions on this page.
+            pass
+        self._operator_action_failures.add(problem)
+        return False
+
+    def capture_and_start(self) -> None:
+        """Log in once and keep the same Chromium context for Recon."""
+        self._phase = "login"
+        self._operator_confirmed_login = False
+        self.authentication_endpoints.clear()
+        try:
+            policy_managed_login = has_request_exclusions(self.target_policy)
+            if policy_managed_login:
+                # A visible Playwright runtime keeps the same proxy and request
+                # guard as Recon.  This permits operator login without opening
+                # an unmanaged network path around request exclusions.
+                self._launch_managed_runtime(headless=False)
+                self._register_authentication_observer()
+                assert self.page is not None
+                try:
+                    self.page.goto(
+                        self.session_config.login_url,
+                        wait_until="domcontentloaded",
+                        timeout=self.session_config.timeout_ms,
+                    )
+                except PlaywrightTimeoutError:
+                    # Rate-limited SPAs can commit the approved document while
+                    # deferred scripts keep DOMContentLoaded pending.  The
+                    # operator can still finish login in that committed page.
+                    current_url = str(getattr(self.page, "url", "") or "")
+                    parsed = urlparse(current_url)
+                    if (
+                        parsed.scheme not in {"http", "https"}
+                        or self.target_policy is None
+                        or not self.target_policy.allows_url(current_url)
+                    ):
+                        raise
+                print("  [Playwright] 정책이 적용된 로그인 창을 열었습니다. 브라우저에서 로그인해주세요.")
+            else:
+                # Where no request exclusions exist, preserve the direct login
+                # flow for identity providers which reject proxied automation.
+                self._launch_manual_browser(manual_login=True)
+                self._attach_manual_browser()
+                self._register_authentication_observer()
+                print("  [Playwright] 직접 연결 로그인 창을 열었습니다. 브라우저에서 로그인해주세요.")
+            dashboard_confirmation = self.session_config.operator_confirmation
+            if dashboard_confirmation is not None:
+                operator_confirmed = dashboard_confirmation(self._manual_login_problem)
+            else:
+                operator_confirmed = _wait_for_manual_login(auth_ready=self._browser_auth_ready)
+            if not self.save_session():
+                raise RuntimeError("could not save the target session after manual login")
+            headers = self.get_auth_headers()
+            target_pages = []
+            for page in self.context.pages:
+                try:
+                    if (not page.is_closed()
+                            and normalize_origin(page.url) == normalize_origin(self.base_url)):
+                        target_pages.append(page)
+                except (AuthenticationEndpointError, ValueError):
+                    continue
+            login_form_visible = False
+            for page in target_pages:
+                try:
+                    login_form_visible = (
+                        page.locator("input[type='password']:visible").count() > 0
+                        or self._page_indicates_login_required(page)
+                    )
+                except Exception:
+                    login_form_visible = True
+                if login_form_visible:
+                    break
+            if dashboard_confirmation is not None:
+                # Explicit human confirmation permits cookie-only sessions and
+                # does not require a particular API's success or a Bearer token.
+                verified = bool(operator_confirmed and self._manual_login_problem() is None)
+            else:
+                verified = bool(
+                    operator_confirmed and target_pages and not login_form_visible
+                    and headers and self.session_is_valid()
+                    and ("Authorization" in headers
+                         or self.session_config.auth_check_url)
+                )
+            if verified:
+                self._operator_confirmed_login = dashboard_confirmation is not None
+                self.automatic_auth_marker_path.write_text("authenticated\n", encoding="utf-8")
+                self._remember_authenticated_state()
+            else:
+                self.automatic_auth_marker_path.unlink(missing_ok=True)
+                try:
+                    noninteractive = not sys.stdin.isatty()
+                except (OSError, ValueError, AttributeError):
+                    noninteractive = True
+                if noninteractive:
+                    raise RuntimeError("browser login could not be verified")
+            if self.session_config.authentication_endpoint_callback is not None:
+                self.session_config.authentication_endpoint_callback(
+                    tuple(self.authentication_endpoints)
+                )
+            # Do not restart Chromium here. Shopify and other identity-aware
+            # services can bind authorization to the live browser context.
+            # Active policy enforcement is attached only after login; the login
+            # flow contributes only secret-free passive endpoint coordinates.
+            self._phase = "runtime"
+            if not policy_managed_login:
+                self._register_context_handlers()
+            for page in self.context.pages:
+                self._register_page_handlers(page)
+        except BaseException:
+            self._operator_confirmed_login = False
+            self._shutdown_runtime()
+            self._phase = "runtime"
+            raise
+
+        self._auth_expired = False
+        self._interactive_authentication_enabled = True
+        print("  [Playwright] 로그인한 동일 Chromium 컨텍스트에 정책을 적용했습니다; Recon을 시작합니다.")
+
+    @staticmethod
+    def _login_path(url: str) -> bool:
+        try:
+            segments = [item for item in urlparse(url).path.lower().split("/") if item]
+        except ValueError:
+            return False
+        return any(
+            segment in {"login", "log-in", "signin", "sign-in", "sso", "authenticate"}
+            for segment in segments
+        )
+
+    def _login_capability_reason(self, page: Page, response) -> str | None:
+        """Detect visible, interactive login UI instead of inferring from HTTP text."""
+        status = getattr(response, "status", None)
+        if status in {404, 410}:
+            return None
+        if isinstance(status, int) and status >= 500:
+            return None
+
+        try:
+            if page.locator("input[type='password']:visible").count() > 0:
+                return "visible password form"
+        except Exception:
+            pass
+
+        # A public landing page can still provide a real login feature. Detect
+        # only visible interactive controls, not incidental words in prose.
+        try:
+            hrefs = page.locator("a[href]:visible").evaluate_all(
+                "elements => elements.map(element => element.href)"
+            )
+            if any(self._login_path(str(href)) for href in hrefs):
+                return "visible login link"
+        except Exception:
+            pass
+        try:
+            actions = page.locator("form[action]:visible").evaluate_all(
+                "elements => elements.map(element => element.action)"
+            )
+            if any(self._login_path(str(action)) for action in actions):
+                return "visible login form"
+        except Exception:
+            pass
+        try:
+            labels = page.locator(
+                "a:visible, button:visible, input[type='submit']:visible"
+            ).all_inner_texts()
+            login_labels = {
+                "login", "log in", "sign in", "signin", "로그인", "로그 인",
+            }
+            if any(str(label).strip().lower() in login_labels for label in labels):
+                return "visible login control"
+        except Exception:
+            pass
+        return None
+
+    def _start_unauthenticated(self, *, restore_saved_session: bool = False):
+        self._phase = "runtime"
+        self._interactive_authentication_enabled = False
+        self._launch_manual_browser()
+        if restore_saved_session:
+            self._restore_target_session()
+        page = self._ensure_page()
+        try:
+            response = page.goto(
+                self.base_url,
+                wait_until="domcontentloaded",
+                timeout=self.session_config.timeout_ms,
+            )
+        except PlaywrightTimeoutError:
+            # A SPA can commit its document quickly while rate-limited script
+            # and stylesheet requests keep DOMContentLoaded pending.  The page
+            # is still usable for capture and discovery once it has reached an
+            # approved HTTP(S) URL.  A timeout before navigation commits keeps
+            # about:blank (or another URL) and remains a hard failure.
+            current_url = str(getattr(page, "url", "") or "")
+            parsed = urlparse(current_url)
+            if (parsed.scheme not in {"http", "https"}
+                    or (self.target_policy is not None
+                        and not self.target_policy.allows_url(current_url))):
+                raise
+            response = None
+            print(
+                "  [Playwright] 문서는 열렸지만 일부 자원 로딩이 지연되어 "
+                "정찰을 계속합니다.",
+                flush=True,
+            )
+        if self.target_policy is not None and not self.target_policy.allows_url(page.url):
+            raise RuntimeError(
+                "unauthenticated browser left the approved start URL boundary"
+            )
+        return page, response
+
+    def start_unauthenticated(self) -> None:
+        """Start policy-enforced Recon without opening an operator login UI."""
+        try:
+            self._start_unauthenticated()
+            if not self.save_session():
+                raise RuntimeError("could not save the unauthenticated browser state")
+        except BaseException:
+            self._shutdown_runtime()
+            raise
+        self._auth_expired = False
+        print("  [Playwright] 비로그인 브라우저로 Recon을 시작합니다.")
+
+    def start_automatic(self) -> bool:
+        """Open a login UI only when the anonymous page exposes login functionality."""
+        try:
+            reuse_authenticated_session = (
+                self.automatic_auth_marker_path.is_file()
+                and self.session_path.is_file()
+                and self.session_storage_path.is_file()
+            )
+            page, response = self._start_unauthenticated(
+                restore_saved_session=reuse_authenticated_session
+            )
+            if reuse_authenticated_session:
+                if not self.save_session():
+                    raise RuntimeError("could not refresh the authenticated browser state")
+                self._auth_expired = False
+                self._interactive_authentication_enabled = True
+                self._remember_authenticated_state()
+                print("  [Playwright] 동일 사이트의 로그인 세션을 재사용합니다.")
+                return True
+            reason = self._login_capability_reason(page, response)
+            if reason is None:
+                if not self.save_session():
+                    raise RuntimeError("could not save the unauthenticated browser state")
+                self._auth_expired = False
+                print("  [Playwright] 로그인 기능 없음; 비로그인 Recon을 시작합니다.")
+                return False
+            print(f"  [Playwright] 로그인 기능 감지 ({reason}); 로그인 창을 엽니다.")
+            self._shutdown_runtime()
+            self.capture_and_start()
+            return True
+        except BaseException:
+            self._shutdown_runtime()
+            raise
+
+    def start_from_session(self) -> None:
+        """Restore the pre-Recon snapshot without launching another login flow."""
+        if not self.session_path.is_file():
+            raise RuntimeError("pre-Recon target session is missing")
+        self._phase = "runtime"
+        for attempt in range(2):
+            try:
+                self._launch_manual_browser()
+                self._restore_target_session()
+                page = self._ensure_page()
+                response = page.goto(self.base_url, wait_until="domcontentloaded",
+                                     timeout=self.session_config.timeout_ms)
+                if self.target_policy is not None and not self.target_policy.allows_url(page.url):
+                    raise RuntimeError("login did not return to the approved start URL boundary")
+                if response is not None and response.status >= 400:
+                    raise RuntimeError("approved start URL returned an error after login")
+                if self._page_indicates_login_required(page) or not self.session_is_valid():
+                    raise RuntimeError("target session validation failed after login")
+                if not self.save_session():
+                    raise RuntimeError("could not save the target session after return")
+                if self.session_config.auth_check_url:
+                    self.automatic_auth_marker_path.write_text("authenticated\n", encoding="utf-8")
+                break
+            except RuntimeError as exc:
+                self._shutdown_runtime()
+                if attempt != 0:
+                    raise
+                print(f"  [Playwright] 복사된 세션 복원 실패: {exc}")
+                print("  [Playwright] Phase 2 Chromium 창에서 직접 로그인한 뒤 Enter를 눌러주세요.")
+                self._phase = "login"
+                self.authentication_endpoints.clear()
+                self._launch_manual_browser(manual_login=True)
+                try:
+                    self._attach_manual_browser()
+                    self._register_authentication_observer()
+                    _wait_for_manual_login()
+                    if not self.save_session():
+                        raise RuntimeError("could not save the Chromium login session")
+                    if self.session_config.authentication_endpoint_callback is not None:
+                        self.session_config.authentication_endpoint_callback(
+                            tuple(self.authentication_endpoints)
+                        )
+                finally:
+                    self._shutdown_runtime()
+                    self._phase = "runtime"
+
+        self._auth_expired = False
+        self._interactive_authentication_enabled = True
+        self._remember_authenticated_state()
+        print("  [Playwright] 프록시·Scope 적용 및 타깃 복귀 완료; Recon을 시작합니다.")
+
+    def _remember_authenticated_state(self) -> None:
+        """Retain one immutable recovery point for a restored target session."""
+        headers = self.get_auth_headers()
+        required = tuple(
+            name for name, value in headers.items()
+            if value and name.lower() != "cookie" and name not in self.request_headers
+        )
+        if not required and headers.get("Cookie"):
+            required = ("Cookie",)
+        if not required:
+            return
+        self._auth_checkpoint_state = json.loads(
+            self.session_path.read_text(encoding="utf-8")
+        )
+        self._auth_checkpoint_session_storage = (
+            json.loads(self.session_storage_path.read_text(encoding="utf-8"))
+            if self.session_storage_path.is_file() else None
+        )
+        self._required_auth_headers = required
+
+    def _restore_authenticated_state(self) -> None:
+        """Restore approved credentials after browser navigation cleared them."""
+        checkpoint = self._auth_checkpoint_state
+        if checkpoint is None:
+            raise RuntimeError("authenticated session recovery point is missing")
+        _write_private_session(self.session_path, checkpoint)
+        if self._auth_checkpoint_session_storage is None:
+            self.session_storage_path.unlink(missing_ok=True)
+        else:
+            _write_private_session(self.session_storage_path, self._auth_checkpoint_session_storage)
+        self.restore_runtime(force=True)
+        page = self._ensure_page()
+        response = page.goto(
+            self.base_url,
+            wait_until="domcontentloaded",
+            timeout=self.session_config.timeout_ms,
+        )
+        if self.target_policy is not None and not self.target_policy.allows_url(page.url):
+            raise RuntimeError("authenticated session recovery left the approved target")
+        if response is not None and response.status >= 400:
+            raise RuntimeError("authenticated session recovery returned an error")
+        headers = self.get_auth_headers()
+        if any(not headers.get(name) for name in self._required_auth_headers):
+            raise RuntimeError("authenticated session recovery did not restore credentials")
+        if not self._operator_confirmed_login and not self.session_is_valid():
+            raise RuntimeError("authenticated session recovery failed validation")
+        print("  [Playwright] 인증 상태 소실 감지; 승인된 세션에서 복구 완료")
+
+    @staticmethod
+    def _page_indicates_login_required(page: Page) -> bool:
+        """Detect Shopify's 200-status permission/login interstitials."""
+        try:
+            text = page.locator("body").inner_text(timeout=3000).lower()
+        except Exception:
+            return False
+        markers = ("doesn't have permission to view this page",
+                   "does not have permission to view this page",
+                   "sign in to shopify", "log in to shopify")
+        return any(marker in text for marker in markers)
+
+    def _restore_target_session(self) -> None:
+        """Restore only target cookies and storage into the proxied CDP context."""
+        state = self._filter_storage_state(json.loads(self.session_path.read_text(encoding="utf-8")))
+        self.context.add_cookies(state.get("cookies", []))
+        origins = json.dumps(state.get("origins", []), ensure_ascii=False)
+        indexed_db = json.dumps(state.get("origins", [])[0].get("indexedDB", []) if state.get("origins") else [], ensure_ascii=False)
+        self.context.add_init_script(script=f"""
+            (() => {{
+                const saved = {origins};
+                const current = saved.find(item => item.origin === location.origin);
+                for (const item of current?.localStorage || []) {{
+                    localStorage.setItem(item.name, item.value);
+                }}
+                // Restore Playwright's IndexedDB snapshot before the app boot
+                // script runs.  This is intentionally best-effort: browsers
+                // can reject a value that is no longer cloneable.
+                const databases = {indexed_db};
+                for (const db of databases) {{
+                    try {{
+                        const request = indexedDB.open(db.name, db.version);
+                        request.onupgradeneeded = () => {{
+                            const database = request.result;
+                            for (const store of db.stores || []) {{
+                                if (!database.objectStoreNames.contains(store.name)) {{
+                                    database.createObjectStore(store.name);
+                                }}
+                            }}
+                        }};
+                        request.onsuccess = () => {{
+                            const database = request.result;
+                            try {{
+                                const transaction = database.transaction((db.stores || []).map(s => s.name), 'readwrite');
+                                for (const store of db.stores || []) {{
+                                    const objectStore = transaction.objectStore(store.name);
+                                    for (const entry of store.entries || []) objectStore.put(entry.value, entry.key);
+                                }}
+                            }} catch (_) {{}}
+                        }};
+                    }} catch (_) {{}}
+                }}
+            }})();
+        """)
+        self._restore_saved_session_storage()
+
+    # =====================================================
+    # Target Storage Filtering
+    # =====================================================
+
+    def _filter_storage_state(
+        self,
+        state: dict,
+    ) -> dict:
+
+        base = urlparse(
+            self.base_url
+        )
+
+        base_host = (
+            base.hostname
+            or ""
+        ).lower()
+
+        base_origin = (
+            self._base_origin()
+        )
+
+        target_cookies: list[
+            dict
+        ] = []
+
+        for cookie in state.get(
+            "cookies",
+            [],
+        ):
+
+            domain = (
+                cookie.get(
+                    "domain",
+                    "",
+                )
+                .lstrip(".")
+                .lower()
+            )
+
+            if not domain:
+                continue
+
+            if (
+                base_host == domain
+                or base_host.endswith(
+                    "." + domain
+                )
+            ):
+
+                target_cookies.append(
+                    cookie
+                )
+
+        target_origins = [
+            item
+
+            for item in state.get(
+                "origins",
+                [],
+            )
+
+            if (
+                item.get(
+                    "origin"
+                )
+                == base_origin
+            )
+        ]
+
+        return {
+            "cookies": (
+                target_cookies
+            ),
+
+            "origins": target_origins,
+        }
+
+    # =====================================================
+    # Save Session
+    # =====================================================
+
+    def save_session(
+        self,
+    ) -> bool:
+
+        if self.context is None:
+            return False
+
+        try:
+
+            try:
+                raw_state = self.context.storage_state(indexed_db=True)
+            except TypeError:
+                raw_state = self.context.storage_state()
+
+        except Exception:
+
+            # TargetClosedError 포함
+            return False
+
+        state = (
+            self._filter_storage_state(
+                raw_state
+            )
+        )
+
+        self.session_path.parent.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+
+        _write_private_session(self.session_path, state)
+
+        # ---------------------------------------------
+        # sessionStorage
+        # ---------------------------------------------
+
+        base_origin = (
+            self._base_origin()
+        )
+
+        session_storage: dict[
+            str,
+            dict[str, str],
+        ] = {}
+
+        try:
+
+            pages = (
+                self.context.pages
+            )
+
+        except Exception:
+
+            pages = []
+
+        for page in pages:
+
+            try:
+
+                if page.is_closed():
+                    continue
+
+                origin = (
+                    page.evaluate(
+                        "() => location.origin"
+                    )
+                )
+
+                if origin != base_origin:
+                    continue
+
+                values = (
+                    page.evaluate(
+                        """
+                        () => {
+                            const result = {};
+
+                            for (
+                                let i = 0;
+                                i < sessionStorage.length;
+                                i++
+                            ) {
+                                const key =
+                                    sessionStorage.key(i);
+
+                                result[key] =
+                                    sessionStorage.getItem(key);
+                            }
+
+                            return result;
+                        }
+                        """
+                    )
+                )
+
+                if isinstance(
+                    values,
+                    dict,
+                ):
+
+                    session_storage[
+                        origin
+                    ] = values
+
+            except Exception:
+
+                continue
+
+        _write_private_session(self.session_storage_path, session_storage)
+
+        print()
+        print(
+            "  [Playwright] "
+            "세션 저장 완료"
+        )
+
+        print(
+            f"  storage_state : "
+            f"{self.session_path}"
+        )
+
+        print(
+            f"  sessionStorage: "
+            f"{self.session_storage_path}"
+        )
+
+        return True
+
+    # =====================================================
+    # Restore sessionStorage
+    # =====================================================
+
+    def _restore_saved_session_storage(
+        self,
+    ) -> None:
+
+        if self.context is None:
+            return
+
+        if not (
+            self.session_storage_path
+            .exists()
+        ):
+            return
+
+        try:
+
+            data = json.loads(
+                self.session_storage_path
+                .read_text(
+                    encoding="utf-8"
+                )
+            )
+
+        except (
+            OSError,
+            json.JSONDecodeError,
+        ):
+
+            return
+
+        encoded = json.dumps(
+            data,
+            ensure_ascii=False,
+        )
+
+        script = f"""
+        (() => {{
+            const savedStorage = {encoded};
+
+            const current =
+                savedStorage[
+                    window.location.origin
+                ];
+
+            if (!current) {{
+                return;
+            }}
+
+            for (
+                const [key, value]
+                of Object.entries(current)
+            ) {{
+                sessionStorage.setItem(
+                    key,
+                    value
+                );
+            }}
+        }})();
+        """
+
+        self.context.add_init_script(
+            script=script
+        )
+
+    # =====================================================
+    # Runtime State
+    # =====================================================
+
+    def runtime_is_alive(
+        self,
+    ) -> bool:
+
+        if self.context is None:
+            return False
+
+        if self._browser_kind == "managed":
+            try:
+                return self.browser is not None and self.browser.is_connected()
+            except Exception:
+                return False
+
+        if self._chrome_process is None:
+            return False
+
+        # self.context.storage_state()는 CDP 호출에 타임아웃이 없어서,
+        # 브라우저 프로세스는 살아있는데 CDP가 응답 없는 상태(hang)가 되면
+        # 이 함수 자체가 영원히 안 끝나는 문제가 실측으로 확인됐다. 여기서는
+        # CDP 모드에서 순수 프로세스 생존만 확인하고, "진짜" liveness는 이미
+        # 타임아웃이 걸려 있는 다음 단계 호출들(session_is_valid(),
+        # page.goto(timeout=...))에 맡긴다.
+        try:
+            return self._chrome_process.poll() is None
+        except Exception:
+            return False
+
+    # =====================================================
+    # Restore Runtime
+    # =====================================================
+
+    def restore_runtime(
+        self,
+        *,
+        force: bool = False,
+    ) -> None:
+        """Reopen the same persistent Chromium runtime from the saved session."""
+
+        if (
+            not force
+            and self.runtime_is_alive()
+        ):
+            return
+
+        if not self.session_path.exists():
+
+            raise RuntimeError(
+                "저장된 인증 세션 파일이 없습니다."
+            )
+
+        print()
+        print(
+            "  [Playwright] "
+            "저장된 세션으로 Runtime 복구"
+        )
+
+        # Keep the browser kind, profile, and launch mode stable across phases.
+        # Switching to a managed headless browser causes some sites to require
+        # connection verification again even when cookies were restored.
+        # A crawler's CDP hand-off can occasionally leave Chromium unable to
+        # open its replacement debugging port on the first launch.  Retry once
+        # after the normal runtime cleanup; _launch_manual_browser also removes
+        # run-scoped profile singleton files before starting the replacement.
+        for attempt in range(2):
+            try:
+                self._launch_manual_browser()
+                self._restore_target_session()
+                break
+            except RuntimeError as exc:
+                self._shutdown_runtime()
+                if attempt != 0:
+                    raise
+                print(f"  [Playwright] Runtime 복구 1차 실패, 정리 후 재시도: {exc}")
+        self._auth_expired = False
+
+    # =====================================================
+    # CDP URL
+    # =====================================================
+
+    def get_chrome_ws_url(
+        self,
+    ) -> str | None:
+
+        if self._chrome_process is None:
+            return None
+
+        try:
+
+            if (
+                self._chrome_process.poll()
+                is not None
+            ):
+
+                return None
+
+        except Exception:
+
+            return None
+
+        return (
+            self._chrome_ws_url
+        )
+
+    # =====================================================
+    # State Loading
+    # =====================================================
+
+    def _load_auth_state(
+        self,
+    ) -> dict:
+
+        # -------------------------------------------------
+        # Context가 살아 있으면 최신 State 사용
+        # -------------------------------------------------
+
+        if self.context is not None:
+
+            try:
+
+                raw_state = (
+                    self.context
+                    .storage_state()
+                )
+
+                state = (
+                    self._filter_storage_state(
+                        raw_state
+                    )
+                )
+
+                self.session_path.parent.mkdir(
+                    parents=True,
+                    exist_ok=True,
+                )
+
+                _write_private_session(self.session_path, state)
+
+                return state
+
+            except Exception:
+
+                # Context가 이미 닫혔으면
+                # 저장 파일 Fallback
+                pass
+
+        # -------------------------------------------------
+        # TargetClosed → File Fallback
+        # -------------------------------------------------
+
+        if not self.session_path.exists():
+
+            return {
+                "cookies": [],
+                "origins": [],
+            }
+
+        try:
+
+            return json.loads(
+                self.session_path
+                .read_text(
+                    encoding="utf-8"
+                )
+            )
+
+        except (
+            OSError,
+            json.JSONDecodeError,
+        ):
+
+            return {
+                "cookies": [],
+                "origins": [],
+            }
+
+    # =====================================================
+    # JWT
+    # =====================================================
+
+    @staticmethod
+    def _looks_like_jwt(
+        value: str,
+    ) -> bool:
+
+        if not isinstance(
+            value,
+            str,
+        ):
+            return False
+
+        # JSON 문자열 형태
+        try:
+
+            if (
+                value.startswith('"')
+                and value.endswith('"')
+            ):
+
+                decoded = json.loads(
+                    value
+                )
+
+                if isinstance(
+                    decoded,
+                    str,
+                ):
+
+                    value = decoded
+
+        except Exception:
+            pass
+
+        parts = (
+            value.split(".")
+        )
+
+        if len(parts) != 3:
+            return False
+
+        return all(
+            len(part) > 0
+            for part in parts
+        )
+
+    @staticmethod
+    def _clean_token_value(
+        value: str,
+    ) -> str:
+
+        try:
+
+            decoded = json.loads(
+                value
+            )
+
+            if isinstance(
+                decoded,
+                str,
+            ):
+
+                return decoded
+
+        except Exception:
+            pass
+
+        return value
+
+    # =====================================================
+    # Storage Values
+    # =====================================================
+
+    def _collect_storage_values(
+        self,
+        state: dict,
+    ) -> dict[str, str]:
+
+        values: dict[
+            str,
+            str,
+        ] = {}
+
+        base_origin = (
+            self._base_origin()
+        )
+
+        # ---------------------------------------------
+        # localStorage
+        # ---------------------------------------------
+
+        for origin_info in state.get(
+            "origins",
+            [],
+        ):
+
+            if (
+                origin_info.get(
+                    "origin"
+                )
+                != base_origin
+            ):
+
+                continue
+
+            for item in origin_info.get(
+                "localStorage",
+                [],
+            ):
+
+                name = (
+                    item.get(
+                        "name"
+                    )
+                )
+
+                value = (
+                    item.get(
+                        "value"
+                    )
+                )
+
+                if (
+                    name
+                    and value is not None
+                ):
+
+                    values[
+                        name
+                    ] = str(
+                        value
+                    )
+
+        # ---------------------------------------------
+        # sessionStorage
+        # ---------------------------------------------
+
+        if (
+            self.session_storage_path
+            .exists()
+        ):
+
+            try:
+
+                session_data = json.loads(
+                    self.session_storage_path
+                    .read_text(
+                        encoding="utf-8"
+                    )
+                )
+
+                origin_values = (
+                    session_data.get(
+                        base_origin,
+                        {},
+                    )
+                )
+
+                if isinstance(
+                    origin_values,
+                    dict,
+                ):
+
+                    for (
+                        name,
+                        value,
+                    ) in (
+                        origin_values.items()
+                    ):
+
+                        if (
+                            name
+                            and value is not None
+                        ):
+
+                            values[
+                                name
+                            ] = str(
+                                value
+                            )
+
+            except Exception:
+                pass
+
+        return values
+
+    # =====================================================
+    # Auth Headers
+    # =====================================================
+
+    def get_auth_headers(
+        self,
+    ) -> dict[str, str]:
+        """
+        중요:
+        더 이상 context.cookies()에 직접 의존하지 않는다.
+
+        Context가 살아있으면 storage_state() 사용.
+        Context가 죽었으면 저장된 session.json 사용.
+
+        따라서 Katana Headless가 CDP Context를
+        종료해도 TargetClosedError가 발생하지 않는다.
+        """
+
+        headers: dict[
+            str,
+            str,
+        ] = {}
+
+        state = (
+            self._load_auth_state()
+        )
+
+        # ---------------------------------------------
+        # Cookie
+        # ---------------------------------------------
+
+        base = urlparse(
+            self.base_url
+        )
+
+        base_host = (
+            base.hostname
+            or ""
+        ).lower()
+
+        cookie_values: list[
+            str
+        ] = []
+
+        for cookie in state.get(
+            "cookies",
+            [],
+        ):
+
+            name = (
+                cookie.get(
+                    "name"
+                )
+            )
+
+            value = (
+                cookie.get(
+                    "value"
+                )
+            )
+
+            domain = (
+                cookie.get(
+                    "domain",
+                    "",
+                )
+                .lstrip(".")
+                .lower()
+            )
+
+            if (
+                not name
+                or value is None
+            ):
+                continue
+
+            if (
+                domain
+                and base_host
+                and not (
+                    base_host == domain
+
+                    or
+                    base_host.endswith(
+                        "." + domain
+                    )
+                )
+            ):
+
+                continue
+
+            cookie_values.append(
+                f"{name}={value}"
+            )
+
+        if cookie_values:
+
+            headers[
+                "Cookie"
+            ] = (
+                "; ".join(
+                    cookie_values
+                )
+            )
+
+        # ---------------------------------------------
+        # Storage
+        # ---------------------------------------------
+
+        storage = (
+            self._collect_storage_values(
+                state
+            )
+        )
+
+        # ---------------------------------------------
+        # Explicit Mapping
+        # ---------------------------------------------
+
+        for (
+            storage_key,
+            mapping,
+        ) in (
+            self.session_config
+            .storage_header_map
+            .items()
+        ):
+
+            value = (
+                storage.get(
+                    storage_key
+                )
+            )
+
+            if not value:
+                continue
+
+            value = (
+                self._clean_token_value(
+                    value
+                )
+            )
+
+            (
+                header_name,
+                prefix,
+            ) = mapping
+
+            headers[
+                header_name
+            ] = (
+                f"{prefix}{value}"
+            )
+
+        # ---------------------------------------------
+        # JWT 자동 탐지
+        # ---------------------------------------------
+
+        if (
+            "Authorization"
+            not in headers
+        ):
+
+            candidates: list[
+                str
+            ] = []
+
+            for (
+                key,
+                value,
+            ) in storage.items():
+
+                lowered = (
+                    key.lower()
+                )
+
+                if not any(
+                    name in lowered
+
+                    for name in (
+                        "token",
+                        "jwt",
+                        "auth",
+                    )
+                ):
+
+                    continue
+
+                cleaned = (
+                    self._clean_token_value(
+                        value
+                    )
+                )
+
+                if self._looks_like_jwt(
+                    cleaned
+                ):
+
+                    if (
+                        cleaned
+                        not in candidates
+                    ):
+
+                        candidates.append(
+                            cleaned
+                        )
+
+            # 여러 개면 잘못된 Token 선택 위험
+            if len(candidates) == 1:
+
+                headers[
+                    "Authorization"
+                ] = (
+                    "Bearer "
+                    + candidates[0]
+                )
+
+        headers.update(self.request_headers)
+        return headers
+
+    # =====================================================
+    # Session Validation
+    # =====================================================
+
+    def session_is_valid(
+        self,
+    ) -> bool:
+
+        if self.context is None:
+            return False
+
+        check = (
+            self.session_config
+            .auth_check_url
+        )
+
+        # 범용 사이트에서 검사 URL을 모르면
+        # 임의의 401 하나만으로
+        # 세션 만료라고 판단하지 않는다.
+        if not check:
+            return True
+
+        check_url = urljoin(
+            self.base_url + "/",
+            check,
+        )
+
+        try:
+
+            if self.target_policy is not None:
+                # APIRequestContext does not pass through browser route handlers.
+                status, _, _ = _http_request(
+                    check_url, headers=self.get_auth_headers(),
+                    timeout=self.session_config.timeout_ms / 1000,
+                    target_policy=self.target_policy, proxy_url=self.proxy_url,
+                )
+                valid = status is not None and 200 <= status < 300
+                self._auth_expired = not valid
+                return valid
+
+            response = (
+                self.context
+                .request
+                .get(
+                    check_url,
+
+                    headers=(
+                        self.get_auth_headers()
+                    ),
+
+                    timeout=(
+                        self.session_config
+                        .timeout_ms
+                    ),
+                    max_redirects=0,
+                )
+            )
+
+            valid = 200 <= response.status < 300
+
+            self._auth_expired = (
+                not valid
+            )
+
+            return valid
+
+        except Exception:
+
+            return False
+
+    # =====================================================
+    # Session Ensure / Re-login
+    # =====================================================
+
+    def ensure_session(
+        self,
+    ) -> None:
+
+        # Context가 Katana 등에 의해 죽었으면
+        # 먼저 저장된 세션으로 복구
+        self.restore_runtime()
+
+        if not (self._interactive_authentication_enabled or self.preauthenticated):
+            return
+
+        if self._required_auth_headers:
+            headers = self.get_auth_headers()
+            if any(not headers.get(name) for name in self._required_auth_headers):
+                self._restore_authenticated_state()
+
+        if self._operator_confirmed_login:
+            # Individual API status codes cannot revoke operator attestation.
+            return
+
+        if self.session_is_valid():
+
+            return
+
+        print()
+        print(
+            "  [Playwright] "
+            "인증 세션 만료가 감지되었습니다."
+        )
+        print(
+            "  브라우저에서 다시 로그인해주세요."
+        )
+
+        # 실제 Visible Browser를 다시 띄움
+        self.capture_and_start()
+
+    # =====================================================
+    # Visit
+    # =====================================================
+
+    def visit_path(
+        self,
+        path: str,
+    ) -> bool:
+
+        page = (
+            self._ensure_page()
+        )
+
+        url = urljoin(self.base_url.rstrip("/") + "/", path)
+        previous_url = page.url
+
+        try:
+
+            response = (
+                page.goto(
+                    url,
+
+                    wait_until=(
+                        "domcontentloaded"
+                    ),
+
+                    timeout=(
+                        self.session_config
+                        .timeout_ms
+                    ),
+                )
+            )
+
+            if isinstance(page.url, str) and is_probable_redirect_loop_path(urlparse(page.url).path):
+                return False
+
+        except Exception:
+
+            return False
+
+        if response is None:
+            # Playwright returns no HTTP response for same-document fragment
+            # navigation. SPA hash routes still need a rendered-screen check.
+            previous = urlparse(previous_url)
+            target = urlparse(url)
+            if (target.fragment and target.fragment != previous.fragment
+                    and (previous.scheme, previous.netloc, previous.path, previous.query)
+                    == (target.scheme, target.netloc, target.path, target.query)
+                    and canonical_visit_key(page.url) == canonical_visit_key(url)):
+                try:
+                    return "html" in str(page.evaluate("document.contentType")).lower()
+                except Exception:
+                    return False
+            return False
+
+        # 해당 Endpoint가 401이라고 해서
+        # 전체 세션 만료라고 판단하지 않음.
+        if (
+            response.status
+            in
+            self.session_config
+            .invalid_auth_statuses
+        ):
+
+            return False
+
+        content_type = (
+            response.headers
+            .get(
+                "content-type",
+                "",
+            )
+            .lower()
+        )
+
+        return (
+            "text/html"
+            in content_type
+        )
+
+    # =====================================================
+    # Dangerous Path
+    # =====================================================
+
+    def _path_looks_dangerous(
+        self,
+        path: str,
+    ) -> bool:
+
+        lowered = (
+            path.lower()
+        )
+
+        return any(
+            word.replace(
+                " ",
+                "",
+            )
+            in lowered.replace(
+                "-",
+                "",
+            ).replace(
+                "_",
+                "",
+            ).replace(
+                "/",
+                "",
+            )
+
+            for word in (
+                "delete",
+                "remove",
+                "logout",
+                "checkout",
+                "purchase",
+                "payment",
+                "transfer",
+                "unsubscribe",
+                "resetpassword",
+                "deleteaccount",
+            )
+        )
+
+    # =====================================================
+    # Safe UI Actions
+    # =====================================================
+
+    def trigger_safe_actions(
+        self,
+        *,
+        max_actions: int | None = None,
+        deadline: float | None = None,
+        after_action: Callable[[], None] | None = None,
+    ) -> int:
+
+        page = (
+            self._ensure_page()
+        )
+        if not self.resolve_user_action(page):
+            return 0
+
+        config = (
+            self.interaction_config
+        )
+
+        # Explicit read labels extend menus/tabs without selecting arbitrary
+        # buttons. A modal close consumes the same action allowance as a click.
+        candidates = page.locator(
+            _READ_ACTION_SELECTOR if config.expand_read_controls else _BASE_SAFE_ACTION_SELECTOR
+        )
+
+        try:
+
+            count = (
+                candidates.count()
+            )
+
+        except Exception:
+
+            return 0
+
+        actions = 0
+
+        index = 0
+        close_failed = False
+        while index < count:
+
+            if (
+                actions
+                >=
+                config.max_actions_per_page
+            ) or (max_actions is not None and actions >= max_actions) or (
+                deadline is not None and time.monotonic() >= deadline
+            ):
+
+                break
+
+            try:
+
+                closing = (page.locator(_DIALOG_CLOSE_SELECTOR).filter(visible=True)
+                           if config.expand_read_controls else None)
+                is_close = closing is not None and not close_failed and closing.count() > 0
+                if is_close:
+                    element = closing.first
+                    close_failed = True
+                else:
+                    element = candidates.nth(index)
+                    index += 1
+
+                if not element.is_visible():
+                    continue
+
+                # Angular 등 SPA는 후보를 모으고 나서도 계속 리렌더링/DOM
+                # 교체가 일어나서, 이 사이 후보가 stale해지는 race가 흔하다.
+                # 아래 호출들에 명시적 timeout이 없으면 Playwright 기본값인
+                # 30초를 그대로 물려받아, 후보 하나가 stale일 때마다 최대
+                # 30초씩 날아갈 수 있다(최대 max_actions_per_page개까지
+                # 누적되면 상호작용 단계 전체가 사실상 멈춘 것처럼 보인다 -
+                # 실측으로 확인된 hang의 원인 중 하나). 결과를 못 얻는 후보는
+                # 빠르게 포기하고 다음으로 넘어가도록 짧은 timeout을 준다.
+                text = (
+                    element.inner_text(timeout=2000)
+                    or ""
+                ).strip().lower()
+
+                aria_label = (
+                    element.get_attribute(
+                        "aria-label", timeout=2000
+                    )
+                    or ""
+                ).lower()
+
+                title = (
+                    element.get_attribute(
+                        "title", timeout=2000
+                    )
+                    or ""
+                ).lower()
+
+                element_id = (
+                    element.get_attribute(
+                        "id", timeout=2000
+                    )
+                    or ""
+                ).lower()
+
+                name = (
+                    element.get_attribute(
+                        "name", timeout=2000
+                    )
+                    or ""
+                ).lower()
+
+                description = (
+                    " ".join(
+                        (
+                            text,
+                            aria_label,
+                            title,
+                            element_id,
+                            name,
+                        )
+                    )
+                )
+
+                base_action = not config.expand_read_controls or is_close or element.evaluate(
+                    "el => el.matches(" + json.dumps(_BASE_SAFE_ACTION_SELECTOR) + ")",
+                    timeout=2000,
+                )
+                read_label = " ".join((text, aria_label, title))
+                if not base_action and (
+                    not _READ_ACTION_LABEL.search(read_label)
+                    or re.search(r"\bclose\b", read_label)
+                ):
+                    continue
+
+                # -------------------------------------
+                # 위험 Action 제외
+                # -------------------------------------
+
+                if any(
+                    blocked
+                    in description
+
+                    for blocked in (
+                        config.blocked_words
+                    )
+                ):
+
+                    continue
+
+                # -------------------------------------
+                # Form Submit 제외
+                # -------------------------------------
+
+                tag = (
+                    element.evaluate(
+                        """
+                        el =>
+                            el.tagName.toLowerCase()
+                        """,
+                        timeout=2000,
+                    )
+                )
+
+                inside_form = element.evaluate(
+                    "el => !!el.closest('form')", timeout=2000,
+                )
+                if inside_form and not config.allow_form_submission:
+                    continue
+                if tag == "button" and inside_form:
+                    button_type = (element.get_attribute("type", timeout=2000) or "").lower()
+                    if button_type != "button":
+                        continue
+
+                # -------------------------------------
+                # Click
+                # -------------------------------------
+
+                # This adapter cannot attest the selected control's complete
+                # resource/effects. dom_action marks every request predicate
+                # unknown; page.url is only the enclosing document identity.
+                require_request_admission(self.target_policy, url=page.url, method='GET',
+                    headers={}, body_available=False, identity_available=False,
+                    context={'transport':'browser', 'operation':'dom_action', 'target':description[:300]})
+                self._context_serial += 1
+                self._action_context = {
+                    'context_key': f'action:{self._context_serial}',
+                    'action_type': 'click',
+                    'action_target': description[:300],
+                    'association_method': 'action_time_window',
+                }
+                try:
+                    element.click(timeout=1500)
+                    page.wait_for_timeout(config.action_wait_ms)
+                finally:
+                    self._action_context = None
+
+                if after_action is not None:
+                    try:
+                        after_action()
+                    except Exception:
+                        pass
+
+                actions += 1
+                close_failed = False
+                if not self.resolve_user_action(page):
+                    break
+
+                if (
+                    self._auth_expired
+                    and
+                    self.session_config
+                    .auth_check_url
+                ):
+
+                    self.ensure_session()
+
+                    page = (
+                        self._ensure_page()
+                    )
+
+            except Exception:
+
+                continue
+
+        return actions
+
+    # =====================================================
+    # Interaction Pass
+    # =====================================================
+
+    def _current_screen_fingerprint(self) -> str | None:
+        """Read only visible content and control labels after a page has loaded."""
+        page = self._ensure_page()
+        try:
+            current_url = page.url
+            if not self._same_origin(current_url):
+                return None
+            snapshot = page.evaluate("""() => {
+                const main = document.querySelector('main, [role="main"]') || document.body;
+                const controls = [...document.querySelectorAll(
+                    '[role="tab"], button[aria-controls], button[aria-expanded], '
+                    'button[aria-haspopup], [role="button"][aria-controls], '
+                    '[role="button"][aria-expanded], [role="button"][aria-haspopup], '
+                    'summary, nav button'
+                )].filter(el => el.getClientRects().length).slice(0, 100).map(el =>
+                    [el.tagName, el.getAttribute('role') || '',
+                     el.getAttribute('aria-label') || '',
+                     el.getAttribute('aria-selected') || '',
+                     el.getAttribute('aria-expanded') || '',
+                     el.getAttribute('aria-controls') || '', el.innerText || ''].join(' '));
+                const text = main?.innerText || '';
+                return {
+                    main_text: text.length > 16000
+                        ? text.slice(0, 12000) + String.fromCharCode(10) + text.slice(-4000) : text,
+                    text_length: text.length,
+                    controls
+                };
+            }""")
+            parsed = urlparse(current_url)
+            return screen_fingerprint(snapshot, origin=f"{parsed.scheme}://{parsed.netloc}")
+        except Exception:
+            return None
+
+    def _screen_was_explored(self, url: str) -> bool:
+        key = canonical_visit_key(url)
+        fingerprint = self._current_screen_fingerprint()
+        if fingerprint is not None:
+            duplicate = fingerprint in self._interaction_seen_screens
+            self._interaction_seen_screens.add(fingerprint)
+        else:
+            duplicate = key in self._interaction_visited
+        self._interaction_visited.add(key)
+        if duplicate:
+            self.last_interaction_duplicate_screens += 1
+        return duplicate
+
+    def _visible_navigation_paths(self) -> list[str]:
+        """Collect visible, same-origin links that can open another screen."""
+        page = self._ensure_page()
+        try:
+            links = page.evaluate("""() => [...document.querySelectorAll('a[href], [routerlink]')]
+                .filter(el => el.getClientRects().length && !el.hasAttribute('download')
+                    && el.getAttribute('target') !== '_blank')
+                .map(el => ({href: el.href || null,
+                    routerLink: el.getAttribute('routerLink')}))""")
+        except Exception:
+            return []
+        if not isinstance(links, list):
+            return []
+
+        paths: list[str] = []
+        for link in links:
+            if isinstance(link, str):
+                href = link
+                router_link = None
+            elif isinstance(link, dict):
+                href = link.get("href")
+                router_link = link.get("routerLink")
+            else:
+                continue
+            if not href and isinstance(router_link, str) and router_link.startswith("/"):
+                if urlparse(page.url).fragment.startswith("/"):
+                    href = page.url.split("#", 1)[0] + "#" + router_link
+                else:
+                    href = urljoin(page.url, router_link)
+            if not isinstance(href, str) or not href:
+                continue
+            url = urljoin(page.url, href)
+            parsed = urlparse(url)
+            if parsed.scheme not in {"http", "https"} or not self._same_origin(url):
+                continue
+            if self.target_policy is not None and not self.target_policy.allows_url(url):
+                continue
+            path = parsed.path or "/"
+            if parsed.query:
+                path += "?" + parsed.query
+            if parsed.fragment:
+                path += "#" + parsed.fragment
+            if self._path_looks_dangerous(path):
+                continue
+            decoded_path = unquote(unquote(path))
+            if any(marker in decoded_path for marker in ("{", "}")):
+                continue
+            paths.append(path)
+        return paths
+
+    def run_interaction_pass(
+        self,
+        endpoints: list[dict],
+    ) -> None:
+
+        if not (
+            self.interaction_config
+            .enabled
+        ):
+            return
+
+        self.ensure_session()
+
+        self._phase = (
+            "interaction"
+        )
+
+        visited = self._interaction_visited
+        pages = self._interaction_page_count
+        pages_at_start = pages
+        self.last_interaction_duplicate_screens = 0
+        deadline = time.monotonic() + self.interaction_config.max_pass_seconds
+        action_limit = (self.interaction_config.max_total_actions
+                        if self.interaction_config.max_total_actions is not None
+                        else self.interaction_config.max_pages * self.interaction_config.max_actions_per_page)
+
+        actions = 0
+        pending = list(endpoints)
+        queued = set()
+
+        def queue_visible_links() -> None:
+            for path in self._visible_navigation_paths():
+                key = canonical_visit_key(urljoin(self.base_url.rstrip("/") + "/", path))
+                if key not in queued and key not in visited:
+                    queued.add(key)
+                    pending.append({"method": "GET", "path": path})
+
+        page = (
+            self._ensure_page()
+        )
+
+        # ---------------------------------------------
+        # SPA Root
+        # ---------------------------------------------
+
+        try:
+            # Keep the exact page reached during Phase 1 login (Shopify Admin
+            # commonly lands on /products?country=...).  Navigating back to
+            # the canonical store root can trigger a permission interstitial
+            # even though the live authenticated context is valid.
+            current_url = page.url
+            parsed_current = urlparse(current_url)
+            current_is_approved = (
+                parsed_current.scheme in {"http", "https"}
+                and self._same_origin(current_url)
+                and (self.target_policy is None or self.target_policy.allows_url(current_url))
+            )
+            if not current_is_approved:
+                page.goto(
+                    self.base_url,
+                    wait_until="domcontentloaded",
+                    timeout=self.session_config.timeout_ms,
+                )
+
+            current_url = page.url
+            if pages < self.interaction_config.max_pages and time.monotonic() < deadline:
+                page.wait_for_timeout(500)
+                queue_visible_links()
+                if not self._screen_was_explored(current_url):
+                    actions += self.trigger_safe_actions(
+                        max_actions=action_limit - actions,
+                        deadline=deadline,
+                        after_action=queue_visible_links,
+                    )
+                    pages += 1
+                    queue_visible_links()
+
+        except Exception:
+            pass
+
+        # ---------------------------------------------
+        # Discovered Pages
+        # ---------------------------------------------
+
+        index = 0
+        while index < len(pending):
+            endpoint = pending[index]
+            index += 1
+
+            if (pages >= self.interaction_config.max_pages
+                    or actions >= action_limit
+                    or time.monotonic() >= deadline):
+
+                break
+
+            method = (
+                endpoint.get(
+                    "method",
+                    "GET",
+                )
+                .upper()
+            )
+
+            if method != "GET":
+                continue
+
+            path = (
+                endpoint.get(
+                    "path"
+                )
+            )
+
+            if not path:
+                continue
+
+            if any(marker in unquote(unquote(path)) for marker in ("{", "}")):
+                continue
+
+            url = urljoin(self.base_url.rstrip("/") + "/", path)
+            key = canonical_visit_key(url)
+            if key in visited:
+                continue
+
+            if not self._same_origin(url) or (
+                self.target_policy is not None and not self.target_policy.allows_url(url)
+            ):
+                continue
+
+            if self._path_looks_dangerous(
+                path
+            ):
+
+                continue
+
+            if not self.visit_path(
+                path
+            ):
+                visited.add(key)
+                continue
+
+            pages += 1
+
+            try:
+
+                self._ensure_page() \
+                    .wait_for_timeout(
+                        300
+                    )
+
+            except Exception:
+                pass
+
+            duplicate_screen = self._screen_was_explored(self._ensure_page().url)
+            visited.add(key)
+            if duplicate_screen:
+                continue
+
+            queue_visible_links()
+
+            actions += (
+                self.trigger_safe_actions(
+                    max_actions=action_limit - actions,
+                    deadline=deadline,
+                    after_action=queue_visible_links,
+                )
+            )
+            queue_visible_links()
+
+        self.last_interaction_stop_reason = (
+            "time_limit" if time.monotonic() >= deadline else
+            "action_limit" if actions >= action_limit else
+            "page_limit" if pages >= self.interaction_config.max_pages else
+            "completed"
+        )
+
+        print()
+        print(
+            f"  [Playwright] "
+            f"HTML 방문 : {pages - pages_at_start}개 "
+            f"(전체 {pages}/{self.interaction_config.max_pages})"
+        )
+
+        print(
+            f"  [Playwright] "
+            f"UI Action : {actions}개"
+        )
+
+        print(f"  [Playwright] 이미 본 화면 건너뜀 : {self.last_interaction_duplicate_screens}개")
+
+        print(
+            f"  [Playwright] "
+            f"WebSocket : "
+            f"{len(self.websockets)}개"
+        )
+
+        self._interaction_page_count = pages
+
+    # =====================================================
+    # HTTP Results
+    # =====================================================
+
+    def drain_observations(self) -> list[dict]:
+        """Unmerged requests since the last phase boundary."""
+        items = self.requests[self._observation_cursor:]
+        self._observation_cursor = len(self.requests)
+        return [dict(item) for item in items]
+
+    def drain_authentication_observations(self) -> list[dict]:
+        items = self.authentication_observations
+        self.authentication_observations = []
+        return [dict(item) for item in items]
+
+    def get_http_results(
+        self,
+    ) -> list[dict]:
+
+        unique: dict[
+            tuple[str, str],
+            dict,
+        ] = {}
+
+        for result in self.requests:
+
+            method = (
+                result.get(
+                    "method",
+                    "GET",
+                )
+                .upper()
+            )
+
+            path = (
+                result.get(
+                    "path"
+                )
+            )
+
+            if not path:
+                continue
+
+            key = (
+                method,
+                path,
+            )
+
+            source = (
+                result.get(
+                    "source"
+                )
+            )
+
+            if key not in unique:
+
+                item = dict(
+                    result
+                )
+
+                item["method"] = method
+
+                item["sources"] = []
+
+                if source:
+
+                    item["sources"].append(
+                        source
+                    )
+
+                unique[key] = (
+                    item
+                )
+
+                continue
+
+            if (
+                source
+                and source
+                not in
+                unique[key]
+                .setdefault(
+                    "sources",
+                    [],
+                )
+            ):
+
+                unique[key][
+                    "sources"
+                ].append(
+                    source
+                )
+
+        return list(
+            unique.values()
+        )
+
+    # =====================================================
+    # WebSocket Results
+    # =====================================================
+
+    def get_websocket_results(
+        self,
+    ) -> list[dict]:
+
+        return [
+            dict(item)
+            for item in self.websockets
+        ]
+
+    # =====================================================
+    # Close
+    # =====================================================
+
+    def close(
+        self,
+    ) -> None:
+
+        # 가능한 경우 최신 Session 저장
+        try:
+
+            self.save_session()
+
+        except Exception:
+            pass
+
+        self._shutdown_runtime()
+
+        if self.playwright is not None:
+
+            try:
+
+                self.playwright.stop()
+
+            except Exception:
+                pass
+
+        self.playwright = None

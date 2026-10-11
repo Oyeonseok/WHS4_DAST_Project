@@ -1,0 +1,11 @@
+.well-known/security.txt
+security.txt
+robots.txt
+ftp
+admin
+api
+assets
+config
+login
+profile
+rest

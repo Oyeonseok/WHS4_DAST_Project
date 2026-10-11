@@ -1,0 +1,63 @@
+--- a/src/aidast/recon/tools/api_secondary_discovery.py
++++ b/src/aidast/recon/tools/api_secondary_discovery.py
+@@ -1415,7 +1415,7 @@
+         )
+         if status is None or status == 404 or status >= 500:
+             continue
+-        if status == 403 and body == _POLICY_BLOCK_BODY:
++        if body == _POLICY_BLOCK_BODY:
+             continue
+         content_type = _media_type(response_headers)
+         if content_type == "text/html":
+@@ -1432,21 +1432,29 @@
+             control_status, control_headers, control_body, request_url=control_url,
+         )
+         if control_status >= 500:
+-            # A broken missing-route handler cannot establish whether an auth
+-            # error belongs to a real route. Only distinct 2xx API responses
+-            # provide enough evidence to retain a candidate.
+-            if not 200 <= status < 300:
++            # An explicit first-party GET call plus a distinct access-denied
++            # response is useful route evidence even when the missing-route
++            # handler is broken. Preserve it as observed, never verified.
++            restricted_get = status in {401, 403} and candidates[url] == 0
++            if not (200 <= status < 300 or restricted_get):
+                 unverified_count += 1
+                 continue
+             if candidate_fingerprint[1:] == control_fingerprint[1:]:
+                 continue
+         elif candidate_fingerprint == control_fingerprint:
+             continue
++        evidence = {"response_status": status, "source_scripts": scripts}
++        if status in {401, 403}:
++            evidence.update(
++                access_status="authentication_required" if status == 401 else "forbidden",
++                verification_reason="explicit_get_access_denied" if candidates[url] == 0 else "distinct_access_denied",
++                control_status=control_status,
++            )
+         results.append({
+             "method": "GET", "path": urlparse(url).path or "/", "url": url,
+             "source": "adaptive_js", "discovery_kind": "js_api_candidate",
+             "content_type": next((v for k, v in response_headers.items() if k.lower() == "content-type"), None),
+-            "evidence": {"response_status": status, "source_scripts": scripts},
++            "evidence": evidence,
+         })
+ 
+         # Probe one real item per collection within the global request cap.
+--- a/src/aidast/recon/annotations.py
++++ b/src/aidast/recon/annotations.py
+@@ -108,10 +108,12 @@
+             result[key] = safe_text(value[key])[:200]
+     if isinstance(value.get('verification_reason'), str):
+         result['verification_reason'] = safe_text(value['verification_reason'])[:80]
+-    for key in ('response_status', 'content_length', 'word_count', 'line_count'):
++    if value.get('access_status') in {'authentication_required', 'forbidden'}:
++        result['access_status'] = value['access_status']
++    for key in ('response_status', 'control_status', 'content_length', 'word_count', 'line_count'):
+         number = value.get(key)
+         if type(number) is int and 0 <= number <= 10**12:
+-            if key != 'response_status' or 100 <= number <= 599:
++            if key not in {'response_status', 'control_status'} or 100 <= number <= 599:
+                 result[key] = number
+     seeds = value.get('seed_paths')
+     if isinstance(seeds, list):

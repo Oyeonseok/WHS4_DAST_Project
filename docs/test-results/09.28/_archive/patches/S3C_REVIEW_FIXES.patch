@@ -1,0 +1,180 @@
+--- a/src/aidast/recon/tools/api_secondary_discovery.py
++++ b/src/aidast/recon/tools/api_secondary_discovery.py
+@@ -36,7 +36,7 @@
+ from aidast.core.request_broker import RequestBroker, RequestPolicyError
+ from aidast.recon.policy import TargetPolicy
+ from aidast.recon.verification import successful_response
+-from aidast.recon.tools.js_api_paths import extract_js_api_paths
++from aidast.recon.tools.js_api_paths import extract_js_api_paths, literal_call_method
+ 
+ 
+ # =========================================================
+@@ -1238,7 +1238,9 @@
+                     and re.fullmatch(r"[A-Za-z0-9_-]{1,64}", str(item["id"]))), None)
+     if item_id is None:
+         return None
+-    detail_url = collection_url.rstrip("/") + "/" + item_id
++    parsed = urlparse(collection_url)
++    detail_url = parsed._replace(path=parsed.path.rstrip("/") + "/" + item_id,
++                                 query="", fragment="").geturl()
+     if target_policy is not None and not target_policy.allows_url(detail_url, method="GET"):
+         return None
+     return detail_url
+@@ -1272,20 +1274,7 @@
+     }
+ 
+ 
+-def _literal_call_method(script: str, start: int, end: int) -> str | None:
+-    """Recognize direct HTTP calls without evaluating target JavaScript."""
+-    prefix = script[max(0, start - 160):start]
+-    call = re.search(r"\.\s*(get|post|put|patch|delete|head|options)\s*\(\s*(?:[\w.$]+\s*\+\s*)?$", prefix, re.I)
+-    if call:
+-        return call.group(1).upper()
+-    if re.search(r"\bfetch\s*\(\s*$", prefix):
+-        options = re.match(r"\s*,\s*\{([^{}]{0,256})\}", script[end:end + 280])
+-        if options:
+-            method = re.search(r"\bmethod\s*:\s*['\"]([A-Za-z]+)['\"]", options.group(1))
+-            if method:
+-                return method.group(1).upper()
+-        return "GET"
+-    return None
++_literal_call_method = literal_call_method
+ 
+ 
+ def _bind_collection_template(template: str, collection_detail_url: str) -> str | None:
+--- a/src/aidast/recon/tools/js_api_paths.py
++++ b/src/aidast/recon/tools/js_api_paths.py
+@@ -82,31 +82,103 @@
+ 
+ 
+ _CLASS = re.compile(r'\bclass(?:\s+[\w$]+)?(?:\s+extends\s+[\w.$]+)?\s*$')
+-_PROPERTY = re.compile(r'(?:\bthis\.)?(?P<name>[A-Za-z_$][\w$]*)\s*=\s*(?:[\w.$]+\s*\+\s*)?$')
++_PROPERTY = re.compile(r'(?:^|[;{},])\s*(?P<receiver>this\.)?(?P<name>[A-Za-z_$][\w$]*)\s*=\s*(?:[\w.$]+\s*\+\s*)?$')
+ _CONCAT = re.compile(r'\.\s*(?:get|post|put|patch|delete|head|options)\s*\(\s*this\.(?P<name>[\w$]+)\s*\+\s*$', re.I)
+ _INTERPOLATION = re.compile(r'\$\{([^{}]+)\}')
+ _API = re.compile(r'^/(?:api|rest)(?:/|$)', re.I)
+ 
+ 
+-def _class_ranges(script: str, literals: list) -> list[tuple[int, int]]:
++def _literal_scopes(script: str, literals: list[_Literal]) -> dict:
+     skips = {match.start: match.end for match in literals}
+     stack: list[int | None] = []
+-    ranges = []
++    classes: list[tuple[int, int]] = []
++    ends = {}
++    positions = {}
+     index = 0
+     while index < len(script):
+         if index in skips:
++            if classes:
++                positions[index] = (classes[-1][0], len(stack) - classes[-1][1])
+             index = skips[index]
+             continue
+         char = script[index]
+         if char == '{':
+             start = index + 1 if _CLASS.search(script[max(0, index - 160):index]) else None
+             stack.append(start)
++            if start is not None:
++                classes.append((start, len(stack)))
+         elif char == '}' and stack:
+             start = stack.pop()
+             if start is not None:
+-                ranges.append((start, index))
++                ends[start] = index
++                classes.pop()
+         index += 1
+-    return sorted(ranges)
++    return {position: ((start, ends[start]), depth)
++            for position, (start, depth) in positions.items() if start in ends}
++
++
++def _without_comments(text: str) -> str:
++    parts = []
++    previous = 0
++    for token in _literals(text):
++        if token.value is None:
++            parts.append(text[previous:token.start])
++            parts.append(" ")
++            previous = token.end
++    parts.append(text[previous:])
++    return "".join(parts)
++
++
++def literal_call_method(script: str, start: int, end: int) -> str | None:
++    prefix = _without_comments(script[max(0, start - 160):start])
++    call = re.search(r"\.\s*(get|post|put|patch|delete|head|options)\s*\(\s*(?:[\w.$]+\s*\+\s*)?$", prefix, re.I)
++    if call:
++        return call.group(1).upper()
++    if not re.search(r"\bfetch\s*\(\s*$", prefix):
++        return None
++    tail = _without_comments(script[end:end + 4096]).lstrip()
++    if tail.startswith(")"):
++        return "GET"
++    if not tail.startswith(","):
++        return "UNKNOWN"
++    options = tail[1:].lstrip()
++    if not options.startswith("{"):
++        return "UNKNOWN"
++    skips = {token.start: token.end for token in _literals(options)}
++    depth = 1
++    index = field_start = 1
++    fields = []
++    while index < len(options) and depth:
++        if index in skips:
++            index = skips[index]
++            continue
++        char = options[index]
++        if char in "{[(":
++            depth += 1
++        elif char in "}])":
++            depth -= 1
++            if depth == 0:
++                fields.append(options[field_start:index])
++        elif char == ',' and depth == 1:
++            fields.append(options[field_start:index])
++            field_start = index + 1
++        index += 1
++    if depth:
++        return "UNKNOWN"
++    method = "GET"
++    for field in fields:
++        field = field.strip()
++        if not field:
++            continue
++        key = re.match(r"(?:([\w$]+)|['\"]([\w$]+)['\"])\s*:", field)
++        if key is None:
++            return "UNKNOWN"
++        if (key.group(1) or key.group(2)) == "method":
++            value = re.fullmatch(r"\s*(['\"])([A-Za-z]+)\1\s*", field[key.end():])
++            if value is None:
++                return "UNKNOWN"
++            method = value.group(2).upper()
++    return method
+ 
+ 
+ def extract_js_api_paths(
+@@ -114,10 +186,11 @@
+ ) -> list[tuple[str, str | None]]:
+     """Return path expressions and their HTTP method evidence in source order."""
+     literals = _literals(script)
+-    ranges = _class_ranges(script, literals)
++    scopes = _literal_scopes(script, literals)
+ 
+     def scope_at(position: int) -> tuple[int, int] | None:
+-        return next((scope for scope in reversed(ranges) if scope[0] <= position < scope[1]), None)
++        info = scopes.get(position)
++        return info[0] if info is not None else None
+ 
+     # Distinct classes often use the same property name for different APIs.
+     # Resolve only an unambiguous base inside the enclosing class.
+@@ -129,7 +202,9 @@
+         scope = scope_at(match.start)
+         assignment = _PROPERTY.search(script[max(0, match.start - 160):match.start])
+         if scope is not None and assignment:
+-            bases.setdefault((scope, assignment.group('name')), set()).add(value)
++            nesting = scopes[match.start][1]
++            if assignment.group('receiver') or nesting == 0:
++                bases.setdefault((scope, assignment.group('name')), set()).add(value)
+ 
+     def resolve_base(scope, name: str) -> str | None:
+         values = bases.get((scope, name), set())

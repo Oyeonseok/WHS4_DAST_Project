@@ -1,0 +1,84 @@
+{
+  "schema_version": 1,
+  "experiment_date": "2026-09-26",
+  "fixture_kind": "synthetic_attack_claims_for_validation_only",
+  "official_key_sha256": "9bc241353aa7dde248b1c27da0cb7015c8ef246544648b28115df7db5ee37a84",
+  "official_candidates": 10,
+  "ready_get_candidates": 7,
+  "primary_bundle": "result/test-runs/validation-candidates/validation-real-agent-20260926",
+  "primary_score_summary": {
+    "PASS": 5,
+    "PENDING": 1,
+    "NEEDS_PREREQUISITES": 3,
+    "UNRESOLVED": 1
+  },
+  "retry_bundle": "result/test-runs/validation-candidates/validation-real-agent-privacy-retry-20260926",
+  "privacy_retry_result": "PASS",
+  "impact_bundle": "result/test-runs/validation-candidates/validation-real-agent-impact-fixed-20260926",
+  "impact_result": "PASS",
+  "combined_negative_proof_passes": 6,
+  "positive_without_development": "UNDERPOWERED",
+  "positive_with_development": "CONFIRMED",
+  "blind_signal_classification_matches": 7,
+  "ready_cases": [
+    {
+      "candidate_id": "juice-shop:case:GET:/api/Complaints:unauthenticated_disclosure",
+      "expected_status": "DISPROVEN",
+      "primary_status": "DISPROVEN",
+      "primary_score": "PASS",
+      "blind_reproduced": false
+    },
+    {
+      "candidate_id": "juice-shop:case:GET:/api/Feedbacks/:id:unauthenticated_disclosure",
+      "expected_status": "DISPROVEN",
+      "primary_status": "DISPROVEN",
+      "primary_score": "PASS",
+      "blind_reproduced": false
+    },
+    {
+      "candidate_id": "juice-shop:case:GET:/api/PrivacyRequests:unauthenticated_disclosure",
+      "expected_status": "DISPROVEN",
+      "primary_status": null,
+      "primary_score": "PENDING",
+      "blind_reproduced": false,
+      "retry_status": "DISPROVEN",
+      "retry_score": "PASS"
+    },
+    {
+      "candidate_id": "juice-shop:case:GET:/api/Users:unauthenticated_disclosure",
+      "expected_status": "DISPROVEN",
+      "primary_status": "DISPROVEN",
+      "primary_score": "PASS",
+      "blind_reproduced": false
+    },
+    {
+      "candidate_id": "vuln-bank:case:GET:/api/billers/by-category/<int:category_id>:sql_injection",
+      "expected_status": "DISPROVEN",
+      "primary_status": "DISPROVEN",
+      "primary_score": "PASS",
+      "blind_reproduced": false
+    },
+    {
+      "candidate_id": "vuln-bank:case:GET:/api/virtual-cards/<int:card_id>/transactions:sql_injection",
+      "expected_status": "DISPROVEN",
+      "primary_status": "DISPROVEN",
+      "primary_score": "PASS",
+      "blind_reproduced": false
+    },
+    {
+      "candidate_id": "vuln-bank:curated:GET:/debug/users:excessive_data_exposure",
+      "expected_status": "CONFIRMED",
+      "primary_status": "UNDERPOWERED",
+      "primary_score": "UNRESOLVED",
+      "blind_reproduced": true,
+      "impact_status": "CONFIRMED",
+      "impact_score": "PASS"
+    }
+  ],
+  "scope_notes": [
+    "The primary run has one ClaimComparison failure on PrivacyRequests. The isolated retry also timed out at ClaimComparison and then completed via failed-stage resume in a fresh comparison session.",
+    "The positive Impact run uses a separate opt-in development contract and cannot be counted as an unchanged primary-run verdict.",
+    "Three official candidates require authentication prerequisites and were not executed.",
+    "The staged Attack claims are synthetic; only local GET responses and Validation Agent assessments were executed."
+  ]
+}

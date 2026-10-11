@@ -1,0 +1,179 @@
+"""Policy-checked HTTP requests with explicit, bounded redirect handling."""
+
+from __future__ import annotations
+
+from collections.abc import Callable
+from dataclasses import dataclass
+import math
+from typing import Literal
+from urllib.error import HTTPError
+from urllib.parse import urljoin, urlsplit
+from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
+
+from aidast.core.http_safety import is_sensitive_header, merge_hackerone_identity, sanitize_headers, require_request_admission
+from aidast.core.capture_receipt import prepare_http_request, urllib_request_data
+from aidast.recon.policy import TargetPolicy
+from aidast.core.request_governor import RequestGovernor, GovernorError
+
+
+class RequestPolicyError(ValueError):
+    """The boundary rejected a request before sending it."""
+
+
+class _NoRedirect(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+@dataclass
+class BrokerResponse:
+    status_code: int
+    url: str
+    headers: dict[str, str]
+    body: bytes
+
+
+class RequestBroker:
+    """A transport must perform exactly one hop; the default disables redirects.
+
+    Injection is intended for trusted adapters and offline test fakes.
+    A trusted proxy transport can own shared accounting for each physical hop.
+    Destination, identity and exclusion checks still run in the broker.
+    Responses expose sanitized headers; bodies remain available for in-memory processing
+    unless capture_bodies is disabled explicitly.
+    """
+
+    def __init__(self, policy: TargetPolicy | None, *, transport: Callable | None = None,
+                 max_redirects: int = 10, max_body_bytes: int = 200_000,
+                 budget_limit: int | None = None,
+                 authority: Literal["recon", "validation"] = "recon",
+                 governor_owner: Literal["broker", "transport"] = "broker") -> None:
+        if not isinstance(policy, TargetPolicy):
+            raise RequestPolicyError("an approved TargetPolicy is required for HTTP requests")
+        if max_redirects < 0 or max_body_bytes < 0:
+            raise ValueError("request bounds must be nonnegative")
+        if authority not in {"recon", "validation"}:
+            raise ValueError("unsupported HTTP request authority")
+        if governor_owner not in {"broker", "transport"} or (governor_owner == "transport" and transport is None):
+            raise ValueError("transport accounting requires a trusted custom transport")
+        self.policy = policy
+        self.authority = authority
+        opener = build_opener(ProxyHandler({}), _NoRedirect())
+        opener.addheaders = []
+        self.transport = transport if transport is not None else opener.open
+        self.max_redirects = max_redirects
+        self.max_body_bytes = max_body_bytes
+        if budget_limit is not None and budget_limit < 1:
+            raise ValueError("budget_limit must be positive")
+        self.budget_limit = budget_limit
+        self.request_count = 0
+        try:
+            governor = RequestGovernor(getattr(policy, "request_governor", None))
+            self.governor = governor if governor_owner == "broker" else RequestGovernor(None)
+        except GovernorError as exc:
+            raise RequestPolicyError(str(exc)) from exc
+
+    def request(self, url: str, *, method: str = "GET", headers: dict[str, str] | None = None,
+                data: bytes | None = None, timeout: float | None = None,
+                capture_bodies: bool = True) -> BrokerResponse:
+        method = method.upper()
+        if timeout is not None and (timeout <= 0 or not math.isfinite(timeout)):
+            raise RequestPolicyError("timeout must be positive and finite")
+        effective_timeout = min(timeout if timeout is not None else self.policy.limits.timeout_seconds,
+                                self.policy.limits.timeout_seconds)
+        headers = dict(headers or {})
+        data = bytes(data) if data is not None else None
+        for hop in range(self.max_redirects + 1):
+            self._validate(url, method)
+            if self.policy.required_identity_headers or self.policy.hackerone_username:
+                headers = merge_hackerone_identity(
+                    headers, self.policy.hackerone_username,
+                    required_identity_headers=self.policy.required_identity_headers,
+                )
+            try:
+                descriptor = prepare_http_request(url, method=method, headers=headers, body=data)
+            except ValueError as exc:
+                raise RequestPolicyError('invalid physical request context') from exc
+            identity_available = getattr(self.transport, 'identity_available', True) is True
+            def admit():
+                require_request_admission(self.policy, url=url, method=method,
+                    headers=descriptor['headers'], body=descriptor['body'],
+                    identity_available=identity_available, error_class=RequestPolicyError)
+            admit()
+            limit = self.budget_limit or self.policy.limits.max_requests
+            if self.request_count >= limit:
+                raise RequestPolicyError("HTTP request budget exhausted")
+            request = Request(url, data=urllib_request_data(descriptor), headers=descriptor["headers"], method=method)
+            self.request_count += 1
+            try:
+                permit = self.governor.acquire(url, timeout_seconds=effective_timeout)
+            except GovernorError as exc:
+                raise RequestPolicyError(str(exc)) from exc
+            try:
+                permit.wait()
+                admit()
+                try:
+                    response = self.transport(request, timeout=permit.timeout_seconds)
+                except HTTPError as exc:
+                    response = exc
+                try:
+                    status = response.code if isinstance(response, HTTPError) else response.status
+                    response_headers = dict(response.headers.items()) if response.headers else {}
+                    location = next((value for name, value in response_headers.items()
+                                     if name.lower() == "location"), None)
+                    if status in {301, 302, 303, 307, 308} and location:
+                        if hop == self.max_redirects:
+                            raise RequestPolicyError("HTTP redirect limit exceeded")
+                        next_url = urljoin(url, location)
+                        if (status == 303 and method != "HEAD") or (status in {301, 302} and method == "POST"):
+                            method, data = "GET", None
+                            headers = {key: value for key, value in headers.items()
+                                       if key.lower() not in {"content-type", "content-length", "transfer-encoding"}}
+                        try:
+                            self._validate(next_url, method)
+                        except RequestPolicyError:
+                            # Keep the approved response as evidence, but never
+                            # follow a redirect outside the target's policy. A
+                            # common login/CDN redirect must not abort all-target
+                            # Recon for this otherwise reachable host.
+                            readable = not isinstance(response, HTTPError) or response.fp is not None
+                            body = response.read(self.max_body_bytes) if capture_bodies and readable else b""
+                            return BrokerResponse(
+                                status, url, sanitize_headers(response_headers, identity_headers=self.policy.required_identity_headers), body
+                            )
+                        if self._origin(url) != self._origin(next_url):
+                            headers = {key: value for key, value in headers.items()
+                                       if not is_sensitive_header(key) and key.lower() != "host"}
+                        url = next_url
+                        continue
+                    readable = not isinstance(response, HTTPError) or response.fp is not None
+                    body = response.read(self.max_body_bytes) if capture_bodies and readable else b""
+                    return BrokerResponse(status, url, sanitize_headers(response_headers, identity_headers=self.policy.required_identity_headers), body)
+                finally:
+                    response.close()
+            except GovernorError as exc:
+                raise RequestPolicyError(str(exc)) from exc
+            finally:
+                permit.complete()
+        raise RequestPolicyError("HTTP redirect limit exceeded")
+
+    def _validate(self, url: str, method: str) -> None:
+        try:
+            parsed = urlsplit(url)
+            allows = (
+                self.policy.allows_validation_url
+                if self.authority == "validation"
+                else self.policy.allows_url
+            )
+            valid = not (parsed.username or parsed.password) and allows(
+                url, method=method
+            )
+        except ValueError:
+            valid = False
+        if not valid:
+            raise RequestPolicyError("TargetPolicy does not allow the HTTP destination or method")
+
+    @staticmethod
+    def _origin(url: str) -> tuple[str, str | None, int]:
+        parsed = urlsplit(url)
+        return parsed.scheme, parsed.hostname, parsed.port or (443 if parsed.scheme == "https" else 80)

@@ -1,0 +1,821 @@
+from __future__ import annotations
+
+import json
+import sqlite3
+import tempfile
+import tomllib
+import unittest
+from contextlib import closing
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
+
+from aidast.agents.main import CodexMainAgent
+from aidast.agents.native_pipeline import (
+    CodexMainAgent as NativePipelineAgent,
+    _bind_pipeline_database_reference,
+)
+from aidast.attack.db_cli import (
+    commit_attempt, commit_finding, query, resolve_attempt, transition_task,
+)
+from aidast.attack.models import AttackStageResult
+from aidast.orchestration.attack import AttackCoordinator, AttackCoordinatorError
+from aidast.pipeline.lifecycle import create_task, finish_stage_run, start_stage_run, register_credential_reference
+from aidast.pipeline.live_schema import migrate_live_pipeline_schema
+from aidast.recon import db
+from aidast.validation import (CandidateIntegrityGate, HttpRuntimeContract,
+                               DevelopmentRuntimeContract,
+                               ImpactDevelopmentRuntimeContract, canonical_sha256)
+
+
+class FakeNativeMain:
+    def __init__(self) -> None:
+        self.calls = []
+
+    def run_attack_orchestrator(self, **kwargs) -> AttackStageResult:
+        self.calls.append(kwargs)
+        for task in kwargs["attack_tasks"]:
+            transition_task(
+                kwargs["db_path"], kwargs["scan_id"], kwargs["stage_run_id"],
+                task["task_id"], "running",
+            )
+            transition_task(
+                kwargs["db_path"], kwargs["scan_id"], kwargs["stage_run_id"],
+                task["task_id"], "completed",
+            )
+        return AttackStageResult(
+            status="COMPLETED",
+            scan_id=kwargs["scan_id"],
+            db_path=str(kwargs["db_path"]),
+            stage_run_id=kwargs["stage_run_id"],
+            attack_agent_ids=["/root/aidast_attack"],
+            summary="no applicable findings",
+        )
+
+
+def completed_pipeline(root: Path) -> Path:
+    path = root / "Pipeline.db"
+    conn = db.init_db(path)
+    migrate_live_pipeline_schema(conn)
+    db.insert_scan(
+        conn, scan_id="scan_native", scope_type="approved_scope", scope_value="scope"
+    )
+    asset = db.insert_asset(
+        conn, scan_id="scan_native", identifier="example.test", asset_type="DOMAIN"
+    )
+    origin = db.upsert_origin(
+        conn, asset_id=asset, scheme="https", host="example.test", port=443,
+        base_url="https://example.test",
+    )
+    endpoint = db.upsert_endpoint(
+        conn, origin_id=origin, method="GET", path="/api/items",
+        normalized_path="/api/items", source_tool="fixture",
+    )
+    conn.execute(
+        """INSERT INTO parameters
+           (parameter_id,endpoint_id,name,location,data_type,is_identifier)
+           VALUES ('parameter_item_id',?,'object_id','query','string',1)""",
+        (endpoint,),
+    )
+    conn.execute(
+        "UPDATE scans SET status='completed',finished_at=CURRENT_TIMESTAMP WHERE scan_id='scan_native'"
+    )
+    conn.commit()
+    conn.close()
+    return path
+
+
+class LegacyNativeAttackCoordinatorTests(unittest.TestCase):
+    def test_vulnbank_web_scan_bootstraps_disposable_identities(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            database = completed_pipeline(root)
+            with sqlite3.connect(database) as conn:
+                conn.execute("UPDATE assets SET identifier='http://127.0.0.1:5002/',asset_type='URL'")
+                conn.execute(
+                    """UPDATE origins SET scheme='http',host='127.0.0.1',port=5002,
+                       base_url='http://127.0.0.1:5002/'"""
+                )
+            scope = root / "Scope.md"
+            policy = root / "TargetPolicy.json"
+            scope.write_text(
+                "# VulnBank\n스캐너가 생성한 합성 계정과 일회성 데이터에 한해 허용합니다.",
+                encoding="utf-8",
+            )
+            policy.write_text("{}", encoding="utf-8")
+            coordinator = AttackCoordinator(
+                agent=FakeNativeMain(), db_path=database,
+                scope_path=scope, policy_path=policy,
+            )
+            result = {
+                "credential_reference_count": 5,
+                "owned_test_object_count": 8,
+                "benchmark_fixture_count": 2,
+            }
+            with patch(
+                "aidast.benchmarks.vulnbank.bootstrap_vulnbank",
+                return_value=result,
+            ) as bootstrap:
+                coordinator._bootstrap_local_vulnbank_fixtures("scan_native")
+            bootstrap.assert_called_once_with(
+                database.resolve(), scan_id="scan_native",
+                target_url="http://127.0.0.1:5002/",
+                scope_path=scope.resolve(), policy_path=policy.resolve(),
+            )
+            with sqlite3.connect(database) as conn:
+                details = json.loads(conn.execute(
+                    """SELECT details_json FROM audit_events
+                       WHERE scan_id='scan_native'
+                         AND event_type='benchmark.fixture_created'"""
+                ).fetchone()[0])
+            self.assertEqual(details["target"], "vulnbank")
+            self.assertEqual(details["credential_reference_count"], 5)
+
+    def test_authenticated_credential_reference_is_bound_to_attack_tasks(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            database = completed_pipeline(root)
+            scope, policy = root / "Scope.md", root / "TargetPolicy.json"
+            scope.write_text("# approved", encoding="utf-8")
+            policy.write_text("{}", encoding="utf-8")
+            with sqlite3.connect(database) as conn:
+                origin_id = conn.execute("SELECT origin_id FROM origins").fetchone()[0]
+                conn.execute("INSERT INTO sessions(session_id,origin_id,auth_state) VALUES ('session_auth',?,'authenticated')", (origin_id,))
+                reference = register_credential_reference(
+                    conn, scan_id="scan_native", session_id="session_auth", label="browser",
+                    reference_uri="env://AIDAST_TEST_AUTH_HEADERS", identity_role="authenticated",
+                )
+            main = FakeNativeMain()
+            AttackCoordinator(agent=main, db_path=database, scope_path=scope,
+                              policy_path=policy).run_selected_skills("scan_native")
+            tasks = main.calls[0]["attack_tasks"]
+            assert tasks
+            assert all(task["credential_references"][0]["credential_reference_id"] == reference
+                       for task in tasks)
+            with sqlite3.connect(database) as conn:
+                payloads = [json.loads(row[0]) for row in conn.execute(
+                    "SELECT payload_json FROM attack_tasks WHERE stage_run_id=?",
+                    (main.calls[0]["stage_run_id"],),
+                )]
+            assert all(payload["credential_references"][0]["credential_reference_id"] == reference
+                       for payload in payloads)
+
+    def test_completed_recon_spawns_one_agent_and_finishes_attack_stage(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            database = completed_pipeline(root)
+            scope = root / "Scope.md"
+            policy = root / "TargetPolicy.json"
+            scope.write_text("# approved", encoding="utf-8")
+            policy.write_text("{}", encoding="utf-8")
+            main = FakeNativeMain()
+
+            result = AttackCoordinator(
+                agent=main, db_path=database, scope_path=scope, policy_path=policy
+            ).run_selected_skills("scan_native")
+
+            self.assertEqual(result.attack_agent_ids, ["/root/aidast_attack"])
+            self.assertEqual(len(main.calls), 1)
+            with closing(sqlite3.connect(database)) as conn:
+                row = conn.execute(
+                    "SELECT status FROM stage_runs WHERE scan_id='scan_native' AND stage='attack'"
+                ).fetchone()
+            self.assertEqual(row, ("completed",))
+            self.assertGreater(len(main.calls[0]["attack_tasks"]), 0)
+
+    def test_existing_attack_stage_prevents_duplicate_agent(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            database = completed_pipeline(root)
+            scope = root / "Scope.md"
+            policy = root / "TargetPolicy.json"
+            scope.write_text("# approved", encoding="utf-8")
+            policy.write_text("{}", encoding="utf-8")
+            coordinator = AttackCoordinator(
+                agent=FakeNativeMain(), db_path=database, scope_path=scope,
+                policy_path=policy,
+            )
+            coordinator.run_selected_skills("scan_native")
+            with self.assertRaisesRegex(AttackCoordinatorError, "already exists"):
+                coordinator.run_selected_skills("scan_native")
+
+    def test_foreign_database_reference_is_not_bound_and_is_rejected(self) -> None:
+        class ForeignDatabaseMain(FakeNativeMain):
+            def run_attack_orchestrator(self, **kwargs) -> AttackStageResult:
+                result = super().run_attack_orchestrator(**kwargs)
+                return result.model_copy(update={"db_path": "/tmp/foreign.db"})
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            database = completed_pipeline(root)
+            scope, policy = root / "Scope.md", root / "TargetPolicy.json"
+            scope.write_text("# approved", encoding="utf-8")
+            policy.write_text("{}", encoding="utf-8")
+
+            untrusted = AttackStageResult(
+                status="COMPLETED", scan_id="scan_native",
+                db_path="/tmp/foreign.db", stage_run_id="stage_attack",
+                attack_agent_ids=["/root/aidast_attack"],
+            )
+            self.assertEqual(
+                _bind_pipeline_database_reference(untrusted, database).db_path,
+                "/tmp/foreign.db",
+            )
+            with self.assertRaisesRegex(AttackCoordinatorError, "mismatch: db_path"):
+                AttackCoordinator(
+                    agent=ForeignDatabaseMain(), db_path=database,
+                    scope_path=scope, policy_path=policy,
+                ).run_selected_skills("scan_native")
+
+    def test_unresolved_lead_prevents_stage_completion(self) -> None:
+        class UnresolvedLeadMain(FakeNativeMain):
+            def run_attack_orchestrator(self, **kwargs) -> AttackStageResult:
+                with closing(sqlite3.connect(kwargs["db_path"])) as conn, conn:
+                    endpoint_id = conn.execute(
+                        "SELECT endpoint_id FROM endpoints LIMIT 1"
+                    ).fetchone()[0]
+                    conn.execute(
+                        """INSERT INTO attack_attempts
+                           (attempt_id,scan_id,skill_name,endpoint_id,
+                            request_fingerprint,outcome)
+                           VALUES ('attempt_open','scan_native','hunt-cors',?,?,'lead')""",
+                        (endpoint_id, "d" * 64),
+                    )
+                return super().run_attack_orchestrator(**kwargs)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            database = completed_pipeline(root)
+            scope = root / "Scope.md"
+            policy = root / "TargetPolicy.json"
+            scope.write_text("# approved", encoding="utf-8")
+            policy.write_text("{}", encoding="utf-8")
+            coordinator = AttackCoordinator(
+                agent=UnresolvedLeadMain(), db_path=database,
+                scope_path=scope, policy_path=policy,
+            )
+            with self.assertRaisesRegex(AttackCoordinatorError, "unresolved lead"):
+                coordinator.run_selected_skills("scan_native")
+
+    def test_failed_stage_can_resume_without_reusing_stage_or_tasks(self) -> None:
+        class FailOnceMain(FakeNativeMain):
+            def run_attack_orchestrator(self, **kwargs) -> AttackStageResult:
+                if not self.calls:
+                    self.calls.append(kwargs)
+                    raise RuntimeError("interrupted")
+                return super().run_attack_orchestrator(**kwargs)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            database = completed_pipeline(root)
+            scope = root / "Scope.md"
+            policy = root / "TargetPolicy.json"
+            scope.write_text("# approved", encoding="utf-8")
+            policy.write_text("{}", encoding="utf-8")
+            main = FailOnceMain()
+            coordinator = AttackCoordinator(
+                agent=main, db_path=database, scope_path=scope, policy_path=policy,
+            )
+            with self.assertRaisesRegex(AttackCoordinatorError, "interrupted"):
+                coordinator.run_selected_skills("scan_native")
+            result = coordinator.run_selected_skills("scan_native")
+            self.assertEqual(result.status, "COMPLETED")
+            with closing(sqlite3.connect(database)) as conn:
+                stages = conn.execute(
+                    "SELECT stage_run_id,status FROM stage_runs WHERE stage='attack' ORDER BY created_at"
+                ).fetchall()
+                tasks = conn.execute(
+                    "SELECT stage_run_id,status FROM attack_tasks ORDER BY created_at"
+                ).fetchall()
+            self.assertEqual([row[1] for row in stages], ["failed", "completed"])
+            self.assertEqual({row[1] for row in tasks}, {"cancelled", "completed"})
+            self.assertNotEqual(stages[0][0], stages[1][0])
+
+
+class NativeAttackMainAgentTests(unittest.TestCase):
+    def test_scanner_created_loopback_profile_mutation_is_auto_approved(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            database = completed_pipeline(Path(temporary))
+            label = "recon-browser:fixture:identity_synthetic"
+            with closing(sqlite3.connect(database)) as conn:
+                stage = start_stage_run(conn, scan_id="scan_native", stage="attack")
+                task = create_task(
+                    conn, stage_run_id=stage, skill_name="hunt-ssrf", payload={
+                        "credential_references": [{
+                            "label": label,
+                            "identity_role": "identity_synthetic",
+                        }],
+                        "test_fixtures": [{
+                            "fact_type": "owned_test_object",
+                            "fact_value": {
+                                "credential_label": label,
+                                "resource": "account",
+                                "disposable": True,
+                                "cleanup_allowed": True,
+                            },
+                        }],
+                    },
+                )
+            transition_task(database, "scan_native", stage, task, "running")
+            with closing(sqlite3.connect(database)) as conn, conn:
+                conn.execute(
+                    """INSERT INTO attack_authorization_envelopes
+                       (envelope_id,scan_id,stage_run_id,task_id,policy_id,
+                        policy_sha256,method,origin,normalized_path,provenance_kind,
+                        risk_class,approval_reason,max_requests,max_body_bytes,
+                        status,requested_at)
+                       VALUES ('envelope_auto','scan_native',?,?, 'policy',?,'POST',
+                               'http://127.0.0.1:5002','/upload_profile_picture_url',
+                               'agent_proposed','external_side_effect','external_side_effect',
+                               3,4096,'pending',1)""",
+                    (stage, task, "a" * 64),
+                )
+
+            def unexpected_prompt(_: str) -> str:
+                raise AssertionError("safe synthetic loopback mutation must not prompt")
+
+            self.assertEqual(
+                CodexMainAgent._review_pending_attack_authorizations(
+                    database, stage, input_fn=unexpected_prompt,
+                ),
+                1,
+            )
+            with closing(sqlite3.connect(database)) as conn:
+                self.assertEqual(conn.execute(
+                    "SELECT status FROM attack_authorization_envelopes"
+                ).fetchone(), ("approved",))
+                details = json.loads(conn.execute(
+                    "SELECT details_json FROM audit_events "
+                    "WHERE event_type='attack.authorization.approved'"
+                ).fetchone()[0])
+            self.assertEqual(
+                details["decision_source"],
+                "scanner_created_loopback_identity",
+            )
+
+    def test_owned_loopback_high_impact_post_is_auto_approved(self) -> None:
+        payload = json.dumps({
+            "credential_references": [{
+                "label": "fixture:identity_synthetic",
+                "identity_role": "identity_synthetic",
+            }],
+            "test_fixtures": [{
+                "fact_type": "owned_test_object",
+                "fact_value": {
+                    "credential_label": "fixture:identity_synthetic",
+                    "resource": "account",
+                    "disposable": True,
+                    "cleanup_allowed": True,
+                },
+            }],
+        })
+        for path in ("/api/v3/forgot-password", "/admin/create_admin", "/api/payments"):
+            with self.subTest(path=path):
+                self.assertTrue(NativePipelineAgent._synthetic_loopback_auto_approval(
+                    method="POST", origin="http://127.0.0.1:5002",
+                    normalized_path=path, risk_class="external_side_effect",
+                    payload_json=payload,
+                ))
+
+    def test_owned_loopback_auto_approval_keeps_destructive_boundaries(self) -> None:
+        payload = json.dumps({
+            "credential_references": [{
+                "label": "fixture:identity_synthetic",
+                "identity_role": "identity_synthetic",
+            }],
+            "test_fixtures": [{
+                "fact_type": "owned_test_object",
+                "fact_value": {
+                    "credential_label": "fixture:identity_synthetic",
+                    "resource": "account",
+                    "disposable": True,
+                    "cleanup_allowed": True,
+                },
+            }],
+        })
+        cases = (
+            ("DELETE", "http://127.0.0.1:5002", "test_resource_delete"),
+            ("POST", "https://example.test", "external_side_effect"),
+            ("POST", "http://127.0.0.1:5002", "destructive_or_bulk"),
+        )
+        for method, origin, risk_class in cases:
+            with self.subTest(method=method, origin=origin, risk_class=risk_class):
+                self.assertFalse(NativePipelineAgent._synthetic_loopback_auto_approval(
+                    method=method, origin=origin, normalized_path="/api/resource",
+                    risk_class=risk_class, payload_json=payload,
+                ))
+
+    def test_attack_authorization_prompt_is_resolved_once_and_audited(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            database = completed_pipeline(Path(temporary))
+            with closing(sqlite3.connect(database)) as conn:
+                stage = start_stage_run(conn, scan_id="scan_native", stage="attack")
+                task = create_task(
+                    conn, stage_run_id=stage, skill_name="hunt-injection",
+                )
+            transition_task(database, "scan_native", stage, task, "running")
+            with closing(sqlite3.connect(database)) as conn, conn:
+                conn.executemany(
+                    """INSERT INTO attack_authorization_envelopes
+                       (envelope_id,scan_id,stage_run_id,task_id,policy_id,
+                        policy_sha256,method,origin,normalized_path,provenance_kind,
+                        risk_class,approval_reason,max_requests,max_body_bytes,
+                        status,requested_at)
+                       VALUES (?,'scan_native',?,?, 'policy',?,'POST',
+                               'https://example.test',?,'agent_proposed',
+                               'external_side_effect','external_side_effect',
+                               10,16384,'pending',1)""",
+                    [
+                        ("envelope_approve", stage, task, "a" * 64, "/api/items/:id"),
+                        ("envelope_deny", stage, task, "a" * 64, "/api/admin-action"),
+                    ],
+                )
+            answers = []
+            responses = iter(["y", "N"])
+
+            def approve(prompt: str) -> str:
+                answers.append(prompt)
+                return next(responses)
+
+            self.assertEqual(
+                CodexMainAgent._review_pending_attack_authorizations(
+                    database, stage, input_fn=approve,
+                ),
+                2,
+            )
+            self.assertEqual(
+                CodexMainAgent._review_pending_attack_authorizations(
+                    database, stage, input_fn=approve,
+                ),
+                0,
+            )
+            self.assertEqual(len(answers), 2)
+            with closing(sqlite3.connect(database)) as conn:
+                rows = conn.execute(
+                    """SELECT status,decided_at,expires_at
+                       FROM attack_authorization_envelopes ORDER BY envelope_id"""
+                ).fetchall()
+                event_types = {
+                    row[0] for row in conn.execute(
+                        """SELECT event_type FROM audit_events
+                           WHERE event_type LIKE 'attack.authorization.%'"""
+                    )
+                }
+            status, decided_at, expires_at = rows[0]
+            self.assertEqual(status, "approved")
+            self.assertGreater(expires_at, decided_at)
+            self.assertEqual(rows[1][0], "denied")
+            self.assertIsNone(rows[1][2])
+            self.assertEqual(event_types, {
+                "attack.authorization.approved",
+                "attack.authorization.denied",
+            })
+
+    def test_main_stages_hunt_skills_and_custom_attack_agent(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            database = completed_pipeline(root)
+            scope = root / "Scope.md"
+            policy = root / "TargetPolicy.json"
+            scope.write_text("# approved", encoding="utf-8")
+            from test_policy_guidance import bound
+            policy.write_text(json.dumps({"policies": [bound(root).model_dump(mode="json")]}), encoding="utf-8")
+
+            def fake_run(command, **kwargs):
+                self.assertEqual(kwargs["timeout"], 6100)
+                self.assertEqual(kwargs["idle_timeout"], 360)
+                work = Path(command[command.index("--cd") + 1])
+                self.assertNotIn("--ephemeral", command)
+                self.assertEqual(
+                    command[command.index("--sandbox") + 1],
+                    "workspace-write",
+                )
+                self.assertNotIn("danger-full-access", command)
+                self.assertNotIn("--add-dir", command)
+                self.assertEqual(
+                    command[command.index("--model") + 1], "gpt-6-luna"
+                )
+                self.assertIn('access_programs.cyber="standard"', command)
+                self.assertTrue(
+                    (work / ".codex/agents/aidast-attack.toml").is_file()
+                )
+                agent_config = (
+                    work / ".codex/agents/aidast-attack.toml"
+                ).read_text(encoding="utf-8")
+                self.assertIn('model = "gpt-6-luna"', agent_config)
+                self.assertIn("$aidast-policy", agent_config)
+                self.assertIn("$aidast-policy", kwargs["input"])
+                self.assertIn(
+                    "fresh scanner-owned synthetic administrator",
+                    kwargs["input"],
+                )
+                self.assertTrue((work / ".agents/skills/aidast-policy/SKILL.md").is_file())
+                self.assertIn("Sensitive data", (work / "TargetPolicy.json").read_text())
+                self.assertEqual((work / "scope.md").read_bytes(), scope.read_bytes())
+                overrides = tomllib.loads("\n".join(
+                    command[index + 1]
+                    for index, value in enumerate(command[:-1]) if value == "--config"
+                ))
+                self.assertEqual(
+                    overrides["agents"]["aidast_attack"]["config_file"],
+                    str(work / ".codex/agents/aidast-attack.toml"),
+                )
+                self.assertTrue(overrides["agents"]["aidast_attack"]["description"])
+                self.assertTrue(
+                    (work / ".agents/skills/aidast-live-attack/SKILL.md").is_file()
+                )
+                live_skill = (
+                    work / ".agents/skills/aidast-live-attack/SKILL.md"
+                ).read_text(encoding="utf-8")
+                self.assertIn(
+                    "black-box source-disclosure evidence",
+                    live_skill,
+                )
+                self.assertIn("recovery phrases or mnemonic seeds", live_skill)
+                self.assertTrue((work / "tools/request_cli.py").is_file())
+                self.assertTrue((work / "tools/template_cli.py").is_file())
+                self.assertTrue(
+                    (work / "hunt-skills/hunt-dispatch/SKILL.md").is_file()
+                )
+                self.assertTrue((work / "hunt-skills/hunt-idor/SKILL.md").is_file())
+                self.assertLessEqual(
+                    len(list((work / "hunt-skills").glob("hunt-*/SKILL.md"))), 9
+                )
+                self.assertFalse((work / "hunt-skills/hunt-xxe").exists())
+                self.assertFalse((work / "hunt-skills/chain").exists())
+                config = json.loads((work / "config.json").read_text(encoding="utf-8"))
+                self.assertEqual(config["pipeline_db_path"], "broker://pipeline")
+                self.assertNotIn(str(database.resolve()), json.dumps(config))
+                self.assertIn("hunt-idor", config["hunt_skill_names"])
+                self.assertIn(
+                    "identifier parameter",
+                    config["hunt_skill_selection_reasons"]["hunt-idor"],
+                )
+                self.assertEqual(config["hunt_skill_root"], "hunt-skills")
+                self.assertEqual(
+                    config["hunt_skill_documents"]["hunt-idor"]["path"],
+                    "hunt-skills/hunt-idor/SKILL.md",
+                )
+                self.assertEqual(
+                    len(config["hunt_skill_documents"]["hunt-idor"]["sha256"]),
+                    64,
+                )
+                self.assertEqual(config["attack_tasks"][0]["task_id"], "task_one")
+                self.assertEqual(config["attack_templates"], [])
+                output = Path(command[command.index("--output-last-message") + 1])
+                output.write_text(AttackStageResult(
+                    status="COMPLETED", scan_id="scan_native",
+                    db_path="broker://pipeline", stage_run_id="stage_attack",
+                    attack_agent_ids=["/root/aidast_attack"],
+                ).model_dump_json(), encoding="utf-8")
+                return SimpleNamespace(returncode=0, stderr="")
+
+            agent = CodexMainAgent(
+                attack_model="gpt-6-luna",
+                timeout_seconds=6100,
+                python_executable=str(Path(__file__).resolve()),
+            )
+            with (
+                patch("aidast.agents.main.shutil.which", return_value="codex.exe"),
+                patch.object(CodexMainAgent, "_require_login"),
+                patch("aidast.agents.main.codex_process.run_codex", side_effect=fake_run),
+            ):
+                result = agent.run_attack_orchestrator(
+                    scan_id="scan_native", db_path=database, scope_path=scope,
+                    policy_path=policy, stage_run_id="stage_attack",
+                    attack_tasks=[{
+                        "task_id": "task_one", "skill_name": "hunt-idor",
+                        "selection_reasons": ["identifier parameter"],
+                    }],
+                    selected_skill_names=("hunt-idor",),
+                    selection_reasons={"hunt-idor": ("identifier parameter",)},
+                )
+            self.assertEqual(result.attack_agent_ids, ["/root/aidast_attack"])
+            self.assertEqual(result.db_path, str(database.resolve()))
+
+
+class NativeAttackDatabaseCliTests(unittest.TestCase):
+    def test_agent_helper_queries_recon_and_commits_attack_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            database = completed_pipeline(root)
+            endpoint_id = query(
+                database,
+                "SELECT endpoint_id FROM endpoints WHERE path='/api/items'",
+            )[0]["endpoint_id"]
+            with closing(sqlite3.connect(database)) as conn:
+                stage_run_id = start_stage_run(conn, scan_id="scan_native", stage="attack")
+                task_id = create_task(
+                    conn, stage_run_id=stage_run_id, skill_name="hunt-cors",
+                )
+            transition_task(
+                database, "scan_native", stage_run_id, task_id, "running"
+            )
+            attempt = root / "attempt.json"
+            attempt.write_text(json.dumps({
+                "task_id": task_id, "skill_name": "hunt-cors", "endpoint_id": endpoint_id,
+                "request_fingerprint": "a" * 64, "method": "GET",
+                "url": "https://example.test/api/items", "payload_variant": "baseline",
+                "response_status": 200, "response_signature": "b" * 64,
+                "outcome": "lead",
+            }), encoding="utf-8")
+            attempt_result = commit_attempt(database, "scan_native", attempt)
+            self.assertTrue(attempt_result["committed"])
+            duplicate = commit_attempt(database, "scan_native", attempt)
+            self.assertFalse(duplicate["committed"])
+            self.assertEqual(duplicate["attempt_id"], attempt_result["attempt_id"])
+
+            with closing(sqlite3.connect(database)) as conn, conn:
+                conn.execute("""INSERT INTO attack_http_requests
+                    (request_id,scan_id,stage_run_id,task_id,policy_id,policy_sha256,
+                     method,url,request_fingerprint,status,response_status,response_bytes,scheduled_at)
+                    VALUES ('http_fixture','scan_native',?,?,'policy',?,'GET',
+                    'https://example.test/api/items',?,'completed',200,5,0)""",
+                    (stage_run_id, task_id, "d" * 64, "a" * 64))
+
+            finding = root / "finding.json"
+            target_attempt = {
+                "request": {"query_parameters": {"object_id": "7"},
+                            "headers": {"Origin": "https://redacted.invalid"}},
+                "assertions": [{
+                    "assertion_id": "cors-origin",
+                    "kind": "header_equals",
+                    "header": "Access-Control-Allow-Origin",
+                    "expected": "https://redacted.invalid",
+                }],
+            }
+            positive_attempt = {
+                "request": {"query_parameters": {"object_id": "7"}},
+                "assertions": [{
+                    "assertion_id": "healthy-status",
+                    "kind": "status_equals",
+                    "expected": 200,
+                }],
+            }
+            negative_attempt = {
+                "request": {"query_parameters": {"object_id": "7"},
+                            "headers": {"Origin": "https://same-origin.test"}},
+                "assertions": [{
+                    "assertion_id": "cors-origin",
+                    "kind": "header_equals",
+                    "header": "Access-Control-Allow-Origin",
+                    "expected": "https://redacted.invalid",
+                }],
+            }
+            runtime_contract = {
+                "schema_version": 1,
+                "target": target_attempt,
+                "positive_control": positive_attempt,
+                "negative_control": negative_attempt,
+            }
+            development_contract = {
+                "schema_version": 1,
+                "actions": [{
+                    "contract_id": "refresh-current-role",
+                    "action_type": "refresh_current_role_credential",
+                    "blocker_axis": "identity_auth",
+                    "endpoint_template": "/api/session/refresh",
+                    "method": "GET",
+                    "risk_class": "http_probe",
+                    "request": {},
+                    "assertions": [{
+                        "assertion_id": "refresh-marker",
+                        "kind": "body_contains",
+                        "expected": "refreshed",
+                    }],
+                    "credential_roles": [],
+                }],
+            }
+            impact_development_contract = {
+                "schema_version": 1,
+                "actions": [{
+                    "contract_id": "bounded-cors-impact",
+                    "path_id": "bounded-impact-confirmation",
+                    "endpoint_template": "/api/items",
+                    "method": "GET",
+                    "request": {
+                        "query_parameters": {"object_id": "7"},
+                        "headers": {"Origin": "https://redacted.invalid"},
+                    },
+                    "assertions": [{
+                        "assertion_id": "cors-impact-origin",
+                        "kind": "header_equals",
+                        "header": "Access-Control-Allow-Origin",
+                        "expected": "https://redacted.invalid",
+                    }],
+                    "credential_roles": [],
+                }],
+            }
+            finding.write_text(json.dumps({
+                "scan_id": "scan_native", "endpoint_id": endpoint_id,
+                "vuln_type": "CORS", "severity": "MEDIUM",
+                "title": "Untrusted origin accepted",
+                "description": "The observed response reflected an untrusted origin.",
+                "lead_attempt_ids": [attempt_result["attempt_id"]],
+                "reproduction": {
+                    "method": "GET", "endpoint_template": "/api/items",
+                    "injection_location": "query", "parameter_name": "object_id",
+                    "payload_template": {"object_id": "<slot:string>"},
+                    "required_identity_roles": [],
+                    "source_request_ids": ["http_fixture"],
+                    "runtime_contract": runtime_contract,
+                    "development_contract": development_contract,
+                    "impact_development_contract": impact_development_contract,
+                },
+                "evidence": [{
+                    "role": "unauthenticated", "method": "GET",
+                    "url": "https://example.test/api/items", "response_status": 200,
+                    "response_headers": "access-control-allow-origin: https://redacted.invalid",
+                    "response_body": "proof", "response_time_ms": 10,
+                }],
+            }), encoding="utf-8")
+            result = commit_finding(database, "scan_native", finding)
+            with closing(sqlite3.connect(database)) as conn:
+                stored = conn.execute(
+                    "SELECT vuln_type,status FROM findings WHERE finding_id=?",
+                    (result["finding_id"],),
+                ).fetchone()
+                requests = conn.execute("SELECT COUNT(*) FROM attack_requests").fetchone()[0]
+                promoted = conn.execute(
+                    """SELECT outcome,finding_id,resolved_at IS NOT NULL
+                       FROM attack_attempts WHERE attempt_id=?""",
+                    (attempt_result["attempt_id"],),
+                ).fetchone()
+                stored_runtime = conn.execute(
+                    """SELECT runtime_contract_json,runtime_contract_sha256,
+                              development_contract_json,development_contract_sha256,
+                              impact_development_contract_json,
+                              impact_development_contract_sha256,
+                              spec_sha256
+                       """
+                    "FROM finding_reproduction_specs WHERE finding_id=?",
+                    (result["finding_id"],),
+                ).fetchone()
+                schema_version = conn.execute("PRAGMA user_version").fetchone()[0]
+            self.assertEqual(stored, ("CORS", "unreviewed"))
+            self.assertEqual(requests, 1)
+            self.assertEqual(promoted, ("confirmed", result["finding_id"], 1))
+            self.assertEqual(result["promoted_attempt_count"], 1)
+            normalized_runtime = HttpRuntimeContract.model_validate(
+                runtime_contract
+            ).model_dump(mode="json")
+            self.assertEqual(json.loads(stored_runtime[0]), normalized_runtime)
+            self.assertEqual(stored_runtime[1], canonical_sha256(normalized_runtime))
+            normalized_development = DevelopmentRuntimeContract.model_validate(
+                development_contract
+            ).model_dump(mode="json")
+            self.assertEqual(json.loads(stored_runtime[2]), normalized_development)
+            self.assertEqual(
+                stored_runtime[3], canonical_sha256(normalized_development)
+            )
+            from aidast.validation.contracts.impact_development import impact_contract_document
+            normalized_impact = impact_contract_document(
+                ImpactDevelopmentRuntimeContract.model_validate(impact_development_contract)
+            )
+            self.assertEqual(json.loads(stored_runtime[4]), normalized_impact)
+            self.assertEqual(
+                stored_runtime[5], canonical_sha256(normalized_impact)
+            )
+            self.assertTrue(all(len(value) == 64 for value in stored_runtime[1::2]))
+            self.assertEqual(schema_version, 12)
+
+            second_attempt = root / "second-attempt.json"
+            second_attempt.write_text(json.dumps({
+                "task_id": task_id, "skill_name": "hunt-cors", "endpoint_id": endpoint_id,
+                "request_fingerprint": "c" * 64, "method": "GET",
+                "url": "https://example.test/api/items", "payload_variant": "control",
+                "response_status": 200, "response_signature": "e" * 64,
+                "outcome": "lead",
+            }), encoding="utf-8")
+            second = commit_attempt(database, "scan_native", second_attempt)
+            resolution = root / "resolution.json"
+            resolution.write_text(json.dumps({
+                "attempt_id": second["attempt_id"], "resolution": "rejected",
+                "reason": "matched the negative control",
+            }), encoding="utf-8")
+            self.assertTrue(
+                resolve_attempt(database, "scan_native", resolution)["resolved"]
+            )
+            with closing(sqlite3.connect(database)) as conn:
+                closed = conn.execute(
+                    "SELECT outcome,resolution_reason,resolved_at IS NOT NULL "
+                    "FROM attack_attempts WHERE attempt_id=?", (second["attempt_id"],),
+                ).fetchone()
+            self.assertEqual(closed, ("rejected", "matched the negative control", 1))
+            transition_task(
+                database, "scan_native", stage_run_id, task_id, "completed"
+            )
+            with closing(sqlite3.connect(database)) as conn:
+                finish_stage_run(conn, stage_run_id, status="completed")
+                candidate = CandidateIntegrityGate(conn).validate_finding(
+                    case_id="case_runtime", scan_id="scan_native",
+                    finding_id=result["finding_id"],
+                )
+            self.assertEqual(
+                candidate.staged._blind_case.runtime_contract,
+                normalized_runtime,
+            )
+
+
+if __name__ == "__main__":
+    unittest.main()
