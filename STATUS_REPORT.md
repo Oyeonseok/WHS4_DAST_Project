@@ -24,7 +24,7 @@ artex(공격/체이닝/검증 본체)를 기준으로, benchmark의 필요한 �
 
 **attack 다음 단계(chaining → validation → report)가 자동으로 이어지는지는 아직 검증 전입니다.** 지금까지는 recon→attack만 확인했고, attack 배치가 끝나는 대로 chaining부터 이어서 확인할 계획입니다.
 
-**아직 git 저장소가 아닙니다.** `attack/integrated` 폴더는 지금 로컬 실험 상태이고, 팀 repo에 올리려면 테스트가 끝난 뒤 git 저장소로 만들고 커밋/푸시하는 절차가 따로 필요합니다.
+**팀 repo에 올렸습니다.** `integrate/strix-recon-merge` 브랜치로 push 완료했습니다 (main과의 충돌 정리는 하지 않고 통으로 새 브랜치만 올린 상태입니다): https://github.com/Oyeonseok/WHS4_DAST_Project/tree/integrate/strix-recon-merge
 
 **속도가 느립니다.** 공격 단계가 엔드포인트 하나당 실제 모델 호출을 거치기 때문에, 112개 커버리지 항목을 전부 처리하는 데 꽤 오래 걸립니다(현재도 진행 중). 실타깃처럼 범위가 넓어지면 더 오래 걸릴 수 있다는 걸 감안해야 합니다.
 
