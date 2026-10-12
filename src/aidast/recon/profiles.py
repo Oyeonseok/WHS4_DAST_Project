@@ -11,7 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from aidast.scope.models import ScopeAnalysis
 
-ProfileId = Literal["safe-recon", "focused-discovery"]
+ProfileId = Literal["safe-recon", "focused-discovery", "bug-bounty-safe"]
 
 
 class ProfileCaps(BaseModel):
@@ -39,6 +39,13 @@ EXECUTION_PROFILES: Final[Mapping[ProfileId, ProfileCaps]] = MappingProxyType(
             timeout_seconds=20,
             max_depth=3,
             max_requests=2000,
+        ),
+        "bug-bounty-safe": ProfileCaps(
+            requests_per_second=10,
+            concurrency=2,
+            timeout_seconds=15,
+            max_depth=2,
+            max_requests=500,
         ),
     }
 )
