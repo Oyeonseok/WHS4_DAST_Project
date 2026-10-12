@@ -73,6 +73,41 @@ def test_profile_bounds_use_structured_rules_only():
     assert build_scope_execution_requirements(doc.analysis).header_requirements_status == 'pending'
 
 
+def test_global_automatic_scanner_ban_is_an_effective_launch_blocker():
+    from aidast.scope.execution_rules import applicable_blockers, validate_policy_prerequisites
+    from aidast.web.requirements import build_scope_execution_requirements
+    quote = 'Please do not use automatic scanners.'
+    exclusion = dict(
+        key='automatic_scanners', label='Automatic scanners', source_quote=quote,
+        target_assets=[], condition={'operator': 'predicate', 'predicate': {
+            'key': 'automatic_scanner_activity', 'field': 'semantic',
+            'operator': 'equals', 'value': 'use automatic scanners'}},
+    )
+    rules = models.ScopeExecutionRules(policy_review_version=2, exclusions=[exclusion])
+    blockers = applicable_blockers(rules, ['https://app.example/'])
+    assert [(item.label, item.source_quote) for item in blockers] == [('Automatic scanners', quote)]
+    with pytest.raises(ValueError, match='Automatic scanners'):
+        validate_policy_prerequisites(rules, ['https://app.example/'])
+
+    data = document().analysis.model_dump()
+    data.update(required_request_headers=[], execution_rules=rules.model_dump())
+    data['source_evidence'].append(dict(section='Prohibited', quote=quote))
+    requirements = build_scope_execution_requirements(models.ScopeAnalysis.model_validate(data))
+    assert [item.label for item in requirements.policy_blockers] == ['Automatic scanners']
+
+
+def test_conditional_scanner_exclusion_remains_a_request_guard():
+    from aidast.scope.execution_rules import effective_blocking_requirements
+    quote = 'Do not run automatic scans against the billing endpoint.'
+    rules = models.ScopeExecutionRules(exclusions=[dict(
+        key='billing_scanner', label='Billing scanner', source_quote=quote,
+        target_assets=['https://billing.example/'], condition={'operator': 'predicate', 'predicate': {
+            'key': 'automatic_scanner_activity', 'field': 'semantic',
+            'operator': 'equals', 'value': 'automatic scanning'}},
+    )])
+    assert effective_blocking_requirements(rules) == []
+
+
 def test_narrow_rules_and_shared_binding(tmp_path):
     from aidast.scope.execution_rules import bind_execution_policies
     from aidast.recon.policy import TargetPolicy

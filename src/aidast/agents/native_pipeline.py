@@ -513,6 +513,8 @@ Supported execution_rules fields:
   approved production assets. If applicability cannot be grounded, record an advisory
   without inventing assets.
 - blocking_requirements: label, source_quote, reason, target_assets for mandatory unsupported controls.
+  A blanket prohibition on automatic/automated scanners or scanning is incompatible
+  with this automated DAST and must be a global blocking_requirement, not an exclusion.
   Preserve conditional unsupported controls by binding exact approved assets: production-only
   controls bind only production assets; obligations for OTHER assets bind only those OTHER
   assets. Do not block unrelated targets. Empty target_assets means a global mandatory

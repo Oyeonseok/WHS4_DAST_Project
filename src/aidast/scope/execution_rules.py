@@ -5,7 +5,14 @@ import json
 from pathlib import Path
 from typing import Callable, Final
 from uuid import uuid4
-from aidast.scope.models import ScopeAnalysis, ScopeDocument, ScopeExecutionInterpretation, ScopeExecutionRules, MAX_POLICY_REFERENCE_EDGES
+from aidast.scope.models import (
+    BlockingRequirement,
+    ScopeAnalysis,
+    ScopeDocument,
+    ScopeExecutionInterpretation,
+    ScopeExecutionRules,
+    MAX_POLICY_REFERENCE_EDGES,
+)
 from aidast.core.http_safety import validate_platform_username
 
 DEFAULT_SCOPE_MODEL: Final = "gpt-5.6-sol"
@@ -55,8 +62,52 @@ def validate_policy_prerequisites(rules: ScopeExecutionRules | None, selected_as
 
 def applicable_blockers(rules: ScopeExecutionRules, selected_assets):
     selected = set(selected_assets)
-    return [item for item in rules.blocking_requirements
+    return [item for item in effective_blocking_requirements(rules)
             if not item.target_assets or selected.intersection(item.target_assets)]
+
+
+def _blanket_automation_exclusion(rule) -> bool:
+    """Recognize a grounded global ban that is incompatible with AI-DAST.
+
+    Conditional/path-specific exclusions remain request or Agent guards.  This
+    promotion is deliberately limited to a single global semantic predicate
+    whose reviewed text explicitly describes automatic scanner use.
+    """
+    if rule.target_assets or rule.condition.operator != 'predicate':
+        return False
+    predicate = rule.condition.predicate
+    if predicate is None or predicate.field != 'semantic' or predicate.operator != 'equals':
+        return False
+    text = ' '.join((rule.label, rule.source_quote, predicate.value or '')).casefold()
+    automation = any(term in text for term in ('automatic', 'automated', 'automation'))
+    scanner = any(term in text for term in ('scanner', 'scanning'))
+    prohibition = any(term in text for term in (
+        'do not', 'not use', 'forbidden', 'prohibited', 'disallowed', 'not allowed',
+    ))
+    return automation and scanner and prohibition
+
+
+def effective_blocking_requirements(rules: ScopeExecutionRules) -> list[BlockingRequirement]:
+    """Return declared blockers plus global tool bans the runtime can prove."""
+    result = list(rules.blocking_requirements)
+    existing = {(item.source_quote, tuple(item.target_assets)) for item in result}
+    for rule in rules.exclusions or []:
+        if not _blanket_automation_exclusion(rule):
+            continue
+        identity = (rule.source_quote, ())
+        if identity in existing:
+            continue
+        result.append(BlockingRequirement(
+            label=rule.label,
+            source_quote=rule.source_quote,
+            target_assets=[],
+            reason=(
+                'The approved program forbids automatic scanners, and AI-DAST '
+                'cannot execute this program without violating that rule.'
+            ),
+        ))
+        existing.add(identity)
+    return result
 
 
 EXECUTION_INTERPRETATION_VERSION = "4"

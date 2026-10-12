@@ -298,67 +298,138 @@ def rule_digest(rules) -> str:
     return hashlib.sha256(_json(_rules(rules)).encode('utf-8')).hexdigest()
 
 
-def _asset_host_envelope(asset):
-    """Recognize only literal hosts and leading DNS wildcards; else unknown.
+def _asset_envelope(asset):
+    """Parse the bounded URL-like forms used by approved Scope assets.
 
-    Paths, schemes and ports deliberately never prove alias disjointness. This
-    is applicability analysis, not a new scope authorization parser.
+    The result is only used to decide whether an exclusion binding can apply.
+    It never grants target authorization; TargetPolicy remains the authority for
+    that.  Unknown or ambiguous forms deliberately return ``None``.
     """
     try:
         _text(asset)
         if any(ord(c) < 33 or ord(c) == 127 for c in asset) or '\\' in asset:
             return None
-        if '://' in asset:
-            parsed = urlsplit(asset)
-            if (parsed.scheme not in {'http', 'https'} or not parsed.hostname
-                    or '@' in parsed.netloc or parsed.query or parsed.fragment
-                    or parsed.netloc.endswith(':')):
-                return None
-            if parsed.port is not None and not 1 <= parsed.port <= 65535:
-                return None
-            host = parsed.hostname
-        else:
-            host = asset
+        qualified = '://' in asset
+        parsed = urlsplit(asset if qualified else '//' + asset)
+        if (qualified and parsed.scheme not in {'http', 'https'}
+                or not parsed.hostname or '@' in parsed.netloc
+                or parsed.query or parsed.fragment or parsed.netloc.endswith(':')):
+            return None
+        if not qualified and parsed.scheme:
+            return None
+        port = parsed.port
+        if port is not None and not 1 <= port <= 65535:
+            return None
+        host = parsed.hostname
         wildcard = host.startswith('*.')
         host = host[2:] if wildcard else host
+        if '*' in host:
+            return None
         host = host.encode('idna').decode('ascii').lower().rstrip('.')
+        numeric_address = False
         try:
             address = ipaddress.ip_address(host)
-            return None if wildcard else (str(address), False)
+            if wildcard:
+                return None
+            host = str(address)
+            numeric_address = True
+            # A bare IPv4/CIDR string is not an URL path binding.
+            if not qualified and re.fullmatch(r'/[0-9]{1,3}', parsed.path or ''):
+                return None
         except ValueError:
-            pass
+            if len(host) > 253 or not all(re.fullmatch(
+                    r'[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?', label)
+                    for label in host.split('.')):
+                return None
         # Resolver-dependent abbreviated/octal/hex IPv4 spellings cannot prove
         # disjointness from a literal address (for example 127.1 vs 127.0.0.1).
-        if re.fullmatch(r'(?:0x[0-9a-f]+|[0-9]+)(?:\.(?:0x[0-9a-f]+|[0-9]+))*', host):
+        if not numeric_address and re.fullmatch(
+                r'(?:0x[0-9a-f]+|[0-9]+)(?:\.(?:0x[0-9a-f]+|[0-9]+))*', host):
             return None
-        if len(host) > 253 or not all(re.fullmatch(r'[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?', label)
-                                      for label in host.split('.')):
-            return None
-        return host, wildcard
+        path = _path(parsed.path or '/')
+        scheme = parsed.scheme if qualified else None
+        effective_port = port if port is not None else (
+            443 if scheme == 'https' else 80 if scheme == 'http' else None)
+        return scheme, host, wildcard, effective_port, path
     except (ValueError, TypeError, UnicodeError):
         return None
+
+
+def _host_contains(container, member):
+    left, left_wildcard = container
+    right, right_wildcard = member
+    if not left_wildcard:
+        return not right_wildcard and left == right
+    if right_wildcard:
+        return right == left or right.endswith('.' + left)
+    return right.endswith('.' + left)
+
+
+def _path_contains(container, member):
+    prefix = container.rstrip('/')
+    return not prefix or member == prefix or member.startswith(prefix + '/')
+
+
+def _asset_contains(container, member):
+    """Return whether every request described by member is inside container."""
+    c_scheme, c_host, c_wildcard, c_port, c_path = container
+    m_scheme, m_host, m_wildcard, m_port, m_path = member
+    return (not c_scheme or c_scheme == m_scheme) and (c_port is None or c_port == m_port) \
+        and _host_contains((c_host, c_wildcard), (m_host, m_wildcard)) \
+        and _path_contains(c_path, m_path)
+
+
+def _assets_intersect(left, right):
+    l_scheme, l_host, l_wildcard, l_port, l_path = left
+    r_scheme, r_host, r_wildcard, r_port, r_path = right
+    if l_scheme and r_scheme and l_scheme != r_scheme:
+        return False
+    if l_port is not None and r_port is not None and l_port != r_port:
+        return False
+    if not (_host_contains((l_host, l_wildcard), (r_host, r_wildcard))
+            or _host_contains((r_host, r_wildcard), (l_host, l_wildcard))):
+        return False
+    return _path_contains(l_path, r_path) or _path_contains(r_path, l_path)
 
 
 def exclusion_applicability(rule, target_asset):
     """Return apply, disjoint or overlap without rewriting source bindings.
 
-    Nonidentical aliases with possibly intersecting host envelopes require an
-    offline hold; no predicate/classification can resolve that mapping here.
+    A selected asset wholly contained by a rule binding is an unambiguous
+    application, even when one side uses a wildcard or a path-qualified URL.
+    Partially intersecting assets remain overlaps for per-request resolution.
     """
     assets = rule['target_assets']
     if not assets or target_asset in assets:
         return 'apply'
-    selected = _asset_host_envelope(target_asset)
+    selected = _asset_envelope(target_asset)
+    overlap = False
     for asset in assets:
-        bound = _asset_host_envelope(asset)
+        bound = _asset_envelope(asset)
         if selected is None or bound is None:
-            return 'overlap'
-        left, left_wildcard = selected
-        right, right_wildcard = bound
-        if (left == right or (left_wildcard and right.endswith('.' + left))
-                or (right_wildcard and left.endswith('.' + right))):
-            return 'overlap'
-    return 'disjoint'
+            overlap = True
+        elif _asset_contains(bound, selected):
+            return 'apply'
+        elif _assets_intersect(selected, bound):
+            overlap = True
+    return 'overlap' if overlap else 'disjoint'
+
+
+def _request_applicability(rule, url):
+    """Resolve a static overlap against the concrete outbound request URL."""
+    request = _asset_envelope(url)
+    if request is None:
+        return 'overlap'
+    ambiguous = False
+    for asset in rule['target_assets']:
+        bound = _asset_envelope(asset)
+        if bound is None:
+            ambiguous = True
+        elif _asset_contains(bound, request):
+            return 'apply'
+        elif _assets_intersect(bound, request):
+            ambiguous = True
+    return 'overlap' if ambiguous else 'disjoint'
 
 
 def validate_exclusion_policy(data) -> dict:
@@ -580,9 +651,13 @@ def evaluate_exclusions(data, *, url, method='GET', headers=None, body=None,
     denied, held, overlaps = [], [], []
     for rule, applicability in applicable:
         if applicability == 'overlap':
-            held.append(rule['key'])
-            overlaps.append(rule['key'])
-            continue
+            applicability = _request_applicability(rule, url)
+            if applicability == 'disjoint':
+                continue
+            if applicability == 'overlap':
+                held.append(rule['key'])
+                overlaps.append(rule['key'])
+                continue
         value = expression_value(rule['condition'], rule['key'])
         if value is True:
             denied.append(rule['key'])
