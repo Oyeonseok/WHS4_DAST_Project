@@ -7,7 +7,9 @@ import pytest
 from aidast.recon import db
 from aidast.recon.annotations import ObservationRecorder
 from aidast.pipeline.live_schema import migrate_live_pipeline_schema
-from aidast.attack.coverage import ensure_coverage_manifest, claim_coverage_batch
+from aidast.attack.coverage import (
+    ensure_coverage_manifest, claim_coverage_batch, _task_fixtures,
+)
 from aidast.pipeline.lifecycle import start_stage_run
 
 
@@ -73,9 +75,322 @@ def test_normal_tags_create_parameter_bound_hypotheses_and_account_for_unknowns(
             ('query', 'q', 'unauthenticated'), ('query', 'q', 'unauthenticated')]
         assert conn.execute('PRAGMA foreign_key_check').fetchall() == []
     assert 'private-value' not in json.dumps(agent.contexts)
+    ordinary_observation = agent.contexts[0]['endpoints'][0]['observations'][0]
+    assert 'discovery_kind' not in ordinary_observation
+    assert 'evidence_json' not in ordinary_observation
 
 
-def test_replanning_is_idempotent_and_respects_parameter_identity_variants(tmp_path):
+def test_black_box_planning_never_consumes_source_or_benchmark_answers(tmp_path):
+    from aidast.attack.recon_hypotheses import plan_recon_attack
+
+    path = pipeline(tmp_path)
+    with sqlite3.connect(path) as conn:
+        observation = conn.execute(
+            "SELECT o.observation_id FROM endpoint_observations o "
+            "JOIN endpoints e ON e.endpoint_id=o.endpoint_id "
+            "WHERE e.normalized_path='/search'"
+        ).fetchone()[0]
+        conn.executemany(
+            "INSERT INTO endpoint_annotations(annotation_id,observation_id,annotation_run_id,"
+            "category,tag,rationale,created_at) VALUES (?,?,'tags',?,?,'answer',CURRENT_TIMESTAMP)",
+            [
+                ('source-answer', observation, 'source_vulnerability', 'sqli'),
+                ('benchmark-answer', observation, 'benchmark_catalog_vulnerability', 'xss'),
+            ],
+        )
+        conn.executemany(
+            "INSERT INTO attack_facts(fact_id,scan_id,fact_type,fact_key,fact_value,confidence) "
+            "VALUES (?,'scan',?,?,?,1.0)",
+            [
+                ('owned', 'owned_test_object', 'owned.id', '{"object_id":"1"}'),
+                ('benchmark', 'benchmark_fixture', 'answer.id', '{"object_id":"2"}'),
+            ],
+        )
+
+    agent = Planner()
+    plan_recon_attack(path, 'scan', agent=agent)
+    manifest = ensure_coverage_manifest(path, 'scan')
+
+    serialized = json.dumps(agent.contexts)
+    assert 'source-answer' not in serialized
+    assert 'benchmark-answer' not in serialized
+    assert manifest.by_vulnerability == {'sqli': 1, 'xss': 1}
+    with sqlite3.connect(path) as conn:
+        conn.row_factory = sqlite3.Row
+        assert conn.execute(
+            "SELECT count(*) FROM attack_coverage_items "
+            "WHERE annotation_id IN ('source-answer','benchmark-answer')"
+        ).fetchone()[0] == 0
+        assert [item['fact_type'] for item in _task_fixtures(
+            conn, 'scan', parameter_name='id',
+        )] == ['owned_test_object']
+
+
+def test_grounded_baseline_keeps_strong_recon_signals_in_attack_queue(tmp_path):
+    from aidast.attack.recon_hypotheses import plan_recon_attack
+    path = pipeline(tmp_path)
+
+    def omit_search_hypotheses(response, context):
+        row = next(row for row in response['endpoints'] if row['hypotheses'])
+        row.update({
+            'hypotheses': [],
+            'disposition': 'insufficient_evidence',
+            'reason': 'Model omitted the observed input.',
+        })
+
+    plan_recon_attack(path, 'scan', agent=Planner(omit_search_hypotheses))
+    manifest = ensure_coverage_manifest(path, 'scan')
+    assert manifest.by_vulnerability == {'sqli': 1, 'xss': 1}
+    with sqlite3.connect(path) as conn:
+        assert conn.execute(
+            "SELECT status FROM attack_endpoint_reviews r JOIN endpoints e "
+            "ON e.endpoint_id=r.endpoint_id WHERE e.normalized_path='/search'"
+        ).fetchone() == ('planned',)
+        rationales = [row[0] for row in conn.execute(
+            "SELECT rationale FROM endpoint_annotations WHERE category='attack_hypothesis'"
+        )]
+    assert all('private-value' not in rationale for rationale in rationales)
+
+
+def test_grounded_black_box_hypotheses_supplement_partial_model_plan(tmp_path):
+    from aidast.attack.recon_hypotheses import plan_recon_attack
+    path = pipeline(tmp_path)
+
+    def omit_one_observed_input_class(response, context):
+        row = next(row for row in response['endpoints'] if row['hypotheses'])
+        row['hypotheses'] = [
+            item for item in row['hypotheses'] if item['vuln_class'] == 'sqli'
+        ]
+
+    agent = Planner(omit_one_observed_input_class)
+    plan_recon_attack(path, 'scan', agent=agent)
+    manifest = ensure_coverage_manifest(path, 'scan')
+
+    assert manifest.by_vulnerability == {'sqli': 1, 'xss': 1}
+    assert 'private-value' not in json.dumps(agent.contexts)
+
+
+def test_grounded_planner_upgrade_supplements_completed_plan_without_model(tmp_path):
+    from aidast.attack.recon_hypotheses import (
+        plan_recon_attack, supplement_grounded_hypotheses,
+    )
+
+    path = pipeline(tmp_path)
+    agent = Planner()
+    plan_recon_attack(path, 'scan', agent=agent)
+    with sqlite3.connect(path) as conn:
+        endpoint_id, observation_id = conn.execute(
+            """SELECT e.endpoint_id,o.observation_id
+               FROM endpoints e JOIN endpoint_observations o
+                 ON o.endpoint_id=e.endpoint_id
+               WHERE e.normalized_path='/opaque' LIMIT 1"""
+        ).fetchone()
+        conn.execute(
+            "UPDATE endpoints SET normalized_path='/rest/saveLoginIp',"
+            "path='/rest/saveLoginIp' WHERE endpoint_id=?",
+            (endpoint_id,),
+        )
+        conn.execute(
+            "UPDATE endpoint_observations SET observed_url="
+            "'https://example.test/rest/saveLoginIp' WHERE observation_id=?",
+            (observation_id,),
+        )
+
+    added = supplement_grounded_hypotheses(path, 'scan')
+    repeated = supplement_grounded_hypotheses(path, 'scan')
+
+    assert added >= 1
+    assert repeated == 0
+    with sqlite3.connect(path) as conn:
+        assert conn.execute(
+            """SELECT count(*) FROM endpoint_annotations n
+               JOIN endpoint_observations o ON o.observation_id=n.observation_id
+               WHERE o.endpoint_id=? AND n.category='attack_hypothesis'
+                 AND n.tag='auth_bypass'""",
+            (endpoint_id,),
+        ).fetchone()[0] == 1
+
+
+def test_grounded_baseline_reviews_observed_successful_api_reads_for_exposure():
+    from aidast.attack.coverage import hypothesis_skill_catalog
+    from aidast.attack.recon_hypotheses import _grounded_baseline_hypotheses
+
+    hypotheses = _grounded_baseline_hypotheses({
+        'path': '/api/Profiles', 'method': 'GET', 'auth_required': False,
+        'http_statuses': [200], 'parameters': [], 'technology_context': {},
+        'response_header_names': [],
+    }, hypothesis_skill_catalog())
+
+    assert 'api_misconfig' in {item.vuln_class for item in hypotheses}
+
+
+@pytest.mark.parametrize(
+    ('path', 'method', 'expected'),
+    [
+        ('/rest/user/whoami', 'GET', {'auth_bypass', 'session'}),
+        ('/rest/order-history', 'GET', {'auth_bypass'}),
+        ('/rest/saveLoginIp', 'GET', {'business_logic', 'csrf'}),
+        ('/rest/2fa/disable', 'POST', {'mfa_bypass', 'session', 'business_logic', 'csrf'}),
+    ],
+)
+def test_grounded_route_semantics_create_black_box_boundary_hypotheses(
+    path, method, expected,
+):
+    from aidast.attack.coverage import hypothesis_skill_catalog
+    from aidast.attack.recon_hypotheses import _grounded_baseline_hypotheses
+
+    hypotheses = _grounded_baseline_hypotheses({
+        'path': path, 'method': method, 'auth_required': False,
+        'http_statuses': [200], 'parameters': [], 'technology_context': {},
+        'response_header_names': [],
+    }, hypothesis_skill_catalog())
+    by_class = {item.vuln_class: item for item in hypotheses}
+
+    assert expected <= set(by_class)
+    for name in expected & {'business_logic', 'csrf'}:
+        assert by_class[name].required_identity_role == 'authenticated'
+
+
+def test_state_boundary_and_observed_access_denial_create_auth_bypass_controls():
+    from aidast.attack.coverage import hypothesis_skill_catalog
+    from aidast.attack.recon_hypotheses import _grounded_baseline_hypotheses
+
+    save_login = _grounded_baseline_hypotheses({
+        'path': '/rest/saveLoginIp', 'method': 'GET', 'auth_required': False,
+        'access_statuses': ['authentication_required'], 'http_statuses': [401],
+        'parameters': [], 'technology_context': {}, 'response_header_names': [],
+    }, hypothesis_skill_catalog())
+    change_password = _grounded_baseline_hypotheses({
+        'path': '/rest/user/change-password', 'method': 'GET',
+        'auth_required': False, 'access_statuses': ['authentication_required'],
+        'http_statuses': [401], 'technology_context': {},
+        'response_header_names': [], 'parameters': [{
+            'name': 'current', 'location': 'query', 'role': 'unknown',
+            'data_type': 'string', 'is_identifier': False,
+        }],
+    }, hypothesis_skill_catalog())
+
+    assert any(
+        item.vuln_class == 'auth_bypass'
+        and (item.injection_location, item.parameter_name) == ('endpoint', '')
+        and item.required_identity_role == 'unauthenticated'
+        for item in save_login
+    )
+    assert any(
+        item.vuln_class == 'auth_bypass'
+        and (item.injection_location, item.parameter_name) == ('query', 'current')
+        and item.required_identity_role == 'unauthenticated'
+        for item in change_password
+    )
+
+
+@pytest.mark.parametrize('method', ['GET', 'POST'])
+def test_socketio_transport_inputs_keep_exact_websocket_coverage(method):
+    from aidast.attack.coverage import hypothesis_skill_catalog
+    from aidast.attack.recon_hypotheses import _grounded_baseline_hypotheses
+
+    hypotheses = _grounded_baseline_hypotheses({
+        'path': '/socket.io', 'method': method, 'auth_required': False,
+        'http_statuses': [200], 'technology_context': {},
+        'response_header_names': [], 'parameters': [
+            {'name': name, 'location': 'query', 'role': 'unknown',
+             'data_type': 'string', 'is_identifier': False}
+            for name in ('EIO', 'transport', 't', 'sid')
+        ],
+    }, hypothesis_skill_catalog())
+
+    exact = {
+        (item.injection_location, item.parameter_name)
+        for item in hypotheses if item.vuln_class == 'websocket'
+    }
+    assert {('endpoint', ''), ('query', 'EIO'), ('query', 'transport'),
+            ('query', 't')} <= exact
+    assert ('query', 'sid') not in exact
+
+
+def test_attack_plans_exact_public_client_declarations_but_not_inferred_crud(tmp_path):
+    from aidast.attack.recon_hypotheses import plan_recon_attack
+    path = pipeline(tmp_path)
+    with sqlite3.connect(path) as conn:
+        origin = conn.execute('SELECT origin_id FROM origins').fetchone()[0]
+        ObservationRecorder(conn, origin_id=origin, scan_id='scan').record('passive', [
+            {
+                'method': 'POST', 'path': '/rest/chat',
+                'url': 'https://example.test/rest/chat',
+                'source': 'adaptive_js', 'discovery_kind': 'js_http_call',
+                'verification_status': 'candidate', 'traffic_class': 'passive',
+                'declared_parameters': [
+                    {'name': 'messages', 'location': 'json', 'data_type': 'array'},
+                ],
+            },
+            {
+                'method': 'DELETE', 'path': '/api/Guesses/{id}',
+                'url': 'https://example.test/api/Guesses/{id}',
+                'source': 'passive_route_inference',
+                'discovery_kind': 'rest_resource_family',
+                'verification_status': 'candidate', 'traffic_class': 'passive',
+            },
+            {
+                'method': 'GET', 'path': '/%7B%7Bhref%7D%7D',
+                'url': 'https://example.test/%7B%7Bhref%7D%7D',
+                'source': 'playwright_http', 'discovery_kind': 'http_request',
+            },
+        ])
+
+    agent = Planner()
+    result = plan_recon_attack(path, 'scan', agent=agent)
+    manifest = ensure_coverage_manifest(path, 'scan')
+
+    planned_paths = {
+        endpoint['path']
+        for call in agent.contexts
+        for endpoint in call['endpoints']
+    }
+    assert '/rest/chat' in planned_paths
+    assert '/api/Guesses/{id}' not in planned_paths
+    assert '/%7B%7Bhref%7D%7D' not in planned_paths
+    assert result['total_endpoints'] == 3
+    assert manifest.by_vulnerability['llm_ai'] == 1
+    with sqlite3.connect(path) as conn:
+        row = conn.execute(
+            "SELECT is_excluded,exclude_reason FROM endpoints WHERE normalized_path='/rest/chat'"
+        ).fetchone()
+    assert row == (1, 'unverified_candidate')
+
+
+def test_planner_receives_sanitized_public_openapi_operation_metadata(tmp_path):
+    from aidast.attack.recon_hypotheses import plan_recon_attack
+
+    path = pipeline(tmp_path)
+    with sqlite3.connect(path) as conn:
+        origin = conn.execute('SELECT origin_id FROM origins').fetchone()[0]
+        ObservationRecorder(conn, origin_id=origin, scan_id='scan').record('passive', [{
+            'method': 'POST', 'path': '/transfer',
+            'url': 'https://example.test/transfer',
+            'source': 'passive_declaration',
+            'discovery_kind': 'api_spec_declaration',
+            'verification_status': 'candidate', 'traffic_class': 'passive',
+            'evidence': {
+                'operation_summary': 'Transfer funds',
+                'operation_description': 'password=hidden Check transfer invariants.',
+                'operation_tags': ['transactions'],
+            },
+            'declared_parameters': [
+                {'name': 'amount', 'location': 'json', 'data_type': 'number'},
+            ],
+        }])
+
+    agent = Planner()
+    plan_recon_attack(path, 'scan', agent=agent)
+    transfer = next(endpoint for call in agent.contexts for endpoint in call['endpoints']
+                    if endpoint['path'] == '/transfer')
+    declaration = transfer['observations'][0]['declaration_evidence']
+    assert declaration['operation_summary'] == 'Transfer funds'
+    assert 'hidden' not in declaration['operation_description']
+    assert declaration['operation_tags'] == ['transactions']
+
+
+def test_replanning_is_idempotent_and_respects_parameter_identity_variants(tmp_path, monkeypatch):
     from aidast.attack.recon_hypotheses import plan_recon_attack
     path = pipeline(tmp_path)
     def change(response, context):
@@ -88,6 +403,16 @@ def test_replanning_is_idempotent_and_respects_parameter_identity_variants(tmp_p
     assert ensure_coverage_manifest(path, 'scan').total == 3
     with sqlite3.connect(path) as conn:
         conn.row_factory = sqlite3.Row
+        from aidast.pipeline.lifecycle import register_credential_reference
+        register_credential_reference(
+            conn, scan_id='scan', label='fixture-auth',
+            reference_uri='env://AIDAST_TEST_COVERAGE_AUTH',
+            identity_role='authenticated',
+        )
+        monkeypatch.setenv(
+            'AIDAST_TEST_COVERAGE_AUTH',
+            '{"Authorization":"Bearer fixture"}',
+        )
         stage = start_stage_run(conn, scan_id='scan', stage='attack')
         tasks = claim_coverage_batch(conn, scan_id='scan', stage_run_id=stage, batch_size=8)
         assert len(tasks) == 3
@@ -132,7 +457,7 @@ def test_more_than_eight_hypotheses_are_retained(tmp_path):
         first = row['hypotheses'][0]
         row['hypotheses'] = [{**first, 'vuln_class': name} for name in list(VULNERABILITY_SKILLS)[:10]]
     plan_recon_attack(path, 'scan', agent=Planner(change))
-    assert ensure_coverage_manifest(path, 'scan').total == 10
+    assert ensure_coverage_manifest(path, 'scan').total == 12
 
 
 def test_normal_attack_processes_the_whole_endpoint_queue_in_batches_of_eight(tmp_path):
@@ -153,12 +478,12 @@ def test_normal_attack_processes_the_whole_endpoint_queue_in_batches_of_eight(tm
     policy.write_text('{"policies":[]}')
     result = AttackCoordinator(agent=agent, db_path=path, scope_path=scope, policy_path=policy).run('scan')
     assert result.status == 'COMPLETED'
-    assert [len(call['attack_tasks']) for call in agent.calls] == [8, 2]
+    assert [len(call['attack_tasks']) for call in agent.calls] == [8, 4]
     assert all(task.get('endpoint_id') and task.get('coverage_id')
                for call in agent.calls for task in call['attack_tasks'])
     with sqlite3.connect(path) as conn:
-        assert conn.execute('SELECT COUNT(*) FROM attack_tasks').fetchone()[0] == 10
-        assert conn.execute("SELECT COUNT(*) FROM attack_coverage_items WHERE status='unsupported'").fetchone()[0] == 10
+        assert conn.execute('SELECT COUNT(*) FROM attack_tasks').fetchone()[0] == 12
+        assert conn.execute("SELECT COUNT(*) FROM attack_coverage_items WHERE status='unsupported'").fetchone()[0] == 12
 
 
 def test_planner_service_failure_records_a_failed_attack_stage_for_resume(tmp_path):
@@ -234,7 +559,9 @@ def test_dashboard_does_not_show_completed_between_coverage_batches(tmp_path):
     snapshot = projector.snapshot('scan')
     assert snapshot['status'] == 'running'
     assert snapshot['stage_statuses']['Attack'] == 'running'
-    assert snapshot['progress'] == 50
+    # Attack planning occupies 0-20%; one of two durable coverage items then
+    # advances halfway through the remaining execution range.
+    assert snapshot['progress'] == 60
 
 
 def test_completed_batch_with_pending_queue_can_resume_normal_attack(tmp_path):
@@ -291,7 +618,10 @@ def test_prior_finding_does_not_cover_different_parameter_or_identity_hypotheses
     ensure_coverage_manifest(path, 'scan')
     with sqlite3.connect(path) as conn:
         conn.row_factory = sqlite3.Row
-        matched = conn.execute("SELECT * FROM attack_coverage_items WHERE parameter_name='q' AND required_identity_role='unauthenticated'").fetchone()
+        matched = conn.execute(
+            "SELECT * FROM attack_coverage_items WHERE vuln_class='sqli' "
+            "AND parameter_name='q' AND required_identity_role='unauthenticated'"
+        ).fetchone()
         stage = start_stage_run(conn, scan_id='scan', stage='attack')
         from aidast.pipeline.lifecycle import create_task
         task = create_task(conn, stage_run_id=stage, skill_name='hunt-sqli', endpoint_id=endpoint_id, payload={'coverage_id':matched['coverage_id']})
@@ -302,8 +632,16 @@ def test_prior_finding_does_not_cover_different_parameter_or_identity_hypotheses
         if has_http:
             conn.execute("INSERT INTO attack_http_requests(request_id,scan_id,stage_run_id,task_id,policy_id,method,url,request_fingerprint,status,response_status,scheduled_at,endpoint_reference_id,result_json) VALUES ('request','scan',?,?,'policy','GET','https://example.test/search',?,'completed',200,0,?,'{}')", (stage,task,'f'*64,endpoint_id))
         _adopt_existing_findings(conn, 'scan')
-        states = {(row['parameter_name'],row['required_identity_role']):row['status'] for row in conn.execute('SELECT * FROM attack_coverage_items')}
-        assert states == {('q','unauthenticated'): 'candidate' if has_http else 'pending',('q','authenticated'):'pending',('filter','unauthenticated'):'pending'}
+        states = {
+            (row['vuln_class'], row['parameter_name'], row['required_identity_role']): row['status']
+            for row in conn.execute('SELECT * FROM attack_coverage_items')
+        }
+        assert states == {
+            ('sqli', 'q', 'unauthenticated'): 'candidate' if has_http else 'pending',
+            ('sqli', 'q', 'authenticated'): 'pending',
+            ('sqli', 'filter', 'unauthenticated'): 'pending',
+            ('xss', 'q', 'unauthenticated'): 'pending',
+        }
 
 
 def test_a_negative_attempt_without_completed_http_evidence_is_not_tested(tmp_path):
@@ -328,7 +666,94 @@ def test_a_negative_attempt_without_completed_http_evidence_is_not_tested(tmp_pa
         assert conn.execute('SELECT status FROM attack_coverage_items WHERE coverage_id=?', (task['coverage_id'],)).fetchone()[0] == 'error_retryable'
 
 
-@pytest.mark.parametrize('request_endpoint,credential_reference,expected', [('exact',None,'tested_negative'),('other',None,'error_retryable'),('exact','invented-auth','error_retryable')])
+def test_completed_inconclusive_http_evidence_is_terminal_unsupported(tmp_path):
+    from aidast.attack.recon_hypotheses import plan_recon_attack
+    from aidast.attack.coverage import reconcile_coverage_batch
+    path = pipeline(tmp_path)
+    plan_recon_attack(path, 'scan', agent=Planner())
+    ensure_coverage_manifest(path, 'scan')
+    with sqlite3.connect(path) as conn:
+        conn.row_factory = sqlite3.Row
+        stage = start_stage_run(conn, scan_id='scan', stage='attack')
+        task = claim_coverage_batch(conn, scan_id='scan', stage_run_id=stage, batch_size=1)[0]
+        endpoint = conn.execute(
+            """SELECT e.method,e.normalized_path,o.base_url FROM endpoints e
+               JOIN origins o ON o.origin_id=e.origin_id WHERE e.endpoint_id=?""",
+            (task['endpoint_id'],),
+        ).fetchone()
+        conn.execute("UPDATE attack_tasks SET status='completed' WHERE task_id=?", (task['task_id'],))
+        conn.execute(
+            """INSERT INTO attack_attempts
+               (attempt_id,scan_id,task_id,endpoint_id,skill_name,request_fingerprint,
+                outcome,resolution_reason,resolved_at)
+               VALUES ('attempt-inconclusive','scan',?,?,?,?,'inconclusive',?,CURRENT_TIMESTAMP)""",
+            (task['task_id'], task['endpoint_id'], task['skill_name'], 'f'*64,
+             'The response did not establish the required security property.'),
+        )
+        conn.execute(
+            """INSERT INTO attack_http_requests
+               (request_id,scan_id,stage_run_id,task_id,policy_id,method,url,
+                request_fingerprint,status,response_status,scheduled_at,
+                endpoint_reference_id,result_json)
+               VALUES ('request-inconclusive','scan',?,?,'policy',?,?,?,'completed',200,0,?,'{}')""",
+            (stage, task['task_id'], endpoint['method'],
+             endpoint['base_url'].rstrip('/') + endpoint['normalized_path'],
+             'f'*64, task['endpoint_id']),
+        )
+        reconcile_coverage_batch(conn, stage_run_id=stage)
+        status, reason = conn.execute(
+            'SELECT status,disposition_reason FROM attack_coverage_items WHERE coverage_id=?',
+            (task['coverage_id'],),
+        ).fetchone()
+        assert status == 'unsupported'
+        assert reason == 'The response did not establish the required security property.'
+
+
+def test_off_target_attempt_does_not_poison_exact_inconclusive_evidence(tmp_path):
+    from aidast.attack.recon_hypotheses import plan_recon_attack
+    from aidast.attack.coverage import reconcile_coverage_batch
+    path = pipeline(tmp_path)
+    plan_recon_attack(path, 'scan', agent=Planner())
+    ensure_coverage_manifest(path, 'scan')
+    with sqlite3.connect(path) as conn:
+        conn.row_factory = sqlite3.Row
+        stage = start_stage_run(conn, scan_id='scan', stage='attack')
+        task = claim_coverage_batch(conn, scan_id='scan', stage_run_id=stage, batch_size=1)[0]
+        method = conn.execute(
+            'SELECT method FROM endpoints WHERE endpoint_id=?', (task['endpoint_id'],),
+        ).fetchone()[0]
+        conn.execute("UPDATE attack_tasks SET status='completed' WHERE task_id=?", (task['task_id'],))
+        conn.executemany(
+            """INSERT INTO attack_attempts
+               (attempt_id,scan_id,task_id,endpoint_id,skill_name,request_fingerprint,
+                outcome,resolution_reason,resolved_at)
+               VALUES (?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)""",
+            [
+                ('selected','scan',task['task_id'],task['endpoint_id'],task['skill_name'],
+                 'a'*64,'inconclusive','Exact response remained inconclusive'),
+                ('redirect','scan',task['task_id'],None,task['skill_name'],
+                 'b'*64,'negative','Redirect target was outside the selected endpoint'),
+            ],
+        )
+        conn.execute(
+            """INSERT INTO attack_http_requests
+               (request_id,scan_id,stage_run_id,task_id,policy_id,method,url,
+                request_fingerprint,status,response_status,scheduled_at,
+                endpoint_reference_id,result_json)
+               VALUES ('selected-request','scan',?,?,'policy',?,'https://example.test/exact',
+                       ?,'completed',308,0,?,'{}')""",
+            (stage, task['task_id'], method, 'a'*64, task['endpoint_id']),
+        )
+        reconcile_coverage_batch(conn, stage_run_id=stage)
+        status, reason = conn.execute(
+            'SELECT status,disposition_reason FROM attack_coverage_items WHERE coverage_id=?',
+            (task['coverage_id'],),
+        ).fetchone()
+        assert status == 'unsupported'
+        assert reason == 'Exact response remained inconclusive'
+
+
+@pytest.mark.parametrize('request_endpoint,credential_reference,expected', [('exact',None,'error_retryable'),('other',None,'error_retryable'),('exact','invented-auth','error_retryable')])
 def test_negative_coverage_requires_the_selected_endpoint_and_identity(tmp_path, request_endpoint, credential_reference, expected):
     from aidast.attack.recon_hypotheses import plan_recon_attack
     from aidast.attack.coverage import reconcile_coverage_batch
@@ -346,6 +771,60 @@ def test_negative_coverage_requires_the_selected_endpoint_and_identity(tmp_path,
             VALUES ('request','scan',?,?,'policy','GET','https://example.test/search',?,'completed',200,0,?,?)""", (stage,task['task_id'],'f'*64,task['endpoint_id'] if request_endpoint == 'exact' else other,json.dumps({'credential_reference_id':credential_reference})))
         reconcile_coverage_batch(conn, stage_run_id=stage)
         assert conn.execute('SELECT status FROM attack_coverage_items WHERE coverage_id=?', (task['coverage_id'],)).fetchone()[0] == expected
+
+
+def test_authenticated_positive_control_is_exposed_but_needs_a_checkpoint(tmp_path):
+    from aidast.attack.recon_hypotheses import plan_recon_attack
+    from aidast.attack.coverage import reconcile_coverage_batch
+    from aidast.pipeline.lifecycle import register_credential_reference
+    path = pipeline(tmp_path)
+    plan_recon_attack(path, 'scan', agent=Planner())
+    ensure_coverage_manifest(path, 'scan')
+    with sqlite3.connect(path) as conn:
+        conn.row_factory = sqlite3.Row
+        reference = register_credential_reference(
+            conn, scan_id='scan', label='positive-control',
+            reference_uri='env://AIDAST_POSITIVE_CONTROL',
+            identity_role='authenticated',
+        )
+        stage = start_stage_run(conn, scan_id='scan', stage='attack')
+        task = claim_coverage_batch(
+            conn, scan_id='scan', stage_run_id=stage, batch_size=1,
+        )[0]
+        payload = json.loads(conn.execute(
+            'SELECT payload_json FROM attack_tasks WHERE task_id=?',
+            (task['task_id'],),
+        ).fetchone()[0])
+        assert payload['required_identity_role'] == 'unauthenticated'
+        assert payload['optional_control_identity_roles'] == ['authenticated']
+        conn.execute(
+            "UPDATE attack_tasks SET status='completed' WHERE task_id=?",
+            (task['task_id'],),
+        )
+        conn.execute(
+            """INSERT INTO attack_attempts
+               (attempt_id,scan_id,task_id,endpoint_id,skill_name,
+                request_fingerprint,outcome)
+               VALUES ('auth-negative','scan',?,?,?,?,'negative')""",
+            (task['task_id'], task['endpoint_id'], task['skill_name'], 'a'*64),
+        )
+        conn.execute(
+            """INSERT INTO attack_http_requests
+               (request_id,scan_id,stage_run_id,task_id,policy_id,method,url,
+                request_fingerprint,status,response_status,scheduled_at,
+                endpoint_reference_id,result_json)
+               VALUES ('auth-request','scan',?,?,'policy','GET',
+                       'https://example.test/search',?,'completed',200,0,?,?)""",
+            (
+                stage, task['task_id'], 'a'*64, task['endpoint_id'],
+                json.dumps({'credential_reference_id': reference}),
+            ),
+        )
+        reconcile_coverage_batch(conn, stage_run_id=stage)
+        assert conn.execute(
+            'SELECT status FROM attack_coverage_items WHERE coverage_id=?',
+            (task['coverage_id'],),
+        ).fetchone()[0] == 'error_retryable'
 
 
 def test_dashboard_uses_captured_http_path_even_after_legacy_endpoint_window(tmp_path):
@@ -378,7 +857,9 @@ def test_framework_specific_installed_skill_can_be_planned_without_static_catalo
     plan_recon_attack(path, 'scan', agent=Planner(framework))
     ensure_coverage_manifest(path, 'scan')
     with sqlite3.connect(path) as conn:
-        assert conn.execute('SELECT skill_name FROM attack_coverage_items').fetchall() == [('hunt-nodejs',)]
+        assert conn.execute('SELECT skill_name FROM attack_coverage_items').fetchall() == [
+            ('hunt-nodejs',), ('hunt-sqli',), ('hunt-xss',),
+        ]
 
 
 def test_candidate_only_request_provenance_preserves_method_at_shared_path(tmp_path):
@@ -389,6 +870,36 @@ def test_candidate_only_request_provenance_preserves_method_at_shared_path(tmp_p
         conn.execute("INSERT INTO endpoints(endpoint_id,origin_id,method,path,normalized_path) VALUES ('aaa-get',?,'GET','/shared','/shared')", (origin,))
         conn.execute("INSERT INTO endpoints(endpoint_id,origin_id,method,path,normalized_path) VALUES ('zzz-post',?,'POST','/shared','/shared')", (origin,))
     assert _endpoint_provenance(path, scan_id='scan', method='POST', url='https://example.test/shared') == ('recon_candidate', 'zzz-post')
+
+
+def test_request_provenance_accepts_only_unambiguous_terminal_slash_variant(tmp_path):
+    from aidast.attack.request_cli import _endpoint_provenance
+    path = pipeline(tmp_path)
+    with sqlite3.connect(path) as conn:
+        search = conn.execute(
+            "SELECT endpoint_id FROM endpoints WHERE normalized_path='/search'"
+        ).fetchone()[0]
+        conn.execute("""INSERT INTO endpoint_observations
+            (observation_id,endpoint_id,source_tool,discovery_kind,observed_url,
+             association_method,observed_at)
+            VALUES ('search-response',?,'browser','http_response',
+                    'https://example.test/search','exact','2026-10-04')""", (search,))
+
+    assert _endpoint_provenance(
+        path, scan_id='scan', method='GET', url='https://example.test/search/'
+    )[0] == 'network_observed'
+
+    with sqlite3.connect(path) as conn:
+        origin = conn.execute('SELECT origin_id FROM origins').fetchone()[0]
+        conn.execute("INSERT INTO endpoints(endpoint_id,origin_id,method,path,normalized_path) VALUES ('slash-variant',?,'GET','/search/','/search/')", (origin,))
+        conn.execute("""INSERT INTO endpoint_observations
+            (observation_id,endpoint_id,source_tool,discovery_kind,observed_url,
+             association_method,observed_at)
+            VALUES ('slash-observation','slash-variant','browser','http_response',
+                    'https://example.test/search/','exact','2026-10-04')""")
+    assert _endpoint_provenance(
+        path, scan_id='scan', method='GET', url='https://example.test/search/'
+    ) == ('agent_proposed', None)
 
 
 def test_planning_streams_every_endpoint_through_bounded_model_batches(tmp_path):
@@ -475,6 +986,9 @@ def test_normal_attack_continues_after_repair_exhaustion(tmp_path):
     assert result.status == 'COMPLETED'
     assert len(agent.calls) == 1
     assert [task['skill_name'] for task in agent.calls[0]['attack_tasks']] == ['hunt-xss']
+    assert agent.calls[0]['attack_tasks'][0]['selection_reasons'] == [
+        'exhaustive Recon DB coverage item', 'black-box Recon hypothesis: xss',
+    ]
 
 
 def test_all_invalid_proposals_become_unexecuted_and_do_not_claim_tests(tmp_path):
@@ -511,7 +1025,7 @@ def test_withdrawal_of_invalid_proposal_preserves_valid_hypotheses(tmp_path):
     agent = Planner(withdraw)
     plan_recon_attack(path, 'scan', agent=agent)
     assert len(agent.contexts) == 2
-    assert ensure_coverage_manifest(path, 'scan').by_vulnerability == {'xss': 1}
+    assert ensure_coverage_manifest(path, 'scan').by_vulnerability == {'sqli': 1, 'xss': 1}
     with sqlite3.connect(path) as conn:
         assert conn.execute('SELECT status FROM attack_planning_diagnostics').fetchall() == [('resolved',)]
         assert 'withdrawn' in conn.execute("SELECT reason FROM attack_endpoint_reviews WHERE status='planned'").fetchone()[0]
@@ -551,7 +1065,7 @@ def test_valid_hypotheses_survive_provider_failure_during_correction_and_resume(
             row.update(hypotheses=[], disposition='insufficient_evidence', reason='Unsupported SQLi withdrawn.')
     agent = Planner(withdraw)
     plan_recon_attack(path, 'scan', agent=agent)
-    assert ensure_coverage_manifest(path, 'scan').by_vulnerability == {'xss': 1}
+    assert ensure_coverage_manifest(path, 'scan').by_vulnerability == {'sqli': 1, 'xss': 1}
     assert any(h['vuln_class'] == 'xss' for items in agent.contexts[0]['retained_hypotheses'].values() for h in items)
 
 
@@ -603,10 +1117,12 @@ def test_correction_keeps_independently_valid_endpoint_hypothesis_with_invalid_s
     agent = Planner(independent_endpoint)
     plan_recon_attack(path, 'scan', agent=agent)
     assert len(agent.contexts) == 2
-    assert ensure_coverage_manifest(path, 'scan').by_vulnerability == {'sqli': 1}
+    assert ensure_coverage_manifest(path, 'scan').by_vulnerability == {'sqli': 2, 'xss': 1}
     with sqlite3.connect(path) as conn:
         assert conn.execute("SELECT count(*) FROM attack_planning_diagnostics WHERE status='unresolved'").fetchone()[0] == 0
-        assert conn.execute('SELECT injection_location,parameter_name FROM attack_coverage_items').fetchall() == [('endpoint','')]
+        assert sorted(conn.execute(
+            'SELECT injection_location,parameter_name FROM attack_coverage_items'
+        ).fetchall()) == [('endpoint', ''), ('query', 'q'), ('query', 'q')]
 
 
 def test_source_evidence_review_supersedes_old_ordinary_planning_rejections(tmp_path):

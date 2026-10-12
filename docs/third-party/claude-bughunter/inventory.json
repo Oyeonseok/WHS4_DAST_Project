@@ -32,7 +32,7 @@
       "included_as": "catalog_metadata"
     },
     {
-      "source_sha256": "7d8c2a013969817ceb337ecdb6afd04564727cfb0d9f2c2c86d5141020638e14",
+      "source_sha256": "15d4279f05701dca151b0a3ef4b684381e0042a8a4326d0021e684fbfbe8f450",
       "source_path": "library/hunt-auth-bypass/SKILL.md",
       "included_as": "catalog_metadata"
     },
@@ -267,7 +267,7 @@
       "included_as": "catalog_metadata"
     },
     {
-      "source_sha256": "fc5627c37b1028172413285c322c76d1105ebffbbb5af4e0ca0eaa81811fd7c0",
+      "source_sha256": "55fc6fd6755ec92dd2a741da85cb8bd3ce6bbfa2936b99884e29f42ae9bd2df2",
       "source_path": "library/hunt-sqli/SKILL.md",
       "included_as": "catalog_metadata"
     },

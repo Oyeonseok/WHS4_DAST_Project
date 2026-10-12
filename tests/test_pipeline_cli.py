@@ -15,6 +15,7 @@ from unittest.mock import patch
 
 from aidast.cli import _parser, _write_recon_handoff, main
 from aidast.paths import RESULT_ROOT
+from aidast.pipeline.models import HandoffManifest
 from aidast.recon import db
 from aidast.recon.models import ReconPlan
 from aidast.recon.policy import TargetPolicy
@@ -73,7 +74,9 @@ class PipelineCliTests(unittest.TestCase):
                 ObservationRecorder(conn, origin_id=origin, scan_id=kwargs["scan_id"]).record(
                     "fixture", [{"method": "GET", "path": f"/page-{index}"} for index in range(3)],
                 )
-                return SimpleNamespace(conn=conn, scan_id=kwargs["scan_id"], run=lambda tasks: None)
+                # One target-local tool failure is recoverable because another
+                # target produced a usable, policy-bound service surface.
+                return SimpleNamespace(conn=conn, scan_id=kwargs["scan_id"], run=lambda tasks: 1)
 
             stdout = io.StringIO()
             observed_during_planning = []
@@ -180,8 +183,13 @@ class PipelineCliTests(unittest.TestCase):
             self.assertEqual([(item["processed"], item["observation_total"], item["batch_number"],
                                item["batch_total"], item["progress"]) for item in tagging_updates],
                              [(2, 3, 1, 2, 84), (3, 3, 2, 2, 88)])
-            self.assertEqual(planner.call_args.kwargs["main_model"], "gpt-6-sol")
-            self.assertEqual(planner.call_args.kwargs["attack_model"], "gpt-6-luna")
+            self.assertEqual(
+                [item.kwargs["main_model"] for item in planner.call_args_list],
+                ["gpt-6-sol", "gpt-6-luna"],
+            )
+            self.assertEqual(planner.call_args_list[0].kwargs["attack_model"], "gpt-6-luna")
+            self.assertEqual(planner.call_args_list[0].kwargs["chaining_model"], "gpt-6-luna")
+            self.assertEqual(planner.call_args_list[0].kwargs["validation_model"], "gpt-5.6-terra")
             self.assertEqual(
                 validation_coordinator.call_args.kwargs["validation_model"],
                 "gpt-5.6-terra",
@@ -190,7 +198,21 @@ class PipelineCliTests(unittest.TestCase):
             database, = (root / "AttackRuns").glob("*/*/scan_*/legacy/Attack.db")
             self.assertEqual(database.relative_to(root / "AttackRuns").parts[:2], ("example-test", "program"))
             self.assertTrue((root / "Runs" / "example-test" / "program" / database.parent.parent.name / "Recon.db").is_file())
+            from aidast.pipeline.model_settings import MODEL_SETTINGS_FILE, load_scan_model_choices, read_scan_model_choices
+            model_path = root / "Runs" / "example-test" / "program" / scan_id / MODEL_SETTINGS_FILE
+            models = read_scan_model_choices(model_path, scan_id=scan_id)
+            self.assertEqual(models, load_scan_model_choices(root, scan_id))
+            self.assertEqual(models.report_model, "gpt-6-astra")
+            handoff = HandoffManifest.model_validate_json(model_path.with_name("Handoff.json").read_text())
+            self.assertIn(MODEL_SETTINGS_FILE, handoff.verify_artifacts(root=model_path.parent))
             self.assertTrue((database.parent / "review/evidence-review-queue.json").is_file())
+            self.assertTrue((root / "ReportRun" / scan_id / "ScanSummary.json").is_file())
+            recon_database = root / "Runs" / "example-test" / "program" / scan_id / "Recon.db"
+            with closing(sqlite3.connect(recon_database)) as conn:
+                self.assertEqual(
+                    conn.execute("SELECT status FROM scans WHERE scan_id=?", (scan_id,)).fetchone()[0],
+                    "completed",
+                )
             with closing(sqlite3.connect(database)) as conn:
                 self.assertEqual(conn.execute("SELECT COUNT(*) FROM attack_plans").fetchone()[0], 1)
                 self.assertEqual(conn.execute("SELECT COUNT(*) FROM attack_attempts").fetchone()[0], 0)

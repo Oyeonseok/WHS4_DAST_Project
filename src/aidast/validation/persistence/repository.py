@@ -736,7 +736,8 @@ class ValidationRepository:
     def finalize(self, case_id: str, *, stage_run_id: str, expected_version: int,
                  status: TerminalStatus, decision: dict[str, Any], evidence_ids: Iterable[str],
                  impact: tuple[int, int, int] | None = None,
-                 known_source_case_id: str | None = None) -> int:
+                 known_source_case_id: str | None = None,
+                 zero_sensitivity_boundary_confirmation: bool = False) -> int:
         cited = tuple(evidence_ids)
         if len(cited) != len(set(cited)):
             raise ValidationRepositoryError("decision evidence IDs must be unique")
@@ -750,7 +751,15 @@ class ValidationRepository:
             ).fetchone()[0]
             if count != len(cited):
                 raise ValidationRepositoryError("decision cites evidence outside the current case and stage")
-            impact_result = evaluate_impact(*impact) if impact is not None else None
+            impact_result = (
+                evaluate_impact(
+                    *impact,
+                    zero_sensitivity_boundary_confirmation=(
+                        zero_sensitivity_boundary_confirmation
+                    ),
+                )
+                if impact is not None else None
+            )
             if status in {"CONFIRMED", "UNDERPOWERED"} and impact_result is None:
                 raise ValidationRepositoryError("impact is required for reproduced decisions")
             if status == "UNDERPOWERED" and not impact_result.underpowered:

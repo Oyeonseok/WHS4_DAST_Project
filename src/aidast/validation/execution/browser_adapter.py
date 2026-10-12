@@ -14,7 +14,7 @@ from ..contracts.browser_contract import (BrowserObservationSnapshot, BrowserRun
                                evaluate_browser_observation)
 from ..contracts.models import ReproductionObservation
 from ..contracts.runtime_contract import render_http_request
-from .credentials import credential_preflight_reason, resolve_credential_headers
+from .credentials import credential_unsupported_reason, resolve_credential_headers
 
 
 class BrowserExecutor(Protocol):
@@ -52,8 +52,9 @@ class BrowserReproductionPort:
         if blind_case.credential_references and self.credential_resolver is None:
             return "credential_resolver_missing"
         for reference in blind_case.credential_references:
-            reason = credential_preflight_reason(
-                self.credential_resolver, reference, blind_case.endpoint,
+            reason = credential_unsupported_reason(
+                self.credential_resolver, reference,
+                destination_url=blind_case.endpoint,
             )
             if reason is not None:
                 return reason
@@ -81,7 +82,7 @@ class BrowserReproductionPort:
         try:
             for reference in blind_case.credential_references:
                 merged.update(resolve_credential_headers(
-                    self.credential_resolver, reference, url,
+                    self.credential_resolver, reference, destination_url=url,
                 ))
         except (OSError, ValueError):
             return ReproductionObservation(

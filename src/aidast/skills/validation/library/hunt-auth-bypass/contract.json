@@ -7,6 +7,7 @@
   "runtime_kinds": [
     "http"
   ],
+  "zero_sensitivity_boundary_confirmation": true,
   "target_expected_signal": {
     "kind": "hunt-auth-bypass_verified",
     "criterion": "a protected operation succeeds without its required authentication state",

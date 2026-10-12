@@ -534,6 +534,7 @@ class ReconBrowserTransportTests(unittest.TestCase):
             {"href": None, "routerLink": "/basket"},
             {"href": "https://example.com/#/account", "routerLink": None},
             {"href": None, "routerLink": "/logout"},
+            {"href": "https://example.com/%257B%257Bhref%257D%257D", "routerLink": None},
             {"href": None, "routerLink": "https://outside.example/admin"},
         ]
         with patch.object(driver, "_ensure_page", return_value=page):
@@ -660,6 +661,85 @@ class ReconBrowserTransportTests(unittest.TestCase):
         ])
         self.assertIs(self.driver.context.pages[0], page)
 
+    def test_request_exclusions_use_visible_policy_managed_login(self):
+        page = Mock(url=self.policy.asset)
+        page.is_closed.return_value = False
+        page.locator.return_value.count.return_value = 0
+        self.driver.page = page
+        self.driver.context = Mock(pages=[page])
+        self.driver.session_config.operator_confirmation = lambda check: check() is None
+        with tempfile.TemporaryDirectory() as directory:
+            self.driver.session_config.session_file = str(Path(directory) / "session.json")
+            self.driver.session_path.write_text("{}", encoding="utf-8")
+            with patch(
+                "aidast.recon.tools.playwright_driver.has_request_exclusions", return_value=True,
+            ), patch.object(
+                self.driver, "_launch_managed_runtime"
+            ) as managed, patch.object(
+                self.driver, "_launch_manual_browser"
+            ) as unmanaged, patch.object(
+                self.driver, "_attach_manual_browser"
+            ) as attach, patch.object(
+                self.driver, "_register_authentication_observer"
+            ), patch.object(
+                self.driver, "_manual_login_problem", return_value=None,
+            ), patch.object(
+                self.driver, "save_session", return_value=True,
+            ), patch.object(
+                self.driver, "get_auth_headers", return_value={"Cookie": "redacted"},
+            ), patch.object(
+                self.driver, "_remember_authenticated_state"
+            ), patch.object(
+                self.driver, "_register_context_handlers"
+            ) as register_policy, patch.object(
+                self.driver, "_register_page_handlers"
+            ):
+                self.driver.capture_and_start()
+
+        managed.assert_called_once_with(headless=False)
+        unmanaged.assert_not_called()
+        attach.assert_not_called()
+        page.goto.assert_called_once_with(
+            self.policy.asset, wait_until="domcontentloaded", timeout=15_000,
+        )
+        # The managed runtime installs the policy guard before navigation;
+        # capture_and_start must not register a duplicate route afterward.
+        register_policy.assert_not_called()
+
+    def test_policy_managed_login_continues_after_committed_spa_timeout(self):
+        from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+
+        page = Mock(url=self.policy.asset)
+        page.goto.side_effect = PlaywrightTimeoutError("pending resources")
+        page.is_closed.return_value = False
+        page.locator.return_value.count.return_value = 0
+        self.driver.page = page
+        self.driver.context = Mock(pages=[page])
+        self.driver.session_config.operator_confirmation = lambda check: check() is None
+        with tempfile.TemporaryDirectory() as directory:
+            self.driver.session_config.session_file = str(Path(directory) / "session.json")
+            self.driver.session_path.write_text("{}", encoding="utf-8")
+            with patch(
+                "aidast.recon.tools.playwright_driver.has_request_exclusions", return_value=True,
+            ), patch.object(
+                self.driver, "_launch_managed_runtime"
+            ), patch.object(
+                self.driver, "_register_authentication_observer"
+            ), patch.object(
+                self.driver, "_manual_login_problem", return_value=None,
+            ), patch.object(
+                self.driver, "save_session", return_value=True,
+            ), patch.object(
+                self.driver, "get_auth_headers", return_value={"Cookie": "redacted"},
+            ), patch.object(
+                self.driver, "_remember_authenticated_state"
+            ), patch.object(
+                self.driver, "_register_page_handlers"
+            ):
+                self.driver.capture_and_start()
+
+        self.assertEqual(self.driver._phase, "runtime")
+
     def test_manual_cookie_session_needs_success_proof_before_handoff(self):
         page = Mock(url=self.policy.asset)
         page.is_closed.return_value = False
@@ -709,6 +789,35 @@ class ReconBrowserTransportTests(unittest.TestCase):
         )
         wait.assert_not_called()
         shutdown.assert_not_called()
+
+    def test_unauthenticated_start_continues_after_committed_dom_timeout(self):
+        from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+
+        page = Mock(url=self.policy.asset)
+        page.goto.side_effect = PlaywrightTimeoutError("DOMContentLoaded timed out")
+        with tempfile.TemporaryDirectory() as directory:
+            self.driver.session_config.session_file = str(Path(directory) / "session.json")
+            with patch.object(self.driver, "_launch_manual_browser"), patch.object(
+                self.driver, "_ensure_page", return_value=page
+            ), patch.object(self.driver, "save_session", return_value=True), patch.object(
+                self.driver, "_shutdown_runtime"
+            ) as shutdown:
+                self.driver.start_unauthenticated()
+
+        shutdown.assert_not_called()
+
+    def test_unauthenticated_start_keeps_uncommitted_timeout_fatal(self):
+        from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+
+        page = Mock(url="about:blank")
+        page.goto.side_effect = PlaywrightTimeoutError("navigation timed out")
+        with patch.object(self.driver, "_launch_manual_browser"), patch.object(
+            self.driver, "_ensure_page", return_value=page
+        ), patch.object(self.driver, "_shutdown_runtime") as shutdown:
+            with self.assertRaises(PlaywrightTimeoutError):
+                self.driver.start_unauthenticated()
+
+        shutdown.assert_called_once_with()
 
     def test_automatic_start_does_not_prompt_for_404(self):
         page = Mock(url=self.policy.asset)
@@ -877,6 +986,8 @@ class ReconBrowserTransportTests(unittest.TestCase):
         self.driver._observe_authentication_request(SimpleNamespace(
             method="POST",
             url="https://example.com/rest/user/login?password=private#fragment",
+            headers={"Content-Type": "application/json"},
+            post_data_buffer=b'{"email":"private@example.test","password":"private"}',
         ))
         self.driver._observe_authentication_request(SimpleNamespace(
             method="POST",
@@ -889,6 +1000,11 @@ class ReconBrowserTransportTests(unittest.TestCase):
         self.assertEqual(self.driver.get_http_results(), [])
         passive = self.driver.drain_authentication_observations()
         self.assertEqual(passive[0]["discovery_kind"], "passive_login_observation")
+        self.assertEqual(passive[0]["declared_parameters"], [
+            {"name": "email", "location": "json", "data_type": "string"},
+            {"name": "password", "location": "json", "data_type": "string"},
+        ])
+        self.assertNotIn("private", json.dumps(passive))
         self.assertNotIn("private", json.dumps(self.driver.get_http_results()))
 
     def test_passive_authentication_observation_cannot_use_browser_support_path_bypass(self):

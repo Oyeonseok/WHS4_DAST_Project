@@ -39,8 +39,12 @@ Choose fewer, structurally useful roots rather than enumerating every prefix.
 4. Do not select static file leaves such as JavaScript, stylesheets, images,
    fonts, source maps, or archive files. Their surrounding observed directory
    prefix may still be useful.
-5. Keep `/` as a fallback when useful, but only once.
-6. If the candidates exceed `max_roots`, keep shallow shared, API, and auth
+5. Do not select an API/REST collection leaf such as `/api/Products` when its
+   only observed descendants are numeric or placeholder item identifiers.
+   Prefer its shallow `/api` prefix. A deeper prefix remains useful when Recon
+   observed literal child actions below it.
+6. Keep `/` as a fallback when useful, but only once.
+7. If the candidates exceed `max_roots`, keep shallow shared, API, and auth
    roots before deep, numeric, or low-information roots.
 
 Every selected value must be `/` or an exact prefix ending at a `/` boundary in

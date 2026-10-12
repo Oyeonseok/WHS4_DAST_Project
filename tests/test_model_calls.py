@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -13,7 +14,9 @@ from fastapi.testclient import TestClient
 from pydantic import BaseModel
 
 from aidast.core.model_calls import (
+    ModelCallEvent,
     SQLiteModelCallSink,
+    close_abandoned_model_calls,
     logged_model_call,
     model_call_context,
     read_model_call_events,
@@ -33,6 +36,29 @@ class ModelCallLogTests(unittest.TestCase):
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
         self.database = self.root / "logs" / "CodexCalls.db"
+
+    def test_resume_closes_abandoned_started_calls_append_only(self) -> None:
+        sink = SQLiteModelCallSink(self.root)
+        sink.append(ModelCallEvent(
+            call_id='a' * 32, state='started',
+            occurred_at='2026-01-01T00:00:00+00:00',
+            scan_id='scan-1', stage='Attack', stage_run_id='stage-1',
+            task_id=None, case_id=None, scope_job_id=None,
+            operation_code='attack_orchestrator',
+            invocation_kind='attack_orchestrator', requested_model='gpt-6-sol',
+            elapsed_ms=None, error_code=None, input_tokens=None,
+            cached_input_tokens=None, output_tokens=None,
+            usage_status='not_captured', input_summary={'task_count': 8},
+            result_summary={},
+        ))
+
+        self.assertEqual(close_abandoned_model_calls(self.root, 'scan-1'), 1)
+        self.assertEqual(close_abandoned_model_calls(self.root, 'scan-1'), 0)
+        events, _ = read_model_call_events(self.root)
+        self.assertEqual([event['state'] for event in events], ['error', 'started'])
+        self.assertEqual(events[0]['error_code'], 'agent_error')
+        self.assertEqual(events[0]['usage_status'], 'absent')
+        self.assertEqual(events[0]['input_summary'], {'task_count': 8})
 
     def test_scope_policy_call_records_safe_work_summary_and_clears_scan_linkage(self) -> None:
         class Result(BaseModel):
@@ -216,6 +242,69 @@ class ModelCallLogTests(unittest.TestCase):
                         )
                     self.assertIs(caught.exception.__cause__, expired)
 
+    def test_structured_adapters_use_absolute_deadline_for_silent_toolless_turns(self) -> None:
+        from aidast.agents.main import CodexMainAgent
+        from aidast.agents.native_pipeline import CodexMainAgent as NativeAgent
+
+        class Artifact(BaseModel):
+            ok: bool
+
+        def completed(command, **_kwargs):
+            output = Path(command[command.index("--output-last-message") + 1])
+            output.write_text('{"ok":true}', encoding="utf-8")
+            return subprocess.CompletedProcess(command, 0, None, "")
+
+        for adapter in (CodexMainAgent, NativeAgent):
+            with self.subTest(adapter=adapter.__module__):
+                with (
+                    patch(f"{adapter.__module__}.shutil.which", return_value="codex"),
+                    patch.object(adapter, "_require_login"),
+                    patch(
+                        f"{adapter.__module__}.codex_process.run_codex",
+                        side_effect=completed,
+                    ) as run,
+                ):
+                    adapter(timeout_seconds=3600)._run_structured(
+                        prompt="fixture",
+                        model_type=Artifact,
+                        artifact_name="silent-tool-disabled",
+                        operation="captured Scope interpretation",
+                        allow_browser=False,
+                    )
+                    self.assertEqual(run.call_args.kwargs["idle_timeout"], 3600)
+
+    def test_browser_structured_turn_keeps_no_progress_watchdog(self) -> None:
+        from aidast.agents.main import CodexMainAgent
+        from aidast.core.codex_process import CODEX_IDLE_TIMEOUT_SECONDS
+
+        class Artifact(BaseModel):
+            ok: bool
+
+        def completed(command, **_kwargs):
+            output = Path(command[command.index("--output-last-message") + 1])
+            output.write_text('{"ok":true}', encoding="utf-8")
+            return subprocess.CompletedProcess(command, 0, None, "")
+
+        with (
+            patch("aidast.agents.main.shutil.which", return_value="codex"),
+            patch.object(CodexMainAgent, "_require_login"),
+            patch(
+                "aidast.agents.main.codex_process.run_codex",
+                side_effect=completed,
+            ) as run,
+        ):
+            CodexMainAgent(timeout_seconds=3600)._run_structured(
+                prompt="fixture",
+                model_type=Artifact,
+                artifact_name="browser-turn",
+                operation="Scope collection",
+                allow_browser=True,
+            )
+            self.assertEqual(
+                run.call_args.kwargs["idle_timeout"],
+                CODEX_IDLE_TIMEOUT_SECONDS,
+            )
+
     def test_newer_events_page_before_older_events_without_creating_missing_store(self) -> None:
         self.assertEqual(read_model_call_events(self.root), ([], None))
         self.assertFalse(self.database.exists())
@@ -368,6 +457,34 @@ class ModelCallLogTests(unittest.TestCase):
         self.assertEqual(usage["unattributed"]["total_tokens"], 5)
         self.assertEqual(usage["stages"]["Report"]["unreported_calls"], 1)
 
+    def test_scan_tokens_accumulate_every_unattributed_stage(self) -> None:
+        class Agent:
+            _main_model = "gpt-test"
+
+            @logged_model_call("structured", model_attribute="_main_model")
+            def run(self, *, operation: str, tokens: int | None) -> None:
+                record_session_usage([{"type": "turn.completed", "usage": {
+                    "input_tokens": tokens, "cached_input_tokens": 0,
+                    "output_tokens": tokens,
+                }}])
+
+        with using_model_call_sink(SQLiteModelCallSink(self.root)):
+            for stage, tokens in ((None, 2), ("Other", 3), ("Legacy", 4), ("Other", None)):
+                with model_call_context(scan_id="scan-a", stage=stage):
+                    Agent().run(operation="offline report drafting", tokens=tokens)
+            with model_call_context(scan_id="scan-a", stage="Scope"):
+                Agent().run(operation="Scope collection", tokens=100)
+            with model_call_context(scan_id="scan-b", stage="Other"):
+                Agent().run(operation="offline report drafting", tokens=200)
+
+        usage = read_scan_token_usage(self.root, "scan-a")
+        self.assertEqual(usage["unattributed"], {
+            "input_tokens": 9, "output_tokens": 9, "total_tokens": 18,
+            "measured_calls": 3, "unreported_calls": 1,
+        })
+        self.assertEqual(usage["total"], usage["unattributed"])
+        self.assertTrue(all(bucket["total_tokens"] == 0 for bucket in usage["stages"].values()))
+
     def test_resumed_thread_totals_are_not_counted_twice(self) -> None:
         class Agent:
             _validation_model = "gpt-test"
@@ -519,6 +636,20 @@ class ModelCallLogTests(unittest.TestCase):
         self.assertEqual([(event["scan_id"], event["case_id"]) for event in terminal], [
             ("scan-1", "case-1"), ("scan-2", None), ("scan-1", "case-1"),
         ])
+
+    def test_attack_capacity_fallback_uses_distinct_configured_validation_model(self) -> None:
+        from aidast.agents.main import CodexMainAgent
+        from aidast.agents.native_pipeline import CodexMainAgent as NativeAgent
+
+        for adapter in (CodexMainAgent, NativeAgent):
+            with self.subTest(adapter=adapter.__module__):
+                agent = adapter(
+                    main_model="gpt-6-sol",
+                    attack_model="gpt-6-sol",
+                    validation_model="gpt-5.6-sol",
+                )
+                self.assertTrue(agent.activate_attack_fallback_model())
+                self.assertEqual(agent._attack_model, "gpt-5.6-sol")
 
     def test_console_entrypoint_enables_store_without_changing_programmatic_main(self) -> None:
         from aidast import cli

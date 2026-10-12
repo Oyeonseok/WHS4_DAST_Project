@@ -19,7 +19,7 @@ from ..contracts.models import ReproductionObservation
 from .request_broker import (ValidationCredentialError, ValidationPolicyRejection,
                              ValidationRequestBroker)
 from ..contracts.runtime_contract import evaluate_http_response, render_http_request
-from .credentials import credential_preflight_reason
+from .credentials import credential_unsupported_reason
 
 
 class ChainReproductionPort:
@@ -59,8 +59,9 @@ class ChainReproductionPort:
             return "credential_resolver_missing"
         for step in runtime.steps:
             for reference in step.credential_references:
-                reason = credential_preflight_reason(
-                    self.credential_resolver, reference, step.endpoint,
+                reason = credential_unsupported_reason(
+                    self.credential_resolver, reference,
+                    destination_url=step.endpoint,
                 )
                 if reason is not None:
                     return reason

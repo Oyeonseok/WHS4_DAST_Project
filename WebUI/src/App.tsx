@@ -37,13 +37,16 @@ import {
   type ScopeExecutionRules,
   type ExclusionPreparation,
   isValidTagBatchSize,
+  bugBountyTargetReady,
   resolveExecutionLimits,
   scanRetryAction,
   type ExecutionProfileId,
   type RequiredRequestHeader,
   type ScopeExecutionRequirements,
+  approvedScopeSelection,
+  validStartUrl,
 } from './lib/scan';
-import { isValidScopeModel, programRegistrationUrlError, scopeRequestForStatus, selectApprovedScope } from './lib/scope';
+import { createScopeResponseGuard, isValidScopeModel, programRegistrationUrlError, scopeRequestForStatus, selectApprovedScope } from './lib/scope';
 import type { PolicyReferenceSummary } from './lib/scope';
 import { ScopePolicyReferences } from './components/ScopePolicyReferences';
 import { apiErrorMessage } from './lib/transport';
@@ -51,11 +54,14 @@ import { activityHeightBounds, clampPanelWidth, panelBounds } from './lib/layout
 import { filterFindings, findingVerdict, findingValidationStatus, knownSourceCase, parseValidationCases, reportCaseForFinding, type FindingVerdict, type ValidationCase, type ValidationStatus } from './lib/validation';
 import { ResizeHandle } from './components/ResizeHandle';
 import { ManualLoginNotice } from './components/ManualLoginNotice';
+import { OperatorActions } from './components/OperatorActions';
 import { ScopeExecutionRules as ScopeExecutionRulesView, ScopeExclusionStatus, ScopePolicyAdvisories } from './components/ScopeExecutionRules';
 import { ScopeHeaderRequirements } from './components/ScopeHeaderRequirements';
 import { ReportSubmission } from './components/ReportSubmission';
 import { reportLanguageChoices } from './lib/reportSubmission';
+import { confirmedReportSummaries, requestReportSummaries, requestScanExecutionSummary, type ReportSummary, type ScanExecutionSummary } from './lib/reports';
 import { useManualLogin } from './hooks/useManualLogin';
+import { useOperatorActions } from './hooks/useOperatorActions';
 import { parseScanTokenUsage, type ScanTokenUsage, type TokenBucket } from './lib/modelCalls';
 import { ModelCallLog } from './components/ModelCallLog';
 
@@ -71,7 +77,6 @@ type RegisteredProgram = { id: string; platform: string; program: string; visibi
 type ScopeDraftAsset = ScopeTarget & { eligibility: string };
 type ScopeDraft = { scope_id: string; created_at: string; source_url: string; program_name: string; program_description: string; in_scope_assets: ScopeDraftAsset[]; out_of_scope_assets: ScopeDraftAsset[]; allowed_activities: string[]; prohibited_activities: string[]; submission_requirements: string[]; operational_constraints: string[]; safe_harbor: string; ambiguities: string[]; source_evidence: { section: string; quote: string }[]; required_request_headers?: RequiredRequestHeader[] | null; execution_rules?: ScopeExecutionRules | null; policy_references?: PolicyReferenceSummary[] };
 type ScopeApproval = { approved_by: string; approved_at: string };
-type ReportSummary = { report_id: string; scan_id: string; case_id: string; platform: string; language?: 'ko' | 'en'; title: string; created_at: string };
 type ThemeChoice = 'system' | 'dark' | 'light';
 type TokenUsageState = { scanId: string; data: ScanTokenUsage | null; error: boolean };
 const scopeStatusLabel: Record<ScopeStatus, string> = { scope_required: 'Scope required', collecting: 'Collecting', awaiting_browser: 'Login required', paused: 'Paused', cancelling: 'Cancelling', cancelled: 'Cancelled', review_required: 'Review Yes / No', approved: 'Approved', rejected: 'Rejected', failed: 'Failed' };
@@ -80,7 +85,7 @@ const THEME_KEY = 'aidast-theme';
 const modelNamePattern = /^[A-Za-z0-9][A-Za-z0-9_.:/-]{0,127}$/;
 const codexModels = [
   'gpt-5.6-luna', 'gpt-5.6-terra', 'gpt-5.6-sol',
-  'gpt-6-luna', 'gpt-6-sol', 'gpt-6-astra',
+  'gpt-6.1-sol', 'gpt-6-luna', 'gpt-6-sol', 'gpt-6-astra',
 ] as const;
 function ScanModelField({ label, value, onChange, customLabel, disabled = false }: {
   label: string; value: string; onChange: (value: string) => void; customLabel: string; disabled?: boolean;
@@ -315,6 +320,7 @@ export default function App() {
   const [scanId, setScanId] = useState<string>(configuredScanId);
   const [scanOptions, setScanOptions] = useState<ScanSummary[]>([]);
   const [scopes, setScopes] = useState<ApprovedScope[]>([]);
+  const [scopesLoading, setScopesLoading] = useState(!demo);
   const [catalogScopeId, setCatalogScopeId] = useState('');
   const [catalogScopeDraft, setCatalogScopeDraft] = useState<ScopeDraft | null>(null);
   const [catalogScopeApproval, setCatalogScopeApproval] = useState<ScopeApproval | null>(null);
@@ -336,21 +342,24 @@ export default function App() {
   const [scopeReviewer, setScopeReviewer] = useState('');
   const [scopeConfirmed, setScopeConfirmed] = useState(false);
   const [scopeActionBusy, setScopeActionBusy] = useState(false);
+  const [scopeResponses] = useState(createScopeResponseGuard);
   const [scopeWorkflowError, setScopeWorkflowError] = useState('');
   const [scopeModel, setScopeModel] = useState('gpt-5.6-sol');
   const [scopeId, setScopeId] = useState('');
   const [selectedTargets, setSelectedTargets] = useState<string[]>([]);
-  const [scanProfile, setScanProfile] = useState<ExecutionProfileId>('safe-recon');
-  const [reconModel, setReconModel] = useState('gpt-6-luna');
-  const [attackModel, setAttackModel] = useState('gpt-6-sol');
+  const [scanProfile, setScanProfile] = useState<ExecutionProfileId>('bug-bounty-safe');
+  const [reconEngine, setReconEngine] = useState<'integrated' | 'native'>('integrated');
+  const [reconModel, setReconModel] = useState('gpt-6.1-sol');
+  const [attackModel, setAttackModel] = useState('gpt-6.1-sol');
   const [validationModel, setValidationModel] = useState('gpt-6-sol');
-  const [reportModel, setReportModel] = useState('gpt-6-sol');
-  const [maxRequests, setMaxRequests] = useState(500);
-  const [maxRps, setMaxRps] = useState(0.5);
-  const [maxConcurrency, setMaxConcurrency] = useState(2);
+  const [reportModel, setReportModel] = useState('gpt-6.1-sol');
+  const [maxRequests, setMaxRequests] = useState(300);
+  const [maxRps, setMaxRps] = useState(0.2);
+  const [maxConcurrency, setMaxConcurrency] = useState(1);
   const [timeoutSeconds, setTimeoutSeconds] = useState(15);
   const [maxDepth, setMaxDepth] = useState(2);
-  const [ffufMaxTimeSeconds, setFfufMaxTimeSeconds] = useState(150);
+  const [ffufMaxTimeSeconds, setFfufMaxTimeSeconds] = useState(60);
+  const [startUrl, setStartUrl] = useState('');
   const [tagBatchSize, setTagBatchSize] = useState(25);
   const [policyValues, setPolicyValues] = useState<Record<string, string>>({});
   const [identityValues, setIdentityValues] = useState<Record<string, string>>({});
@@ -404,6 +413,8 @@ export default function App() {
   const [auditAckError, setAuditAckError] = useState('');
   const [auditRevision, setAuditRevision] = useState(0);
   const [reports, setReports] = useState<ReportSummary[]>([]);
+  const [executionSummary, setExecutionSummary] = useState<ScanExecutionSummary | null>(null);
+  const [executionSummaryError, setExecutionSummaryError] = useState('');
   const [validationCases, setValidationCases] = useState<readonly ValidationCase[]>(demo ? DEMO_VALIDATIONS : []);
   const [validationScanId, setValidationScanId] = useState<string | null>(demo ? DEMO_SCAN : null);
   const [validationError, setValidationError] = useState('');
@@ -414,6 +425,9 @@ export default function App() {
   const [resultRoot, setResultRoot] = useState(demo ? 'Synthetic demo data (memory)' : '');
   const { snapshot, state, error, refresh } = useScanSocket(scanId);
   const manualLogin = useManualLogin(scanId, snapshot?.status || '', !demo && !!scanId);
+  const operatorActions = useOperatorActions(
+    scanId, !demo && !!scanId, snapshot?.status || '',
+  );
   const tokenUsage = tokenUsageState?.scanId === scanId ? tokenUsageState.data : null;
   const tokenStatus = tokenUsageState?.scanId === scanId
     ? tokenUsageState.error ? 'error' : tokenUsage ? 'ready' : 'loading'
@@ -740,6 +754,7 @@ export default function App() {
         const response = await fetch(new URL(`/api/v1/programs/${encodeURIComponent(workflowProgram.id)}/approved-scope`, base), { signal: abort.signal, credentials: 'same-origin', cache: 'no-store' });
         const body = await response.json() as { scope?: ScopeDraft; approval?: ScopeApproval; detail?: unknown };
         if (!response.ok || !body.scope || !body.approval) throw new Error(tr(apiErrorMessage(body.detail, `Approved Scope returned ${response.status}`)));
+        if (abort.signal.aborted) return;
         setScopeDraft(body.scope);
         setScopeApproval(body.approval);
         setScopeId(body.scope.scope_id);
@@ -779,22 +794,27 @@ export default function App() {
     return () => abort.abort();
   }, [demo, page, scanId, auditRevision]);
   useEffect(() => {
-    if (demo || (!scanId && page !== 'Reports')) return;
+    if (demo) return;
     const abort = new AbortController();
     setReportError('');
     setReportScanId(null);
-    void (async () => {
-      try {
-        const base = import.meta.env.VITE_API_BASE_URL || location.origin;
-        const url = new URL('/api/v1/reports', base);
-        if (scanId) url.searchParams.set('scan_id', scanId);
-        const response = await fetch(url, { signal: abort.signal, credentials: 'same-origin', cache: 'no-store' });
-        const body = await response.json() as { reports?: ReportSummary[]; detail?: string };
-        if (!response.ok || !Array.isArray(body.reports)) throw new Error(body.detail || `Report request returned ${response.status}`);
-        setReports(body.reports);
-        setReportScanId(scanId || null);
-      } catch (e) { if (!abort.signal.aborted) setReportError(e instanceof Error ? e.message : 'Reports could not be loaded.'); }
-    })();
+    setReports([]);
+    setExecutionSummary(null);
+    setExecutionSummaryError('');
+    if (!scanId) return () => abort.abort();
+    const base = import.meta.env.VITE_API_BASE_URL || location.origin;
+    void requestReportSummaries(base, scanId, abort.signal).then(reports => {
+      if (abort.signal.aborted) return;
+      setReports(reports);
+      setReportScanId(scanId);
+    }).catch(error => {
+      if (!abort.signal.aborted) setReportError(error instanceof Error ? error.message : 'Reports could not be loaded.');
+    });
+    void requestScanExecutionSummary(base, scanId, abort.signal).then(summary => {
+      if (!abort.signal.aborted) setExecutionSummary(summary);
+    }).catch(error => {
+      if (!abort.signal.aborted) setExecutionSummaryError(error instanceof Error ? error.message : 'Scan summary could not be loaded.');
+    });
     return () => abort.abort();
   }, [demo, page, scanId, validationRevision, snapshot?.stage, snapshot?.status, snapshot?.stage_statuses?.Report]);
   useEffect(() => {
@@ -824,6 +844,7 @@ export default function App() {
     if (demo || (modal !== null && modal !== 'new')) return;
     const abort = new AbortController();
     setLaunchError('');
+    setScopesLoading(true);
     void (async () => {
       try {
         const base = import.meta.env.VITE_API_BASE_URL || location.origin;
@@ -831,6 +852,7 @@ export default function App() {
         if (!response.ok) throw new Error(`Approved scope request returned ${response.status}`);
         const body = await response.json() as { scopes?: ApprovedScope[] };
         const loaded = Array.isArray(body.scopes) ? body.scopes : [];
+        if (abort.signal.aborted) return;
         setScopes(loaded);
         setScopeId(current => repeatSource && !loaded.some(item => item.scope_id === current) ? '' : selectApprovedScope(loaded, current));
         if (repeatSource) {
@@ -838,6 +860,7 @@ export default function App() {
           setSelectedTargets(approved ? repeatSource.targets.filter(target => approved.targets.some(item => item.asset === target)) : []);
         }
       } catch (e) { if (!abort.signal.aborted) setLaunchError(e instanceof Error ? e.message : 'Approved scopes could not be loaded.'); }
+      finally { if (!abort.signal.aborted) setScopesLoading(false); }
     })();
     return () => abort.abort();
   }, [modal, demo, repeatSource]);
@@ -889,7 +912,7 @@ export default function App() {
   useEffect(() => {
     exclusionGeneration.current += 1;
     setExclusionPreparation(null);
-  }, [scopeId, selectedTargets, identityValues, policyValues, loginMode, scanProfile, modal]);
+  }, [scopeId, selectedTargets, startUrl, identityValues, policyValues, loginMode, scanProfile, modal]);
   const policyConfirmations = selectedScope
     ? policyConfirmationKeys(selectedScope.execution_requirements, selectedTargets, authorizationConfirmed)
     : [];
@@ -906,6 +929,7 @@ export default function App() {
     setMaxConcurrency(selectedLimits.concurrency);
     setTimeoutSeconds(selectedLimits.timeout_seconds);
     setMaxDepth(selectedLimits.max_depth);
+    setFfufMaxTimeSeconds(scanProfile === 'bug-bounty-safe' ? 60 : 150);
   }, [selectedScope?.scope_id, scanProfile, selectedLimits?.max_requests, selectedLimits?.requests_per_second, selectedLimits?.concurrency, selectedLimits?.timeout_seconds, selectedLimits?.max_depth]);
   const registerProgram = async () => {
     if (!scopeProgramUrl.trim()) return;
@@ -926,12 +950,15 @@ export default function App() {
     finally { setScopeSubmitting(false); }
   };
   const openScopeWorkflow = (item: RegisteredProgram) => {
+    scopeResponses.invalidate();
+    setScopeActionBusy(false);
     setScopeModel(item.scope_model || 'gpt-5.6-sol');
     setWorkflowProgram(item); dispatchScopeActivity({ type: 'job-selected', status: item.scope_status }); setScopeDraft(null); setScopeApproval(null); setScopeReviewer(''); setScopeConfirmed(false); setScopeWorkflowError(''); setModal('scope-workflow');
   };
   const startScopeCollection = async () => {
     if (!workflowProgram || scopeActionBusy || !isValidScopeModel(scopeModel)) return;
-    setScopeActionBusy(true); setScopeWorkflowError(''); dispatchScopeActivity({ type: 'reset' }); setScopeDraft(null); setScopeApproval(null);
+    const isCurrent = scopeResponses.capture();
+    setScopeActionBusy(true); setScopeWorkflowError('');
     try {
       const base = import.meta.env.VITE_API_BASE_URL || location.origin;
       const response = await fetch(new URL(`/api/v1/programs/${encodeURIComponent(workflowProgram.id)}/scope-collection`, base), {
@@ -940,41 +967,51 @@ export default function App() {
       });
       const body = await response.json() as { job?: Partial<RegisteredProgram>; detail?: unknown };
       if (!response.ok || !body.job) throw new Error(tr(apiErrorMessage(body.detail, `Scope collection returned ${response.status}`)));
-      setWorkflowProgram(current => current ? { ...current, ...body.job } : current);
-      dispatchScopeActivity({ type: 'collection-started' });
+      if (!isCurrent()) return;
+      setWorkflowProgram(current => current?.id === workflowProgram.id ? { ...current, ...body.job } : current);
+      if (body.job.scope_status !== 'approved') {
+        dispatchScopeActivity({ type: 'reset' });
+        setScopeDraft(null); setScopeApproval(null);
+        dispatchScopeActivity({ type: 'collection-started' });
+      }
       await refreshRegisteredPrograms();
-    } catch (e) { setScopeWorkflowError(e instanceof Error ? e.message : 'Scope collection could not start.'); }
-    finally { setScopeActionBusy(false); }
+    } catch (e) { if (isCurrent()) setScopeWorkflowError(e instanceof Error ? e.message : 'Scope collection could not start.'); }
+    finally { if (isCurrent()) setScopeActionBusy(false); }
   };
   const confirmScopeBrowser = async () => {
-    if (!workflowProgram) return;
+    if (!workflowProgram || scopeActionBusy) return;
+    const isCurrent = scopeResponses.capture();
     setScopeActionBusy(true); setScopeWorkflowError('');
     try {
       const base = import.meta.env.VITE_API_BASE_URL || location.origin;
       const response = await fetch(new URL(`/api/v1/programs/${encodeURIComponent(workflowProgram.id)}/scope-browser-ready`, base), { method: 'POST', credentials: 'same-origin' });
       const body = await response.json() as { job?: Partial<RegisteredProgram>; detail?: unknown };
       if (!response.ok || !body.job) throw new Error(tr(apiErrorMessage(body.detail, `Browser confirmation returned ${response.status}`)));
-      setWorkflowProgram(current => current ? { ...current, ...body.job } : current);
+      if (!isCurrent()) return;
+      setWorkflowProgram(current => current?.id === workflowProgram.id ? { ...current, ...body.job } : current);
       dispatchScopeActivity({ type: 'external-mutation' });
-    } catch (e) { setScopeWorkflowError(e instanceof Error ? e.message : 'Browser confirmation failed.'); }
-    finally { setScopeActionBusy(false); }
+    } catch (e) { if (isCurrent()) setScopeWorkflowError(e instanceof Error ? e.message : 'Browser confirmation failed.'); }
+    finally { if (isCurrent()) setScopeActionBusy(false); }
   };
   const controlScope = async (action: 'pause' | 'continue' | 'cancel') => {
     if (!workflowProgram || scopeActionBusy) return;
+    const isCurrent = scopeResponses.capture();
     setScopeActionBusy(true); setScopeWorkflowError('');
     try {
       const base = import.meta.env.VITE_API_BASE_URL || location.origin;
       const response = await fetch(new URL(`/api/v1/programs/${encodeURIComponent(workflowProgram.id)}/scope-${action}`, base), { method: 'POST', credentials: 'same-origin' });
       const body = await response.json() as { job?: Partial<RegisteredProgram>; detail?: unknown };
       if (!response.ok || !body.job) throw new Error(tr(apiErrorMessage(body.detail, `Scope ${action} returned ${response.status}`)));
-      setWorkflowProgram(current => current ? { ...current, ...body.job } : current);
+      if (!isCurrent()) return;
+      setWorkflowProgram(current => current?.id === workflowProgram.id ? { ...current, ...body.job } : current);
       dispatchScopeActivity({ type: 'external-mutation' });
       await refreshRegisteredPrograms();
-    } catch (e) { setScopeWorkflowError(e instanceof Error ? e.message : `Scope ${action} failed.`); }
-    finally { setScopeActionBusy(false); }
+    } catch (e) { if (isCurrent()) setScopeWorkflowError(e instanceof Error ? e.message : `Scope ${action} failed.`); }
+    finally { if (isCurrent()) setScopeActionBusy(false); }
   };
   const decideScope = async (decision: 'yes' | 'no') => {
-    if (!workflowProgram) return;
+    if (!workflowProgram || scopeActionBusy) return;
+    const isCurrent = scopeResponses.capture();
     setScopeActionBusy(true); setScopeWorkflowError('');
     try {
       const base = import.meta.env.VITE_API_BASE_URL || location.origin;
@@ -984,15 +1021,20 @@ export default function App() {
       });
       const body = await response.json() as { job?: Partial<RegisteredProgram>; detail?: unknown };
       if (!response.ok || !body.job) throw new Error(tr(apiErrorMessage(body.detail, `Scope decision returned ${response.status}`)));
-      setWorkflowProgram(current => current ? { ...current, ...body.job } : current);
+      if (!isCurrent()) return;
+      setWorkflowProgram(current => current?.id === workflowProgram.id ? { ...current, ...body.job } : current);
       dispatchScopeActivity({ type: 'external-mutation' });
       setScopeDraft(null); setScopeConfirmed(false);
       await refreshRegisteredPrograms();
-    } catch (e) { setScopeWorkflowError(e instanceof Error ? e.message : 'Scope decision failed.'); }
-    finally { setScopeActionBusy(false); }
+    } catch (e) { if (isCurrent()) setScopeWorkflowError(e instanceof Error ? e.message : 'Scope decision failed.'); }
+    finally { if (isCurrent()) setScopeActionBusy(false); }
   };
   const closeDialog = () => {
-    if (modal === 'scope-workflow') dispatchScopeActivity({ type: 'dialog-closed' });
+    if (modal === 'scope-workflow') {
+      scopeResponses.invalidate();
+      setScopeActionBusy(false);
+      dispatchScopeActivity({ type: 'dialog-closed' });
+    }
     setModal(null);
   };
   const prepareExclusions = async () => {
@@ -1003,9 +1045,9 @@ export default function App() {
       const base = import.meta.env.VITE_API_BASE_URL || location.origin;
       const response = await fetch(new URL(`/api/v1/scopes/${encodeURIComponent(selectedScope.scope_id)}/exclusion-preparation`, base), {
         method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({scope_id:selectedScope.scope_id, targets:selectedTargets, profile:scanProfile,
+        body: JSON.stringify({...approvedScopeSelection(selectedScope.scope_id, selectedTargets), profile:scanProfile,
           max_requests:maxRequests, max_rps:maxRps, max_concurrency:maxConcurrency, timeout_seconds:timeoutSeconds, max_depth:maxDepth,
-          login_mode:loginMode, authorization_confirmed:true, refresh:true,
+          login_mode:loginMode, start_url:startUrl.trim() || null, authorization_confirmed:true, refresh:true,
           identity_values:headerIdentityValues(selectedScope.execution_requirements,identityValues),
           ...policyLaunchValues(selectedScope.execution_requirements,selectedTargets,policyValues,policyConfirmations)}),
       });
@@ -1023,19 +1065,20 @@ export default function App() {
       const response = await fetch(new URL('/api/v1/scans', base), {
         method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          scope_id: selectedScope.scope_id, targets: selectedTargets, profile: scanProfile,
+          ...approvedScopeSelection(selectedScope.scope_id, selectedTargets), profile: scanProfile,
+          recon_engine: reconEngine,
           recon_model: reconModel, attack_model: attackModel,
           validation_model: validationModel, report_model: reportModel,
           max_requests: maxRequests, max_rps: maxRps, max_concurrency: maxConcurrency,
           timeout_seconds: timeoutSeconds, max_depth: maxDepth, tag_batch_size: tagBatchSize,
           ffuf_max_time_seconds: ffufMaxTimeSeconds,
-          login_mode: loginMode, authorization_confirmed: true,
+          login_mode: loginMode, start_url: startUrl.trim() || null, authorization_confirmed: true,
           identity_values: headerIdentityValues(selectedScope.execution_requirements, identityValues),
           ...policyLaunchValues(selectedScope.execution_requirements, selectedTargets, policyValues, policyConfirmations),
         }),
       });
-      const body = await response.json() as { scan_id?: string; status?: Snapshot['status']; started_at?: string; detail?: string };
-      if (!response.ok || !body.scan_id) throw new Error(body.detail || `Scan start returned ${response.status}`);
+      const body = await response.json() as { scan_id?: string; status?: Snapshot['status']; started_at?: string; detail?: unknown };
+      if (!response.ok || !body.scan_id) throw new Error(apiErrorMessage(body.detail, `Scan start returned ${response.status}`));
       const created: ScanSummary = { scan_id: body.scan_id, status: body.status || 'running', started_at: body.started_at || new Date().toISOString(), finished_at: null, targets: selectedTargets };
       setScanOptions(current => [created, ...current.filter(item => item.scan_id !== created.scan_id)]);
       setScanId(created.scan_id); setRepeatSource(null); go('Scans'); setModal('scan-progress');
@@ -1131,7 +1174,8 @@ export default function App() {
   const findings = snapshot?.findings || [];
   const currentValidations = validationScanId === scanId ? validationCases : [];
   const validationReady = demo || validationScanId === scanId;
-  const validatedReports = demo ? [demoReport] : reports.filter(item => currentValidations.some(validation => validation.case_id === item.case_id && validation.processing_phase === 'completed' && validation.current_status === 'CONFIRMED'));
+  const validatedReports = demo ? [demoReport] : reportScanId === scanId
+    ? confirmedReportSummaries(reports, currentValidations, scanId) : [];
   const selectedReportLanguages = selectedReport ? reportLanguageChoices(validatedReports, selectedReport) : {};
   const shownFindings = filterFindings(findings, currentValidations, validationReady ? verdictFilter : 'all').filter(f => `${f.id} ${f.title} ${findingTitle(f)} ${f.endpoint}`.toLowerCase().includes(search.toLowerCase()) && (severity === 'All severities' || f.severity === severity));
   const reviewCount = findings.filter(f => findingVerdict(f, currentValidations) === 'pending').length;
@@ -1148,8 +1192,11 @@ export default function App() {
     setSelectedTargets([]);
     setIdentityValues({});
     setPolicyValues({});
-    setReconModel('gpt-6-luna');
-    setAttackModel('gpt-6-sol');
+    setReconEngine('integrated');
+    setReconModel('gpt-6.1-sol');
+    setAttackModel('gpt-6.1-sol');
+    setValidationModel('gpt-6-sol');
+    setReportModel('gpt-6.1-sol');
     setAuthorizationConfirmed(false);
     setLaunchError('');
     setModal('new');
@@ -1163,8 +1210,11 @@ export default function App() {
     setSelectedTargets(approved ? source.targets.filter(target => approved.targets.some(item => item.asset === target)) : []);
     setIdentityValues({});
     setPolicyValues({});
-    setReconModel('gpt-6-luna');
-    setAttackModel('gpt-6-sol');
+    setReconEngine('integrated');
+    setReconModel('gpt-6.1-sol');
+    setAttackModel('gpt-6.1-sol');
+    setValidationModel('gpt-6-sol');
+    setReportModel('gpt-6.1-sol');
     setAuthorizationConfirmed(false);
     setLaunchError('');
     setModal('new');
@@ -1222,6 +1272,7 @@ export default function App() {
   const latestReconPhase = latestReconActivity?.message_params?.phase;
   const latestReconState = latestReconActivity?.message_params?.state;
   const manualLoginNotice = <ManualLoginNotice {...manualLogin} language={language}/>;
+  const operatorActionNotice = <OperatorActions {...operatorActions} language={language}/>;
   const workLogs = snapshot?.logs.filter(log => log.message_code === 'agent.work') ?? [];
   const currentWork = [...(snapshot?.logs ?? [])].reverse().find(log =>
     log.stage === snapshot?.stage && (log.message_code === 'agent.work' || log.message_code === 'recon.activity'));
@@ -1248,9 +1299,8 @@ export default function App() {
     <button className="secondary-button" onClick={() => void changePause(snapshot.status === 'running' ? 'pause' : 'continue')} disabled={!!pauseBusy || cancelling}>{pauseBusy === 'pause' ? tk("일시정지 처리 중…", "Pausing…") : pauseBusy === 'continue' ? tk("계속 처리 중…", "Continuing…") : snapshot.status === 'running' ? tk("일시정지", "Pause") : tk("계속", "Continue")}</button>
     <button className="secondary-button" onClick={() => void cancelScan()} disabled={cancelling || !!pauseBusy}>{cancelPhase === 'requesting' ? tk("취소 요청 전달 중…", "Sending cancellation request…") : cancelling ? tk("취소 확인 중…", "Confirming cancellation…") : tk("스캔 취소", "Cancel scan")}</button>
   </> : null;
-  const scanPanel = <Panel className="scan-summary-panel" title={demo ? tr('Local lab · API assessment') : scanTargetLabel} subtitle={demo ? tr('Synthetic fixture · isolated from program inventory') : `${snapshot?.program_name ? `${snapshot.program_name} · ` : ''}${scanId}`} action={<div className="scan-panel-actions"><Badge tone={snapshot?.status === 'failed' ? 'critical' : snapshot?.status === 'completed' ? 'success' : 'warning'}><span className="dot"/>{cancelling ? tk("취소 처리 중", "Cancelling") : tr(snapshot?.status || state)}</Badge>{scanControls}{!demo && retryAction === 'resume' && <button className="secondary-button" onClick={resumeScan} disabled={resuming}>{resuming ? tk("재실행 요청 중…", "Requesting rerun…") : tk("실패 단계부터 재실행", "Rerun from failed stage")}</button>}{!demo && retryAction === 'rescan' && <button className="secondary-button" onClick={openRepeatScan}>{tk("정찰부터 다시 스캔", "Rescan from recon")}</button>}{!demo && scanId && <button className="secondary-button" onClick={() => setModal('scan-progress')}>{snapshot?.stage === 'Recon' ? tk("도구 작업·발견 URL 보기", "View tools and URLs") : tk("진행 창 열기", "Open progress window")}</button>}</div>}>
+  const scanPanel = <Panel className="scan-summary-panel" title={demo ? tr('Local lab · API assessment') : scanTargetLabel} subtitle={demo ? tr('Synthetic fixture · isolated from program inventory') : `${snapshot?.program_name ? `${snapshot.program_name} · ` : ''}${scanId}`} action={<div className="scan-panel-actions"><Badge tone={snapshot?.status === 'failed' ? 'critical' : snapshot?.status === 'completed' ? 'success' : 'warning'}><span className="dot"/>{cancelling ? tk("취소 처리 중", "Cancelling") : tr(snapshot?.status || state)}</Badge>{scanControls}{!demo && retryAction === 'resume' && <button className="secondary-button" onClick={resumeScan} disabled={resuming}>{resuming ? tk("재실행 요청 중…", "Requesting rerun…") : snapshot?.stage === 'Report' ? tk("보고서만 다시 생성", "Retry report only") : tk("실패 단계부터 재실행", "Rerun from failed stage")}</button>}{!demo && retryAction === 'rescan' && <button className="secondary-button" onClick={openRepeatScan}>{tk("정찰부터 다시 스캔", "Rescan from recon")}</button>}{!demo && scanId && <button className="secondary-button" onClick={() => setModal('scan-progress')}>{snapshot?.stage === 'Recon' ? tk("도구 작업·발견 URL 보기", "View tools and URLs") : tk("진행 창 열기", "Open progress window")}</button>}</div>}>
     {snapshot ? <>
-      {manualLoginNotice}
       <Pipeline snapshot={{ ...snapshot, progress: scanProgress }} language={language} reportDraft={reportDraftStatus}
         tokenUsage={demo ? undefined : tokenUsage} tokenStatus={tokenStatus}/>
       {!demo && <><p className="scan-current-activity" role="status"><strong>{tk("현재 작업", "Current work")}</strong> {currentWork ? localizeActivityMessage(language, currentWork) : tk("스캔 프로세스를 시작하고 승인된 스코프를 확인하고 있습니다.", "Starting the scan process and checking the approved scope.")}</p>{agentBoard}</>}
@@ -1273,6 +1323,7 @@ export default function App() {
   </Panel>;
   const scanProgressContent = <div className="scan-progress-dialog">
     {manualLoginNotice}
+    {operatorActionNotice}
     {cancelError && <p className="scan-progress-failed" role="alert"><strong>{tk("스캔 취소 실패 ·", "Scan cancellation failed ·")} </strong>{cancelError}</p>}
     {pauseError && <p className="scan-progress-failed" role="alert"><strong>{tk("일시정지 상태 변경 실패 ·", "Pause state change failed ·")} </strong>{pauseError}</p>}
     <div className="scan-progress-overview">
@@ -1287,7 +1338,7 @@ export default function App() {
     {snapshot?.status === 'running' && !cancelling && <p className="scan-progress-working" role="status"><span className="dot"/> {tk(`${tr(snapshot.stage)} 단계 작업 중 · ${formatActivityElapsed(scanElapsedSeconds, language)}`, `${tr(snapshot.stage)} stage running · ${formatActivityElapsed(scanElapsedSeconds, language)}`)}</p>}
     {!demo && agentBoard}
     {snapshot?.status === 'paused' && !cancelling && <p className="scan-stop-status" role="status">{tk("스캔 일시정지 중 · 작업을 멈춘 상태입니다. 같은 실행을 이어가려면 ‘계속’을 누르세요.", "Scan paused. Work is stopped. Select Continue to resume this run.")}</p>}
-    {snapshot?.status === 'failed' && <p className="scan-progress-failed" role="alert">{retryAction === 'rescan' ? tk(`${tr(snapshot.stage)} 단계에서 스캔이 실패했습니다. 정찰부터 새 스캔을 시작하세요. 아래 활동 기록에서 마지막 오류를 확인할 수 있습니다.`, `Scan failed during ${tr(snapshot.stage)}. Start a new scan from recon. Check the last error in activity below.`) : tk(`${tr(snapshot.stage)} 단계에서 스캔이 실패했습니다. 완료된 정찰 결과를 재사용하고, 실패한 단계의 작업을 새로 생성해 실행합니다. 아래 활동 기록에서 마지막 오류를 확인하세요.`, `Scan failed during ${tr(snapshot.stage)}. Completed recon results are reused and work for the failed stage is recreated. Check the last error in activity below.`)}</p>}
+    {snapshot?.status === 'failed' && <p className="scan-progress-failed" role="alert">{retryAction === 'rescan' ? tk(`${tr(snapshot.stage)} 단계에서 스캔이 실패했습니다. 정찰부터 새 스캔을 시작하세요. 아래 활동 기록에서 마지막 오류를 확인할 수 있습니다.`, `Scan failed during ${tr(snapshot.stage)}. Start a new scan from recon. Check the last error in activity below.`) : snapshot.stage === 'Report' ? tk('보고서 생성이 실패했습니다. 정찰·공격·체이닝·검증 결과는 재실행하지 않고 현재 검증 결과에서 보고서만 다시 생성합니다. 아래 활동 기록에서 마지막 오류를 확인하세요.', 'Report generation failed. Recon, Attack, Chaining, and Validation are not rerun; only the report is regenerated from the current validation results. Check the last error in activity below.') : tk(`${tr(snapshot.stage)} 단계에서 스캔이 실패했습니다. 완료된 정찰 결과를 재사용하고, 실패한 단계의 작업을 새로 생성해 실행합니다. 아래 활동 기록에서 마지막 오류를 확인하세요.`, `Scan failed during ${tr(snapshot.stage)}. Completed recon results are reused and work for the failed stage is recreated. Check the last error in activity below.`)}</p>}
     {snapshot?.status === 'cancelled' && <p className="scan-stop-status is-done" role="status">{tk("스캔 취소 완료 · 실행 프로세스가 종료됐고 스캔 상태가 취소됨으로 저장됐습니다. 다시 검사하려면 새 스캔을 시작하세요.", "Scan cancelled. The process exited and the cancelled status was saved. Start a new scan to test again.")}</p>}
     {resumeError && <p className="form-error" role="alert">{resumeError}</p>}
     {error && <p className="form-error" role="alert">{tr(error)}</p>}
@@ -1314,9 +1365,12 @@ export default function App() {
     </section>}
     {!demo && attackTasksContent}
     <div className="scan-progress-log"><h3>{tk("스캔 활동", "Scan activity")} <small>{tk(`${snapshot?.logs.length ?? 0}개 기록`, `${snapshot?.logs.length ?? 0} records`)}</small></h3><div>{snapshot?.logs.slice(-50).map(log => <article key={log.id} className={log.level}><time dateTime={log.time}>{new Date(log.time).toLocaleTimeString(language === 'ko' ? 'ko-KR' : 'en-GB',{hour12:false})}</time><span>{tr(log.stage)}</span><p>{localizeActivityMessage(language, log)}</p></article>)}{!snapshot?.logs.length && <p className="scan-progress-empty">{tk("스캔 상태를 불러오는 중입니다. 기록이 도착하면 여기에 표시됩니다.", "Loading scan status. New records will appear here.")}</p>}</div></div>
-    <div className="button-row"><button className="secondary-button" onClick={() => { refresh(); setAttackTaskRevision(value => value + 1); }}>{tk("상태 새로고침", "Refresh status")}</button>{scanControls}{!demo && retryAction === 'resume' && <button className="primary-button" onClick={resumeScan} disabled={resuming}>{resuming ? tk("재실행 요청 중…", "Requesting rerun…") : tk("실패 단계부터 재실행", "Rerun from failed stage")}</button>}{!demo && retryAction === 'rescan' && <button className="primary-button" onClick={openRepeatScan}>{tk("정찰부터 다시 스캔", "Rescan from recon")}</button>}<button className="secondary-button" onClick={closeDialog}>{tk("스캔 화면에서 계속 보기", "Continue in scan view")}</button></div>
+    <div className="button-row"><button className="secondary-button" onClick={() => { refresh(); setAttackTaskRevision(value => value + 1); }}>{tk("상태 새로고침", "Refresh status")}</button>{scanControls}{!demo && retryAction === 'resume' && <button className="primary-button" onClick={resumeScan} disabled={resuming}>{resuming ? tk("재실행 요청 중…", "Requesting rerun…") : snapshot?.stage === 'Report' ? tk("보고서만 다시 생성", "Retry report only") : tk("실패 단계부터 재실행", "Rerun from failed stage")}</button>}{!demo && retryAction === 'rescan' && <button className="primary-button" onClick={openRepeatScan}>{tk("정찰부터 다시 스캔", "Rescan from recon")}</button>}<button className="secondary-button" onClick={closeDialog}>{tk("스캔 화면에서 계속 보기", "Continue in scan view")}</button></div>
   </div>;
   const scanFromScope = (id: string) => {
+    scopeResponses.invalidate();
+    setScopeActionBusy(false);
+    setRepeatSource(null);
     setScopeId(id);
     setSelectedTargets([]);
     setIdentityValues({});
@@ -1355,9 +1409,14 @@ export default function App() {
   const modelsValid = [reconModel, attackModel, validationModel, reportModel].every(
     model => modelNamePattern.test(model) && !model.includes('://'),
   );
+  const startUrlReady = validStartUrl(startUrl, scanProfile === 'bug-bounty-safe')
+    && (!startUrl.trim() || selectedTargets.length === 1);
+  const bugBountyReady = selectedScope
+    ? bugBountyTargetReady(scanProfile, selectedTargets, selectedScope.targets, startUrl)
+    : false;
   const canLaunch = !demo && !!selectedScope && selectedTargets.length > 0
     && selectedTargets.every(target => selectedScope.targets.some(item => item.asset === target))
-    && authorizationConfirmed && limitsValid && modelsValid
+    && authorizationConfirmed && limitsValid && modelsValid && startUrlReady && bugBountyReady
     && canLaunchWithHeaderInputs(selectedScope.execution_requirements, identityValues)
     && canLaunchWithPolicyInputs(selectedScope.execution_requirements, selectedTargets, policyValues, policyConfirmations, identityValues) && !launching;
   const journeySteps = [
@@ -1378,11 +1437,12 @@ export default function App() {
           : { label: reviewCount ? tk("검증 대기열 열기", "Open validation queue") : tk("스캔 화면 열기", "Open scans"), run: () => go(reviewCount ? 'Validation' : 'Scans') };
   const newScanContent = <div className="scan-form">
     <div className="notice"><Icon name="lock"/><div><strong>{tr('Approved Scope only')}</strong><p>{tr('The backend re-verifies approval integrity and the Python orchestrator enforces TargetPolicy and request budgets.')}</p></div></div>
+    <div className="notice"><Icon name="search"/><div><strong>{tk('블랙박스 실행', 'Black-box execution')}</strong><p>{tk('실행 에이전트는 대상의 HTTP 응답, DOM, 브라우저 트래픽, 공개 클라이언트 자산만 사용합니다. 공개 정답 목록과 소스 기준 목록은 실행 입력으로 사용되지 않습니다.', 'Runtime agents use only target HTTP responses, DOM, browser traffic, and public client assets. Public answer catalogs and source baselines are never used as execution input.')}</p></div></div>
     {demo ? <p className="form-error">{tr('Switch to the live local dashboard to start a scan.')}</p> : <>
       {repeatSource && <div className="notice" role="status"><Icon name="scope"/><div><strong>{tk("정찰부터 새 스캔", "New scan from recon")}</strong><p>{tk(`기존 스캔 ${repeatSource.scanId}의 결과는 유지됩니다. 새 스캔 ID를 만들고 Scope·대상·실행 제한·로그인 방식을 확인한 뒤 정찰부터 다시 시작합니다. 이전 실행 설정은 저장되지 않아 현재 승인된 Scope와 프로필 기본값을 사용합니다.`, `Results for scan ${repeatSource.scanId} are kept. A new scan ID is created. Review the Scope, targets, limits, and login method before starting again from recon. Previous run settings were not saved, so the current approved Scope and profile defaults are used.`)}</p></div></div>}
       {repeatSource && !scopes.some(scope => scope.scope_id === repeatSource.scopeId) && <p className="form-error" role="alert">{tk("기존 스캔의 승인된 Scope를 찾을 수 없습니다. 새로 승인된 Scope를 직접 선택하고 대상을 확인하세요.", "The approved Scope for the previous scan is unavailable. Select a newly approved Scope and check the targets.")}</p>}
       {repeatSource && selectedScope?.scope_id === repeatSource.scopeId && repeatSource.targets.some(target => !selectedScope.targets.some(item => item.asset === target)) && <p className="form-error" role="alert">{tk("이전 스캔의 일부 대상은 현재 승인된 Scope에 없어 선택하지 않았습니다. 대상 목록을 확인하세요.", "Some targets from the previous scan are outside the currently approved Scope and were not selected. Check the target list.")}</p>}
-      <label className="form-field"><span>{tr('Verified Scope')}</span><select aria-label={tr('Approved program')} value={scopeId} onChange={event => { setScopeId(event.target.value); setSelectedTargets([]); setIdentityValues({}); setAuthorizationConfirmed(false); }}><option value="">{tr('Select a recent approved scope')}</option>{scopes.map(scope => <option key={scope.scope_id} value={scope.scope_id}>{scope.program_name} · {scope.platform}</option>)}</select></label>
+      <label className="form-field"><span>{tr('Verified Scope')}</span><select aria-label={tr('Approved program')} value={scopeId} onChange={event => { setScopeId(event.target.value); setSelectedTargets([]); setStartUrl(''); setIdentityValues({}); setAuthorizationConfirmed(false); }}><option value="">{tr('Select a recent approved scope')}</option>{scopes.map(scope => <option key={scope.scope_id} value={scope.scope_id}>{scope.program_name} · {scope.platform}</option>)}</select></label>
       {selectedScope && <>
         {!headerRequirementsReady && (headerResolutionError
           ? <p className="form-error" role="alert">{tk('실행 요구 사항을 확인하지 못해 스캔을 시작할 수 없습니다.', 'The scan cannot start until execution requirements are resolved.')} {headerResolutionError}</p>
@@ -1395,16 +1455,22 @@ export default function App() {
         </div>
         <p className="form-hint">{tr('Select Codex models from GPT-5.6 onward, or enter a custom model ID.')}</p>
         {!modelsValid && <p className="form-error" role="alert">{tr('Enter valid model IDs before starting the scan.')}</p>}
-        <fieldset className="target-fieldset"><legend>{tr('Targets')} <small>{selectedTargets.length}{tr('selected')}</small></legend><div className="target-actions"><button type="button" className="text-button" onClick={() => setSelectedTargets(selectedScope.targets.map(item => item.asset))}>{tr('Select all')}</button><button type="button" className="text-button" onClick={() => setSelectedTargets([])}>{tr('Clear')}</button></div><div className="target-list">{selectedScope.targets.map(target => <label key={`${target.asset_type}:${target.asset}`}><input type="checkbox" checked={selectedTargets.includes(target.asset)} onChange={() => setSelectedTargets(current => current.includes(target.asset) ? current.filter(item => item !== target.asset) : [...current, target.asset])}/><span><strong>{target.asset}</strong><small>{target.asset_type} · {tk("최대", "maximum")} {tr(target.maximum_severity || 'program policy')}</small></span></label>)}</div></fieldset>
+        <fieldset className="target-fieldset"><legend>{tr('Targets')} <small>{selectedTargets.length}{tr('selected')}</small></legend><div className="target-actions">{scanProfile !== 'bug-bounty-safe' && <button type="button" className="text-button" onClick={() => { setSelectedTargets(selectedScope.targets.map(item => item.asset)); setStartUrl(''); }}>{tr('Select all')}</button>}<button type="button" className="text-button" onClick={() => { setSelectedTargets([]); setStartUrl(''); }}>{tr('Clear')}</button></div><div className="target-list">{selectedScope.targets.map(target => <label key={`${target.asset_type}:${target.asset}`}><input type="checkbox" checked={selectedTargets.includes(target.asset)} onChange={() => { setSelectedTargets(current => scanProfile === 'bug-bounty-safe' ? (current.includes(target.asset) ? [] : [target.asset]) : (current.includes(target.asset) ? current.filter(item => item !== target.asset) : [...current, target.asset])); setStartUrl(''); }}/><span><strong>{target.asset}</strong><small>{target.asset_type} · {tk("최대", "maximum")} {tr(target.maximum_severity || 'program policy')}</small></span></label>)}</div></fieldset>
         {selectedTargets.length > 0 && selectedLimits && <section className="execution-requirements"><div className="execution-requirements-heading"><div><h3>{tr('Execution requirements')}</h3></div><div className="stage-badges"><Badge>{tr('Recon')}</Badge><Badge>{tr('Attack')}</Badge><Badge>{tr('Validation')}</Badge></div></div><div className="requirements-summary"><div><span>{tr('Policy request-rate ceiling')}</span><strong>{selectedScope.execution_requirements.scope_max_requests_per_second ? `${selectedScope.execution_requirements.scope_max_requests_per_second} ${tr('requests per second unit')}` : tr('Not specified by policy')}</strong></div><div><span>{tr('Required request header')}</span><strong className="mono">{headerRequirementsReady ? (selectedScope.execution_requirements.required_headers.length ? selectedScope.execution_requirements.required_headers.map(header => <span key={header.name} title={header.source_quote}>{header.name}: {header.value_template}<br/></span>) : tr('None')) : tk('확인 중', 'Pending')}</strong></div></div></section>}
-        <div className="form-grid"><label className="form-field"><span>{tr('Execution profile')}</span><select value={scanProfile} onChange={event => setScanProfile(event.target.value as ExecutionProfileId)}><option value="safe-recon">{tr('Safe recon')}</option><option value="focused-discovery">{tr('Focused discovery')}</option></select></label><label className="form-field"><span>{tk('공유 스캔 요청 예산', 'Shared scan request budget')} <small>≤ {selectedLimits?.max_requests.toLocaleString()}</small></span><input type="number" min="1" max={selectedLimits?.max_requests} value={maxRequests} onChange={event => setMaxRequests(Number(event.target.value))}/></label></div>
+        <div className="form-grid"><label className="form-field"><span>{tr('Execution profile')}</span><select value={scanProfile} onChange={event => { setScanProfile(event.target.value as ExecutionProfileId); setSelectedTargets([]); setStartUrl(''); }}><option value="bug-bounty-safe">{tk('버그바운티 안전', 'Bug bounty safe')}</option><option value="safe-recon">{tr('Safe recon')}</option><option value="focused-discovery">{tr('Focused discovery')}</option></select></label><label className="form-field"><span>{tk('정찰 엔진', 'Recon engine')}</span><select value={reconEngine} onChange={event => setReconEngine(event.target.value as 'integrated' | 'native')}><option value="integrated">{tk('Strix 통합 · 기본 정찰 자동 대체', 'Integrated Strix · automatic native fallback')}</option><option value="native">{tk('기본 정찰 엔진', 'Native recon engine')}</option></select><small>{tk('Strix 실행 환경이 막히거나 결과가 비어 있으면 같은 승인 정책으로 기본 정찰을 이어서 실행합니다.', 'If the Strix runtime is unavailable or returns no endpoints, native Recon continues under the same approved policy.')}</small></label></div>
+        <label className="form-field"><span>{tk('공유 스캔 요청 예산', 'Shared scan request budget')} <small>≤ {selectedLimits?.max_requests.toLocaleString()}</small></span><input type="number" min="1" max={selectedLimits?.max_requests} value={maxRequests} onChange={event => setMaxRequests(Number(event.target.value))}/></label>
+        {scanProfile === 'bug-bounty-safe' && <div className="notice"><Icon name="scope"/><div><strong>{tk('실제 버그바운티 프로그램용 보수적 실행', 'Conservative execution for a real bug bounty program')}</strong><p>{tk('한 번에 승인된 자산 하나만 실행하며 일반 워드리스트 경로 대입은 사용하지 않습니다. 와일드카드는 아래에 정확한 HTTPS 시작 URL이 필요합니다.', 'Run one approved asset at a time without generic wordlist path guessing. Wildcards require an exact HTTPS start URL below.')}</p></div></div>}
+        {selectedTargets.length === 1 && <label className="form-field"><span>{tk('정확한 시작 URL', 'Exact start URL')} <small>{selectedScope.targets.find(item => item.asset === selectedTargets[0])?.asset_type === 'WILDCARD' && scanProfile === 'bug-bounty-safe' ? tk('필수', 'required') : tk('선택', 'optional')}</small></span><input type="url" placeholder="https://approved.example/path" value={startUrl} onChange={event => setStartUrl(event.target.value)} aria-invalid={!validStartUrl(startUrl, scanProfile === 'bug-bounty-safe')}/><small>{scanProfile === 'bug-bounty-safe' ? tk('승인된 자산 안의 HTTPS URL만 입력하세요.', 'Enter only an HTTPS URL inside the approved asset.') : tk('승인된 자산 안의 HTTP(S) URL만 입력하세요.', 'Enter only an HTTP(S) URL inside the approved asset.')}</small></label>}
+        {!startUrlReady && <p className="form-error" role="alert">{scanProfile === 'bug-bounty-safe' ? tk('시작 URL은 쿼리·프래그먼트·자격 증명이 없는 HTTPS URL이어야 하며 대상 하나를 선택해야 합니다.', 'The start URL must be an HTTPS URL without a query, fragment, or embedded credentials and requires one selected target.') : tk('시작 URL은 쿼리·프래그먼트·자격 증명이 없는 HTTP(S) URL이어야 하며 대상 하나를 선택해야 합니다.', 'The start URL must be an HTTP(S) URL without a query, fragment, or embedded credentials and requires one selected target.')}</p>}
+        {scanProfile === 'bug-bounty-safe' && selectedTargets.length === 1 && selectedScope.targets.find(item => item.asset === selectedTargets[0])?.asset_type === 'WILDCARD' && !startUrl.trim() && <p className="form-error" role="alert">{tk('와일드카드 대상에는 정확한 HTTPS 시작 URL이 필요합니다.', 'An exact HTTPS start URL is required for a wildcard target.')}</p>}
         <div className="form-grid"><label className="form-field"><span>{tr('Requests per second')} <small>≤ {selectedLimits?.requests_per_second}</small></span><input type="number" min="0.1" step="0.1" max={selectedLimits?.requests_per_second} value={maxRps} onChange={event => setMaxRps(Number(event.target.value))}/></label><label className="form-field"><span>{tr('Concurrency')} <small>≤ {selectedLimits?.concurrency}</small></span><input type="number" min="1" max={selectedLimits?.concurrency} value={maxConcurrency} onChange={event => setMaxConcurrency(Number(event.target.value))}/></label></div>
         <div className="scan-rate-summary" aria-live="polite"><span>{tk('이번 스캔의 공유 요청 속도 상한', 'This scan shared request-rate cap')}</span><strong>{maxRps > 0 ? `${maxRps} ${tr('requests per second unit')}` : tr('Enter a valid request rate')}</strong>{requestInterval !== null && <small>{language === 'ko' ? `평균 ${requestInterval}초에 1회 요청` : `Average one request every ${requestInterval} seconds`}</small>}</div>
         <div className="form-grid"><label className="form-field"><span>{tr('Timeout seconds')} <small>≤ {selectedLimits?.timeout_seconds}</small></span><input type="number" min="1" max={selectedLimits?.timeout_seconds} value={timeoutSeconds} onChange={event => setTimeoutSeconds(Number(event.target.value))}/></label><label className="form-field"><span>{tr('Maximum depth')} <small>≤ {selectedLimits?.max_depth}</small></span><input type="number" min="0" max={selectedLimits?.max_depth} value={maxDepth} onChange={event => setMaxDepth(Number(event.target.value))}/></label></div>
-        <label className="form-field"><span>{tk('추가 경로 탐색 시간 (초/루트)', 'Additional path discovery time (seconds/root)')} <small>{tk('0 = 시간 제한 없음', '0 = no time limit')}</small></span><input type="number" min="0" max="86400" value={ffufMaxTimeSeconds} onChange={event => setFfufMaxTimeSeconds(Number(event.target.value))}/></label>
+        <label className="form-field"><span>{tk('추가 경로 탐색 전체 시간 (초)', 'Total additional path discovery time (seconds)')} <small>{scanProfile === 'bug-bounty-safe' ? tk('일반 워드리스트 탐색 비활성', 'Generic wordlist discovery disabled') : tk('모든 루트가 공유 · 0 = 시간 제한 없음', 'Shared by all roots · 0 = no time limit')}</small></span><input type="number" min="0" max={scanProfile === 'bug-bounty-safe' ? 60 : 86400} value={ffufMaxTimeSeconds} disabled={scanProfile === 'bug-bounty-safe'} onChange={event => setFfufMaxTimeSeconds(Number(event.target.value))}/></label>
         <div className="form-grid"><label className="form-field"><span>{tr('Tag batch size')} <small>1–200</small></span><input type="number" min="1" max="200" step="1" value={tagBatchSize} onChange={event => setTagBatchSize(Number(event.target.value))} aria-describedby="tag-batch-size-hint"/><small id="tag-batch-size-hint">{tr('Observations per model call · 25 recommended (300-second model timeout)')}</small></label><label className="form-field"><span>{tr('Login behavior')}</span><select value={loginMode} onChange={event => setLoginMode(event.target.value as 'none' | 'runtime-browser')}><option value="none">{tr('No login prompt')}</option><option value="runtime-browser">{tr('Open runtime browser')}</option></select></label></div>
         {!!selectedScope.execution_requirements.execution_rules?.exclusions?.length && <div><ScopeExclusionStatus count={selectedScope.execution_requirements.execution_rules.exclusions.length} preparation={exclusionPreparation}/><button className="secondary-button" disabled={!canLaunch || preparingExclusions} onClick={() => void prepareExclusions()}>{tk(preparingExclusions ? '확인 중…' : '저장된 증거로 제외 조건 확인', preparingExclusions ? 'Checking…' : 'Check exclusions from saved evidence')}</button></div>}
         {loginMode === 'runtime-browser' && <p className="requirements-note">{tk('스캔 중 열린 브라우저에서 5분 안에 로그인을 완료하세요. 인증 토큰과 로그인 화면 종료가 확인되면 자동으로 진행합니다. 토큰을 사용하지 않는 사이트는 자동 확인에 실패할 수 있습니다.', 'Complete login in the opened browser within five minutes. The scan continues when an authentication token is detected and the login form closes. Sites without a token may not be confirmed automatically.')}</p>}
+        {loginMode === 'runtime-browser' && reconEngine === 'integrated' && <p className="requirements-note">{tk('사람이 로그인하는 실행에서는 같은 브라우저 세션을 유지하기 위해 기본 정찰 엔진으로 자동 전환합니다.', 'Operator login automatically uses native Recon so the same browser session is preserved.')}</p>}
         <p className="requirements-note">{tk('요청 예산은 모든 대상과 정찰·공격·검증 단계가 공유합니다.', 'The request budget is shared across all targets and Recon, Attack, and Validation.')}</p>
         {applicablePolicyRequirements(selectedScope.execution_requirements.policy_blockers, selectedTargets).map((blocker, index) => <div className="form-error" role="alert" key={index}><strong>{blocker.label}</strong><p>{blocker.reason}</p></div>)}
         <ScopePolicyAdvisories advisories={selectedScope.execution_requirements.execution_rules?.advisories} selectedAssets={selectedTargets} language={language}/>
@@ -1413,7 +1479,7 @@ export default function App() {
         {headerRequirementsReady && selectedScope.execution_requirements.header_inputs.map(input => <label className="form-field" key={input.key}><span>{input.label} <small>{tr('required for every request')}</small></span><input type={input.kind === 'email' ? 'email' : 'text'} value={identityValues[input.key] ?? ''} onChange={event => setIdentityValues(current => ({ ...current, [input.key]: event.target.value }))} autoComplete="off" maxLength={input.kind === 'username' ? 64 : 256} required aria-invalid={!!identityValues[input.key] && !canLaunchWithHeaderInputs({ header_requirements_status: 'ready', header_inputs: [input] }, identityValues)}/>{input.kind === 'username' && <small>{tk('1~64자 영문·숫자·점·밑줄·하이픈, 첫 글자는 영문 또는 숫자', '1–64 letters, digits, dots, underscores or hyphens; start with a letter or digit')}</small>}</label>)}
       </>}
       {launchError && <p className="form-error" role="alert">{launchError}</p>}
-      {!scopes.length && !launchError && <p className="form-empty">{tr('Loading verified scopes…')}</p>}
+      {!scopes.length && !launchError && <p className="form-empty">{tr(scopesLoading ? 'Loading verified scopes…' : 'No verified Scopes are available. Review and approve a program first.')}</p>}
       <div className="dialog-action-dock">{selectedScope && <label className="confirm-field"><input type="checkbox" disabled={!headerRequirementsReady} checked={authorizationConfirmed} onChange={event => setAuthorizationConfirmed(event.target.checked)}/><span>{tk('선택한 대상의 테스트 권한과 승인된 정책의 필수 조건 충족을 확인합니다.', 'I confirm authorization for the selected targets and completion of the approved policy prerequisites.')}</span></label>}<div className="button-row"><button className="secondary-button" onClick={() => { setModal(null); go('Scopes / Programs'); }}>{tr('Review programs')}</button><button className="primary-button" disabled={!canLaunch} onClick={() => void startScan()}>{tr(launching ? 'Starting…' : 'Start scan')} <Icon name="arrow" size={14}/></button></div></div>
     </>}
   </div>;
@@ -1480,6 +1546,7 @@ export default function App() {
       <div className="main-shell" style={viewportWidth > 820 ? { marginLeft: navigationWidth } : undefined}><header className="topbar"><div className="breadcrumb">{tr('Workspace')} <span>/</span> <strong>{pageLabel(page)}</strong></div><div className="top-actions"><label className="language-select"><span className="sr-only">{tr('Language')}</span><select aria-label={tr('Language')} value={language} onChange={event => setLanguage(event.target.value as Language)}><option value="ko">한국어</option><option value="en">English</option></select></label><button className="icon-button theme-toggle" title={tr(`Switch to ${resolvedTheme === 'dark' ? 'light' : 'dark'} mode`)} aria-label={tr(`Switch to ${resolvedTheme === 'dark' ? 'light' : 'dark'} mode`)} onClick={() => setTheme(resolvedTheme === 'dark' ? 'light' : 'dark')}><Icon name={resolvedTheme === 'dark' ? 'sun' : 'moon'} size={16}/></button></div></header>
       {demo && <div className={`demo-strip ${samplePreview ? 'sample-preview' : ''}`}><Icon name="terminal" size={14}/><span>{tr('DEMO DATA')}<b>·</b>{tr('A synthetic workflow. No network scans or program activity.')}</span><button onClick={samplePreview ? () => location.assign(liveUrl.href) : () => go('Settings')}>{samplePreview ? tk('실제 데이터로 돌아가기', 'Return to live data') : tr('Connection details')} <Icon name="arrow" size={13}/></button></div>}
       <div className={`workspace-grid ${collapsed ? 'activity-collapsed' : ''}`} style={viewportWidth > 1100 && !collapsed ? { gridTemplateColumns: `minmax(0,1fr) ${activityWidth}px` } : undefined}><main id="main-content" tabIndex={-1} className="content-column">
+        {manualLoginNotice}
         <div className="page-heading"><div><p className="eyebrow">{tr(page === 'Overview' ? 'YOUR OPERATIONS, AT A GLANCE' : 'AI DAST / WORKSPACE')}</p><h1>{tr(page === 'Overview' ? 'Security overview' : page)}</h1><p>{tr(page === 'Overview' ? 'From approved scope to evidence you can stand behind.' : page === 'Scopes / Programs' ? 'Program inventory is a starting point. Approved scope defines execution.' : page === 'Scans' ? 'One deterministic pipeline. Traceable decisions at every stage.' : page === 'Findings' ? 'Signals become findings. Validation establishes the verdict.' : page === 'Validation' ? 'Reproduction, controls, and evidence before confirmation.' : page === 'Reports' ? 'Reviewable local drafts. Nothing is submitted automatically.' : page === 'Audit log' ? 'Trace the decisions and provenance behind each run.' : page === 'LLM log' ? 'Review Codex execution metadata without prompts or results.' : 'Connection, privacy, and display preferences.')}</p></div><span className="heading-tag">{demo ? tk("데모 / 042", "Demo / 042") : tk("라이브 / V1", "Live / V1")}</span></div>
         {!demo && (page === 'Findings' || page === 'Validation' || page === 'Reports') && <div className="scope-page-actions"><div><strong>{tk('예시 데이터', 'Example data')}</strong><p>{tk('취약점 · 검증 · 보고서 예시를 실제 스캔 결과와 분리해 살펴봅니다.', 'Explore synthetic findings, validations, and reports separately from live scans.')}</p></div><a className="secondary-button" href={sampleUrl.href}>{tk('예시 보기', 'View examples')}</a></div>}
         {page === 'Scopes / Programs' && <div className="scope-page-actions"><div><strong>{tr('Scope intake')}</strong><p>{tr('Register a bug bounty program before collecting and approving its executable Scope.')}</p></div><button className="primary-button" onClick={() => { setScopeError(''); setModal('scope'); }}><Icon name="plus" size={15}/>{tr('Add program')}</button></div>}
@@ -1550,9 +1617,23 @@ export default function App() {
         </>}
         {page === 'Reports' && <>
           {reportError && <div className="error-banner" role="alert"><span>{reportError}</span><button onClick={() => setReportError('')}>{tr('Dismiss')}</button></div>}
+          {executionSummaryError && <div className="error-banner" role="alert">{tk('스캔 실행 요약을 불러오지 못했습니다.', 'The scan execution summary could not be loaded.')} {executionSummaryError}</div>}
           {validationError && <div className="error-banner" role="alert">{tr('Validation results unavailable')}</div>}
+          {executionSummary?.scan_id === scanId && <Panel title={tk('스캔 실행 보고서', 'Scan execution report')} subtitle={tk('발견·단계·검증·오류를 포함한 전체 실행 결과', 'Complete run outcome including discovery, stages, validation, and errors')}>
+            <div className="scan-stats">
+              <div><span>{tk('실행 상태', 'Execution status')}</span><strong>{executionSummary.execution_status}</strong></div>
+              <div><span>{tr('Endpoints')}</span><strong>{executionSummary.inventory.endpoints ?? 0}</strong></div>
+              <div><span>{tk('후보 발견', 'Candidate findings')}</span><strong>{executionSummary.inventory.candidate_findings ?? 0}</strong></div>
+              <div><span>{tk('검증 확정', 'Validation confirmed')}</span><strong>{executionSummary.validation.current_confirmed}</strong></div>
+              <div><span>{tk('생성 보고서', 'Generated reports')}</span><strong>{executionSummary.reports.length}</strong></div>
+              <div><span>{tk('기록된 오류', 'Recorded errors')}</span><strong>{executionSummary.errors.length}</strong></div>
+            </div>
+            <details><summary>{tk('실행 보고서 전체 보기', 'View complete execution report')}</summary><pre className="report-preview">{executionSummary.markdown}</pre></details>
+          </Panel>}
           <Panel title={tr('Local report drafts')} subtitle={tr('Integrity-checked local artifacts · never submitted automatically')} action={!demo && <button className="secondary-button" onClick={() => setValidationRevision(value => value + 1)}>{tr('Refresh validation results')}</button>}>
-            {!validationReady ? <p className="table-empty">{tr('Checking validation verdict')}</p>
+            {!demo && !scanId ? <Empty title={tr('No scans yet')}>{tr('Start a scan from an approved Scope to view its reports.')}</Empty>
+              : !validationReady ? <p className="table-empty">{tr('Checking validation verdict')}</p>
+              : !demo && reportScanId !== scanId && !reportError ? <p className="table-empty">{tr('Loading report drafts…')}</p>
               : validatedReports.length ? <div className="report-list">{validatedReports.map(item => <div className="report-card" key={item.report_id}>
                 <div className="report-illustration"><Icon name="report" size={42}/></div><div>
                   <Badge tone={demo ? 'warning' : 'success'}>{tr(demo ? 'DEMO DRAFT' : 'LOCAL DRAFT')}{item.language ? ` · ${item.language.toUpperCase()}` : ''}</Badge>
@@ -1615,7 +1696,6 @@ export default function App() {
           </div>
           {hasActivity && <div className="activity-filters"><label className="search-field"><Icon name="search" size={14}/><input aria-label={tr('Search activity')} value={logSearch} onChange={e => setLogSearch(e.target.value)} placeholder={tr('Search activity…')}/></label><div><select aria-label={tr('Filter log level')} value={level} onChange={e => setLevel(e.target.value)}>{['All levels','info','success','warning','error'].map(l => <option key={l} value={l}>{tr(l)}</option>)}</select><select aria-label={tr('Filter log stage')} value={stageFilter} onChange={e => setStageFilter(e.target.value)}>{['All stages',...stages].map(s => <option key={s} value={s}>{tr(s)}</option>)}</select></div></div>}
           {hasActivity && <div className="log-toolbar"><span>{visibleLogs.length + (showDashboardError ? 1 : 0)} {tr('events')}{scopeActive && <b> · {scopeWorkLabel} {scopeElapsedLabel}</b>}</span><button onClick={() => setPaused(v => !v)} aria-pressed={paused}>{tr(paused ? '▶ Resume following' : 'Ⅱ Pause scrolling')}</button></div>}
-          {manualLoginNotice}
           <div className="log-stream" ref={stream} tabIndex={0} aria-label={tr('Activity events')}>
             {hasActivity && <div className="stream-start">{demo ? tr('SYNTHETIC SESSION STARTED') : tk("통합 활동 스트림 시작", "Combined activity stream started")}</div>}
             {visibleLogs.map(log => <article key={log.key} className={`log-entry ${log.level}`}><div><time dateTime={log.time}>{new Date(log.time).toLocaleTimeString(language === 'ko' ? 'ko-KR' : 'en-GB',{hour12:false})}</time><span>{log.source === 'scope' ? tk("스코프 수집", "Scope collection") : `${tk('스캔', 'Scan')} · ${tr(log.stage)}`}</span><i title={tr(log.level)}/><span className="sr-only">{tr(log.level)}</span></div><p>{localizeActivityMessage(language, log)}</p></article>)}

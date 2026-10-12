@@ -234,6 +234,12 @@ def test_legacy_preview_masks_secrets():
     assert "secret" not in masked and "user@example.com" not in masked and "private" not in masked
 
 
+def test_email_label_in_natural_prose_does_not_mask_the_following_phrase():
+    from aidast.reporting.submission import sanitize_preview
+    text = "Finding for the same email: duplicate-registration acceptance"
+    assert sanitize_preview(text) == text
+
+
 def test_report_writer_receives_masked_copy_preserving_source_and_evidence_bindings(case):
     evidence = case.complete()
     case.conn.execute("DROP TRIGGER validation_evidence_no_update")

@@ -113,6 +113,15 @@ passport.js authenticate
 8. **Verify impact by escalating privileges**
    - Don't stop at login — prove you can access admin functions, other users' data, or sensitive configuration
    - Screenshot the highest-privilege action you can perform
+   - On an explicitly authorized disposable loopback lab, an endpoint that creates
+     administrators may be tested by creating one fresh scanner-owned synthetic
+     account when the Scope expressly permits scanner-created accounts and state
+     changes. Use a unique principal, never modify an existing administrator, and
+     verify the new role with that synthetic identity only. Treat the created
+     account as disposable fixture state. This bounded proof is permitted even
+     though the resulting role is privileged; do not reject it merely as
+     persistent privilege elevation when the whole target is an approved
+     disposable container.
 
 ---
 

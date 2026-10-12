@@ -394,8 +394,10 @@ class SharedValidationReportingTests(unittest.TestCase):
         self.conn.commit()
         output_root = self.path.parent.parent / "ReportRun" / "scan"
         self.assertEqual(generate_scan_reports(self.path, output_root, scan_id="scan", platform="hackerone"), [])
-        self.assertFalse(output_root.exists())
-        self.assertEqual(self.conn.execute("SELECT count(*) FROM stage_runs WHERE stage='report'").fetchone()[0], 0)
+        self.assertTrue((output_root / "ScanSummary.json").is_file())
+        self.assertTrue((output_root / "ScanSummary.md").is_file())
+        self.assertFalse((output_root / "Report.md").exists())
+        self.assertEqual(self.conn.execute("SELECT status FROM stage_runs WHERE stage='report'").fetchone()[0], "skipped")
 
     def test_auto_reports_use_selected_report_model(self):
         evidence = self.complete()
@@ -419,11 +421,13 @@ class SharedValidationReportingTests(unittest.TestCase):
             def write(inner, context):
                 raise RuntimeError("writer failed")
 
-        with self.assertRaisesRegex(RuntimeError, "writer failed"):
-            generate_scan_reports(
-                self.path, self.path.parent.parent / "ReportRun" / "scan",
-                scan_id="scan", platform="hackerone", writer=Writer(),
-            )
+        results = generate_scan_reports(
+            self.path, self.path.parent.parent / "ReportRun" / "scan",
+            scan_id="scan", platform="hackerone", writer=Writer(),
+        )
+        self.assertEqual(results, [])
+        self.assertEqual(results.errors[0]["error_type"], "RuntimeError")
+        self.assertEqual(results.summary["execution_status"], "partial")
         self.assertEqual(
             tuple(self.conn.execute("SELECT stage,status FROM stage_runs ORDER BY rowid DESC LIMIT 1").fetchone()),
             ("report", "failed"),

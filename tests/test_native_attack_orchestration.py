@@ -11,7 +11,10 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from aidast.agents.main import CodexMainAgent
-from aidast.agents.native_pipeline import _bind_pipeline_database_reference
+from aidast.agents.native_pipeline import (
+    CodexMainAgent as NativePipelineAgent,
+    _bind_pipeline_database_reference,
+)
 from aidast.attack.db_cli import (
     commit_attempt, commit_finding, query, resolve_attempt, transition_task,
 )
@@ -83,6 +86,51 @@ def completed_pipeline(root: Path) -> Path:
 
 
 class LegacyNativeAttackCoordinatorTests(unittest.TestCase):
+    def test_vulnbank_web_scan_bootstraps_disposable_identities(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            database = completed_pipeline(root)
+            with sqlite3.connect(database) as conn:
+                conn.execute("UPDATE assets SET identifier='http://127.0.0.1:5002/',asset_type='URL'")
+                conn.execute(
+                    """UPDATE origins SET scheme='http',host='127.0.0.1',port=5002,
+                       base_url='http://127.0.0.1:5002/'"""
+                )
+            scope = root / "Scope.md"
+            policy = root / "TargetPolicy.json"
+            scope.write_text(
+                "# VulnBank\n스캐너가 생성한 합성 계정과 일회성 데이터에 한해 허용합니다.",
+                encoding="utf-8",
+            )
+            policy.write_text("{}", encoding="utf-8")
+            coordinator = AttackCoordinator(
+                agent=FakeNativeMain(), db_path=database,
+                scope_path=scope, policy_path=policy,
+            )
+            result = {
+                "credential_reference_count": 5,
+                "owned_test_object_count": 8,
+                "benchmark_fixture_count": 2,
+            }
+            with patch(
+                "aidast.benchmarks.vulnbank.bootstrap_vulnbank",
+                return_value=result,
+            ) as bootstrap:
+                coordinator._bootstrap_local_vulnbank_fixtures("scan_native")
+            bootstrap.assert_called_once_with(
+                database.resolve(), scan_id="scan_native",
+                target_url="http://127.0.0.1:5002/",
+                scope_path=scope.resolve(), policy_path=policy.resolve(),
+            )
+            with sqlite3.connect(database) as conn:
+                details = json.loads(conn.execute(
+                    """SELECT details_json FROM audit_events
+                       WHERE scan_id='scan_native'
+                         AND event_type='benchmark.fixture_created'"""
+                ).fetchone()[0])
+            self.assertEqual(details["target"], "vulnbank")
+            self.assertEqual(details["credential_reference_count"], 5)
+
     def test_authenticated_credential_reference_is_bound_to_attack_tasks(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -245,6 +293,118 @@ class LegacyNativeAttackCoordinatorTests(unittest.TestCase):
 
 
 class NativeAttackMainAgentTests(unittest.TestCase):
+    def test_scanner_created_loopback_profile_mutation_is_auto_approved(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            database = completed_pipeline(Path(temporary))
+            label = "recon-browser:fixture:identity_synthetic"
+            with closing(sqlite3.connect(database)) as conn:
+                stage = start_stage_run(conn, scan_id="scan_native", stage="attack")
+                task = create_task(
+                    conn, stage_run_id=stage, skill_name="hunt-ssrf", payload={
+                        "credential_references": [{
+                            "label": label,
+                            "identity_role": "identity_synthetic",
+                        }],
+                        "test_fixtures": [{
+                            "fact_type": "owned_test_object",
+                            "fact_value": {
+                                "credential_label": label,
+                                "resource": "account",
+                                "disposable": True,
+                                "cleanup_allowed": True,
+                            },
+                        }],
+                    },
+                )
+            transition_task(database, "scan_native", stage, task, "running")
+            with closing(sqlite3.connect(database)) as conn, conn:
+                conn.execute(
+                    """INSERT INTO attack_authorization_envelopes
+                       (envelope_id,scan_id,stage_run_id,task_id,policy_id,
+                        policy_sha256,method,origin,normalized_path,provenance_kind,
+                        risk_class,approval_reason,max_requests,max_body_bytes,
+                        status,requested_at)
+                       VALUES ('envelope_auto','scan_native',?,?, 'policy',?,'POST',
+                               'http://127.0.0.1:5002','/upload_profile_picture_url',
+                               'agent_proposed','external_side_effect','external_side_effect',
+                               3,4096,'pending',1)""",
+                    (stage, task, "a" * 64),
+                )
+
+            def unexpected_prompt(_: str) -> str:
+                raise AssertionError("safe synthetic loopback mutation must not prompt")
+
+            self.assertEqual(
+                CodexMainAgent._review_pending_attack_authorizations(
+                    database, stage, input_fn=unexpected_prompt,
+                ),
+                1,
+            )
+            with closing(sqlite3.connect(database)) as conn:
+                self.assertEqual(conn.execute(
+                    "SELECT status FROM attack_authorization_envelopes"
+                ).fetchone(), ("approved",))
+                details = json.loads(conn.execute(
+                    "SELECT details_json FROM audit_events "
+                    "WHERE event_type='attack.authorization.approved'"
+                ).fetchone()[0])
+            self.assertEqual(
+                details["decision_source"],
+                "scanner_created_loopback_identity",
+            )
+
+    def test_owned_loopback_high_impact_post_is_auto_approved(self) -> None:
+        payload = json.dumps({
+            "credential_references": [{
+                "label": "fixture:identity_synthetic",
+                "identity_role": "identity_synthetic",
+            }],
+            "test_fixtures": [{
+                "fact_type": "owned_test_object",
+                "fact_value": {
+                    "credential_label": "fixture:identity_synthetic",
+                    "resource": "account",
+                    "disposable": True,
+                    "cleanup_allowed": True,
+                },
+            }],
+        })
+        for path in ("/api/v3/forgot-password", "/admin/create_admin", "/api/payments"):
+            with self.subTest(path=path):
+                self.assertTrue(NativePipelineAgent._synthetic_loopback_auto_approval(
+                    method="POST", origin="http://127.0.0.1:5002",
+                    normalized_path=path, risk_class="external_side_effect",
+                    payload_json=payload,
+                ))
+
+    def test_owned_loopback_auto_approval_keeps_destructive_boundaries(self) -> None:
+        payload = json.dumps({
+            "credential_references": [{
+                "label": "fixture:identity_synthetic",
+                "identity_role": "identity_synthetic",
+            }],
+            "test_fixtures": [{
+                "fact_type": "owned_test_object",
+                "fact_value": {
+                    "credential_label": "fixture:identity_synthetic",
+                    "resource": "account",
+                    "disposable": True,
+                    "cleanup_allowed": True,
+                },
+            }],
+        })
+        cases = (
+            ("DELETE", "http://127.0.0.1:5002", "test_resource_delete"),
+            ("POST", "https://example.test", "external_side_effect"),
+            ("POST", "http://127.0.0.1:5002", "destructive_or_bulk"),
+        )
+        for method, origin, risk_class in cases:
+            with self.subTest(method=method, origin=origin, risk_class=risk_class):
+                self.assertFalse(NativePipelineAgent._synthetic_loopback_auto_approval(
+                    method=method, origin=origin, normalized_path="/api/resource",
+                    risk_class=risk_class, payload_json=payload,
+                ))
+
     def test_attack_authorization_prompt_is_resolved_once_and_audited(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             database = completed_pipeline(Path(temporary))
@@ -323,6 +483,7 @@ class NativeAttackMainAgentTests(unittest.TestCase):
 
             def fake_run(command, **kwargs):
                 self.assertEqual(kwargs["timeout"], 6100)
+                self.assertEqual(kwargs["idle_timeout"], 360)
                 work = Path(command[command.index("--cd") + 1])
                 self.assertNotIn("--ephemeral", command)
                 self.assertEqual(
@@ -334,6 +495,7 @@ class NativeAttackMainAgentTests(unittest.TestCase):
                 self.assertEqual(
                     command[command.index("--model") + 1], "gpt-6-luna"
                 )
+                self.assertIn('access_programs.cyber="standard"', command)
                 self.assertTrue(
                     (work / ".codex/agents/aidast-attack.toml").is_file()
                 )
@@ -343,6 +505,10 @@ class NativeAttackMainAgentTests(unittest.TestCase):
                 self.assertIn('model = "gpt-6-luna"', agent_config)
                 self.assertIn("$aidast-policy", agent_config)
                 self.assertIn("$aidast-policy", kwargs["input"])
+                self.assertIn(
+                    "fresh scanner-owned synthetic administrator",
+                    kwargs["input"],
+                )
                 self.assertTrue((work / ".agents/skills/aidast-policy/SKILL.md").is_file())
                 self.assertIn("Sensitive data", (work / "TargetPolicy.json").read_text())
                 self.assertEqual((work / "scope.md").read_bytes(), scope.read_bytes())
@@ -358,6 +524,14 @@ class NativeAttackMainAgentTests(unittest.TestCase):
                 self.assertTrue(
                     (work / ".agents/skills/aidast-live-attack/SKILL.md").is_file()
                 )
+                live_skill = (
+                    work / ".agents/skills/aidast-live-attack/SKILL.md"
+                ).read_text(encoding="utf-8")
+                self.assertIn(
+                    "black-box source-disclosure evidence",
+                    live_skill,
+                )
+                self.assertIn("recovery phrases or mnemonic seeds", live_skill)
                 self.assertTrue((work / "tools/request_cli.py").is_file())
                 self.assertTrue((work / "tools/template_cli.py").is_file())
                 self.assertTrue(

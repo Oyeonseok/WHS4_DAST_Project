@@ -115,6 +115,7 @@ def transition_task(
 def finish_stage_run(
     conn: sqlite3.Connection, stage_run_id: str, *, status: str = "completed",
     error_message: str | None = None,
+    allow_terminal_task_errors: bool = False,
 ) -> None:
     if status not in TERMINAL_STATUSES:
         raise ValueError("stage final status must be terminal")
@@ -129,11 +130,26 @@ def finish_stage_run(
         tasks = conn.execute(
             "SELECT task_id, status FROM attack_tasks WHERE stage_run_id=?", (stage_run_id,)
         ).fetchall()
-        if status == "completed" and any(item[1] not in {"completed", "skipped"} for item in tasks):
-            raise ValueError("completed stages require completed or skipped tasks")
         stage_name = conn.execute(
             "SELECT stage FROM stage_runs WHERE stage_run_id=?", (stage_run_id,)
         ).fetchone()[0]
+        if status == "completed" and allow_terminal_task_errors and stage_name != "attack":
+            raise ValueError(
+                "terminal task errors may only complete a reconciled Attack stage"
+            )
+        completed_task_statuses = (
+            TERMINAL_STATUSES
+            if allow_terminal_task_errors
+            else {"completed", "skipped"}
+        )
+        if status == "completed" and any(
+            item[1] not in completed_task_statuses for item in tasks
+        ):
+            raise ValueError(
+                "completed stages require terminal tasks"
+                if allow_terminal_task_errors
+                else "completed stages require completed or skipped tasks"
+            )
         if status == "completed" and stage_name == "validation":
             incomplete = conn.execute(
                 """SELECT count(*) FROM validation_cases

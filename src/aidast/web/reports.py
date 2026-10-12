@@ -12,6 +12,7 @@ from typing import Any
 
 
 _REPORT_ID = re.compile(r"^report_[0-9a-f]{32}$")
+_SCAN_ID = re.compile(r"^[A-Za-z0-9_.-]{1,128}$")
 
 
 class ReportNotFoundError(LookupError):
@@ -44,6 +45,35 @@ class ReportCatalog:
                 if item is not None and item["report_id"] == report_id:
                     return item
         raise ReportNotFoundError("report draft not found")
+
+    def scan_summary(self, scan_id: str) -> dict[str, Any]:
+        """Read one deterministic execution summary without trusting paths from it."""
+        if not _SCAN_ID.fullmatch(scan_id):
+            raise ReportNotFoundError("invalid scan identifier")
+        root = self.result_root / "ReportRun"
+        if not root.is_dir():
+            raise ReportNotFoundError("scan summary not found")
+        for document in root.rglob("ScanSummary.json"):
+            try:
+                if any(path.is_symlink() for path in (document, *document.parents)):
+                    continue
+                resolved = document.resolve(strict=True)
+                resolved.relative_to(root.resolve(strict=True))
+                if not resolved.is_file() or resolved.stat().st_size > 2_000_000:
+                    continue
+                payload = json.loads(resolved.read_text(encoding="utf-8"))
+                if not isinstance(payload, dict) or payload.get("scan_id") != scan_id:
+                    continue
+                markdown_path = resolved.with_name("ScanSummary.md")
+                if markdown_path.is_symlink() or not markdown_path.is_file():
+                    continue
+                markdown = markdown_path.read_text(encoding="utf-8")
+                if len(markdown.encode("utf-8")) > 2_000_000:
+                    continue
+                return {**payload, "markdown": markdown}
+            except (OSError, UnicodeError, ValueError, TypeError):
+                continue
+        raise ReportNotFoundError("scan summary not found")
 
     def database(self, report_id: str) -> Path:
         """Resolve an internal report path and constrain its source to this root."""
@@ -78,52 +108,77 @@ class ReportCatalog:
 
     def _read(self, database: Path) -> dict[str, Any] | None:
         try:
+            if any(path.is_symlink() for path in (database, *database.parents)):
+                return None
             resolved = database.resolve(strict=True)
             resolved.relative_to(self.result_root)
-            if database.is_symlink() or resolved.stat().st_size > 50_000_000:
+            if not resolved.is_file() or resolved.stat().st_size > 50_000_000:
                 return None
             with closing(
                 sqlite3.connect(resolved.as_uri() + "?mode=ro", uri=True, timeout=2)
             ) as conn:
                 conn.row_factory = sqlite3.Row
-                run = conn.execute(
-                    "SELECT report_id,scan_id,case_id,context_json,created_at,source_path FROM report_runs"
-                ).fetchall()
+                conn.execute("PRAGMA query_only=ON")
+                run = conn.execute("SELECT * FROM report_runs").fetchall()
                 if len(run) != 1:
+                    return None
+                run = run[0]
+                required = {"report_id", "context_json", "created_at", "source_path"}
+                if not required.issubset(run.keys()) or not isinstance(run["report_id"], str):
+                    return None
+                if not _REPORT_ID.fullmatch(run["report_id"]):
                     return None
                 draft = conn.execute(
                     "SELECT markdown,markdown_sha256,created_at FROM report_drafts WHERE report_id=?",
-                    (run[0]["report_id"],),
-                ).fetchone()
-                if draft is None:
+                    (run["report_id"],),
+                ).fetchall()
+                if len(draft) != 1:
                     return None
-            markdown = str(draft["markdown"])
+                draft = draft[0]
+            markdown = draft["markdown"]
+            if not isinstance(markdown, str):
+                return None
             if len(markdown.encode("utf-8")) > 2_000_000:
                 return None
             if hashlib.sha256(markdown.encode("utf-8")).hexdigest() != draft["markdown_sha256"]:
                 return None
-            context = json.loads(run[0]["context_json"])
-            platform = str(context.get("platform") or "unknown")[:64]
+            context = json.loads(run["context_json"])
+            if not isinstance(context, dict):
+                return None
+            from aidast.reporting.runtime import PLATFORMS
+            platform = context.get("platform")
+            if platform not in PLATFORMS:
+                return None
             from aidast.reporting.presentation import report_language
             from aidast.reporting.submission import sanitize_preview
             language = report_language(resolved, platform=platform)
 
-            source_path = str(run[0]['source_path'])
+            source_path = run['source_path']
+            if not isinstance(source_path, str):
+                return None
             markdown = sanitize_preview(markdown, paths=(str(resolved), str(resolved.parent), source_path,
                                                        str((resolved.parent / source_path).resolve())))
             title = next(
                 (line.lstrip("# ").strip() for line in markdown.splitlines() if line.startswith("#")),
                 "Local report draft",
             )[:200]
+            # Older report drafts bind a validation record through context.source
+            # rather than storing the shared case/scan columns on report_runs.
+            source = context.get("source")
+            source = source if isinstance(source, dict) else {}
+            scan_id = run["scan_id"] if "scan_id" in run.keys() else source.get("scan_id")
+            case_id = run["case_id"] if "case_id" in run.keys() else ""
+            if not isinstance(scan_id, str) or not isinstance(case_id, str):
+                return None
             return {
-                "report_id": str(run[0]["report_id"]),
-                "scan_id": str(run[0]["scan_id"])[:128],
-                "case_id": str(run[0]["case_id"])[:256],
+                "report_id": run["report_id"],
+                "scan_id": scan_id[:128],
+                "case_id": case_id[:256],
                 "platform": platform,
                 "language": language,
                 "title": title,
-                "created_at": str(draft["created_at"] or run[0]["created_at"]),
+                "created_at": str(draft["created_at"] or run["created_at"]),
                 "markdown": markdown,
             }
-        except (OSError, sqlite3.Error, json.JSONDecodeError, KeyError, TypeError):
+        except (OSError, sqlite3.Error, ValueError, KeyError, TypeError):
             return None

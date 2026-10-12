@@ -46,6 +46,9 @@ Use captured source URLs, payload slots, identity roles and the observed effect 
 build one target request for the exact staged endpoint/method. Use
 identity_mode=case to resolve existing opaque credentials.
 Use source paths/query values to fill slots, never literal <slot:...> placeholders.
+Preserve the captured request encoding. Use encoded text_body plus the matching
+Content-Type for application/x-www-form-urlencoded requests and json_body only
+for captured JSON requests.
 Use bounded JSON/body/header assertions; HTTP 200 alone is not a security effect.
 No credential values, raw Authorization/Cookie headers, endpoint changes or new
 identities. Deeper session_verification is optional, not required for replay.

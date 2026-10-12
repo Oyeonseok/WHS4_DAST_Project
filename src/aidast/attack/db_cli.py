@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sqlite3
 import sys
+from collections.abc import Mapping, Sequence
 from contextlib import closing
 from pathlib import Path
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
@@ -30,21 +32,65 @@ def _payload(path: Path) -> dict:
     return value
 
 
-def _text(value: object, *, required: bool = False, maximum: int = 100_000) -> str:
+def _text(
+    value: object, *, required: bool = False, maximum: int = 100_000,
+    field: str = "value",
+) -> str:
     if value is None:
         value = ""
     if not isinstance(value, str) or len(value) > maximum or (required and not value.strip()):
-        raise ValueError("invalid text field")
+        raise ValueError(f"invalid text field: {field}")
     return value
 
 
-def _body(value: object) -> str:
-    text = _text(value, maximum=1_000_000)
+def _body(value: object, *, field: str = "body") -> str:
+    if isinstance(value, (Mapping, list, tuple, bool, int, float)):
+        try:
+            text = json.dumps(
+                value, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+                allow_nan=False,
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"invalid structured field: {field}") from exc
+    else:
+        text = _text(value, maximum=1_000_000, field=field)
+    if len(text) > 1_000_000:
+        raise ValueError(f"invalid text field: {field}")
     return text if len(text) <= MAX_BODY_CHARS else text[:MAX_BODY_CHARS] + "\n... (truncated)"
 
 
-def _headers(value: object) -> str:
-    text = _text(value, maximum=20_000)
+def _headers(value: object, *, field: str = "headers") -> str:
+    if isinstance(value, Mapping):
+        rendered = []
+        for name, raw in value.items():
+            if not isinstance(name, str) or not name.strip():
+                raise ValueError(f"invalid header name: {field}")
+            if isinstance(raw, (dict, list, tuple)):
+                try:
+                    header_value = json.dumps(
+                        raw, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+                        allow_nan=False,
+                    )
+                except (TypeError, ValueError) as exc:
+                    raise ValueError(f"invalid header value: {field}.{name}") from exc
+            elif raw is None:
+                header_value = ""
+            elif isinstance(raw, (str, bool, int, float)):
+                if isinstance(raw, float) and not math.isfinite(raw):
+                    raise ValueError(f"invalid header value: {field}.{name}")
+                header_value = str(raw)
+            else:
+                raise ValueError(f"invalid header value: {field}.{name}")
+            rendered.append(f"{name}: {header_value}")
+        text = "\n".join(rendered)
+    elif isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        if any(not isinstance(line, str) for line in value):
+            raise ValueError(f"invalid header lines: {field}")
+        text = "\n".join(value)
+    else:
+        text = _text(value, maximum=20_000, field=field)
+    if len(text) > 20_000:
+        raise ValueError(f"invalid text field: {field}")
     lines = []
     for line in text.splitlines():
         name, separator, remainder = line.partition(":")
@@ -59,8 +105,19 @@ def _headers(value: object) -> str:
     return "\n".join(lines)
 
 
+def _cwe(value: object) -> str:
+    if value is None or value == "":
+        return ""
+    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+        return f"CWE-{value}"
+    text = _text(value, maximum=64, field="cwe_id").strip()
+    if text.isdecimal():
+        return f"CWE-{text}"
+    return text
+
+
 def _url(value: object, *, required: bool = False) -> str:
-    raw = _text(value, required=required, maximum=8192)
+    raw = _text(value, required=required, maximum=8192, field="url")
     if not raw:
         return raw
     parsed = urlsplit(raw)
@@ -125,7 +182,7 @@ def query(db_path: Path, sql: str) -> list[dict]:
 
 def commit_attempt(db_path: Path, scan_id: str, payload_path: Path) -> dict:
     item = _payload(payload_path)
-    endpoint_id = _text(item.get("endpoint_id")) or None
+    endpoint_id = _text(item.get("endpoint_id"), field="endpoint_id") or None
     skill_name = _text(item.get("skill_name"), required=True, maximum=128)
     fingerprint = _text(item.get("request_fingerprint"), required=True, maximum=512)
     task_id = _text(item.get("task_id"), required=True, maximum=256)
@@ -172,18 +229,38 @@ def commit_attempt(db_path: Path, scan_id: str, payload_path: Path) -> dict:
         return {"attempt_id": attempt_id, "committed": committed}
 
 
+def commit_checkpoint(db_path: Path, scan_id: str, payload_path: Path) -> dict:
+    """Append a bounded, secret-free intent checkpoint for a running task."""
+    from aidast.attack.intent_checkpoint import commit_intent_checkpoint
+
+    item = _payload(payload_path)
+    task_id = _text(
+        item.pop("task_id", None), required=True, maximum=256, field="task_id",
+    )
+    with closing(sqlite3.connect(db_path)) as conn, conn:
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys=ON")
+        _completed_scan(conn, scan_id)
+        return commit_intent_checkpoint(
+            conn, scan_id=scan_id, task_id=task_id, document=item,
+        )
+
+
 def transition_task(
     db_path: Path, scan_id: str, stage_run_id: str, task_id: str,
     status: str, reason: str | None = None,
 ) -> dict:
     transitions = {
         "pending": {"running", "skipped"},
-        "running": {"completed", "failed"},
+        # Request-bound policy decisions can only be known after a task has
+        # entered running and submitted its exact envelope to the broker. An
+        # explicit denial or evidence/auth blocker is a terminal skip.
+        "running": {"completed", "skipped", "failed"},
     }
     if status not in {"running", "completed", "skipped", "failed"}:
         raise ValueError("invalid Attack task status")
-    if status == "failed" and not (reason or "").strip():
-        raise ValueError("failed Attack tasks require a reason")
+    if status in {"skipped", "failed"} and not (reason or "").strip():
+        raise ValueError(f"{status} Attack tasks require a reason")
     with closing(sqlite3.connect(db_path)) as conn, conn:
         conn.execute("PRAGMA foreign_keys=ON")
         _completed_scan(conn, scan_id)
@@ -291,10 +368,10 @@ def commit_finding(db_path: Path, scan_id: str, payload_path: Path) -> dict:
     item = _payload(payload_path)
     if item.get("scan_id") != scan_id:
         raise ValueError("finding scan_id mismatch")
-    endpoint_id = _text(item.get("endpoint_id")) or None
+    endpoint_id = _text(item.get("endpoint_id"), field="endpoint_id") or None
     if endpoint_id is None:
         raise ValueError("a finding reproduction requires endpoint_id")
-    severity = _text(item.get("severity"), required=True).upper()
+    severity = _text(item.get("severity"), required=True, field="severity").upper()
     if severity not in {"CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"}:
         raise ValueError("invalid finding severity")
     evidence = item.get("evidence")
@@ -311,7 +388,9 @@ def commit_finding(db_path: Path, scan_id: str, payload_path: Path) -> dict:
     reproduction = item.get("reproduction")
     if not isinstance(reproduction, dict):
         raise ValueError("a finding requires one reproduction object")
-    finding_id = _text(item.get("finding_id"), maximum=256) or "finding_" + uuid4().hex
+    finding_id = _text(
+        item.get("finding_id"), maximum=256, field="finding_id",
+    ) or "finding_" + uuid4().hex
     cvss = item.get("cvss_score")
     if cvss is not None and (isinstance(cvss, bool) or not isinstance(cvss, (int, float)) or not 0 <= cvss <= 10):
         raise ValueError("invalid CVSS score")
@@ -361,7 +440,10 @@ def commit_finding(db_path: Path, scan_id: str, payload_path: Path) -> dict:
             (scan_id, *source_request_ids),
         ).fetchall()
         pairs = {(row[1], row[4]) for row in source_attempts}
-        method = _text(reproduction.get("method"), required=True, maximum=16).upper()
+        method = _text(
+            reproduction.get("method"), required=True, maximum=16,
+            field="reproduction.method",
+        ).upper()
         policy_digests = {row[4] for row in source_requests}
         if (len(source_requests) != len(source_request_ids) or len(policy_digests) != 1
                 or None in policy_digests or any(
@@ -369,11 +451,20 @@ def commit_finding(db_path: Path, scan_id: str, payload_path: Path) -> dict:
                     or row[5] != "completed" for row in source_requests
                 )):
             raise ValueError("reproduction requests do not match the supporting attempts")
-        endpoint_template = _text(reproduction.get("endpoint_template"), required=True, maximum=8192)
-        injection_location = _text(reproduction.get("injection_location"), required=True, maximum=16)
+        endpoint_template = _text(
+            reproduction.get("endpoint_template"), required=True, maximum=8192,
+            field="reproduction.endpoint_template",
+        )
+        injection_location = _text(
+            reproduction.get("injection_location"), required=True, maximum=16,
+            field="reproduction.injection_location",
+        )
         if injection_location not in {"path", "query", "header", "cookie", "body"}:
             raise ValueError("invalid reproduction injection_location")
-        parameter_name = _text(reproduction.get("parameter_name"), required=True, maximum=256)
+        parameter_name = _text(
+            reproduction.get("parameter_name"), required=True, maximum=256,
+            field="reproduction.parameter_name",
+        )
         payload_template = reproduction.get("payload_template")
         roles = reproduction.get("required_identity_roles", [])
         if (not isinstance(roles, list) or any(not isinstance(role, str) or not role for role in roles)
@@ -405,6 +496,14 @@ def commit_finding(db_path: Path, scan_id: str, payload_path: Path) -> dict:
                 validated_runtime,
                 resolved_profile,
             )
+            negative_endpoint = getattr(
+                getattr(validated_runtime, "negative_control", None),
+                "endpoint_template", None,
+            )
+            if negative_endpoint is not None and method not in {"GET", "HEAD"}:
+                raise ValueError(
+                    "alternate negative-control endpoints require a read-only method"
+                )
             runtime_contract = validated_runtime.model_dump(mode="json")
             runtime_contract_json = canonical_json(runtime_contract)
             runtime_contract_sha256 = canonical_sha256(runtime_contract)
@@ -473,17 +572,25 @@ def commit_finding(db_path: Path, scan_id: str, payload_path: Path) -> dict:
                VALUES (?,?,?,?,?,?,?,?,?,?)""",
             (
                 finding_id, scan_id, endpoint_id,
-                _text(item.get("vuln_type"), required=True, maximum=128), severity,
-                _text(item.get("title"), required=True, maximum=200),
-                _text(item.get("description"), maximum=20_000) or None,
-                cvss, _text(item.get("cvss_vector"), maximum=256) or None,
-                _text(item.get("cwe_id"), maximum=64) or None,
+                _text(
+                    item.get("vuln_type"), required=True, maximum=128,
+                    field="vuln_type",
+                ), severity,
+                _text(item.get("title"), required=True, maximum=200, field="title"),
+                _text(
+                    item.get("description"), maximum=20_000, field="description",
+                ) or None,
+                cvss, _text(
+                    item.get("cvss_vector"), maximum=256, field="cvss_vector",
+                ) or None,
+                _cwe(item.get("cwe_id")) or None,
             ),
         )
-        for raw in evidence:
+        for evidence_index, raw in enumerate(evidence):
             if not isinstance(raw, dict):
                 raise ValueError("finding evidence must contain JSON objects")
-            body = _body(raw.get("response_body"))
+            prefix = f"evidence[{evidence_index}]"
+            body = _body(raw.get("response_body"), field=f"{prefix}.response_body")
             request_id = "areq_" + uuid4().hex
             conn.execute(
                 """INSERT INTO attack_requests
@@ -492,13 +599,23 @@ def commit_finding(db_path: Path, scan_id: str, payload_path: Path) -> dict:
                    VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     request_id, finding_id,
-                    _text(raw.get("role"), maximum=128) or "unknown",
-                    _text(raw.get("method"), maximum=16) or "GET",
+                    _text(
+                        raw.get("role"), maximum=128, field=f"{prefix}.role",
+                    ) or "unknown",
+                    _text(
+                        raw.get("method"), maximum=16, field=f"{prefix}.method",
+                    ) or "GET",
                     _url(raw.get("url"), required=True),
-                    _headers(raw.get("request_headers")) or None,
-                    _body(raw.get("request_body")) or None,
+                    _headers(
+                        raw.get("request_headers"), field=f"{prefix}.request_headers",
+                    ) or None,
+                    _body(
+                        raw.get("request_body"), field=f"{prefix}.request_body",
+                    ) or None,
                     raw.get("response_status"),
-                    _headers(raw.get("response_headers")) or None,
+                    _headers(
+                        raw.get("response_headers"), field=f"{prefix}.response_headers",
+                    ) or None,
                     body or None, raw.get("response_time_ms"),
                 ),
             )
@@ -550,7 +667,10 @@ def _parser() -> argparse.ArgumentParser:
     source = read.add_mutually_exclusive_group(required=True)
     source.add_argument("--sql")
     source.add_argument("--sql-file", type=Path)
-    for name in ("commit-attempt", "resolve-attempt", "commit-fact", "commit-finding"):
+    for name in (
+        "commit-attempt", "resolve-attempt", "commit-fact", "commit-finding",
+        "commit-checkpoint",
+    ):
         command = sub.add_parser(name)
         command.add_argument("--db", type=Path, required=True)
         command.add_argument("--scan-id", required=True)
@@ -579,6 +699,8 @@ def main(argv: list[str] | None = None) -> int:
             result = commit_fact(args.db, args.scan_id, args.payload)
         elif args.command == "commit-finding":
             result = commit_finding(args.db, args.scan_id, args.payload)
+        elif args.command == "commit-checkpoint":
+            result = commit_checkpoint(args.db, args.scan_id, args.payload)
         else:
             result = transition_task(
                 args.db, args.scan_id, args.stage_run_id, args.task_id,

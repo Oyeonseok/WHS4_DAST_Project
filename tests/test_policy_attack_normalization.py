@@ -74,6 +74,14 @@ def test_read_only_methods_clear_stale_active_evidence(agent_type):
 
 
 @pytest.mark.parametrize("agent_type", [CodexMainAgent, NativeCodexMainAgent])
+def test_recon_mutation_method_from_model_is_repaired_to_read_only(agent_type):
+    policy = compile_policy(agent_type, allowed_methods=["POST"])
+
+    assert policy.allowed_methods == ["GET", "HEAD", "OPTIONS"]
+    assert any("state-changing methods" in note for note in policy.policy_notes)
+
+
+@pytest.mark.parametrize("agent_type", [CodexMainAgent, NativeCodexMainAgent])
 def test_valid_read_only_policy_keeps_existing_notes(agent_type):
     policy = compile_policy(agent_type, policy_notes=["Operator restriction"])
 

@@ -27,13 +27,27 @@ from aidast.scope.models import (
     ScopeExecutionRules,
     RequestLimit,
     OptionLimit,
+    QuotedValues,
 )
-from aidast.scope.paths import resolve_scope_directory, validate_scope_artifact_directory
+from aidast.scope.paths import (
+    resolve_scope_directory,
+    scope_revision_directory,
+    validate_scope_artifact_directory,
+)
 
 
 ACTIVE_AUTHORIZATION = (
     "이 로컬 교육용 애플리케이션에 대한 능동 취약점 테스트와 "
     "GET, HEAD, OPTIONS, POST 요청을 허용합니다."
+)
+
+COMPREHENSIVE_AUTHORIZATION = (
+    "이 로컬 일회성 OWASP Juice Shop 컨테이너의 블랙박스 취약점 테스트 및 검증을 위해 "
+    "GET, HEAD, OPTIONS, POST, PUT, PATCH, DELETE 요청을 허용합니다."
+)
+COMPREHENSIVE_FIXTURE_AUTHORIZATION = (
+    "스캐너가 생성한 합성 계정과 일회성 데이터에 한해 폼 제출, 상태 변경, "
+    "삭제 및 최대 2개의 동시 요청 검증을 허용합니다."
 )
 
 
@@ -44,6 +58,7 @@ class LabScope:
     target_url: str
     description: str
     extra_allowed: tuple[str, ...] = ()
+    comprehensive: bool = False
 
 
 LAB_SCOPES = {
@@ -54,6 +69,14 @@ LAB_SCOPES = {
             program_url="https://lab.aidast.invalid/juice-shop",
             target_url="http://127.0.0.1:3001/",
             description="로컬 OWASP Juice Shop 기능 및 탐지 평가 대상",
+        ),
+        LabScope(
+            name="juice-shop-comprehensive-5001",
+            program_url="https://lab.aidast.invalid/juice-shop-comprehensive-5001",
+            target_url="http://127.0.0.1:5001/",
+            description="로컬 OWASP Juice Shop 블랙박스 정찰·공격 종합 평가 대상",
+            extra_allowed=(COMPREHENSIVE_FIXTURE_AUTHORIZATION,),
+            comprehensive=True,
         ),
         LabScope(
             name="vuln-bank",
@@ -83,6 +106,21 @@ CONSTRAINTS = (
     "timeout_seconds는 15입니다.",
     "max_depth는 2입니다.",
     "max_requests는 타깃당 500입니다.",
+)
+
+COMPREHENSIVE_PROHIBITED = (
+    "서비스 거부, 무제한 brute force 및 2개를 초과하는 동시 요청을 금지합니다.",
+    "외부 도메인, 외부 OOB 서비스, 실제 cloud metadata 및 다른 컨테이너 접근을 금지합니다.",
+    "관리자 계정 삭제, 계정 정지, 대량 데이터 삭제 및 서버 명령 실행을 금지합니다.",
+    "실행 중 서버 소스, 공식 challenge 정답 및 사전 기준 목록 사용을 금지합니다.",
+)
+
+COMPREHENSIVE_CONSTRAINTS = (
+    "requests_per_second는 1 이하입니다.",
+    "concurrency는 2 이하입니다.",
+    "timeout_seconds는 20입니다.",
+    "max_depth는 3입니다.",
+    "max_requests는 타깃당 2000입니다.",
 )
 
 NEON_HEADER_QUOTE = (
@@ -150,7 +188,12 @@ def prepare_neon_policy_lab(*, source_path: Path, output_root: Path, username: s
             raise ValueError("captured Neon policy does not contain the exact supported control")
     if not approved_by.strip():
         raise ValueError("approved_by must not be blank")
-    names = list(LAB_SCOPES) if target == "all" else [target]
+    names = (
+        [name for name, scope in LAB_SCOPES.items() if not scope.comprehensive]
+        if target == "all" else [target]
+    )
+    if any(LAB_SCOPES[name].comprehensive for name in names):
+        raise ValueError("the comprehensive local profile cannot inherit an external program policy")
     prepared = []
     for name in names:
         original = LAB_SCOPES[name]
@@ -229,18 +272,26 @@ def prepare_neon_policy_lab(*, source_path: Path, output_root: Path, username: s
 
 
 def _document(scope: LabScope) -> ScopeDocument:
-    allowed = (ACTIVE_AUTHORIZATION, *scope.extra_allowed)
+    active_authorization = (
+        COMPREHENSIVE_AUTHORIZATION if scope.comprehensive else ACTIVE_AUTHORIZATION
+    )
+    prohibited = COMPREHENSIVE_PROHIBITED if scope.comprehensive else PROHIBITED
+    constraints = COMPREHENSIVE_CONSTRAINTS if scope.comprehensive else CONSTRAINTS
+    allowed = (active_authorization, *scope.extra_allowed)
     source_lines = (
         "AI DAST local lab authorization record.",
         f"Canonical asset: {scope.target_url}",
         *allowed,
-        *PROHIBITED,
-        *CONSTRAINTS,
+        *prohibited,
+        *constraints,
     )
     source_text = "\n".join(source_lines)
     captured_at = datetime.now(timezone.utc)
     return ScopeDocument(
-        scope_id=f"scope_local_lab_{scope.name.replace('-', '_')}",
+        scope_id=(
+            f"scope_local_lab_{scope.name.replace('-', '_')}"
+            + ("_v2" if scope.comprehensive else "")
+        ),
         created_at=captured_at,
         source=ProgramPage(
             requested_url=scope.program_url,
@@ -253,6 +304,7 @@ def _document(scope: LabScope) -> ScopeDocument:
             text=source_text,
         ),
         analysis=ScopeAnalysis(
+            required_request_headers=[] if scope.comprehensive else None,
             program_name=f"AI DAST Local Lab: {scope.name}",
             program_description=scope.description,
             in_scope_assets=[
@@ -266,24 +318,54 @@ def _document(scope: LabScope) -> ScopeDocument:
             ],
             out_of_scope_assets=[],
             allowed_activities=list(allowed),
-            prohibited_activities=list(PROHIBITED),
+            prohibited_activities=list(prohibited),
             submission_requirements=[
                 "모든 finding은 로컬 evidence와 재현 절차를 포함해야 합니다."
             ],
-            operational_constraints=list(CONSTRAINTS),
+            operational_constraints=list(constraints),
             safe_harbor="이 승인 기록은 위 loopback 자산의 로컬 교육용 평가에만 적용됩니다.",
             ambiguities=[],
             source_evidence=[
                 SourceEvidence(section="Canonical asset", quote=scope.target_url),
-                SourceEvidence(section="Active testing", quote=ACTIVE_AUTHORIZATION),
-                SourceEvidence(section="External access", quote=PROHIBITED[2]),
+                SourceEvidence(section="Active testing", quote=active_authorization),
+                SourceEvidence(section="External access", quote=prohibited[1] if scope.comprehensive else prohibited[2]),
+                *(
+                    [SourceEvidence(section="Comprehensive execution limit", quote=quote)
+                     for quote in COMPREHENSIVE_CONSTRAINTS]
+                    if scope.comprehensive else []
+                ),
             ],
+            execution_rules=(ScopeExecutionRules(
+                policy_review_version=2,
+                exclusions=[],
+                request_limits=[RequestLimit(
+                    maximum=1, period_seconds=1.0, scope="program",
+                    source_quote=COMPREHENSIVE_CONSTRAINTS[0],
+                )],
+                option_limits=[
+                    OptionLimit(field="concurrency", value=2, source_quote=COMPREHENSIVE_CONSTRAINTS[1]),
+                    OptionLimit(field="timeout_seconds", value=20, source_quote=COMPREHENSIVE_CONSTRAINTS[2]),
+                    OptionLimit(field="max_depth", value=3, source_quote=COMPREHENSIVE_CONSTRAINTS[3]),
+                    OptionLimit(field="max_requests", value=2000, source_quote=COMPREHENSIVE_CONSTRAINTS[4]),
+                ],
+                allowed_methods=QuotedValues(
+                    values=["GET", "HEAD", "OPTIONS", "POST", "PUT", "PATCH", "DELETE"],
+                    source_quote=COMPREHENSIVE_AUTHORIZATION,
+                ),
+            ) if scope.comprehensive else None),
         ),
     )
 
 
-def _publish(scope: LabScope, *, output_root: Path, approved_by: str) -> Path:
-    destination = resolve_scope_directory(scope.program_url, output_root)
+def _publish(
+    scope: LabScope, *, output_root: Path, approved_by: str,
+    revision_id: str | None = None,
+) -> Path:
+    destination = (
+        scope_revision_directory(scope.program_url, output_root, revision_id)
+        if revision_id is not None
+        else resolve_scope_directory(scope.program_url, output_root)
+    )
     coordinator = ScopeCoordinator(destination)
     expected = _document(scope)
     if destination.exists():
@@ -317,6 +399,10 @@ def main() -> int:
     )
     parser.add_argument("--output-dir", type=Path, default=RESULT_ROOT / "Scope")
     parser.add_argument("--approved-by", default="local-lab-operator")
+    parser.add_argument(
+        "--revision-id",
+        help="publish an immutable app-owned scopejob_<32 hex> revision",
+    )
     parser.add_argument("--policy-profile", choices=("baseline", "neon-common"), default="baseline")
     parser.add_argument("--policy-source", type=Path,
                         default=RESULT_ROOT / "Scope/hackerone/neon_bbp/Scope.json")
@@ -341,6 +427,7 @@ def main() -> int:
             scope,
             output_root=args.output_dir,
             approved_by=args.approved_by.strip(),
+            revision_id=args.revision_id,
         )
     return 0
 

@@ -9,6 +9,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from aidast.agents.errors import AgentInvocationError
 from aidast.pipeline.lifecycle import create_task, finish_stage_run, start_stage_run, transition_task
 from aidast.pipeline.live_schema import migrate_live_pipeline_schema
 from aidast.recon import db
@@ -497,6 +498,30 @@ class ValidationCoordinatorTests(unittest.TestCase):
         eligibility_patch.start()
         self.addCleanup(eligibility_patch.stop)
 
+    def test_foreign_blind_reference_is_repaired_once_without_failing_stage(self):
+        class RepairingAssessmentAgent(FakeAgent):
+            def __init__(inner):
+                inner.corrections = []
+
+            def assess(inner, blind_case, observations, correction=None):
+                inner.corrections.append(correction)
+                result = super().assess(blind_case, observations, correction)
+                if correction is None:
+                    result["evidence_ids"] = (*result["evidence_ids"], "foreign")
+                return result
+
+        agent = RepairingAssessmentAgent()
+        result = ValidationCoordinator(
+            db_path=self.path, agent=agent, reproduction=FakePort(),
+            policy_provider=lambda endpoint, method: self.policy,
+        ).run("scan")
+
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(result.summary["statuses"], {"CONFIRMED": 1})
+        self.assertEqual(len(agent.corrections), 2)
+        self.assertIsNone(agent.corrections[0])
+        self.assertIn("outside this replay batch", agent.corrections[1])
+
     def test_applicable_policy_precaution_can_stop_replay_without_replacing_scope(self):
         self.policy = self.policy.model_copy(update={"policy_notes": ["Sensitive data: use owned data only"]})
         class PrecautionAgent(FakeEligibilityAgent):
@@ -531,6 +556,102 @@ class ValidationCoordinatorTests(unittest.TestCase):
             self.assertEqual(decision["reason"], "finding_eligibility_excluded")
             self.assertEqual(conn.execute("SELECT assessment_id FROM validation_eligibility_assessments").fetchone()[0],
                              decision["eligibility_assessment_id"])
+
+    def test_foreign_comparison_reference_is_corrected_once(self):
+        class CorrectingAgent(FakeAgent):
+            def __init__(self):
+                self.corrections = []
+
+            def compare(self, claim, assessment, correction=None):
+                self.corrections.append(correction)
+                result = super().compare(claim, assessment, correction)
+                if correction is None:
+                    return result.model_copy(update={
+                        "attack_evidence_ids": ("foreign_attack_evidence",),
+                    })
+                return result
+
+        agent = CorrectingAgent()
+        result = ValidationCoordinator(
+            db_path=self.path, agent=agent, reproduction=FakePort(),
+            policy_provider=lambda endpoint, method: self.policy,
+        ).run("scan")
+
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(result.summary["statuses"], {"CONFIRMED": 1})
+        self.assertEqual(len(agent.corrections), 2)
+        self.assertIsNone(agent.corrections[0])
+        self.assertIn("attack_evidence", agent.corrections[1])
+
+    def test_transient_agent_invocation_failure_retries_same_validation_pass(self):
+        class TransientAgent(FakeAgent):
+            def __init__(self):
+                self.compare_calls = 0
+
+            def compare(self, claim, assessment, correction=None):
+                self.compare_calls += 1
+                if self.compare_calls == 1:
+                    raise AgentInvocationError("model process exited without diagnostics")
+                return super().compare(claim, assessment, correction)
+
+        agent = TransientAgent()
+        result = ValidationCoordinator(
+            db_path=self.path, agent=agent, reproduction=FakePort(),
+            policy_provider=lambda endpoint, method: self.policy,
+        ).run("scan")
+
+        self.assertEqual(result.summary["statuses"], {"CONFIRMED": 1})
+        self.assertEqual(agent.compare_calls, 2)
+
+    def test_repeated_agent_invocation_failure_finishes_case_inconclusive(self):
+        class UnavailableAgent(FakeAgent):
+            def __init__(self):
+                self.compare_calls = 0
+
+            def compare(self, claim, assessment, correction=None):
+                self.compare_calls += 1
+                raise AgentInvocationError("model process exited without diagnostics")
+
+        agent = UnavailableAgent()
+        result = ValidationCoordinator(
+            db_path=self.path, agent=agent, reproduction=FakePort(),
+            policy_provider=lambda endpoint, method: self.policy,
+        ).run("scan")
+
+        self.assertEqual(result.summary["statuses"], {"INCONCLUSIVE": 1})
+        self.assertEqual(agent.compare_calls, 2)
+        with db.connect(self.path) as conn:
+            stage_status = conn.execute(
+                "SELECT status FROM stage_runs WHERE stage='validation'"
+            ).fetchone()[0]
+            decision = json.loads(conn.execute(
+                "SELECT decision_json FROM validation_cases"
+            ).fetchone()[0])
+        self.assertEqual(stage_status, "completed")
+        self.assertEqual(decision["reason"], "agent_unavailable")
+        self.assertEqual(decision["phase"], "claim_comparison")
+
+    def test_repeated_foreign_comparison_reference_isolated_to_case(self):
+        class ForeignReferenceAgent(FakeAgent):
+            def compare(self, claim, assessment, correction=None):
+                result = super().compare(claim, assessment, correction)
+                return result.model_copy(update={
+                    "attack_evidence_ids": ("foreign_attack_evidence",),
+                })
+
+        result = ValidationCoordinator(
+            db_path=self.path, agent=ForeignReferenceAgent(), reproduction=FakePort(),
+            policy_provider=lambda endpoint, method: self.policy,
+        ).run("scan")
+
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(result.summary["statuses"], {"INCONCLUSIVE": 1})
+        with db.connect(self.path) as conn:
+            decision = json.loads(conn.execute(
+                "SELECT decision_json FROM validation_cases"
+            ).fetchone()[0])
+        self.assertEqual(decision["reason"], "agent_reference_invalid")
+        self.assertEqual(decision["phase"], "claim_comparison")
 
     def test_profile_evidence_audit_is_sealed_without_changing_decision(self):
         result = ValidationCoordinator(
@@ -1340,6 +1461,43 @@ class ValidationCoordinatorTests(unittest.TestCase):
                     case_id="case", scan_id="scan", finding_id="finding",
                 )
 
+    def test_candidate_gate_rejects_runtime_credential_role_not_declared_by_finding(self):
+        from aidast.validation import canonical_sha256, validate_runtime_contract
+
+        def attempt(variant, *, roles=None):
+            value = {
+                "request": {"path_parameters": {"id": 1},
+                            "query_parameters": {"variant": variant}},
+                "assertions": [{
+                    "assertion_id": "private", "kind": "body_contains",
+                    "expected": "private-record",
+                }],
+            }
+            if roles is not None:
+                value["credential_roles"] = roles
+            return value
+
+        runtime = validate_runtime_contract({
+            "schema_version": 1,
+            "target": attempt("target", roles=["identity_b"]),
+            "positive_control": attempt("baseline"),
+            "negative_control": attempt("inert"),
+        }).model_dump(mode="json")
+        with db.connect(self.path) as conn:
+            conn.execute("DROP TRIGGER finding_reproduction_specs_no_update")
+            conn.execute(
+                """UPDATE finding_reproduction_specs
+                   SET runtime_contract_json=?,runtime_contract_sha256=?
+                   WHERE finding_id='finding'""",
+                (json.dumps(runtime, sort_keys=True, separators=(",", ":")),
+                 canonical_sha256(runtime)),
+            )
+            conn.commit()
+            with self.assertRaisesRegex(CandidateIntegrityError, "runtime_identity_roles"):
+                CandidateIntegrityGate(conn).validate_finding(
+                    case_id="case", scan_id="scan", finding_id="finding",
+                )
+
     def test_candidate_gate_rejects_development_contract_hash_mismatch(self):
         from aidast.validation import DevelopmentRuntimeContract
 
@@ -1885,6 +2043,7 @@ class ValidationCoordinatorTests(unittest.TestCase):
             coordinator.impact_development_port, NativeImpactDevelopmentPort,
         )
         self.assertIsNotNone(coordinator.prerequisite_resolver.policy_provider)
+        self.assertIn("vault", coordinator.reproduction.http.credential_resolver.backends)
         from aidast.validation.orchestration.replay_preparation import CodexReplayPreparer
         self.assertIsInstance(coordinator.replay_preparer, CodexReplayPreparer)
 

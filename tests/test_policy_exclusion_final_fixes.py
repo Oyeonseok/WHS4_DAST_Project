@@ -142,30 +142,32 @@ def test_wire_preparation_does_not_weaken_strict_receipt_identity():
                              response_body=b'ok', captured_at=1)
 
 
-@pytest.mark.parametrize('selected,bound', [
-    ('*.example.test', 'https://a.example.test/'),
-    ('https://*.example.test', 'https://a.example.test/private'),
-    ('a.example.test', 'https://a.example.test/'),
-    ('https://a.example.test/', '*.example.test'),
-    ('https://a.example.test/private', 'https://a.example.test/'),
-    ('*.example.test', '*.a.example.test'),
-    ('api-*.example.test', 'https://api-one.example.test/'),
-    ('https://a.example.test/public', 'http://a.example.test:8080/private'),
-    ('https://a.example.test/', '10.0.0.0/8'),
-    ('https://a.example.test/', 'uninterpretable asset'),
-    ('https://127.0.0.1/', '127.1'),
+@pytest.mark.parametrize('selected,bound,armed,get_decision,post_decision', [
+    ('*.example.test', 'https://a.example.test/', True, 'continue', 'deny'),
+    ('https://*.example.test', 'https://a.example.test/private', True, 'continue', 'continue'),
+    ('a.example.test', 'https://a.example.test/', True, 'continue', 'deny'),
+    ('https://a.example.test/', '*.example.test', True, 'continue', 'deny'),
+    ('https://a.example.test/private', 'https://a.example.test/', True, 'continue', 'deny'),
+    ('*.example.test', '*.a.example.test', True, 'continue', 'continue'),
+    ('api-*.example.test', 'https://api-one.example.test/', True, 'continue', 'continue'),
+    ('https://a.example.test/public', 'http://a.example.test:8080/private', False, 'continue', 'continue'),
+    ('https://a.example.test/', '10.0.0.0/8', True, 'hold', 'hold'),
+    ('https://a.example.test/', 'uninterpretable asset', True, 'hold', 'hold'),
+    ('https://127.0.0.1/', '127.1', True, 'hold', 'hold'),
 ])
-def test_overlapping_alias_cannot_disarm_serialized_policy(selected, bound):
+def test_alias_overlap_is_resolved_against_the_concrete_request(
+        selected, bound, armed, get_decision, post_decision):
     value = dict(compiled(rule(predicate('method', 'POST'), targets=[bound])), target_asset=selected)
     serialized = CompiledExclusionPolicy.model_validate(value).model_dump(mode='json')
     policy = {'asset': selected, 'request_exclusions': serialized}
-    assert has_request_exclusions(policy)
+    assert has_request_exclusions(policy) is armed
     decision = evaluate_exclusions(serialized, url='https://a.example.test/public', method='GET')
-    assert decision['decision'] == 'hold'
-    assert decision['rule_keys'] == ['restricted']
-    assert 'overlap' in decision['reason']
-    with pytest.raises(ValueError, match='exclusion hold'):
+    assert decision['decision'] == get_decision
+    if post_decision == 'continue':
         require_request_admission(policy, url='https://a.example.test/public', method='POST')
+    else:
+        with pytest.raises(ValueError, match='exclusion ' + post_decision):
+            require_request_admission(policy, url='https://a.example.test/public', method='POST')
     assert serialized['rules'] == value['rules']
 
 
@@ -186,7 +188,7 @@ def test_proven_disjoint_alias_keeps_unrelated_rules_inert(selected, bound):
     ('URL', 'https://a.example.com/', '*.example.com'),
 ])
 @pytest.mark.parametrize('cache_only', [False, True])
-def test_overlap_preparation_holds_before_startup_and_exports_armed_policy(tmp_path, asset_type, selected, bound, cache_only):
+def test_overlap_preparation_resolves_http_startup_and_exports_armed_policy(tmp_path, asset_type, selected, bound, cache_only):
     from test_policy_exclusion_preparation import document, rule as preparation_rule
     from aidast.scope.exclusion_preparation import prepare_exclusions, StartupOperation
     from aidast.scope.models import ScopeAsset
@@ -204,9 +206,8 @@ def test_overlap_preparation_holds_before_startup_and_exports_armed_policy(tmp_p
         startup_operations={selected: [StartupOperation('HTTP_PROBE', 'https://a.example.com/public')]},
         resolver=ExclusionBindingResolver(tmp_path / 'cache', lambda _: pytest.fail('direct rule called model')),
         cache_only=cache_only)
-    assert prepared.diagnostics[0]['decision'] == 'hold'
-    with pytest.raises(ValueError, match='overlap'):
-        prepared.require_ready()
+    assert prepared.diagnostics[0]['decision'] == 'continue'
+    prepared.require_ready()
     stored = json.loads(prepared.policies[selected].model_dump_json())
     assert stored['rules'][0]['target_assets'] == [bound]
     assert stored['rules'][0]['source_quote'] == restriction.source_quote

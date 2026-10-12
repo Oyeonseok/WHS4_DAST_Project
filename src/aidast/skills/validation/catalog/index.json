@@ -28,7 +28,7 @@
       "skill_path": "library/hunt-auth-bypass/SKILL.md",
       "contract_path": "library/hunt-auth-bypass/contract.json",
       "skill_sha256": "f8a8a376160552550d09e36daa64033fa1f3289b384ca014990cd7e5a4e69508",
-      "contract_sha256": "b1d4c0b148d9d62d8be38e541221a1714cb5e8e255caaa9a316d4f7a6a6942a1"
+      "contract_sha256": "a578768a1d33b5e6918da9da098b027fea2913fed93baee3c780396941cf730f"
     },
     {
       "skill_id": "hunt-brute-force",
@@ -357,7 +357,7 @@
       "skill_path": "library/hunt-sqli/SKILL.md",
       "contract_path": "library/hunt-sqli/contract.json",
       "skill_sha256": "91e1b2f242c49858d270700b5254e5e46f8b06d7e203fae2c9a6c076f5cbc337",
-      "contract_sha256": "de58b2733b8cb7996627c7602b3159caca2fbeb63bc4b1b9bf9a4015d2c72efb"
+      "contract_sha256": "9f9531e7ce96e3e9c7815839e752c30e963774ca43cc057deef5f4f780a6ede0"
     },
     {
       "skill_id": "hunt-ssrf",

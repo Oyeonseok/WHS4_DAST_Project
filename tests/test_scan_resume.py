@@ -14,6 +14,9 @@ import pytest
 from aidast.pipeline.lifecycle import create_task, finish_stage_run, start_stage_run
 from aidast.pipeline.materialize import materialize_pipeline
 from aidast.pipeline.models import HandoffManifest, hash_artifact
+from aidast.pipeline.model_settings import (
+    MODEL_SETTINGS_FILE, ScanModelChoices, scan_model_settings_path, write_scan_model_choices,
+)
 from aidast.pipeline.resume import execute_resume, inspect_resume
 from aidast.recon import db
 from aidast.web.launch import ScanLaunchManager
@@ -25,7 +28,7 @@ SCAN_ID = "scan_resume_fixture"
 SCOPE_ID = "scope_resume_fixture"
 
 
-def _fixture(root: Path, *, grouped: bool = False) -> Path:
+def _fixture(root: Path, *, grouped: bool = False, models: ScanModelChoices | None = None) -> Path:
     suffix = Path("example-platform/example-program") if grouped else Path()
     run = root / "Runs" / suffix / SCAN_ID
     run.mkdir(parents=True)
@@ -61,7 +64,8 @@ def _fixture(root: Path, *, grouped: bool = False) -> Path:
     scope_md = run / "Scope.md"
     policy = run / "TargetPolicy.json"
     approval = run / "Approval.json"
-    scope_json.write_text(json.dumps({"scope_id": SCOPE_ID}), encoding="utf-8")
+    scope_json.write_text(json.dumps({"scope_id": SCOPE_ID,
+                                     "source": {"requested_url": "https://hackerone.com/example"}}), encoding="utf-8")
     scope_md.write_text("# Example approved scope\n", encoding="utf-8")
     policy.write_text(json.dumps({"scope_id": SCOPE_ID}), encoding="utf-8")
     approval.write_text(json.dumps({
@@ -70,6 +74,10 @@ def _fixture(root: Path, *, grouped: bool = False) -> Path:
         "scope_markdown_sha256": hashlib.sha256(scope_md.read_bytes()).hexdigest(),
     }), encoding="utf-8")
     artifacts = [hash_artifact(path, root=run) for path in (recon, scope_json, scope_md, policy, approval)]
+    if models is not None:
+        model_path = write_scan_model_choices(run / MODEL_SETTINGS_FILE, scan_id=SCAN_ID, models=models)
+        write_scan_model_choices(scan_model_settings_path(root, SCAN_ID), scan_id=SCAN_ID, models=models)
+        artifacts.append(hash_artifact(model_path, root=run, role="scan-models"))
     handoff = run / "Handoff.json"
     handoff.write_text(HandoffManifest(scan_id=SCAN_ID, db_path="Recon.db", artifacts=artifacts).model_dump_json(), encoding="utf-8")
     pipeline = root / "AttackRuns" / suffix / SCAN_ID / "Pipeline.db"
@@ -101,6 +109,168 @@ def test_resume_inspection_finds_program_grouped_scan(tmp_path: Path) -> None:
     assert plan.scope_path == tmp_path / "Runs" / "example-platform" / "example-program" / SCAN_ID / "Scope.md"
 
 
+def test_resume_inspection_accepts_explicitly_cancelled_post_recon_stage(tmp_path: Path) -> None:
+    pipeline = _fixture(tmp_path)
+    with sqlite3.connect(pipeline) as conn:
+        conn.execute(
+            "UPDATE scans SET status='cancelled',finished_at=CURRENT_TIMESTAMP WHERE scan_id=?",
+            (SCAN_ID,),
+        )
+        conn.execute(
+            """UPDATE stage_runs SET status='cancelled',finished_at=CURRENT_TIMESTAMP
+               WHERE stage_run_id=(SELECT stage_run_id FROM stage_runs
+                   WHERE scan_id=? AND stage='attack' ORDER BY rowid DESC LIMIT 1)""",
+            (SCAN_ID,),
+        )
+
+    plan = inspect_resume(tmp_path, SCAN_ID)
+
+    assert plan.stage == "attack"
+    assert plan.database == pipeline
+
+
+def test_resume_prioritizes_failed_validation_cases_over_residual_attack_gap(
+    tmp_path: Path,
+) -> None:
+    pipeline = _fixture(tmp_path)
+    with sqlite3.connect(pipeline) as conn:
+        conn.execute(
+            "UPDATE stage_runs SET status='completed',finished_at=CURRENT_TIMESTAMP "
+            "WHERE stage='attack'"
+        )
+        chaining = start_stage_run(
+            conn, scan_id=SCAN_ID, stage="chaining", stage_run_id="chain-completed",
+        )
+        finish_stage_run(conn, chaining, status="completed")
+        conn.execute(
+            """INSERT INTO findings
+               (finding_id,scan_id,endpoint_id,vuln_type,severity,title)
+               VALUES ('finding-resume',?, 'login','test','LOW','Resume fixture')""",
+            (SCAN_ID,),
+        )
+        validation = start_stage_run(
+            conn, scan_id=SCAN_ID, stage="validation",
+            stage_run_id="validation-interrupted",
+        )
+        conn.execute(
+            """INSERT INTO validation_cases
+               (case_id,scan_id,target_kind,finding_id,latest_stage_run_id,
+                processing_phase,state_version)
+               VALUES ('case-resume',?,'finding','finding-resume',?, 'interrupted',1)""",
+            (SCAN_ID, validation),
+        )
+        finish_stage_run(conn, validation, status="failed", error_message="fixture")
+
+    plan = inspect_resume(tmp_path, SCAN_ID)
+
+    assert plan.stage == "validation"
+    assert plan.stage_run_id == "validation-interrupted"
+
+
+def test_execute_resume_uses_durable_validation_owner_after_upstream_retry(
+    tmp_path: Path,
+) -> None:
+    pipeline = _fixture(tmp_path)
+    plan = inspect_resume(tmp_path, SCAN_ID)
+    resumed: list[str] = []
+
+    class Stage:
+        def __init__(self, name: str, **_kwargs: object) -> None:
+            self.name = name
+
+        def run(self, scan_id: str) -> None:
+            if self.name != "chaining":
+                return
+            with sqlite3.connect(pipeline) as conn:
+                conn.execute(
+                    """INSERT INTO findings
+                       (finding_id,scan_id,endpoint_id,vuln_type,severity,title)
+                       VALUES ('finding-during-resume',?,'login','test','LOW','Resume fixture')""",
+                    (scan_id,),
+                )
+                validation = start_stage_run(
+                    conn, scan_id=scan_id, stage="validation",
+                    stage_run_id="validation-during-resume",
+                )
+                conn.execute(
+                    """INSERT INTO validation_cases
+                       (case_id,scan_id,target_kind,finding_id,latest_stage_run_id,
+                        processing_phase,state_version)
+                       VALUES ('case-during-resume',?,'finding','finding-during-resume',?,
+                               'interrupted',1)""",
+                    (scan_id, validation),
+                )
+                finish_stage_run(
+                    conn, validation, status="failed", error_message="fixture",
+                )
+
+    class ValidationStage:
+        def resume(self, stage_run_id: str) -> None:
+            resumed.append(stage_run_id)
+
+        def run(self, _scan_id: str) -> None:
+            raise AssertionError("a new Validation run must not be started")
+
+    with (
+        patch("aidast.orchestration.attack.AttackCoordinator", lambda **kwargs: Stage("attack", **kwargs)),
+        patch("aidast.orchestration.chaining.ChainingCoordinator", lambda **kwargs: Stage("chaining", **kwargs)),
+    ):
+        execute_resume(
+            plan, agent=object(),
+            validation_factory=lambda **_kwargs: ValidationStage(),
+        )
+
+    assert resumed == ["validation-during-resume"]
+
+
+def test_execute_resume_finishes_each_failed_validation_owner_in_order(
+    tmp_path: Path,
+) -> None:
+    pipeline = _fixture(tmp_path)
+    with sqlite3.connect(pipeline) as conn:
+        conn.execute(
+            "UPDATE stage_runs SET status='completed',finished_at=CURRENT_TIMESTAMP "
+            "WHERE stage='attack'"
+        )
+        for ordinal in (1, 2):
+            finding_id = f"finding-owner-{ordinal}"
+            stage_id = f"validation-owner-{ordinal}"
+            conn.execute(
+                """INSERT INTO findings
+                   (finding_id,scan_id,endpoint_id,vuln_type,severity,title)
+                   VALUES (?,?,'login','test','LOW',?)""",
+                (finding_id, SCAN_ID, f"Owner {ordinal}"),
+            )
+            stage = start_stage_run(
+                conn, scan_id=SCAN_ID, stage="validation", stage_run_id=stage_id,
+            )
+            conn.execute(
+                """INSERT INTO validation_cases
+                   (case_id,scan_id,target_kind,finding_id,latest_stage_run_id,
+                    processing_phase,state_version)
+                   VALUES (?,?, 'finding',?,?, 'interrupted',1)""",
+                (f"case-owner-{ordinal}", SCAN_ID, finding_id, stage),
+            )
+            finish_stage_run(conn, stage, status="failed", error_message="fixture")
+
+    plan = inspect_resume(tmp_path, SCAN_ID)
+    resumed: list[str] = []
+
+    class ValidationStage:
+        def resume(self, stage_run_id: str) -> None:
+            resumed.append(stage_run_id)
+
+        def run(self, _scan_id: str) -> None:
+            raise AssertionError("a new Validation run must not be started")
+
+    execute_resume(
+        plan, validation_factory=lambda **_kwargs: ValidationStage(),
+    )
+
+    assert plan.stage_run_id == "validation-owner-1"
+    assert resumed == ["validation-owner-1", "validation-owner-2"]
+
+
 def test_execute_resume_dispatches_stage_sequence_without_recon(tmp_path: Path) -> None:
     _fixture(tmp_path)
     plan = inspect_resume(tmp_path, SCAN_ID)
@@ -119,6 +289,74 @@ def test_execute_resume_dispatches_stage_sequence_without_recon(tmp_path: Path) 
     ):
         execute_resume(plan, agent=object(), validation_factory=lambda **kwargs: Stage("validation", **kwargs))
     assert calls == [("attack", SCAN_ID), ("chaining", SCAN_ID), ("validation", SCAN_ID)]
+
+
+def test_execute_resume_reuses_current_validation_after_negative_only_attack(
+    tmp_path: Path,
+) -> None:
+    _fixture(tmp_path)
+    plan = inspect_resume(tmp_path, SCAN_ID)
+    calls: list[tuple[str, str]] = []
+
+    class Stage:
+        def __init__(self, name: str, **_kwargs: object) -> None:
+            self.name = name
+
+        def run(self, scan_id: str) -> None:
+            calls.append((self.name, scan_id))
+
+    with (
+        patch("aidast.orchestration.attack.AttackCoordinator", lambda **kwargs: Stage("attack", **kwargs)),
+        patch("aidast.orchestration.chaining.ChainingCoordinator", lambda **kwargs: Stage("chaining", **kwargs)),
+        patch("aidast.pipeline.resume._current_validation_covers_attack_results", return_value=True),
+    ):
+        execute_resume(
+            plan, agent=object(),
+            validation_factory=lambda **_kwargs: (_ for _ in ()).throw(
+                AssertionError("current Validation must be reused")
+            ),
+        )
+
+    assert calls == [("attack", SCAN_ID), ("chaining", SCAN_ID)]
+
+
+def test_execute_resume_restores_cancelled_recon_checkpoint(tmp_path: Path) -> None:
+    pipeline = _fixture(tmp_path)
+    with sqlite3.connect(pipeline) as conn:
+        conn.execute("UPDATE scans SET status='cancelled' WHERE scan_id=?", (SCAN_ID,))
+        conn.execute(
+            """UPDATE stage_runs SET status='cancelled'
+               WHERE stage_run_id=(SELECT stage_run_id FROM stage_runs
+                   WHERE scan_id=? AND stage='attack' ORDER BY rowid DESC LIMIT 1)""",
+            (SCAN_ID,),
+        )
+    plan = inspect_resume(tmp_path, SCAN_ID)
+
+    class Stage:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def run(self, _scan_id: str) -> None:
+            pass
+
+    with (
+        patch("aidast.orchestration.attack.AttackCoordinator", Stage),
+        patch("aidast.orchestration.chaining.ChainingCoordinator", Stage),
+    ):
+        execute_resume(
+            plan, agent=object(),
+            validation_factory=lambda **kwargs: Stage(**kwargs),
+        )
+
+    with sqlite3.connect(pipeline) as conn:
+        assert conn.execute(
+            "SELECT status FROM scans WHERE scan_id=?", (SCAN_ID,),
+        ).fetchone() == ("completed",)
+        assert conn.execute(
+            """SELECT COUNT(*) FROM audit_events
+               WHERE scan_id=? AND event_type='scan.post_recon_checkpoint_restored'""",
+            (SCAN_ID,),
+        ).fetchone() == (1,)
 
 
 def test_resume_api_starts_existing_scan_once_and_requires_origin(tmp_path: Path) -> None:

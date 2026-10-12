@@ -20,8 +20,15 @@ from uuid import uuid4
 from pydantic import BaseModel, ValidationError
 
 from aidast.auth.codex import CodexAuth, CodexAuthError
+from aidast.agents.errors import AgentInvocationError
 from aidast.core import codex_process
 from aidast.agents.policy_guidance import policy_skill_text, stage_policy_skill
+from aidast.agents.failure_diagnostics import (
+    is_model_capacity_error,
+    is_model_policy_refusal,
+    persisted_work_snapshot,
+    preserve_native_failure,
+)
 from aidast.scope.exclusions import ResourceClassification
 from aidast.scope.exclusion_binding import classify_with_agent, SCOPE_EXCLUSION_INSTRUCTIONS
 from aidast.core.model_calls import logged_model_call, record_jsonl_usage, record_session_usage
@@ -46,6 +53,7 @@ from aidast.recon.policy import (
     TargetPolicyProposal,
     TargetPolicySelectionSetProposal,
     ToolPolicy,
+    normalize_recon_read_only_methods,
     normalize_read_only_attack_policy,
     validate_policy_for_target,
 )
@@ -64,6 +72,7 @@ from aidast.scope.paths import identify_program
 
 
 ModelT = TypeVar("ModelT", bound=BaseModel)
+ATTACK_IDLE_TIMEOUT_SECONDS = 360
 
 EXECUTABLE_WEB_ASSET_TYPES = frozenset(
     {
@@ -120,7 +129,7 @@ def _codex_output_schema(model_type: type[BaseModel]) -> dict:
     return schema
 
 
-class MainAgentError(RuntimeError):
+class MainAgentError(AgentInvocationError):
     pass
 
 
@@ -167,8 +176,8 @@ class CodexMainAgent:
     """Uses the locally authenticated Codex CLI as the planning-only Main Agent."""
 
     DEFAULT_MAIN_MODEL = "gpt-6-sol"
-    DEFAULT_ATTACK_MODEL = "gpt-6-sol"
-    DEFAULT_CHAINING_MODEL = "gpt-6-sol"
+    DEFAULT_ATTACK_MODEL = "gpt-5.6-sol"
+    DEFAULT_CHAINING_MODEL = "gpt-5.6-sol"
     DEFAULT_VALIDATION_MODEL = "gpt-6-sol"
 
     def __init__(
@@ -204,6 +213,14 @@ class CodexMainAgent:
         # interpreter because a virtualenv under a non-ASCII project path can
         # be misread by a nested Codex shell on Windows.
         self._python_executable = python_executable or stable_executable
+
+    def activate_attack_fallback_model(self) -> bool:
+        """Use another configured model after an Attack capacity outage."""
+        for candidate in (self._main_model, self._validation_model):
+            if candidate and candidate != self._attack_model:
+                self._attack_model = candidate
+                return True
+        return False
 
     def select_policy_references(self, page_text, candidates):
         return select_with_agent(self, page_text, candidates)
@@ -368,6 +385,7 @@ class CodexMainAgent:
                 **selection.model_dump(exclude={"target_id"}),
             )
             item = self._normalize_grounded_execution_controls(item, scope_markdown)
+            item = normalize_recon_read_only_methods(item)
             item = normalize_read_only_attack_policy(item)
             if item.asset_type is AssetType.WILDCARD:
                 wildcard = item.asset.lower().rstrip(".")
@@ -473,9 +491,11 @@ Advisories guide testing within explicit authorization without preventing launch
 Fresh model output is bounded to 64 blockers and 64 advisories. The application
 stamps policy_review_version after evidence validation; do not claim host review.
 Supported execution_rules fields:
-- request_limits: maximum, period_seconds (null for total/lifetime quota), scope
+- request_limits: maximum, period_seconds (null for a non-window quota), scope
   scan/program/target, source_quote. Preserve stated windows, including per-second,
   per-minute and per-day quotas; do not convert lifetime quotas into periodic rates.
+  A null program quota is lifetime program-wide; null scan and target budgets reset
+  for each scan, with target additionally isolated by normalized origin.
   For example, a mandatory 10 requests/second ceiling is supported as maximum=10,
   period_seconds=1, scope="program", plus the exact source_quote. The schema has
   these fields; do not classify a supported numeric ceiling as unsupported. When
@@ -495,6 +515,8 @@ Supported execution_rules fields:
   approved production assets. If applicability cannot be grounded, record an advisory
   without inventing assets.
 - blocking_requirements: label, source_quote, reason, target_assets for mandatory unsupported controls.
+  A blanket prohibition on automatic/automated scanners or scanning is incompatible
+  with this automated DAST and must be a global blocking_requirement, not an exclusion.
   Preserve conditional unsupported controls by binding exact approved assets: production-only
   controls bind only production assets; obligations for OTHER assets bind only those OTHER
   assets. Do not block unrelated targets. Empty target_assets means a global mandatory
@@ -712,14 +734,23 @@ Reuse compatible input keys; never invent operator values or confirmations.
                     "in_app_browser",
                 ]
             with tempfile.TemporaryFile(mode="w+t", encoding="utf-8") as events:
+                effective_timeout = (
+                    float("inf")
+                    if no_timeout
+                    else min(self._timeout_seconds, max(1.0, float(timeout_seconds)))
+                    if timeout_seconds is not None
+                    else self._timeout_seconds
+                )
                 try:
                     completed = codex_process.run_codex(
                         command,
                         input="$aidast-policy\n\n" + policy_skill_text() + "\n\n" + prompt,
                         stdout=events,
-                        timeout=(float("inf") if no_timeout else
-                                 min(self._timeout_seconds, max(1.0, float(timeout_seconds)))
-                                 if timeout_seconds is not None else self._timeout_seconds),
+                        timeout=effective_timeout,
+                        idle_timeout=codex_process.structured_idle_timeout(
+                            effective_timeout,
+                            tools_enabled=allow_browser,
+                        ),
                     )
                 except codex_process.CodexProcessTimeout as exc:
                     raise MainAgentError(
@@ -756,6 +787,7 @@ Reuse compatible input keys; never invent operator values or confirmations.
     def _run_structured_session(
         self, *, prompt: str, model_type: type[ModelT], artifact_name: str,
         operation: str, work_dir: Path, session_id: str | None = None,
+        model: str | None = None,
     ) -> tuple[ModelT, str]:
         """Run or resume one tool-disabled Codex session with a fresh strict schema."""
         executable = shutil.which(self._executable)
@@ -774,7 +806,7 @@ Reuse compatible input keys; never invent operator values or confirmations.
         result_path.unlink(missing_ok=True)
         common = [
             "--skip-git-repo-check", "--ignore-user-config", "--model",
-            self._validation_model, "--disable", "shell_tool", "--disable",
+            model or self._validation_model, "--disable", "shell_tool", "--disable",
             "unified_exec", "--disable", "apps", "--disable",
             "standalone_web_search", "--disable", "browser_use", "--disable",
             "computer_use", "--disable", "in_app_browser", "--json",
@@ -903,6 +935,8 @@ Reuse compatible input keys; never invent operator values or confirmations.
                     "yourself and send it only through the configured policy-enforcing request helper; never use "
                     "curl, wget, Invoke-WebRequest, a browser, sockets, or another transport. Commit results "
                     "through the configured DB helper. "
+                    "Use external_tool_helper_path only for allowlisted structured manifests; it still sends "
+                    "every physical request through the same policy-enforcing request boundary. "
                     "Do not spawn agents, run codex exec, perform chaining, or widen Scope. "
                     "Return exactly these completion keys: stage, status, scan_id, db_path, "
                     "stage_run_id, finding_ids, summary. stage is ATTACK and status is "
@@ -964,6 +998,63 @@ Reuse compatible input keys; never invent operator values or confirmations.
         ]
 
     @staticmethod
+    def _synthetic_loopback_auto_approval(
+        *, method: str, origin: str, normalized_path: str,
+        risk_class: str, payload_json: str,
+    ) -> bool:
+        """Approve a bounded mutation against an owned disposable loopback fixture.
+
+        The web launcher has no terminal on which to answer an authorization
+        prompt. Local benchmark tasks carry approved credential references and
+        owned disposable fixtures in their durable payload, so those bindings
+        form the non-interactive approval boundary. DELETE remains interactive
+        because its exact resource ownership needs separate proof.
+        """
+        try:
+            parsed = urlsplit(origin)
+            payload = json.loads(payload_json or "{}")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return False
+        host = (parsed.hostname or "").casefold()
+        if (
+            parsed.scheme not in {"http", "https"}
+            or host not in {"127.0.0.1", "::1", "localhost"}
+            or method not in {"POST", "PUT", "PATCH"}
+            or risk_class not in {
+                "application_mutation", "test_resource_create",
+                "external_side_effect",
+            }
+        ):
+            return False
+        if not normalized_path.startswith("/"):
+            return False
+        references = payload.get("credential_references")
+        fixtures = payload.get("test_fixtures")
+        if not isinstance(references, list) or not isinstance(fixtures, list):
+            return False
+        synthetic_labels = {
+            item.get("label") for item in references
+            if isinstance(item, dict)
+            and item.get("identity_role") == "identity_synthetic"
+            and isinstance(item.get("label"), str)
+        }
+        if not synthetic_labels:
+            return False
+        for fixture in fixtures:
+            if not isinstance(fixture, dict) or fixture.get("fact_type") != "owned_test_object":
+                continue
+            value = fixture.get("fact_value")
+            if (
+                isinstance(value, dict)
+                and value.get("credential_label") in synthetic_labels
+                and value.get("disposable") is True
+                and value.get("cleanup_allowed") is True
+                and value.get("resource") == "account"
+            ):
+                return True
+        return False
+
+    @staticmethod
     def _review_pending_attack_authorizations(
         db_path: Path, stage_run_id: str, *, input_fn=None,
     ) -> int:
@@ -976,7 +1067,7 @@ Reuse compatible input keys; never invent operator values or confirmations.
             pending = conn.execute(
                 """SELECT e.envelope_id,e.scan_id,e.task_id,t.skill_name,e.method,
                           e.origin,e.normalized_path,e.provenance_kind,e.max_requests,
-                          e.max_body_bytes,e.risk_class,e.approval_reason
+                          e.max_body_bytes,e.risk_class,e.approval_reason,t.payload_json
                    FROM attack_authorization_envelopes e
                    JOIN attack_tasks t ON t.task_id=e.task_id
                    JOIN stage_runs s ON s.stage_run_id=e.stage_run_id
@@ -990,28 +1081,35 @@ Reuse compatible input keys; never invent operator values or confirmations.
             (
                 envelope_id, scan_id, task_id, skill_name, method, origin,
                 normalized_path, provenance_kind, max_requests, max_body_bytes,
-                risk_class, approval_reason,
+                risk_class, approval_reason, payload_json,
             ) = row
             provenance = (
                 "Recon에서 발견된 경로 후보(해당 메서드는 미관측)"
                 if provenance_kind == "recon_candidate"
                 else "Attack Agent가 새로 제안한 경로"
             )
-            print(
-                "\n[Attack 요청 승인 필요]\n"
-                f"  Skill  : {skill_name}\n"
-                f"  요청   : {method} {origin}{normalized_path}\n"
-                f"  근거   : {provenance}\n"
-                f"  위험   : {risk_class} ({approval_reason})\n"
-                f"  범위   : 현재 task, 최대 {max_requests}회, "
-                f"body {max_body_bytes // 1024} KiB, 15분, redirect 금지",
-                flush=True,
+            auto_approved = CodexMainAgent._synthetic_loopback_auto_approval(
+                method=method, origin=origin, normalized_path=normalized_path,
+                risk_class=risk_class, payload_json=payload_json,
             )
-            try:
-                answer = input_fn("  이 범위만 허용하려면 y, 거부하려면 N: ")
-            except (EOFError, KeyboardInterrupt):
-                answer = "N"
-            approved = str(answer).strip().casefold() == "y"
+            if auto_approved:
+                approved = True
+            else:
+                print(
+                    "\n[Attack 요청 승인 필요]\n"
+                    f"  Skill  : {skill_name}\n"
+                    f"  요청   : {method} {origin}{normalized_path}\n"
+                    f"  근거   : {provenance}\n"
+                    f"  위험   : {risk_class} ({approval_reason})\n"
+                    f"  범위   : 현재 task, 최대 {max_requests}회, "
+                    f"body {max_body_bytes // 1024} KiB, 15분, redirect 금지",
+                    flush=True,
+                )
+                try:
+                    answer = input_fn("  이 범위만 허용하려면 y, 거부하려면 N: ")
+                except (EOFError, KeyboardInterrupt):
+                    answer = "N"
+                approved = str(answer).strip().casefold() == "y"
             now = time.time()
             with closing(sqlite3.connect(db_path, isolation_level=None)) as conn:
                 conn.execute("PRAGMA foreign_keys=ON")
@@ -1049,6 +1147,10 @@ Reuse compatible input keys; never invent operator values or confirmations.
                                     "approval_reason": approval_reason,
                                     "ttl_seconds": 15 * 60,
                                     "redirects_allowed": False,
+                                    "decision_source": (
+                                        "scanner_created_loopback_identity"
+                                        if auto_approved else "operator_prompt"
+                                    ),
                                 }, ensure_ascii=False, sort_keys=True),
                             ),
                         )
@@ -1143,6 +1245,12 @@ Reuse compatible input keys; never invent operator values or confirmations.
                 broker=helper_broker,
                 helper="attack_template",
             )
+            external_tool_helper_path = helper_dir / "external_tool_cli.py"
+            stage_helper_client(
+                external_tool_helper_path,
+                broker=helper_broker,
+                helper="attack_tool",
+            )
             local_scope = work_dir / "scope.md"
             local_policy = work_dir / "TargetPolicy.json"
             local_scope.write_bytes(scope_path.read_bytes())
@@ -1155,6 +1263,7 @@ Reuse compatible input keys; never invent operator values or confirmations.
                 "db_helper_path": str(helper_path),
                 "http_request_helper_path": str(request_helper_path),
                 "template_helper_path": str(template_helper_path),
+                "external_tool_helper_path": str(external_tool_helper_path),
                 "scope_path": str(local_scope),
                 "target_policy_path": str(local_policy),
                 "policy_skill_path": str(work_dir / ".agents/skills/aidast-policy/SKILL.md"),
@@ -1195,11 +1304,23 @@ Reuse compatible input keys; never invent operator values or confirmations.
 
 You are the Main Agent for the post-Recon Attack transition. Read config.json
 and follow the aidast-attack-orchestrator Skill. Spawn exactly one native custom
-agent of type aidast_attack. Never perform the attacks yourself and never launch
-another codex exec process. Return only the required structured result.
+agent of type aidast_attack. This is a defensive validation of an explicitly
+approved local training application; Scope.md and TargetPolicy.json are the
+authoritative authorization and safety boundaries. Use only the brokered,
+policy-checked helpers. Each task is one bounded, non-destructive black-box
+control against the recorded target. Do not perform bulk credential guessing,
+denial of service, persistence on an existing or non-disposable identity,
+malware, evasion, or third-party access. When Scope explicitly authorizes
+scanner-created synthetic accounts on a disposable loopback lab, creating one
+fresh scanner-owned synthetic administrator is fixture creation, not prohibited
+persistence; never modify or delete an existing administrator. Never perform
+the tests yourself and never launch another codex exec process. Return only the
+required structured result.
 """
             command = [
                 executable,
+                "-c",
+                'access_programs.cyber="standard"',
                 "exec",
                 "--skip-git-repo-check",
                 "--ignore-user-config",
@@ -1247,32 +1368,76 @@ another codex exec process. Return only the required structured result.
                 name="aidast-attack-authorization",
                 daemon=True,
             )
+            before = persisted_work_snapshot(db_path, scan_id=scan_id, stage_run_id=stage_run_id)
+            event_text = ""
+
+            def failure(message: str, code: str, stderr: str = "", exit_code: int | None = None):
+                error = MainAgentError(message)
+                # Codex can emit a harmless tool diagnostic on stderr and put
+                # the actual terminal policy refusal only in the JSONL event
+                # stream.  Classify from the bounded terminal diagnostic as
+                # well so that a retryable single task cannot fail the whole
+                # pipeline merely because stderr happened to be non-empty.
+                diagnostic_text = (
+                    stderr + "\n" + message + "\n"
+                    + _codex_jsonl_diagnostic(event_text)
+                ).casefold()
+                error.failure_code = (
+                    "model_policy_refusal"
+                    if is_model_policy_refusal(diagnostic_text)
+                    else "model_capacity"
+                    if is_model_capacity_error(diagnostic_text)
+                    else code
+                )
+                saved = preserve_native_failure(
+                    db_path, scan_id=scan_id, stage_run_id=stage_run_id, event_text=event_text,
+                    stderr=stderr, failure_code=code, before=before, exit_code=exit_code,
+                )
+                error.failure_diagnostics = saved["summary"]
+                error.diagnostic_directory = saved["directory"]
+                error.diagnostic_storage_error = saved["storage_error"]
+                return error
+
+            process_timeout = None
             helper_broker.start()
             broker.start()
             try:
                 with tempfile.TemporaryFile(mode="w+t", encoding="utf-8") as events:
-                    completed = codex_process.run_codex(
-                        command,
-                        input="$aidast-policy\n\n" + policy_skill_text() + "\n\n" + prompt,
-                        stdout=events,
-                        timeout=self._timeout_seconds,
-                    )
-                    events.seek(0)
-                    record_jsonl_usage(events)
+                    try:
+                        completed = codex_process.run_codex(
+                            command,
+                            input="$aidast-policy\n\n" + policy_skill_text() + "\n\n" + prompt,
+                            stdout=events,
+                            timeout=self._timeout_seconds,
+                            idle_timeout=min(
+                                ATTACK_IDLE_TIMEOUT_SECONDS,
+                                self._timeout_seconds,
+                            ),
+                        )
+                    finally:
+                        events.seek(0)
+                        event_text = events.read()
+                        record_jsonl_usage(event_text.splitlines())
             except codex_process.CodexProcessTimeout as exc:
-                raise MainAgentError(f"native Attack Agent: {exc}") from exc
+                process_timeout = exc
             finally:
                 broker_stop.set()
                 broker.join(timeout=1)
                 helper_broker.close()
+            if process_timeout is not None:
+                raise failure(f"native Attack Agent: {process_timeout}", "timeout",
+                              process_timeout.stderr or "") from process_timeout
             if broker_errors:
-                raise MainAgentError(
-                    f"Attack authorization broker failed: {broker_errors[0]}"
+                raise failure(
+                    f"Attack authorization broker failed: {broker_errors[0]}",
+                    "authorization_broker", completed.stderr, completed.returncode,
                 ) from broker_errors[0]
             if completed.returncode != 0:
-                raise MainAgentError(
+                diagnostic = completed.stderr.strip()[-2000:] or _codex_jsonl_diagnostic(event_text)
+                raise failure(
                     "native Attack Agent failed with exit code "
-                    f"{completed.returncode}: {completed.stderr.strip()[-2000:]}"
+                    f"{completed.returncode}: {diagnostic}",
+                    "nonzero_exit", completed.stderr, completed.returncode,
                 )
             if not result_path.is_file() or result_path.stat().st_size > self._max_result_bytes:
                 raise MainAgentError("native Attack Agent returned no bounded result")
@@ -1454,15 +1619,17 @@ another codex exec process. Return only the required structured result.
                         timeout=self._timeout_seconds,
                     )
                     events.seek(0)
-                    record_jsonl_usage(events)
+                    event_text = events.read()
+                    record_jsonl_usage(event_text.splitlines())
             except codex_process.CodexProcessTimeout as exc:
                 raise MainAgentError(f"native Chaining Agent: {exc}") from exc
             finally:
                 helper_broker.close()
             if completed.returncode != 0:
+                diagnostic = completed.stderr.strip()[-2000:] or _codex_jsonl_diagnostic(event_text)
                 raise MainAgentError(
                     "native Chaining Agent failed with exit code "
-                    f"{completed.returncode}: {completed.stderr.strip()[-2000:]}"
+                    f"{completed.returncode}: {diagnostic}"
                 )
             if not result_path.is_file() or result_path.stat().st_size > self._max_result_bytes:
                 raise MainAgentError("native Chaining Agent returned no bounded result")
@@ -1762,3 +1929,24 @@ class CodexSkillAttackPlanner:
             model_type=FindingAssessment, artifact_name="attack-assessment",
             operation="Attack evidence assessment", allow_browser=False,
         ).model_dump(mode="json")
+
+def _codex_jsonl_diagnostic(value: str, *, limit: int = 2000) -> str:
+    """Extract bounded failure details from Codex JSONL when stderr is empty."""
+    messages = []
+    for line in value.splitlines()[-200:]:
+        try:
+            event = json.loads(line)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if not isinstance(event, dict):
+            continue
+        if event.get("error"):
+            messages.append(json.dumps(event["error"], ensure_ascii=False))
+        elif str(event.get("type") or "").endswith((".failed", ".error")):
+            messages.append(json.dumps(event, ensure_ascii=False))
+        item = event.get("item")
+        if isinstance(item, dict) and item.get("type") == "agent_message":
+            text = item.get("text")
+            if isinstance(text, str) and text.strip():
+                messages.append(text.strip())
+    return "\n".join(messages)[-limit:]

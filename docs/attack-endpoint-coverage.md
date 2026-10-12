@@ -37,6 +37,17 @@ a resolved disposition, not an actual test. Exact task URLs come from captured e
 credentials and query values are omitted. Gap previews show the first 200 entries and
 state when more entries exist; complete records remain in Pipeline.db.
 
+Coverage snapshots also expose status counts by vulnerability class and distinct
+included endpoint counts for reviews, persisted attempts, and completed tests.
+Repeated hypotheses or attempts at one endpoint count once in the endpoint totals.
+An inconclusive attempt counts as an attempt but does not establish a completed test.
+Review counts and missing-review checks use the currently included endpoints of the
+same scan; excluded or foreign endpoint reviews cannot fill a review gap. Historical
+hypothesis dispositions remain visible in the hypothesis totals. Distinct finding
+counts and independent Validation decisions are separate from those dispositions;
+an Attack candidate becomes independently confirmed only when its Validation case
+says `CONFIRMED`, and findings awaiting a decision count as `PENDING`.
+
 Negative results require completed same-task HTTP evidence. Planning hypotheses also
 require the exact endpoint/method and actual credential baseline. Findings require
 compatible reproduction inputs and source attempt/request bindings, including when

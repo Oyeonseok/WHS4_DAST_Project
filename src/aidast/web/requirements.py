@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 from aidast.recon.profiles import EXECUTION_PROFILES, ProfileCaps, ProfileId, grounded_scope_request_rate, profile_request_rate
-from aidast.scope.execution_rules import execution_interpretation_complete
+from aidast.scope.execution_rules import execution_interpretation_complete, effective_blocking_requirements
 from aidast.scope.models import ScopeAnalysis, RequiredRequestHeader, HeaderInput, ScopeExecutionRules, PolicyInput, PolicyConfirmation, BlockingRequirement
 
 IdentityHeader = Literal['hackerone', 'intigriti']
@@ -55,7 +55,7 @@ def build_scope_execution_requirements(analysis: ScopeAnalysis, *, identity_head
         execution_rules=rules,
         policy_inputs=tuple(rules.required_inputs) if rules else (),
         policy_confirmations=tuple(rules.required_confirmations) if rules else (),
-        policy_blockers=tuple(rules.blocking_requirements) if rules else (),
+        policy_blockers=tuple(effective_blocking_requirements(rules)) if rules else (),
         header_requirements_status='ready' if ready else 'pending',
         required_headers=headers, header_inputs=tuple(inputs.values()),
         scope_max_requests_per_second=scope_rate,

@@ -358,6 +358,24 @@ def test_audit_log_categorizes_failures_without_exposing_error_text(tmp_path: Pa
     assert "secret" not in json.dumps(audit)
 
 
+def test_policy_denied_legacy_task_failure_is_a_warning(tmp_path: Path) -> None:
+    database = _fixture(tmp_path)
+    with sqlite3.connect(database) as conn:
+        conn.execute(
+            "INSERT INTO audit_events VALUES (?,?,?,?,?,?,?)",
+            ("policy-skip", SCAN_ID, "stage", None, "task.failed",
+             json.dumps({"previous_status": "running", "reason":
+                         "[policy] exact request envelope denied before dispatch"}),
+             "2026-09-20 01:00:03"),
+        )
+    projector = DashboardProjector(tmp_path)
+    entry = next(item for item in projector.audit_log(SCAN_ID)
+                 if item["event_type"] == "task.failed")
+    assert entry["level"] == "warning"
+    replay = projector.snapshot(SCAN_ID)["logs"]
+    assert next(item for item in replay if item.get("audit_id") == "policy-skip")["level"] == "warning"
+
+
 def test_projection_separates_candidate_urls_from_live_responses(tmp_path: Path) -> None:
     database = _fixture(tmp_path)
     with sqlite3.connect(database) as conn:
@@ -399,6 +417,55 @@ def test_failed_stage_overrides_completed_scan_in_snapshot_and_list(tmp_path: Pa
     assert projector.list_scans()[0]["status"] == "failed"
     assert projector.list_scans()[0]["finished_at"] == "2026-09-20T01:07:00Z"
     assert projector.list_scans()[0]["targets"] == ["app.example.com"]
+
+
+def test_partial_recon_failure_is_not_projected_as_success(tmp_path: Path) -> None:
+    database = _fixture(tmp_path)
+    with sqlite3.connect(database) as conn:
+        conn.execute("UPDATE scans SET status='completed_with_errors' WHERE scan_id=?", (SCAN_ID,))
+        conn.execute("UPDATE stage_runs SET status='completed' WHERE scan_id=?", (SCAN_ID,))
+    projector = DashboardProjector(tmp_path)
+    snapshot = projector.snapshot(SCAN_ID)
+    assert snapshot["status"] == "failed"
+    assert snapshot["stage_statuses"]["Recon"] == "failed"
+    assert projector.list_scans()[0]["status"] == "failed"
+    # The dashboard projection must not rewrite the source execution record.
+    with sqlite3.connect(database) as conn:
+        assert conn.execute("SELECT status FROM stage_runs").fetchone()[0] == "completed"
+
+
+@pytest.mark.parametrize("resume", [False, True])
+def test_process_diagnostics_survive_failure_without_exposing_output(tmp_path: Path, resume: bool) -> None:
+    from types import SimpleNamespace
+    projector = DashboardProjector(tmp_path)
+    manager = ScanLaunchManager(tmp_path, projector, project_root=tmp_path)
+    scope = SimpleNamespace(scope_id=SCOPE_ID, program_id="fixture", program_name="Fixture")
+    job = LaunchJob(SCAN_ID, scope, "running", "2026-10-01T00:00:00Z", 0, ())
+    manager._jobs[SCAN_ID] = job
+    job.process = SimpleNamespace(wait=lambda: 7)
+    with manager._process_output(job) as output:
+        output.write(b"ValueError: offline policy review required\nprivate-session-token\n")
+    first_log = job.process_log
+    assert output.closed
+    if resume:
+        manager._monitor_resume(job, "attempt", "recon")
+    else:
+        manager._monitor(job)
+    assert job.status == "failed"
+    snapshot = manager.snapshot(SCAN_ID)
+    params = snapshot["logs"][-1]["message_params"]
+    assert params["exit_code"] == 7
+    saved_log = tmp_path / params["diagnostic_log"]
+    assert saved_log == first_log
+    assert manager._process_result(job) == {"diagnostic_log": params["diagnostic_log"]}
+    assert "ValueError: offline policy review required" in saved_log.read_text()
+    assert "private-session-token" not in json.dumps(snapshot)
+    if os.name != "nt":
+        assert saved_log.stat().st_mode & 0o777 == 0o600
+    with manager._process_output(job) as output:
+        output.write(b"second attempt\n")
+    assert job.process_log != first_log
+    assert "offline policy review" in first_log.read_text()
 
 
 def test_retry_stage_replaces_old_failure_in_scan_status(tmp_path: Path) -> None:
@@ -685,6 +752,41 @@ def test_task_stages_show_partial_progress_before_completion(tmp_path: Path, sta
     assert projector.snapshot(SCAN_ID)["progress"] == 100
 
 
+def test_attack_planning_events_advance_progress_before_tasks_exist(tmp_path: Path) -> None:
+    database = _fixture(tmp_path)
+    with sqlite3.connect(database) as conn:
+        conn.execute("UPDATE scans SET status='running',finished_at=NULL WHERE scan_id=?", (SCAN_ID,))
+        conn.execute("UPDATE stage_runs SET stage='attack',status='running' WHERE stage_run_id='stage'")
+    projector = DashboardProjector(tmp_path)
+    before = projector.snapshot(SCAN_ID)
+    assert before["progress"] == 0
+    projector.record_event(
+        SCAN_ID,
+        source_key="attack-planning:54",
+        event_type="log.appended",
+        payload={
+            "stage": "Attack",
+            "level": "info",
+            "message": "Agent work",
+            "message_code": "agent.work",
+            "message_params": {
+                "agent": "attack",
+                "step": "planning",
+                "state": "progress",
+                "processed": 54,
+                "endpoint_total": 108,
+            },
+        },
+    )
+    snapshot = projector.snapshot(SCAN_ID)
+    assert snapshot["progress"] == 10
+    assert any(
+        event["type"] == "task.progress.updated"
+        and event["payload"]["progress"] == 10
+        for event in projector.events_after(SCAN_ID, before["last_event_id"])
+    )
+
+
 def test_projection_reads_program_grouped_scan(tmp_path: Path) -> None:
     database = _fixture(tmp_path)
     grouped = tmp_path / "Runs" / "yeswehack" / "example-program" / SCAN_ID
@@ -715,7 +817,7 @@ def test_api_snapshot_listing_and_websocket_replay(tmp_path: Path) -> None:
             assert listing.json()["scans"][0]["targets"] == ["app.example.com"]
 
             response = await client.get(f"/api/v1/scans/{SCAN_ID}")
-            assert response.status_code == 200
+            assert response.status_code == 200, response.text
             assert response.json()["scope_approved"] is True
             audit = await client.get(f"/api/v1/scans/{SCAN_ID}/audit")
             assert audit.status_code == 200
@@ -798,6 +900,24 @@ def test_api_snapshot_listing_and_websocket_replay(tmp_path: Path) -> None:
     asyncio.run(exercise_api())
 
 
+def test_removed_coverage_catalog_routes_are_not_exposed(tmp_path: Path) -> None:
+    app = create_app(result_root=tmp_path)
+
+    async def exercise_api() -> None:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test",
+        ) as client:
+            for path in (
+                "/api/v1/recon-wiki/databases",
+                "/api/v1/attack-wiki/databases",
+                f"/api/v1/scans/{SCAN_ID}/recon-wiki",
+                f"/api/v1/scans/{SCAN_ID}/attack-wiki",
+            ):
+                assert (await client.get(path)).status_code == 404
+
+    asyncio.run(exercise_api())
+
+
 def test_scope_dashboard_requires_explicit_yes_or_no(tmp_path: Path) -> None:
     text = (
         "Example policy: *.example.test is in scope. Denial of service is prohibited. "
@@ -872,6 +992,21 @@ def test_scope_dashboard_requires_explicit_yes_or_no(tmp_path: Path) -> None:
         public_reader_factory=Reader,
     )
     app = create_app(result_root=tmp_path, scope_workflow=workflow)
+    launched_process = threading.Event()
+    release_process = threading.Event()
+    captured_launch: dict[str, Any] = {}
+
+    class Process:
+        def wait(self) -> int:
+            launched_process.set()
+            release_process.wait(2)
+            return 0
+
+    def process_factory(argv: list[str], **kwargs: Any) -> Process:
+        captured_launch.update(argv=argv, kwargs=kwargs)
+        return Process()
+
+    app.state.launch_manager.process_factory = process_factory
 
     async def wait_for_status(client: httpx.AsyncClient, program_id: str, expected: str):
         for _ in range(100):
@@ -981,6 +1116,52 @@ def test_scope_dashboard_requires_explicit_yes_or_no(tmp_path: Path) -> None:
             }
             assert requirements["profiles"][0]["limits"]["max_requests"] == 500
             assert requirements["profiles"][0]["limits"]["requests_per_second"] == 10
+
+            launched = await client.post(
+                "/api/v1/scans",
+                headers=headers,
+                json={
+                    "scope_id": approved_scope["scope_id"],
+                    "targets": ["*.example.test"],
+                    "profile": "safe-recon",
+                    "max_requests": 500,
+                    "max_rps": 10,
+                    "max_concurrency": 2,
+                    "timeout_seconds": 15,
+                    "max_depth": 2,
+                    "ffuf_max_time_seconds": 60,
+                    "tag_batch_size": 25,
+                    "login_mode": "none",
+                    "authorization_confirmed": True,
+                    "identity_values": {"intigriti_username": "dashboard-reviewer"},
+                },
+            )
+            assert launched.status_code == 202, launched.text
+            launch = launched.json()
+            assert launch["status"] == "running"
+            assert launch["targets"] == ["*.example.test"]
+            assert launched_process.wait(1)
+            argv = captured_launch["argv"]
+            assert argv[1:4] == ["-m", "aidast", "run"]
+            assert argv[argv.index("--target") + 1] == "*.example.test"
+            assert argv[argv.index("--header-input") + 1] == (
+                "intigriti_username=dashboard-reviewer"
+            )
+            assert captured_launch["kwargs"]["shell"] is False
+
+            outside = await client.post(
+                "/api/v1/scans",
+                headers=headers,
+                json={
+                    "scope_id": approved_scope["scope_id"],
+                    "targets": ["outside.example.test"],
+                    "authorization_confirmed": True,
+                    "identity_values": {"intigriti_username": "dashboard-reviewer"},
+                },
+            )
+            assert outside.status_code == 400
+            assert "not in the approved Scope" in outside.json()["detail"]
+            release_process.set()
             with sqlite3.connect(tmp_path / ".webui" / "programs.db") as connection:
                 connection.execute("DELETE FROM registered_programs")
             assert (await client.get("/api/v1/programs")).json()["programs"] == []
@@ -1185,10 +1366,19 @@ def test_scan_launcher_builds_fixed_argv_and_streams_pre_database_logs(tmp_path:
         authorization_confirmed=True,
     )
     launched = manager.launch(request)
+    from aidast.pipeline.model_settings import load_scan_model_choices, scan_model_settings_path
+    saved_models = load_scan_model_choices(tmp_path, launched["scan_id"])
+    assert saved_models is not None
+    assert (saved_models.main_model, saved_models.recon_model, saved_models.attack_model,
+            saved_models.chaining_model, saved_models.validation_model, saved_models.report_model) == (
+        "gpt-6-sol", "gpt-6-sol", "gpt-6-luna", "gpt-6-luna", "gpt-5.6-terra", "gpt-6-astra")
+    assert "web_operator" not in scan_model_settings_path(tmp_path, launched["scan_id"]).read_text()
     assert launched["targets"] == ["prismlife.com"]
     assert manager.list_jobs()[0]["targets"] == ["prismlife.com"]
     argv = captured["argv"]
     assert captured["kwargs"]["shell"] is False
+    assert captured["kwargs"]["env"]["PYTHONUNBUFFERED"] == "1"
+    assert captured["kwargs"]["stderr"] == subprocess.STDOUT
     assert argv[1:4] == ["-m", "aidast", "run"]
     assert argv[argv.index("--target") + 1] == "prismlife.com"
     assert argv[argv.index("--max-requests") + 1] == "120"
@@ -1201,6 +1391,7 @@ def test_scan_launcher_builds_fixed_argv_and_streams_pre_database_logs(tmp_path:
     assert argv[argv.index("--timeout-seconds") + 1] == "10"
     assert argv[argv.index("--tag-batch-size") + 1] == "17"
     assert argv[argv.index("--recon-model") + 1] == "gpt-6-sol"
+    assert argv[argv.index("--recon-engine") + 1] == "integrated"
     assert argv[argv.index("--attack-model") + 1] == "gpt-6-luna"
     assert argv[argv.index("--validation-model") + 1] == "gpt-5.6-terra"
     assert argv[argv.index("--report-model") + 1] == "gpt-6-astra"
@@ -1208,6 +1399,8 @@ def test_scan_launcher_builds_fixed_argv_and_streams_pre_database_logs(tmp_path:
     assert argv[argv.index("--start-url") + 1] == "https://prismlife.com/app"
     assert manager.snapshot(launched["scan_id"])["logs"][-1]["message"] == "AI DAST pipeline process started."
     assert manager.snapshot(launched["scan_id"])["logs"][-1]["message_code"] == "pipeline.started"
+    params = manager.snapshot(launched["scan_id"])["logs"][-1]["message_params"]
+    assert (tmp_path / params["diagnostic_log"]).is_file()
     assert projector.stored_events_after(launched["scan_id"], 0)[0]["event_id"] == 1
     app = create_app(result_root=tmp_path, launch_manager=manager)
 
@@ -1245,13 +1438,39 @@ def test_scan_launcher_builds_fixed_argv_and_streams_pre_database_logs(tmp_path:
     resolver.cache_path(document).write_text(json.dumps(dict(
         interpretation_version=EXECUTION_INTERPRETATION_VERSION, approved_digest=resolver.digest(document),
         requirements=dict(required_request_headers=[item.model_dump() for item in scope_analysis.required_request_headers],
-            execution_rules=dict(policy_review_version=2, exclusions=[], request_limits=[dict(maximum=10,period_seconds=1,scope="program",source_quote=rate_quote)])))))
+            execution_rules=dict(policy_review_version=3, exclusions=[], request_limits=[dict(maximum=10,period_seconds=1,scope="program",source_quote=rate_quote)])))))
     manager.catalog.header_resolver = resolver
     manager.launch(request.model_copy(update={"max_rps": 10}))
     argv = captured["argv"]
     assert float(argv[argv.index("--max-rps") + 1]) == 10.0
     with pytest.raises(ValueError, match="request rate exceeds"):
         manager.launch(request.model_copy(update={"max_rps": 11}))
+    manager.launch(request.model_copy(update={
+        "profile": "bug-bounty-safe",
+        "max_requests": 300,
+        "max_rps": 0.2,
+        "max_concurrency": 1,
+        "ffuf_max_time_seconds": 60,
+    }))
+    argv = captured["argv"]
+    assert argv[argv.index("--profile") + 1] == "bug-bounty-safe"
+    assert "--ffuf-wordlist" not in argv
+    approved = replace(approved, targets=({
+        "asset_type": "WILDCARD",
+        "asset": "*.prismlife.com",
+        "description": "",
+        "maximum_severity": "HIGH",
+    },))
+    with pytest.raises(ValueError, match="exact start URL"):
+        manager._prepare_launch(request.model_copy(update={
+            "profile": "bug-bounty-safe",
+            "targets": ["*.prismlife.com"],
+            "max_requests": 300,
+            "max_rps": 0.2,
+            "max_concurrency": 1,
+            "ffuf_max_time_seconds": 60,
+            "start_url": None,
+        }))
     waiting.set()
 
 
@@ -1294,11 +1513,22 @@ def test_scan_completion_log_reports_persisted_report_stage(tmp_path: Path) -> N
     events = projector.stored_events_after(SCAN_ID, 0)
     assert events[-1]["payload"]["stage"] == "Report"
     assert "through Report" in events[-1]["payload"]["message"]
-def test_scan_cancel_terminates_managed_process_and_persists_cancelled_state(tmp_path: Path) -> None:
+def test_scan_cancel_terminates_managed_process_and_persists_cancelled_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     database = _fixture(tmp_path)
     with sqlite3.connect(database) as conn:
         conn.execute("UPDATE scans SET status='running',finished_at=NULL WHERE scan_id=?", (SCAN_ID,))
-        conn.execute("UPDATE stage_runs SET status='running',finished_at=NULL WHERE scan_id=?", (SCAN_ID,))
+        conn.execute("UPDATE stage_runs SET stage='attack',status='running',finished_at=NULL WHERE scan_id=?", (SCAN_ID,))
+        conn.execute("CREATE TABLE attack_coverage_items (coverage_id TEXT)")
+    helper_row_factories: list[object] = []
+
+    def coverage_helper(conn: sqlite3.Connection, **_kwargs: object) -> int:
+        helper_row_factories.append(conn.row_factory)
+        return 0
+
+    monkeypatch.setattr("aidast.attack.coverage.fail_running_coverage", coverage_helper)
+    monkeypatch.setattr("aidast.attack.coverage.requeue_interrupted_coverage", coverage_helper)
     projector = DashboardProjector(tmp_path)
     manager = ScanLaunchManager(tmp_path, projector, project_root=tmp_path)
     finished = threading.Event()
@@ -1335,6 +1565,7 @@ def test_scan_cancel_terminates_managed_process_and_persists_cancelled_state(tmp
     with sqlite3.connect(database) as conn:
         assert conn.execute("SELECT status FROM scans WHERE scan_id=?", (SCAN_ID,)).fetchone()[0] == "cancelled"
         assert conn.execute("SELECT status FROM stage_runs WHERE scan_id=?", (SCAN_ID,)).fetchone()[0] == "cancelled"
+    assert helper_row_factories == [sqlite3.Row, sqlite3.Row]
     assert [log["payload"]["message_code"] for log in projector.stored_events_after(SCAN_ID, 0)
             if log["type"] == "log.appended"][-2:] == ["pipeline.cancel_requested", "pipeline.cancelled"]
     with pytest.raises(ValueError, match="no active process"):
@@ -1373,7 +1604,7 @@ def test_scan_pause_continue_and_cancel_preserve_one_process(tmp_path: Path, mon
                 assert (await client.get(f"/api/v1/scans/{SCAN_ID}")).json()["status"] == "running"
                 await client.post(f"/api/v1/scans/{SCAN_ID}/pause", headers=origin)
                 cancelled = await client.post(f"/api/v1/scans/{SCAN_ID}/cancel", headers=origin)
-                assert cancelled.status_code == 202
+                assert cancelled.status_code == 202, cancelled.text
                 assert cancelled.json()["status"] == "cancelling"
         asyncio.run(control())
         monitor.join(timeout=5)
@@ -1383,6 +1614,27 @@ def test_scan_pause_continue_and_cancel_preserve_one_process(tmp_path: Path, mon
         if process.poll() is None:
             os.killpg(process.pid, signal.SIGKILL)
         process.wait(timeout=5)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="uses POSIX process termination")
+def test_scan_termination_falls_back_to_owned_process_when_group_signal_is_denied(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    process = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(60)"],
+        cwd=tmp_path, start_new_session=True,
+    )
+    monkeypatch.setattr(
+        "aidast.web.launch.signal_session",
+        lambda *_args: (_ for _ in ()).throw(PermissionError("protected helper")),
+    )
+    try:
+        ScanLaunchManager._terminate_process(process)
+        assert process.wait(timeout=5) == -signal.SIGTERM
+    finally:
+        if process.poll() is None:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.wait(timeout=5)
 
 
 @pytest.mark.skipif(os.name != "posix", reason="requires POSIX process groups")
@@ -1502,6 +1754,19 @@ def test_scan_request_rejects_unconfirmed_or_excessive_budget() -> None:
             "targets": ["one.example", "two.example"],
             "start_url": "https://one.example/",
             "authorization_confirmed": True,
+        })
+    bug_bounty = {
+        **base,
+        "profile": "bug-bounty-safe",
+        "max_requests": 300,
+        "ffuf_max_time_seconds": 60,
+        "authorization_confirmed": True,
+    }
+    assert ScanLaunchRequest(**bug_bounty).max_rps is None
+    with pytest.raises(ValueError, match="exactly one target"):
+        ScanLaunchRequest(**{
+            **bug_bounty,
+            "targets": ["one.example", "two.example"],
         })
     with pytest.raises(ValueError, match="absolute HTTPS"):
         ProgramResolveRequest(program_url="http://hackerone.com/program")

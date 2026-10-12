@@ -9,6 +9,7 @@ from contextlib import closing
 from pathlib import Path
 
 from aidast.agents.main import CodexMainAgent
+from aidast.agents.failure_diagnostics import is_model_capacity_error, is_model_policy_refusal
 from aidast.attack.models import AttackStageResult
 from aidast.attack.skill_selector import (
     available_attack_skill_names,
@@ -26,6 +27,18 @@ class AttackBatchFailure(AttackCoordinatorError):
     """An identified native batch reported failure; durable tasks decide continuation."""
 
 
+class AttackUnresolvedLeadFailure(AttackBatchFailure):
+    """A bounded batch returned while one of its provisional leads was still open."""
+
+    failure_code = "unresolved_lead"
+
+    def __init__(self, attempt_ids: list[str]) -> None:
+        self.unresolved_attempt_ids = tuple(attempt_ids)
+        super().__init__(
+            f"Attack Agent left {len(self.unresolved_attempt_ids)} unresolved lead(s)"
+        )
+
+
 class AttackCoordinator:
     """Bridge completed Recon state to a native Codex Attack sub-agent."""
 
@@ -33,11 +46,16 @@ class AttackCoordinator:
         self,
         *,
         agent: CodexMainAgent,
+        planning_agent: CodexMainAgent | None = None,
         db_path: Path,
         scope_path: Path,
         policy_path: Path,
     ) -> None:
         self._agent = agent
+        # Endpoint hypothesis planning is part of Attack.  Keep it on the
+        # selected Attack model instead of silently using the Recon/Main model.
+        # The default preserves compatibility for direct coordinator callers.
+        self._planning_agent = planning_agent or agent
         self._db_path = Path(db_path).expanduser().resolve()
         self._scope_path = Path(scope_path).expanduser().resolve()
         self._policy_path = Path(policy_path).expanduser().resolve()
@@ -59,10 +77,18 @@ class AttackCoordinator:
                 WHERE scan_id=? AND stage='attack' ORDER BY rowid DESC LIMIT 1""", (scan_id,)).fetchone()
             if prior and (prior[1] in {'pending', 'running'} or (prior[1] == 'completed' and not attack_work_unfinished(conn, scan_id))):
                 raise AttackCoordinatorError(f'Attack stage already exists for this scan: {prior[0]} ({prior[1]})')
+        self._bootstrap_local_juice_shop_fixtures(scan_id)
+        self._bootstrap_local_vulnbank_fixtures(scan_id)
         with closing(sqlite3.connect(self._db_path)) as conn, conn:
             planning_stage = start_stage_run(conn, scan_id=scan_id, stage='attack')
         try:
-            plan_recon_attack(self._db_path, scan_id, agent=self._agent,
+            # Recon context projection collapses repeated annotations and
+            # observations before this call. Eight endpoints therefore keeps
+            # each structured turn bounded while halving the long sequence of
+            # model startups that previously looked like an infinite load.
+            # Each completed batch remains durable for bounded repair/resume.
+            plan_recon_attack(self._db_path, scan_id, agent=self._planning_agent,
+                batch_size=8,
                 progress=lambda processed, total: self._planning_progress(scan_id, processed, total),
                 stage_run_id=planning_stage,
                 repair_progress=lambda processed, total, attempt, issues: self._planning_progress(
@@ -103,6 +129,131 @@ class AttackCoordinator:
             db_path=str(self._db_path), stage_run_id=completion_stage,
             finding_ids=list(result.finding_ids), attack_agent_ids=list(result.attack_agent_ids),
             summary=f"Endpoint hypothesis coverage: {result.coverage['total']} dispositions across {result.batches} batches; {result.coverage['by_status']}")
+
+    def _bootstrap_local_juice_shop_fixtures(self, scan_id: str) -> None:
+        """Provision private disposable sessions when the approved Scope permits it.
+
+        This fixture is deliberately limited to an explicit loopback Juice Shop
+        Scope. A setup failure is audited and leaves ordinary anonymous Attack
+        coverage available; it does not turn a recoverable account prerequisite
+        into a pipeline failure.
+        """
+        try:
+            scope = self._scope_path.read_text(encoding="utf-8")
+        except OSError:
+            return
+        if "juice shop" not in scope.casefold():
+            return
+        root_value = os.environ.get("AIDAST_RESULT_ROOT")
+        if root_value:
+            result_root = Path(root_value).expanduser().resolve()
+        else:
+            attack_root = next(
+                (parent for parent in self._db_path.parents if parent.name == "AttackRuns"),
+                None,
+            )
+            if attack_root is None:
+                return
+            result_root = attack_root.parent
+        try:
+            with closing(sqlite3.connect(self._db_path)) as conn:
+                targets = [
+                    str(row[0]) for row in conn.execute(
+                        """SELECT DISTINCT o.base_url FROM origins o
+                           JOIN assets a ON a.asset_id=o.asset_id
+                           WHERE a.scan_id=? ORDER BY o.base_url""",
+                        (scan_id,),
+                    )
+                ]
+            if len(targets) != 1:
+                return
+            from aidast.benchmarks.juice_shop import bootstrap_juice_shop
+
+            result = bootstrap_juice_shop(
+                self._db_path, scan_id=scan_id, target_url=targets[0],
+                scope_path=self._scope_path, policy_path=self._policy_path,
+                result_root=result_root,
+            )
+            event_type = "benchmark.fixture_reused" if result["reused"] else "benchmark.fixture_created"
+            details = {
+                "target": "owasp-juice-shop",
+                "credential_reference_count": result["credential_reference_count"],
+                "owned_test_object_count": result["owned_test_object_count"],
+            }
+        except Exception as exc:
+            event_type = "benchmark.fixture_unavailable"
+            details = {
+                "target": "owasp-juice-shop",
+                "error_type": type(exc).__name__,
+            }
+        try:
+            from aidast.pipeline.lifecycle import audit_event
+
+            with closing(sqlite3.connect(self._db_path)) as conn, conn:
+                audit_event(
+                    conn, scan_id=scan_id, event_type=event_type, details=details,
+                )
+        except (OSError, sqlite3.Error, ValueError):
+            # The fixture is optional and its absence is represented later by
+            # blocked_auth coverage rather than an Attack coordinator crash.
+            return
+
+    def _bootstrap_local_vulnbank_fixtures(self, scan_id: str) -> None:
+        """Provision disposable loopback VulnBank identities for web scans.
+
+        The bootstrap uses only approved black-box registration and login
+        endpoints. Tokens remain in process memory behind opaque credential
+        references; Pipeline.db receives roles and owned object IDs only.
+        Running it on resume refreshes those process-bound references.
+        """
+        try:
+            scope = self._scope_path.read_text(encoding="utf-8")
+        except OSError:
+            return
+        normalized_scope = scope.casefold().replace("-", "").replace("_", "")
+        if "vulnbank" not in normalized_scope:
+            return
+        try:
+            with closing(sqlite3.connect(self._db_path)) as conn:
+                targets = [
+                    str(row[0]) for row in conn.execute(
+                        """SELECT DISTINCT o.base_url FROM origins o
+                           JOIN assets a ON a.asset_id=o.asset_id
+                           WHERE a.scan_id=? ORDER BY o.base_url""",
+                        (scan_id,),
+                    )
+                ]
+            if len(targets) != 1:
+                return
+            from aidast.benchmarks.vulnbank import bootstrap_vulnbank
+
+            result = bootstrap_vulnbank(
+                self._db_path, scan_id=scan_id, target_url=targets[0],
+                scope_path=self._scope_path, policy_path=self._policy_path,
+            )
+            event_type = "benchmark.fixture_created"
+            details = {
+                "target": "vulnbank",
+                "credential_reference_count": result["credential_reference_count"],
+                "owned_test_object_count": result["owned_test_object_count"],
+                "benchmark_fixture_count": result["benchmark_fixture_count"],
+            }
+        except Exception as exc:
+            event_type = "benchmark.fixture_unavailable"
+            details = {
+                "target": "vulnbank",
+                "error_type": type(exc).__name__,
+            }
+        try:
+            from aidast.pipeline.lifecycle import audit_event
+
+            with closing(sqlite3.connect(self._db_path)) as conn, conn:
+                audit_event(
+                    conn, scan_id=scan_id, event_type=event_type, details=details,
+                )
+        except (OSError, sqlite3.Error, ValueError):
+            # Fixture setup remains optional for non-benchmark targets.
+            return
 
     @staticmethod
     def _planning_progress(scan_id: str, processed: int, total: int, *, repair_attempt: int | None = None, issue_count: int = 0) -> None:
@@ -262,10 +413,6 @@ class AttackCoordinator:
                 "native Attack completion envelope mismatch: " + ",".join(mismatches)
             )
 
-        if result.status == "FAILED":
-            reason = result.summary.strip() or "no failure summary"
-            raise AttackBatchFailure(f"native Attack Agent returned FAILED: {reason}")
-
         with closing(sqlite3.connect(self._db_path)) as conn:
             rows = conn.execute(
                 "SELECT finding_id FROM findings WHERE scan_id=?", (scan_id,)
@@ -311,15 +458,23 @@ class AttackCoordinator:
         # after its stage snapshot.
         unresolved = [row[0] for row in new_attempts if row[1] == "lead"]
         if unresolved:
-            raise AttackCoordinatorError(
-                f"Attack Agent left {len(unresolved)} unresolved lead(s)"
-            )
+            raise AttackUnresolvedLeadFailure(unresolved)
         invalid_confirmed = [
             row[0] for row in new_attempts
             if row[1] == "confirmed" and (not row[2] or not row[3])
         ]
         if invalid_confirmed:
             raise AttackCoordinatorError("confirmed attempts must link to a finding")
+        if result.status == "FAILED":
+            reason = result.summary.strip() or "no failure summary"
+            failure = AttackBatchFailure(
+                f"native Attack Agent returned FAILED: {reason}"
+            )
+            if is_model_policy_refusal(reason):
+                failure.failure_code = "model_policy_refusal"
+            elif is_model_capacity_error(reason):
+                failure.failure_code = "model_capacity"
+            raise failure
         incomplete_tasks = [task_id for task_id, status in task_rows if status not in {"completed", "skipped"}]
         if incomplete_tasks:
             raise AttackCoordinatorError(

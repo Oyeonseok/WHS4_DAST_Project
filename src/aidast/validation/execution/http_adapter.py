@@ -13,9 +13,9 @@ from aidast.recon.policy import TargetPolicy
 
 from ..contracts.models import BlindCase
 from ..contracts.models import ReproductionObservation
-from .credentials import credential_preflight_reason
 from .request_broker import (ValidationCredentialError, ValidationPolicyRejection,
                              ValidationRequestBroker)
+from .credentials import credential_unsupported_reason
 from ..contracts.runtime_contract import (HttpRuntimeContract, evaluate_http_response,
                                render_http_request, _json_path)
 
@@ -51,8 +51,9 @@ class HttpReproductionPort:
         if blind_case.credential_references and self.credential_resolver is None:
             return "credential_resolver_missing"
         for reference in blind_case.credential_references:
-            reason = credential_preflight_reason(
-                self.credential_resolver, reference, blind_case.endpoint,
+            reason = credential_unsupported_reason(
+                self.credential_resolver, reference,
+                destination_url=blind_case.endpoint,
             )
             if reason is not None:
                 return reason
@@ -61,6 +62,8 @@ class HttpReproductionPort:
     def execute(self, blind_case: BlindCase, *, attempt_kind: str, batch_no: int,
                 ordinal: int, attempt_id: str, db_path: Path, scan_id: str,
                 stage_run_id: str, case_id: str, policy: TargetPolicy) -> ReproductionObservation:
+        if attempt_kind != "target":
+            raise ValueError("unknown Validation attempt kind")
         unsupported = self.unsupported_reason(blind_case)
         if unsupported is not None:
             raise ValueError(unsupported)
@@ -70,16 +73,33 @@ class HttpReproductionPort:
                 raise ValueError("HTTP replay requires a staged runtime contract")
             runtime = HttpRuntimeContract.model_validate(blind_case.runtime_contract)
             attempt = runtime.for_attempt(attempt_kind)
+            if attempt.endpoint_template is not None:
+                raise ValueError("target endpoint override is not allowed")
             url, headers, data = render_http_request(blind_case.endpoint, attempt.request)
         else:
             url, headers, data = self.request_builder(blind_case, attempt_kind, batch_no, ordinal)
+        selected_references = None
+        if runtime is not None:
+            runtime_attempt = runtime.for_attempt(attempt_kind)
+            if runtime_attempt.identity_mode == "anonymous":
+                selected_references = ()
+            elif runtime_attempt.credential_roles is not None:
+                by_role = dict(zip(
+                    blind_case.required_identity_roles,
+                    blind_case.credential_references,
+                ))
+                try:
+                    selected_references = tuple(
+                        by_role[role] for role in runtime_attempt.credential_roles
+                    )
+                except KeyError as exc:
+                    raise ValueError("runtime credential role is unavailable") from exc
         broker = ValidationRequestBroker(
             db_path=db_path, scan_id=scan_id, stage_run_id=stage_run_id,
             case_id=case_id, attempt_id=attempt_id, blind_case=blind_case,
             policy=policy, transport=self.transport,
             credential_resolver=self.credential_resolver,
-            credential_references=(() if runtime is not None
-                                   and runtime.for_attempt(attempt_kind).identity_mode == "anonymous" else None),
+            credential_references=selected_references,
         )
         try:
             started = self.clock()

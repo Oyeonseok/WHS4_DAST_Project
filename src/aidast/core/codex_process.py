@@ -33,6 +33,18 @@ _ITEM_TYPES: Final = _TOOL_TYPES | {
 type TimeoutReason = Literal["total", "idle", "tool"]
 
 
+def structured_idle_timeout(total_timeout: float, *, tools_enabled: bool) -> float:
+    """Choose a truthful no-progress deadline for a structured Codex turn.
+
+    Tool-disabled inference has no dependable intermediate event: a model can be
+    working on its one structured response while stdout remains unchanged. The
+    absolute deadline is therefore its only sound liveness bound. Tool-capable
+    turns retain the shorter watchdog because their work produces observable
+    start/update/completion events.
+    """
+    return CODEX_IDLE_TIMEOUT_SECONDS if tools_enabled else total_timeout
+
+
 class CodexProcessTimeout(subprocess.TimeoutExpired):
     """A deadline violation, retaining subprocess-compatible output fields."""
 

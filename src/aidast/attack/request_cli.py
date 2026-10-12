@@ -24,7 +24,7 @@ import time
 from contextlib import closing
 from pathlib import Path
 from urllib.error import HTTPError
-from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, quote, unquote, urlencode, urlsplit, urlunsplit
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 from uuid import uuid4
 
@@ -32,6 +32,7 @@ from aidast.core.http_safety import merge_hackerone_identity, sanitize_headers
 from aidast.pipeline.request_profiles import recon_user_agent
 from aidast.core.request_governor import RequestGovernor, GovernorError
 from aidast.validation.execution.credentials import PipelineCredentialResolver
+from aidast.attack.surface import ATTACK_ELIGIBLE_ENDPOINT_SQL
 
 
 MAX_REQUEST_BODY_BYTES = 200_000
@@ -46,6 +47,9 @@ SENSITIVE_HEADERS = {
 }
 SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
 _PATH_IDENTIFIER = re.compile(r"/\d+(?=/|$)|/[0-9a-fA-F]{8,}(?=/|$)")
+_PATH_PLACEHOLDER = re.compile(
+    r"^(?::[A-Za-z_$][\w$.-]*|\{[A-Za-z_$][\w$.-]*\})$"
+)
 _HIGH_IMPACT_PATH = re.compile(
     r"(?:^|[-_/])(payments?|billing|checkout|purchases?|transfers?|emails?|sms|"
     r"notifications?|broadcast|webhooks?|invites?)(?:[-_/]|$)",
@@ -55,6 +59,37 @@ MUTATION_RISK_CLASSES = {
     "application_mutation", "test_resource_create", "test_resource_delete",
     "external_side_effect", "destructive_or_bulk",
 }
+
+
+def _canonical_endpoint_path(path: str) -> str:
+    """Treat an optional terminal slash as one route identity.
+
+    Browsers and framework clients commonly add a terminal slash even when the
+    passive declaration omitted it.  Keep every other path byte significant;
+    if Recon observed both spellings the caller still rejects the ambiguous
+    match because two endpoint ids remain.
+    """
+    return path if path == "/" else path.rstrip("/") or "/"
+
+
+def _template_path_matches(template: str, concrete: str) -> bool:
+    """Match one concrete URL path to a Recon route without using slot names."""
+    template_parts = [
+        unquote(unquote(part)) for part in _canonical_endpoint_path(template).split("/")
+        if part
+    ]
+    concrete_parts = [
+        unquote(unquote(part)) for part in _canonical_endpoint_path(concrete).split("/")
+        if part
+    ]
+    if len(template_parts) != len(concrete_parts):
+        return False
+    return all(
+        actual not in {"", ".", ".."}
+        if _PATH_PLACEHOLDER.fullmatch(expected)
+        else expected == actual
+        for expected, actual in zip(template_parts, concrete_parts)
+    )
 
 
 class RequestGuardError(ValueError):
@@ -172,9 +207,12 @@ def _observed_mutation_endpoint(
                  )""",
             (scan_id, method, host, parsed.scheme, port),
         ).fetchall()
+    canonical_path = _canonical_endpoint_path(path)
+    canonical_normalized = _canonical_endpoint_path(normalized)
     matches = [
         endpoint_id for endpoint_id, observed_path, normalized_path in rows
-        if path == observed_path or normalized == normalized_path
+        if canonical_path == _canonical_endpoint_path(observed_path or "/")
+        or canonical_normalized == _canonical_endpoint_path(normalized_path or "/")
     ]
     return matches[0] if len(matches) == 1 else None
 
@@ -201,22 +239,73 @@ def _recon_candidate_endpoint(db_path: Path, *, scan_id: str, url: str, method: 
     _, normalized_path, host, port = _attack_destination(url)
     with closing(sqlite3.connect(db_path)) as conn:
         rows = conn.execute(
-            """SELECT e.endpoint_id
+            f"""SELECT e.endpoint_id,e.normalized_path
                FROM endpoints e
                JOIN origins o ON o.origin_id=e.origin_id
                JOIN assets a ON a.asset_id=o.asset_id
-               WHERE a.scan_id=? AND e.is_excluded=0
+               WHERE a.scan_id=? AND {ATTACK_ELIGIBLE_ENDPOINT_SQL}
                  AND lower(rtrim(o.host,'.'))=? AND o.scheme=? AND o.port=?
-                 AND e.normalized_path=? AND (? IS NULL OR upper(e.method)=?)
+                 AND (? IS NULL OR upper(e.method)=?)
                ORDER BY e.endpoint_id""",
-            (scan_id, host, parsed.scheme, port, normalized_path, method, method),
+            (scan_id, host, parsed.scheme, port, method, method),
         ).fetchall()
-    return rows[0][0] if rows else None
+    expected = _canonical_endpoint_path(normalized_path)
+    matches = [row[0] for row in rows
+               if expected == _canonical_endpoint_path(row[1] or "/")]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _task_endpoint_reference(
+    db_path: Path, *, scan_id: str, task_id: str, method: str, url: str,
+) -> tuple[str, str] | None:
+    """Prefer the exact coverage endpoint when its template matches the URL.
+
+    Recon can retain equivalent templates such as ``:id``, ``{id}``, and
+    ``{e}`` from different black-box tools. Global provenance deliberately
+    rejects that ambiguity, but an exhaustive task already binds one of those
+    endpoint IDs. Keep the request and its later attempt on that task-selected
+    identity after independently checking method, origin, path, and Attack
+    eligibility.
+    """
+    parsed = urlsplit(url)
+    host = (parsed.hostname or "").casefold().rstrip(".")
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    with closing(sqlite3.connect(db_path)) as conn:
+        row = conn.execute(
+            f"""SELECT e.endpoint_id,e.normalized_path,
+                       EXISTS (
+                           SELECT 1 FROM endpoint_observations v
+                           WHERE v.endpoint_id=e.endpoint_id
+                             AND v.discovery_kind IN (
+                                 'http_request','http_response',
+                                 'passive_login_observation'
+                             )
+                       ) network_observed
+                FROM attack_tasks t
+                JOIN endpoints e ON e.endpoint_id=t.endpoint_id
+                JOIN origins o ON o.origin_id=e.origin_id
+                JOIN assets a ON a.asset_id=o.asset_id
+                WHERE t.task_id=? AND t.scan_id=? AND a.scan_id=?
+                  AND upper(e.method)=? AND lower(rtrim(o.host,'.'))=?
+                  AND o.scheme=? AND o.port=?
+                  AND {ATTACK_ELIGIBLE_ENDPOINT_SQL}""",
+            (task_id, scan_id, scan_id, method, host, parsed.scheme, port),
+        ).fetchone()
+    if row is None or not _template_path_matches(str(row[1]), parsed.path or "/"):
+        return None
+    return ("network_observed" if row[2] else "recon_candidate", str(row[0]))
 
 
 def _endpoint_provenance(
     db_path: Path, *, scan_id: str, method: str, url: str,
+    task_id: str | None = None,
 ) -> tuple[str, str | None]:
+    if task_id is not None:
+        selected = _task_endpoint_reference(
+            db_path, scan_id=scan_id, task_id=task_id, method=method, url=url,
+        )
+        if selected is not None:
+            return selected
     observed = _observed_mutation_endpoint(
         db_path, scan_id=scan_id, method=method, url=url,
     )
@@ -635,6 +724,7 @@ def _response_metadata(
         raise RequestGuardError("assertions must be a bounded list")
     body_text = response_body.decode("utf-8", errors="replace")
     parsed_body: object | None = None
+    parsed_engineio_open: object | None = None
 
     def json_body() -> object:
         nonlocal parsed_body
@@ -644,6 +734,22 @@ def _response_metadata(
             except json.JSONDecodeError as exc:
                 raise RequestGuardError("response body is not valid JSON") from exc
         return parsed_body
+
+    def engineio_open_body() -> object:
+        nonlocal parsed_engineio_open
+        if parsed_engineio_open is None:
+            # Engine.IO polling starts its OPEN packet with packet type ``0``
+            # followed by a JSON object.  Parse only that documented envelope;
+            # never treat later Socket.IO frames as generic JSON.
+            if not body_text.startswith("0"):
+                raise RequestGuardError("response body is not an Engine.IO OPEN packet")
+            try:
+                parsed_engineio_open = json.loads(body_text[1:])
+            except json.JSONDecodeError as exc:
+                raise RequestGuardError(
+                    "Engine.IO OPEN packet does not contain valid JSON"
+                ) from exc
+        return parsed_engineio_open
 
     header_map = {
         str(name).casefold(): str(value) for name, value in response_headers.items()
@@ -657,6 +763,8 @@ def _response_metadata(
             raise RequestGuardError("capture names are invalid or duplicated")
         if source == "json_body":
             value = _json_path(json_body(), raw.get("path", []))
+        elif source == "engineio_open_json":
+            value = _json_path(engineio_open_body(), raw.get("path", []))
         elif source == "header":
             header = raw.get("header")
             if not isinstance(header, str) or header.casefold() not in header_map:
@@ -679,6 +787,9 @@ def _response_metadata(
             actual = status_code
         elif kind == "json_equals":
             actual = _json_path(json_body(), raw.get("path", []))
+        elif kind == "json_path_nonempty_string":
+            value = _json_path(json_body(), raw.get("path", []))
+            actual = isinstance(value, str) and bool(value.strip())
         elif kind == "header_equals":
             header = raw.get("header")
             if not isinstance(header, str):
@@ -705,6 +816,9 @@ def _response_metadata(
             raw["name"]: ({
                 "source_kind": "json_path", "source_path": raw["path"],
             } if raw["source"] == "json_body" else {
+                "source_kind": "engineio_open_json_path",
+                "source_path": raw["path"],
+            } if raw["source"] == "engineio_open_json" else {
                 "source_kind": "response_header", "source_path": [raw["header"]],
             }) for raw in raw_captures
         },
@@ -732,6 +846,33 @@ def _redacted_url(url: str) -> str:
     pairs = parse_qsl(parsed.query, keep_blank_values=True)
     query = urlencode([(name, "[REDACTED]") for name, _ in pairs])
     return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, query, ""))
+
+
+def _admission_timeout(policy: dict, timeout: float) -> float:
+    """Bound queue waiting separately from the physical request timeout.
+
+    A compliant shared queue can consume multiple rate slots and response
+    times before this helper is admitted. Only the existing finite request
+    budgets contribute queue slots; this does not authorize extra requests.
+    The governor still enforces its durable scan deadline during admission.
+    """
+    limits = policy["limits"]
+    binding = policy.get("request_governor")
+    if not binding:
+        return timeout
+    # Other policies share this scan queue, even when this policy's own
+    # request allowance is smaller.
+    queue_requests = binding["scan_max_requests"]
+    rate = min(float(limits["requests_per_second"]), binding["requests_per_second"])
+    concurrency = min(limits["concurrency"], binding["concurrency"])
+    response_batches = math.ceil(queue_requests / concurrency)
+    admission = min(
+        3600.0,
+        timeout + queue_requests / rate + response_batches * limits["timeout_seconds"],
+    )
+    if binding["scan_max_seconds"] is not None:
+        admission = min(admission, binding["scan_max_seconds"])
+    return admission
 
 
 def _reserve(
@@ -877,7 +1018,7 @@ def guarded_request(
         bindings=item.get("bindings"), url=url, headers=headers, body=body,
     )
     endpoint_provenance, endpoint_reference_id = _endpoint_provenance(
-        db_path, scan_id=scan_id, method=method, url=url,
+        db_path, scan_id=scan_id, method=method, url=url, task_id=task_id,
     )
     if method in SAFE_METHODS:
         if item.get("risk_class", "http_probe") != "http_probe":
@@ -952,18 +1093,33 @@ def guarded_request(
             error_message="stage or task stopped before dispatch", finished_at=time.time(),
         )
         raise RequestGuardError("Attack stage or task stopped before dispatch")
-    _set_status(db_path, request_id, status="running", dispatched_at=time.time())
     try:
-        permit = RequestGovernor(policy.get("request_governor")).reserve(url, timeout_seconds=timeout)
+        governor = RequestGovernor(policy.get("request_governor"))
+        permit = governor.acquire(
+            url, timeout_seconds=timeout,
+            wait_timeout_seconds=_admission_timeout(policy, timeout),
+        )
     except GovernorError as exc:
         _set_status(db_path, request_id, status="failed", error_message=str(exc), finished_at=time.time())
         raise RequestGuardError(str(exc)) from exc
     opener = build_opener(ProxyHandler({}), _NoRedirect())
     opener.addheaders = []
     request = Request(url, data=body, headers=headers, method=method)
+    dispatched = False
     try:
         permit.wait()
         admit()
+        with closing(sqlite3.connect(db_path)) as conn:
+            state = conn.execute(
+                """SELECT s.status,t.status FROM attack_http_requests r
+                   JOIN stage_runs s ON s.stage_run_id=r.stage_run_id
+                   JOIN attack_tasks t ON t.task_id=r.task_id WHERE r.request_id=?""",
+                (request_id,),
+            ).fetchone()
+        if state != ("running", "running"):
+            raise RequestGuardError("Attack stage or task stopped before dispatch")
+        _set_status(db_path, request_id, status="running", dispatched_at=time.time())
+        dispatched = True
         try:
             response = opener.open(request, timeout=permit.timeout_seconds)
         except HTTPError as exc:
@@ -979,9 +1135,11 @@ def guarded_request(
             response.close()
     except Exception as exc:
         _set_status(
-            db_path, request_id, status="outcome_unknown",
-            error_message=type(exc).__name__, finished_at=time.time(),
+            db_path, request_id, status="outcome_unknown" if dispatched else "failed",
+            error_message=type(exc).__name__ if dispatched else str(exc), finished_at=time.time(),
         )
+        if not dispatched:
+            raise RequestGuardError(str(exc)) from exc
         raise RequestGuardError("HTTP request outcome is unknown") from exc
     finally:
         permit.complete()

@@ -208,6 +208,27 @@ def test_async_capacity_wait_is_bounded_and_does_not_spend_budget(tmp_path):
     assert charges(value) == (1, 1)
 
 
+def test_async_admission_timeout_is_separate_from_network_timeout(tmp_path):
+    value = binding(tmp_path, concurrency=1, requests_per_second=50, scan_max_requests=10)
+    governor = RequestGovernor(value)
+    first = governor.reserve('https://example.com/app')
+    first.wait()
+
+    async def release_and_acquire():
+        async def release():
+            await asyncio.sleep(0.06)
+            await first.complete_async()
+        release_task = asyncio.create_task(release())
+        permit = await governor.acquire_async('https://example.com/next',
+            timeout_seconds=0.02, wait_timeout_seconds=0.2)
+        await release_task
+        assert permit.timeout_seconds == pytest.approx(0.02)
+        await permit.complete_async()
+
+    asyncio.run(release_and_acquire())
+    assert charges(value) == (2, 2)
+
+
 def test_async_permanent_quota_rejects_without_waiting(tmp_path):
     value = binding(tmp_path, request_limits=[dict(maximum=1, period_seconds=None,
                     scope='program', source_quote='one total')])

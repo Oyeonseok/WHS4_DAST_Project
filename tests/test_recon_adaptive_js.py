@@ -32,6 +32,38 @@ def test_sparse_surface_recovers_api_paths_from_first_party_script(monkeypatch) 
     assert len(requested) <= 5
 
 
+def test_explicit_non_get_js_calls_are_retained_without_executing_them(monkeypatch) -> None:
+    requested = []
+
+    def fake_request(url, **kwargs):
+        requested.append((url, kwargs.get("method", "GET")))
+        if url.endswith("main.js"):
+            return 200, {"content-type": "application/javascript"}, (
+                b'fetch("/api/pay", {method: "POST", body: payload}); '
+                b'client.patch("/profile", payload); '
+                b'client.post(`/api/cards/${cardId}/fund`, payload);'
+            )
+        if "__aidast_missing_control__" in url:
+            return 404, {"content-type": "application/json"}, b'{}'
+        raise AssertionError(f"non-GET candidate was executed: {url}")
+
+    monkeypatch.setattr(secondary, "_http_request", fake_request)
+    results = secondary.discover_adaptive_js_api_candidates(
+        "https://example.test/",
+        [{"method": "GET", "path": "/main.js", "url": "https://example.test/main.js"}],
+        include_passive_writes=True,
+    )
+
+    assert {(item["method"], item["path"]) for item in results} == {
+        ("POST", "/api/pay"), ("PATCH", "/profile"),
+        ("POST", "/api/cards/{cardId}/fund"),
+    }
+    assert all(item["discovery_kind"] == "js_http_call" for item in results)
+    assert all(item["traffic_class"] == "passive" for item in results)
+    assert all(item["verification_status"] == "candidate" for item in results)
+    assert all(method == "GET" for _, method in requested)
+
+
 def test_dense_surface_verifies_new_query_conditions_on_a_seen_path(monkeypatch) -> None:
     requested = []
 
@@ -253,6 +285,54 @@ def test_endpoint_discovery_hands_katana_isolated_cdp_and_closes_it(monkeypatch)
     lease.close.assert_called_once()
     driver.pause_policy_routing.assert_not_called()
     driver.resume_policy_routing.assert_not_called()
+
+
+def test_endpoint_discovery_holds_only_katana_headless_for_request_exclusions(monkeypatch) -> None:
+    driver = MagicMock()
+    driver.get_http_results.return_value = []
+    driver.get_websocket_results.return_value = []
+    driver.drain_observations.return_value = []
+    driver.drain_authentication_observations.return_value = []
+    driver.get_auth_headers.return_value = {}
+    calls = []
+    diagnostics = []
+    policy = TargetPolicy(
+        scope_id="scope", policy_id="policy", asset_type=AssetType.URL,
+        asset="https://example.test/", allowed_hosts=["example.test"],
+        allowed_path_prefixes=["/"], allowed_methods=["GET"],
+    )
+
+    def unexpected_clone(*_args, **_kwargs):
+        raise AssertionError("excluded policy must not open an unmanaged CDP browser")
+
+    monkeypatch.setattr(discovery, "PlaywrightDriver", lambda *_args, **_kwargs: driver)
+    monkeypatch.setattr(discovery, "has_request_exclusions", lambda _policy: True)
+    monkeypatch.setattr(discovery, "open_katana_browser", unexpected_clone)
+    monkeypatch.setattr(
+        discovery, "discover_with_katana",
+        lambda *_args, **kwargs: calls.append(kwargs) or [],
+    )
+    monkeypatch.setattr(discovery, "discover_with_ffuf", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(discovery, "discover_api_secondary", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(discovery, "discover_adaptive_js_api_candidates", lambda *_args, **_kwargs: [])
+
+    discovery.discover_endpoints(
+        policy.asset,
+        ffuf_wordlist=None,
+        enable_playwright_interaction=False,
+        target_policy=policy,
+        mitm_proxy_url="http://127.0.0.1:43123",
+        diagnostic_callback=lambda event, **details: diagnostics.append((event, details)),
+    )
+
+    assert [call["mode"] for call in calls] == ["standard"]
+    assert any(
+        event == "phase_held"
+        and details.get("phase") == "katana_headless"
+        and details.get("reason") == "request_exclusions"
+        for event, details in diagnostics
+    )
+    driver.restore_runtime.assert_not_called()
 
 
 def test_endpoint_discovery_falls_back_to_headers_when_clone_unavailable(monkeypatch) -> None:

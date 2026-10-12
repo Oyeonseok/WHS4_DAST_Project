@@ -49,6 +49,7 @@ import subprocess
 import tempfile
 import hashlib
 import uuid
+import time
 
 from dataclasses import replace
 from pathlib import Path
@@ -60,6 +61,7 @@ from urllib.parse import (
 )
 
 from aidast.paths import RESULT_ROOT
+from aidast.core.http_safety import has_request_exclusions
 
 from .api_secondary_discovery import (
     discover_api_secondary,
@@ -1102,16 +1104,106 @@ def _build_ffuf_roots(
 # ffuf
 # =========================================================
 
-def _active_proxy_budget_available(capture_path) -> bool:
-    """Stop useless tool passes; the proxy remains the admission authority."""
+def _active_proxy_budget_remaining(capture_path) -> int | None:
+    """Read the proxy's advisory active budget; admission remains authoritative."""
     if capture_path is None:
-        return True
+        return None
     try:
         value = json.loads(Path(capture_path).with_suffix('.progress.json').read_text())
         remaining = value.get('active_requests_remaining')
-        return not (type(remaining) is int and remaining <= 0)
+        return remaining if type(remaining) is int and remaining >= 0 else None
     except (OSError, ValueError, TypeError, AttributeError):
-        return True
+        return None
+
+
+def _active_proxy_budget_available(capture_path) -> bool:
+    remaining = _active_proxy_budget_remaining(capture_path)
+    return remaining is None or remaining > 0
+
+
+_FFUF_DISCOVERY_PRIORITY = (
+    "healthz", "metrics", ".well-known/security.txt", "security.txt",
+    ".env", ".env.bak", "dashboard", "graphql", "debug/users",
+    ".git/config", "robots.txt", "sitemap.xml", "health", "status",
+    "api/health", "api/status", "debug", "internal", "config", "api",
+    "openapi.json", "swagger.json",
+    "login", "register", "forgot-password", "reset-password", "auth",
+    "account", "profile", "users", "me", "admin", "transactions", "transfer", "upload",
+    "actuator/health",
+)
+_FFUF_ROOT_PRIORITY_MIN_SECONDS = 60
+
+
+def _priority_ffuf_wordlist(wordlist: str) -> tuple[tempfile.TemporaryDirectory, str, list[str]]:
+    """Prepend a small generic high-signal set before a large operator list."""
+    directory = tempfile.TemporaryDirectory(prefix="aidast-ffuf-")
+    source = Path(wordlist)
+    lines = list(dict.fromkeys(
+        line.strip() for line in source.read_text(encoding="utf-8", errors="ignore").splitlines()
+        if line.strip()
+    ))
+    priority = list(_FFUF_DISCOVERY_PRIORITY)
+    ordered = priority + [item for item in lines if item not in set(priority)]
+    target = Path(directory.name) / "ordered.txt"
+    target.write_text("\n".join(ordered) + ("\n" if ordered else ""), encoding="utf-8")
+    return directory, str(target), ordered[:len(_FFUF_DISCOVERY_PRIORITY)]
+
+
+_FFUF_COMPATIBLE_GUIDED_EXCLUSIONS = frozenset({
+    # A bounded, single-worker GET discovery pass does not perform any of
+    # these activities.  Request-level exclusions are still enforced by the
+    # mandatory proxy for every candidate URL.
+    "disruptive_testing",
+    "prohibited_destinations",
+    "prohibited_impact",
+    "prohibited_disruptive_testing",
+    "prohibited_external_access",
+    "prohibited_destructive_impact",
+})
+
+
+def _minimum_ffuf_root_allowed(
+    target_policy: TargetPolicy | None,
+    *,
+    ffuf_origin: str,
+) -> bool:
+    """Allow a deterministic root only for understood, compatible guidance.
+
+    The selector may occasionally return an empty list despite an explicitly
+    enabled ffuf tool.  We must not reinterpret arbitrary prose or restore a
+    root that the selector rejected due to a path-specific precaution.  A
+    minimum ``/`` root is therefore eligible only when every Agent-guided
+    exclusion has a known semantic key whose prohibited activity cannot be
+    caused by the bounded GET discovery operation.
+    """
+    if target_policy is None or not target_policy.tools.ffuf_enabled:
+        return False
+    if not target_policy.allows_url(ffuf_origin + "/", method="GET"):
+        return False
+
+    guided_notes = [
+        note for note in target_policy.policy_notes
+        if "Agent-guided exclusion" in note
+    ]
+    if not guided_notes:
+        return False
+
+    keys: set[str] = set()
+    for note in guided_notes:
+        match = re.search(
+            r"Agent-guided exclusion(?: \(untrusted policy data; no additional authority\))?"
+            r"(?:\s*:\s*|\s+)([A-Za-z0-9_-]+)",
+            note,
+        )
+        if match is None:
+            # Captured structured guidance stores the key in JSON after the
+            # heading rather than directly after it.
+            match = re.search(r'"key"\s*:\s*"([A-Za-z0-9_-]+)"', note)
+        if match is None:
+            return False
+        keys.add(match.group(1))
+
+    return bool(keys) and keys <= _FFUF_COMPATIBLE_GUIDED_EXCLUSIONS
 
 
 def discover_with_ffuf(
@@ -1126,6 +1218,7 @@ def discover_with_ffuf(
     max_time_seconds: int = 150,
     diagnostic_callback=None,
     budget_available: Callable[[], bool] | None = None,
+    budget_remaining: Callable[[], int | None] | None = None,
 ) -> list[dict]:
     parsed_base = urlparse(base_url)
     ffuf_origin = (
@@ -1204,6 +1297,16 @@ def discover_with_ffuf(
         )
         roots = []
 
+    minimum_root_allowed = policy_guided and _minimum_ffuf_root_allowed(
+        target_policy,
+        ffuf_origin=ffuf_origin,
+    )
+    if minimum_root_allowed and "/" not in roots:
+        print(
+            "  [보완] 알려진 정책 제한과 충돌하지 않는 최소 ffuf Root '/' 적용"
+        )
+        roots = ["/", *roots]
+
     if not roots:
         print(
             "  [경고] 선택된 ffuf Root가 없어 "
@@ -1219,6 +1322,11 @@ def discover_with_ffuf(
                 ffuf_origin + (root if root.startswith("/") else "/" + root)
             )
         ]
+    # The origin root carries generic deployment endpoints such as /healthz,
+    # /metrics, and security.txt.  AI-selected prefixes can already contain
+    # ``/`` in an arbitrary position, so make its priority deterministic.
+    if "/" in roots:
+        roots = ["/", *(root for root in roots if root != "/")]
 
     print(
         f"  ffuf Root : "
@@ -1243,6 +1351,14 @@ def discover_with_ffuf(
         dict
     ] = []
 
+    priority_directory, effective_wordlist, priority_preview = _priority_ffuf_wordlist(wordlist)
+    if diagnostic_callback is not None:
+        diagnostic_callback(
+            "ffuf_wordlist_priority", component="endpoint_discovery",
+            priority_entries=priority_preview,
+        )
+
+    ffuf_started_at = time.monotonic()
     for (
         index,
         root,
@@ -1254,6 +1370,16 @@ def discover_with_ffuf(
             if diagnostic_callback is not None:
                 diagnostic_callback('phase_completed', phase='ffuf', reason='active_request_budget_exhausted')
             break
+        if max_time_seconds > 0:
+            total_time_remaining = math.floor(
+                max_time_seconds - (time.monotonic() - ffuf_started_at))
+            if total_time_remaining <= 0:
+                if diagnostic_callback is not None:
+                    diagnostic_callback(
+                        "phase_completed", phase="ffuf", reason="total_time_budget_exhausted")
+                break
+        else:
+            total_time_remaining = max_time_seconds
         if diagnostic_callback is not None:
             diagnostic_callback("ffuf_root_started", index=index, total=len(roots))
 
@@ -1301,7 +1427,7 @@ def discover_with_ffuf(
             fuzz_url,
 
             "-w",
-            wordlist,
+            effective_wordlist,
 
             "-of",
             "json",
@@ -1328,7 +1454,30 @@ def discover_with_ffuf(
             # forward. Exclude those responses before ffuf reports endpoints.
             command += ["-fr", "Blocked by AI-DAST TargetPolicy"]
 
-        command += ["-maxtime", str(max_time_seconds)]
+        roots_remaining = len(roots) - index + 1
+        effective_max_time = (
+            max(1, total_time_remaining // roots_remaining)
+            if total_time_remaining > 0 else total_time_remaining
+        )
+        if (root == "/" and target_policy is not None
+                and total_time_remaining > roots_remaining):
+            # ffuf auto-calibration consumes part of each slice.  Reserve enough
+            # time for the root pass to reach the prefixed high-signal entries,
+            # while leaving at least one second for every selected child root.
+            root_reservation = min(
+                _FFUF_ROOT_PRIORITY_MIN_SECONDS,
+                total_time_remaining - (roots_remaining - 1),
+            )
+            effective_max_time = max(effective_max_time, root_reservation)
+        if target_policy is not None and budget_remaining is not None:
+            remaining = budget_remaining()
+            if remaining is not None:
+                budget_seconds = max(1, math.ceil(
+                    remaining / target_policy.limits.requests_per_second
+                ) + 1)
+                if effective_max_time <= 0 or budget_seconds < effective_max_time:
+                    effective_max_time = budget_seconds
+        command += ["-maxtime", str(effective_max_time)]
         if target_policy is not None:
             command += [
                 "-t", str(target_policy.limits.concurrency),
@@ -1338,7 +1487,7 @@ def discover_with_ffuf(
                 "ffuf", target_policy.limits.requests_per_second
             )
 
-        run_timeout = max_time_seconds + 30 if max_time_seconds > 0 else None
+        run_timeout = effective_max_time + 30 if effective_max_time > 0 else None
 
         _append_headers(
             command,
@@ -1530,6 +1679,8 @@ def discover_with_ffuf(
         f"{len(unique)}건"
     )
 
+    priority_directory.cleanup()
+
     return unique
 
 
@@ -1642,6 +1793,7 @@ def discover_endpoints(
     interactive_login: bool = False,
     automatic_login: bool = False,
     browser_context_token: str | None = None,
+    external_auth_handoff: Callable[[dict[str, str]], bool | None] | None = None,
     diagnostic_callback=None,
     authentication_endpoint_callback=None,
 ) -> list[dict]:
@@ -1662,6 +1814,14 @@ def discover_endpoints(
     def diagnose(event, **details):
         if diagnostic_callback is not None:
             diagnostic_callback(event, component="endpoint_discovery", **details)
+
+    def external_tool_headers(headers: dict[str, str]) -> dict[str, str] | None:
+        if mitm_proxy_url and external_auth_handoff is not None:
+            published = external_auth_handoff(headers)
+            if published is False:
+                raise RuntimeError("policy proxy authentication handoff is unavailable")
+            return None
+        return headers
 
     katana_states: dict[str, str] = {}
     katana_error_types: dict[str, str] = {}
@@ -1781,13 +1941,49 @@ def discover_endpoints(
         if run_id and os.environ.get("AIDAST_DASHBOARD_MANUAL_LOGIN") == "1":
             from aidast.auth.manual_login import ManualLoginGate, ManualLoginStore
             from aidast.auth.endpoints import normalize_origin
-            gate = ManualLoginGate(ManualLoginStore(RESULT_ROOT), run_id, normalize_origin(base_url))
+            # Five minutes was too short for a rate-limited SPA to finish
+            # loading and for an operator to create or enter a lab account.
+            # Keep the browser policy-routed while allowing a practical HITL
+            # window; the dashboard confirmation remains mandatory.
+            gate = ManualLoginGate(
+                ManualLoginStore(RESULT_ROOT), run_id, normalize_origin(base_url),
+                timeout_seconds=900,
+            )
             def confirm_login(browser_problem):
-                confirmed = gate.wait(browser_problem)
+                def poll_browser():
+                    # A Playwright-managed visible browser shares this worker's
+                    # sync event loop.  Dispatch it while waiting for dashboard
+                    # confirmation so SPA scripts, routing and operator input
+                    # continue instead of freezing on the loading screen.
+                    if driver is not None and driver.page is not None:
+                        driver.page.wait_for_timeout(50)
+
+                confirmed = gate.wait(browser_problem, poll_browser=poll_browser)
                 diagnose("operator_login_confirmed", auth_state="operator_confirmed",
                          target_origin=normalize_origin(base_url))
                 return confirmed
             session_config.operator_confirmation = confirm_login
+            def confirm_runtime_action(problem, browser_problem, poll_browser):
+                action_kind = {'login_form_visible': 'recon_login', 'mfa_required': 'mfa',
+                               'captcha_required': 'captcha', 'access_required': 'access'}[problem]
+                if poll_browser is None:
+                    request = gate.store.begin(run_id, normalize_origin(base_url), gate.timeout_seconds,
+                        action_kind=action_kind, problem='runtime_browser_required')
+                    gate.store.finish(run_id, request['request_id'], 'failed')
+                    diagnose('operator_action_unavailable', action_kind=action_kind,
+                             reason='runtime_browser_required')
+                    return False
+                diagnose('operator_action_waiting', action_kind=action_kind)
+                try:
+                    confirmed = gate.wait(browser_problem, action_kind=action_kind,
+                                          problem=problem, poll_browser=poll_browser)
+                except Exception:
+                    diagnose('operator_action_unavailable', action_kind=action_kind,
+                             reason='operator_confirmation_incomplete')
+                    return False
+                diagnose('operator_action_completed', action_kind=action_kind)
+                return confirmed
+            session_config.operator_action_confirmation = confirm_runtime_action
 
         effective_interaction_config = interaction_config or InteractionConfig()
         effective_interaction_config = replace(
@@ -1947,9 +2143,7 @@ def discover_endpoints(
 
                 mode="standard",
 
-                auth_headers=(
-                    auth_headers
-                ),
+                auth_headers=external_tool_headers(auth_headers),
 
                 proxy_url=(
                     mitm_proxy_url
@@ -1968,10 +2162,15 @@ def discover_endpoints(
         # Headless
         # ---------------------------------------------
 
-        headless_allowed = (
+        headless_configured = (
             target_policy is None or target_policy.tools.katana_headless
         )
-        if headless_allowed:
+        # Katana's cloned CDP browser cannot install Playwright's per-request
+        # exclusion guard.  Keep endpoint discovery usable under an exclusion
+        # policy by running the governed collectors and holding only this
+        # incompatible optional mode.
+        headless_held = has_request_exclusions(target_policy)
+        if headless_configured and not headless_held:
             diagnose("phase_started", phase="katana_headless")
             driver.ensure_session()
             auth_headers = driver.get_auth_headers()
@@ -1988,7 +2187,7 @@ def discover_endpoints(
                 headless_results = discover_with_katana(
                     base_url,
                     mode="headless",
-                    auth_headers=auth_headers,
+                    auth_headers=external_tool_headers(auth_headers),
                     chrome_ws_url=katana_browser.chrome_ws_url if katana_browser else None,
                     proxy_url=mitm_proxy_url,
                     target_policy=target_policy,
@@ -2000,6 +2199,13 @@ def discover_endpoints(
             diagnose({"skipped": "phase_skipped", "failed": "phase_error"}.get(katana_states.get("headless"), "phase_completed"),
                      phase="katana_headless", count=len(headless_results),
                      error_type=katana_error_types.get("headless"))
+        elif headless_held:
+            print("  [보류] 요청 제외 규칙 때문에 Katana Headless를 사용하지 않음")
+            diagnose(
+                "phase_held", phase="katana_headless",
+                reason="request_exclusions",
+            )
+            headless_results = []
         else:
             print("  [건너뜀] TargetPolicy에서 Katana Headless가 허용되지 않음")
             diagnose("phase_skipped", phase="katana_headless")
@@ -2012,7 +2218,7 @@ def discover_endpoints(
 
         observe("katana_headless", headless_results, passive_metadata=True)
         observe_browser("playwright_katana")
-        if headless_allowed:
+        if headless_configured and not headless_held:
             driver.restore_runtime()
 
         auth_headers = (
@@ -2148,6 +2354,7 @@ def discover_endpoints(
                 diagnostic_callback=diagnostic_callback,
                 ai_pattern_planner=CodexPatternPlanner() if target_policy is not None and mitm_proxy_url else None,
                 state=adaptive_state,
+                include_passive_writes=True,
             )
         except Exception as exc:
             diagnose(
@@ -2321,12 +2528,13 @@ def discover_endpoints(
                 ))
                 if recon_model is not None else None
             ),
-            auth_headers=auth_headers,
+            auth_headers=external_tool_headers(auth_headers),
             proxy_url=mitm_proxy_url,
             target_policy=target_policy,
             max_time_seconds=ffuf_max_time_seconds,
             diagnostic_callback=diagnostic_callback,
             budget_available=lambda: _active_proxy_budget_available(mitm_capture_path),
+            budget_remaining=lambda: _active_proxy_budget_remaining(mitm_capture_path),
         )
         observe("ffuf", ffuf_results)
         if (target_policy is None or target_policy.tools.ffuf_enabled) and ffuf_wordlist and shutil.which("ffuf") and Path(ffuf_wordlist).is_file():
@@ -2348,6 +2556,7 @@ def discover_endpoints(
                     target_policy=target_policy, proxy_url=mitm_proxy_url,
                     diagnostic_callback=diagnostic_callback, state=adaptive_state,
                     ai_pattern_planner=CodexPatternPlanner() if target_policy is not None and mitm_proxy_url else None,
+                    include_passive_writes=True,
                 )
                 observe('adaptive_js_followup', extra)
                 adaptive_js_results = _deduplicate_results(adaptive_js_results + extra)
@@ -2372,7 +2581,7 @@ def discover_endpoints(
                 base_url, primary_results + secondary_results,
                 observed_responses=adaptive_state.observations(recovery_headers),
                 headers=recovery_headers, target_policy=target_policy, proxy_url=mitm_proxy_url,
-                state=adaptive_state,
+                    state=adaptive_state,
             )
             observe("observed_json_recovery", recovered)
             secondary_results.extend(recovered)

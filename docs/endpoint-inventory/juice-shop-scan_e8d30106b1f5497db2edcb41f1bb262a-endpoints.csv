@@ -1,0 +1,174 @@
+method,normalized_path,category,verification_status,is_excluded,exclude_reason,response_statuses,parameters,source_tools,content_type,auth_required,endpoint_id
+GET,/,application,verified,0,,200,,"katana_auth_standard,mitmproxy,playwright_interaction,playwright_runtime",,,endpoint_bf204623bcc64074a02fd1990cfd84e3
+GET,/%7B%7Bhref%7D%7D,application,verified,0,,200,,"katana_auth_standard,mitmproxy,playwright_interaction",,,endpoint_409fc92066544e9ba0e9ddeaeeb29846
+GET,/api/Addresss,application,candidate,0,unverified_candidate,401,,"adaptive_js,mitmproxy",,,endpoint_ab7e464786fe48c29478bfc896ffb65f
+POST,/api/Addresss,application,candidate,0,unverified_candidate,,,"adaptive_js,passive_route_inference",,,endpoint_060c287287ee49cdae6f817437273040
+DELETE,/api/Addresss/{e},application,candidate,0,unverified_candidate,,path:e (string),adaptive_js,,,endpoint_0550e25fb60540df8d881e70116daf96
+GET,/api/Addresss/{e},application,candidate,0,unverified_candidate,,path:e (string),adaptive_js,,,endpoint_1a59db4fcdfc4687ba6679e767c89ea3
+DELETE,/api/Addresss/{id},application,candidate,1,unverified_candidate,,path:id (string) [id],passive_route_inference,,,endpoint_f3d10837f0ef4d24a558f7fff51dde1d
+GET,/api/Addresss/{id},application,candidate,1,unverified_candidate,,path:id (string) [id],passive_route_inference,,,endpoint_5275d8ff0d0a4fc693b1bf9db8bf5427
+PATCH,/api/Addresss/{id},application,candidate,1,unverified_candidate,,path:id (string) [id],passive_route_inference,,,endpoint_f16de35f50f1475db8d40e8ffae7e5e0
+PUT,/api/Addresss/{id},application,candidate,1,unverified_candidate,,path:id (string) [id],passive_route_inference,,,endpoint_25fea1964c6c463cb2b67ab477c8c0c5
+GET,/api/BasketItems,application,candidate,1,unverified_candidate,401,,"mitmproxy,passive_route_inference",,,endpoint_54f02f0745f74472902247f81ee95d54
+POST,/api/BasketItems,application,candidate,0,unverified_candidate,,,"adaptive_js,passive_route_inference",,,endpoint_9add056a36b946c5804864f75a44ca23
+DELETE,/api/BasketItems/{e},application,candidate,0,unverified_candidate,,path:e (string),adaptive_js,,,endpoint_39919ab1bd654f6dbf9c01881907a74a
+GET,/api/BasketItems/{e},application,candidate,0,unverified_candidate,,path:e (string),adaptive_js,,,endpoint_5c6665c468524812887f75061ecf9368
+DELETE,/api/BasketItems/{id},application,candidate,1,unverified_candidate,,path:id (string) [id],passive_route_inference,,,endpoint_fc437be64596427dab3d954413eeb0c4
+GET,/api/BasketItems/{id},application,candidate,1,unverified_candidate,,path:id (string) [id],passive_route_inference,,,endpoint_3d11106774b4484996ccf4ff98ee7dba
+PATCH,/api/BasketItems/{id},application,candidate,1,unverified_candidate,,path:id (string) [id],passive_route_inference,,,endpoint_17f270ec48834fc0a6e252da6f3faa6f
+PUT,/api/BasketItems/{id},application,candidate,1,unverified_candidate,,path:id (string) [id],passive_route_inference,,,endpoint_132bd9a7c8504c5486368bc2de4d7511
+GET,/api/Cards,application,candidate,0,unverified_candidate,401,,"adaptive_js,mitmproxy",,,endpoint_290d0ea8a30846e0a087cba668788cbf
+POST,/api/Cards,application,candidate,0,unverified_candidate,,,"adaptive_js,passive_route_inference",,,endpoint_0341bb73bc454020833c25755b6a97bb
+GET,/api/Cards/{e},application,candidate,0,unverified_candidate,,path:e (string),adaptive_js,,,endpoint_733db9d4c0fb48f1b71efcf60c6eac9a
+DELETE,/api/Cards/{id},application,candidate,1,unverified_candidate,,path:id (string) [id],passive_route_inference,,,endpoint_8723ba8a6f1a489f9c87d79743d057ee
+GET,/api/Cards/{id},application,candidate,1,unverified_candidate,,path:id (string) [id],passive_route_inference,,,endpoint_fbc2f0c4b5164c90a5f359375223cdcd
+PATCH,/api/Cards/{id},application,candidate,1,unverified_candidate,,path:id (string) [id],passive_route_inference,,,endpoint_02d7cb984e944deb8e82b40779b38e64
+PUT,/api/Cards/{id},application,candidate,1,unverified_candidate,,path:id (string) [id],passive_route_inference,,,endpoint_da29000a54bd4684bebfc6a4f0743059
+GET,/api/Challenges,application,verified,0,,200,query:key (string); query:name (string),"adaptive_js,mitmproxy,observed_json_recovery,passive_route_inference,playwright_interaction",,,endpoint_8f85f30d6c764a04919ff7e59c8a9c55
+POST,/api/Challenges,application,candidate,1,unverified_candidate,,,passive_route_inference,,,endpoint_a067c4d59edb43cbb1fcd38d7ae037ae
+GET,/api/Challenges/:id,application,observed,0,,401,,"adaptive_collection_detail,mitmproxy",text/html,,endpoint_4c5acba7cfc44cc1a8fe4c321e75092d
+DELETE,/api/Challenges/{id},application,candidate,1,unverified_candidate,,path:id (string) [id],passive_route_inference,,,endpoint_f6bf24828e20487ba64338f283a1a87e
+GET,/api/Challenges/{id},application,candidate,1,unverified_candidate,,path:id (string) [id],passive_route_inference,,,endpoint_c5ee92c686c14dac9b7c11fc1452d1c3
+PATCH,/api/Challenges/{id},application,candidate,1,unverified_candidate,,path:id (string) [id],passive_route_inference,,,endpoint_ff337084df1144a694072ee6f7c231c5
+PUT,/api/Challenges/{id},application,candidate,1,unverified_candidate,,path:id (string) [id],passive_route_inference,,,endpoint_4a6a7a063fa64b08a6dcd5936b221783
+GET,/api/Complaints,application,candidate,1,unverified_candidate,401,,"mitmproxy,passive_route_inference",,,endpoint_2e66ab6a1d78483d965616eb93a55728
+POST,/api/Complaints,application,candidate,0,unverified_candidate,,,"adaptive_js,passive_route_inference",,,endpoint_e820a57efaeb460cbff0ad1001b5023f
+DELETE,/api/Complaints/{id},application,candidate,1,unverified_candidate,,path:id (string) [id],passive_route_inference,,,endpoint_39694d22372a4012b9209ab82967fd0b
+GET,/api/Complaints/{id},application,candidate,1,unverified_candidate,,path:id (string) [id],passive_route_inference,,,endpoint_a2ba3f469d3540c2965bdf8b483f2c79
+PATCH,/api/Complaints/{id},application,candidate,1,unverified_candidate,,path:id (string) [id],passive_route_inference,,,endpoint_a13dd335cb0848b1a342aa325c9fd5e2
+PUT,/api/Complaints/{id},application,candidate,1,unverified_candidate,,path:id (string) [id],passive_route_inference,,,endpoint_7e916702873d4efab739851413edffe3
+GET,/api/Deliverys,application,verified,0,,200,,"adaptive_js,mitmproxy",application/json; charset=utf-8,,endpoint_ea902a82f9fd465589ca955f585aa606
+POST,/api/Deliverys,application,candidate,1,unverified_candidate,,,passive_route_inference,,,endpoint_944a2f6d2d57433f84f76a540281a043
+GET,/api/Deliverys/:id,application,verified,0,,200,,"adaptive_collection_detail,adaptive_js_template,mitmproxy",application/json,,endpoint_e3155f5030d041fd9179f9886f0b18c7
+GET,/api/Deliverys/{e},application,candidate,0,unverified_candidate,,path:e (string),adaptive_js,,,endpoint_014fc17bf1ef4b30adc513e675a004c7
+DELETE,/api/Deliverys/{id},application,candidate,1,unverified_candidate,,path:id (string) [id],passive_route_inference,,,endpoint_03519baea5444cfda7fb0bddd97236a8
+GET,/api/Deliverys/{id},application,candidate,1,unverified_candidate,,path:id (string) [id],passive_route_inference,,,endpoint_e0c68a8b7a954c3082422c60da274240
+PATCH,/api/Deliverys/{id},application,candidate,1,unverified_candidate,,path:id (string) [id],passive_route_inference,,,endpoint_2269b39ad53847b5a5de1a9aa72551fe
+PUT,/api/Deliverys/{id},application,candidate,1,unverified_candidate,,path:id (string) [id],passive_route_inference,,,endpoint_c7486705f735422281ed6e35d0da42fe
+GET,/api/Feedbacks,application,verified,0,,200,,"adaptive_js,mitmproxy,passive_route_inference",application/json; charset=utf-8,,endpoint_3047d026463249beb74c83c828fe34b2
+POST,/api/Feedbacks,application,candidate,0,unverified_candidate,,,"adaptive_js,passive_route_inference",,,endpoint_cc9766f4188c4bb2b0e48bdb9ebb6915
+GET,/api/Feedbacks/:id,application,observed,0,,401,,"adaptive_collection_detail,mitmproxy",text/html,,endpoint_1ec6db14357f44b1b76b9d8644ffe382
+DELETE,/api/Feedbacks/{a},application,candidate,0,unverified_candidate,,path:a (string),adaptive_js,,,endpoint_b44ff38b432541b5b038ae98b78c4923
+DELETE,/api/Feedbacks/{id},application,candidate,1,unverified_candidate,,path:id (string) [id],passive_route_inference,,,endpoint_31b8b0d325984e67a578a24e464786a9
+GET,/api/Feedbacks/{id},application,candidate,1,unverified_candidate,,path:id (string) [id],passive_route_inference,,,endpoint_ea645e6e40674e15ad2853d61842fc0a
+PATCH,/api/Feedbacks/{id},application,candidate,1,unverified_candidate,,path:id (string) [id],passive_route_inference,,,endpoint_3cd39d3046394d03937dce1606d7454b
+PUT,/api/Feedbacks/{id},application,candidate,1,unverified_candidate,,path:id (string) [id],passive_route_inference,,,endpoint_e85bf94ae1a24c4d83b3621eeff82c07
+GET,/api/Hints,application,verified,0,,200,,"adaptive_js,mitmproxy,passive_route_inference",application/json; charset=utf-8,,endpoint_40a0cae1808a4d1b9dbf071f1a36558d
+POST,/api/Hints,application,candidate,1,unverified_candidate,,,passive_route_inference,,,endpoint_f34d8a69ede64573ad6c10a5af9d02e1
+GET,/api/Hints/:id,application,observed,0,,401,,"adaptive_collection_detail,mitmproxy",text/html,,endpoint_80c1a25530ba4bc79080441795ac71f4
+PUT,/api/Hints/{e},application,candidate,0,unverified_candidate,,path:e (string),adaptive_js,,,endpoint_c112c475471940d89d867bb620da13b3
+DELETE,/api/Hints/{id},application,candidate,1,unverified_candidate,,path:id (string) [id],passive_route_inference,,,endpoint_2af8d393661644b8824251a189ce1670
+GET,/api/Hints/{id},application,candidate,1,unverified_candidate,,path:id (string) [id],passive_route_inference,,,endpoint_b68ec41401c9460382e000f6d3825eac
+PATCH,/api/Hints/{id},application,candidate,1,unverified_candidate,,path:id (string) [id],passive_route_inference,,,endpoint_5945230e6e6247c6b36a1098509931c5
+PUT,/api/Hints/{id},application,candidate,1,unverified_candidate,,path:id (string) [id],passive_route_inference,,,endpoint_f9cbb3e5a0eb457480c10f530a63c026
+GET,/api/Products,application,verified,0,,200,,"adaptive_js,mitmproxy,passive_route_inference",application/json; charset=utf-8,,endpoint_229077ddbffc45c9992e4a92ed858813
+POST,/api/Products,application,candidate,1,unverified_candidate,,,passive_route_inference,,,endpoint_3e08065defa94648a41f974fc97e288a
+GET,/api/Products/:id,application,verified,0,,200,,"adaptive_collection_detail,mitmproxy",application/json; charset=utf-8,,endpoint_543b1af616ef4f2fa19a0fe9b642f3d0
+PUT,/api/Products/{e},application,candidate,0,unverified_candidate,,path:e (string),adaptive_js,,,endpoint_07ff9993af4f4cdab19f23e64a6c35bb
+DELETE,/api/Products/{id},application,candidate,1,unverified_candidate,,path:id (string) [id],passive_route_inference,,,endpoint_cda308f721ba4fb0b08990af8aa2b443
+GET,/api/Products/{id},application,candidate,1,unverified_candidate,,path:id (string) [id],passive_route_inference,,,endpoint_04140c133e3749378ea23814e1b36c5c
+PATCH,/api/Products/{id},application,candidate,1,unverified_candidate,,path:id (string) [id],passive_route_inference,,,endpoint_2c1d40550a4f4b139eed744837694070
+PUT,/api/Products/{id},application,candidate,1,unverified_candidate,,path:id (string) [id],passive_route_inference,,,endpoint_6069bc5e245a4ffc8245fd2ac1836a97
+GET,/api/Quantitys,application,verified,0,,200,,"adaptive_js,mitmproxy,passive_route_inference,playwright_interaction",,,endpoint_c005ee6caee94983b7be51e2ca8859fe
+POST,/api/Quantitys,application,candidate,1,unverified_candidate,,,passive_route_inference,,,endpoint_eb6b62689ce946158ffaf64813bc0081
+GET,/api/Quantitys/:id,application,observed,0,,403,,"adaptive_collection_detail,adaptive_js_detail_candidate,mitmproxy",application/json,,endpoint_ce9c75668aa843049c61a0421a99ffee
+PUT,/api/Quantitys/{e},application,candidate,0,unverified_candidate,,path:e (string),adaptive_js,,,endpoint_d09feff5ee374cf4b489e8efcb866cb1
+DELETE,/api/Quantitys/{id},application,candidate,1,unverified_candidate,,path:id (string) [id],passive_route_inference,,,endpoint_397906a736ba44828cffabae4e46149a
+GET,/api/Quantitys/{id},application,candidate,1,unverified_candidate,,path:id (string) [id],passive_route_inference,,,endpoint_28d380d975c94eec91ed5c9fa7a04da1
+PATCH,/api/Quantitys/{id},application,candidate,1,unverified_candidate,,path:id (string) [id],passive_route_inference,,,endpoint_57cfcd76fb9245c0bf6af6beecdce510
+PUT,/api/Quantitys/{id},application,candidate,1,unverified_candidate,,path:id (string) [id],passive_route_inference,,,endpoint_49a7f672f9544e5dbef5998329ebc7f6
+GET,/api/Recycles,application,verified,0,,200,,"adaptive_js,mitmproxy,passive_route_inference",application/json; charset=utf-8,,endpoint_dddc73414abd4a26966f18420a7e4f02
+POST,/api/Recycles,application,candidate,0,unverified_candidate,,,"adaptive_js,passive_route_inference",,,endpoint_ac0bf0d95b3b4946997e3d2cb98c9368
+DELETE,/api/Recycles/{id},application,candidate,1,unverified_candidate,,path:id (string) [id],passive_route_inference,,,endpoint_28604bc14c6b47a5ab8bbce001480217
+GET,/api/Recycles/{id},application,candidate,1,unverified_candidate,,path:id (string) [id],passive_route_inference,,,endpoint_cf74877d07b54967a7b3589cc34491ca
+PATCH,/api/Recycles/{id},application,candidate,1,unverified_candidate,,path:id (string) [id],passive_route_inference,,,endpoint_77dac4f459924f0ba8f4721f8f53a320
+PUT,/api/Recycles/{id},application,candidate,1,unverified_candidate,,path:id (string) [id],passive_route_inference,,,endpoint_ae58a916ceb44855aecc3084e4785290
+GET,/api/SecurityAnswers,application,candidate,1,unverified_candidate,401,,"mitmproxy,passive_route_inference",,,endpoint_8a30ac45f0fb446cacdf03e76afe0423
+POST,/api/SecurityAnswers,application,candidate,0,unverified_candidate,,,"adaptive_js,passive_route_inference",,,endpoint_f4c0191e8a2242d19fdc2d087e5e4c32
+DELETE,/api/SecurityAnswers/{id},application,candidate,1,unverified_candidate,,path:id (string) [id],passive_route_inference,,,endpoint_4f5c9cdf65954a19a6fa57f30ed92a3f
+GET,/api/SecurityAnswers/{id},application,candidate,1,unverified_candidate,,path:id (string) [id],passive_route_inference,,,endpoint_477d8d2500df41a0b999282bfcef0f79
+PATCH,/api/SecurityAnswers/{id},application,candidate,1,unverified_candidate,,path:id (string) [id],passive_route_inference,,,endpoint_0f4601e3d6f3448da9acdd480086284e
+PUT,/api/SecurityAnswers/{id},application,candidate,1,unverified_candidate,,path:id (string) [id],passive_route_inference,,,endpoint_14e739fab5954230b964eb59ccee44e0
+GET,/api/SecurityQuestions,application,verified,0,,200,,"adaptive_js,mitmproxy,passive_route_inference",application/json; charset=utf-8,,endpoint_666cddc67f764d6da69912b4cff25114
+POST,/api/SecurityQuestions,application,candidate,1,unverified_candidate,,,passive_route_inference,,,endpoint_cbbd794e253540bd9812942831f9dcf1
+GET,/api/SecurityQuestions/:id,application,observed,0,,401,,"adaptive_collection_detail,mitmproxy",text/html,,endpoint_c0d4a87d6a6143c5bd831d6f18696332
+DELETE,/api/SecurityQuestions/{id},application,candidate,1,unverified_candidate,,path:id (string) [id],passive_route_inference,,,endpoint_562b2b35a8d144759757d4902daabc95
+GET,/api/SecurityQuestions/{id},application,candidate,1,unverified_candidate,,path:id (string) [id],passive_route_inference,,,endpoint_27068efe15f64de4b69c72300d5273bb
+PATCH,/api/SecurityQuestions/{id},application,candidate,1,unverified_candidate,,path:id (string) [id],passive_route_inference,,,endpoint_f72dc9ac58cb4312bf0485766807e649
+PUT,/api/SecurityQuestions/{id},application,candidate,1,unverified_candidate,,path:id (string) [id],passive_route_inference,,,endpoint_6f72626daf1b48ecaec705a67dd5c72f
+GET,/api/Users,application,candidate,1,unverified_candidate,401,,"mitmproxy,passive_route_inference",,,endpoint_7eed19f32e914002866e8d59fd0d9e4b
+POST,/api/Users,application,candidate,0,unverified_candidate,,,"adaptive_js,passive_route_inference",,,endpoint_295f4f28894d4a45a0740498b4c8c73f
+GET,/api/Users/{e},application,candidate,0,unverified_candidate,,path:e (string),adaptive_js,,,endpoint_caf046c06403412aa885c6f9bfdfeda7
+DELETE,/api/Users/{id},application,candidate,1,unverified_candidate,,path:id (string) [id],passive_route_inference,,,endpoint_21e7c46581eb4e6e87f5438b27a2cfcd
+GET,/api/Users/{id},application,candidate,1,unverified_candidate,,path:id (string) [id],passive_route_inference,,,endpoint_6aa0ea6eef60434a9effe1d46df4ad67
+PATCH,/api/Users/{id},application,candidate,1,unverified_candidate,,path:id (string) [id],passive_route_inference,,,endpoint_490532f8ffc648948dbc6476ea37222a
+PUT,/api/Users/{id},application,candidate,1,unverified_candidate,,path:id (string) [id],passive_route_inference,,,endpoint_9ae8b043324e4160876a1141d1b6d1e7
+GET,/assets/i18n/en.json,static/support,observed,0,,,,playwright_interaction,,,endpoint_101d9f777c9549798d1d56c6a0406e53
+POST,/b2b/v2/orders,application,candidate,0,unverified_candidate,,,passive_declaration,,,endpoint_3523ce6536274ba9887ab938321dd52f
+GET,/dataerasure,application,candidate,0,unverified_candidate,,,adaptive_js,,,endpoint_746426034af7441aaafba3ca535e019a
+POST,/file-upload,application,candidate,0,unverified_candidate,,,adaptive_js,,,endpoint_aa06e851ea6044688154580c8cc6edd6
+GET,/main.js,static/support,verified,1,static_asset,200,,"katana_auth_standard,mitmproxy,playwright_interaction",application/javascript; charset=UTF-8,,endpoint_cfdc9c2e260747b789c3047c655baacc
+GET,/polyfills.js,static/support,verified,1,static_asset,200,,"katana_auth_standard,mitmproxy,playwright_interaction",application/javascript; charset=UTF-8,,endpoint_bf1e80dfe80e4a83bb4c5f4d60823dcb
+GET,/profile,application,candidate,0,unverified_candidate,,,adaptive_js,,,endpoint_422bfe0d83024d26b12a5fa6dab51f5e
+GET,/redirect,application,candidate,0,unverified_candidate,,query:to (string),adaptive_js,,,endpoint_045085554c014356bbae861f3b860a59
+POST,/rest/2fa/disable,application,candidate,0,unverified_candidate,,,adaptive_js,,,endpoint_82549686b1f0478e902b7a606b525049
+POST,/rest/2fa/setup,application,candidate,0,unverified_candidate,,,adaptive_js,,,endpoint_c393d25d9193402b8a7dfeee7c77990b
+GET,/rest/2fa/status,application,candidate,0,unverified_candidate,401,,"adaptive_js,mitmproxy",,,endpoint_c6e75b1a957c46dc8a4ce4c4e307185a
+POST,/rest/2fa/verify,application,candidate,0,unverified_candidate,,,adaptive_js,,,endpoint_55c6a65a51da41539e34e6fdbcb47613
+GET,/rest/admin/application-configuration,application,observed,0,,,,"adaptive_js,playwright_interaction",,,endpoint_b1a7f5c5f988452d8e218baddb1a2361
+GET,/rest/admin/application-version,application,observed,0,,,,"adaptive_js,playwright_interaction",,,endpoint_dd3ff2d6d9a14cc9ade52fd3ea3d82a7
+GET,/rest/basket/{e},application,candidate,0,unverified_candidate,,path:e (string),adaptive_js,,,endpoint_3f8c992917ec4a279e45adad24d55952
+POST,/rest/basket/{e}/checkout,application,candidate,0,unverified_candidate,,path:e (string),adaptive_js,,,endpoint_cdab7449a983463c8bfebbbc3eed6205
+PUT,/rest/basket/{e}/coupon/{i},application,candidate,0,unverified_candidate,,path:e (string); path:i (string),adaptive_js,,,endpoint_81067dbbc5f44607b0b49eaed621de04
+GET,/rest/captcha,application,verified,0,,200,,"adaptive_js,mitmproxy",application/json; charset=utf-8,,endpoint_4e3afe42340b40979df59d53b0a9f852
+POST,/rest/chat,application,candidate,0,unverified_candidate,,,adaptive_js,,,endpoint_c6452f2e23634628998999e26c100f21
+GET,/rest/continue-code,application,verified,0,,200,,"adaptive_js,mitmproxy",application/json; charset=utf-8,,endpoint_4c049ab9f6d24cefb7686a7740a22816
+GET,/rest/continue-code-findIt,application,verified,0,,200,,"adaptive_js,mitmproxy",application/json; charset=utf-8,,endpoint_eb5af271e3df4fdcb664237909a98688
+PUT,/rest/continue-code-findIt/apply/{e},application,candidate,0,unverified_candidate,,path:e (string),adaptive_js,,,endpoint_932c0e26f17743a290b5177d3b6ad9c3
+GET,/rest/continue-code-fixIt,application,verified,0,,200,,"adaptive_js,mitmproxy",application/json; charset=utf-8,,endpoint_2a61964df91b419fa34c90d566b9f1ab
+PUT,/rest/continue-code-fixIt/apply/{e},application,candidate,0,unverified_candidate,,path:e (string),adaptive_js,,,endpoint_2b608ef6ab84486eb7e8f16e499f7667
+PUT,/rest/continue-code/apply/{e},application,candidate,0,unverified_candidate,,path:e (string),adaptive_js,,,endpoint_129ce253288148b5b04f03b2093ea456
+GET,/rest/country-mapping,application,candidate,0,unverified_candidate,500,,"adaptive_js,mitmproxy",,,endpoint_9c7e9b2e36414f83b10372a30cdc0821
+GET,/rest/deluxe-membership,application,candidate,0,unverified_candidate,400,,"adaptive_js,mitmproxy",,,endpoint_499a93cca7744d94ad30d83e95b9c748
+POST,/rest/deluxe-membership,application,candidate,0,unverified_candidate,,,adaptive_js,,,endpoint_d01c0d422de7462389dfc0da494318c5
+GET,/rest/image-captcha,application,candidate,0,unverified_candidate,401,,"adaptive_js,mitmproxy",,,endpoint_4bc14045985145b898d3191da1b999c3
+GET,/rest/languages,application,observed,0,,,,"adaptive_js,playwright_interaction",,,endpoint_8a1ccd8414814144b85381f6cc739fa5
+GET,/rest/memories,application,verified,0,,200,,"adaptive_js,mitmproxy",application/json; charset=utf-8,,endpoint_45659e128b3e4240b39eb2c7cec85b77
+POST,/rest/memories,application,candidate,0,unverified_candidate,,,adaptive_js,,,endpoint_a9284a3e4f584c8184cbbf2af726a295
+GET,/rest/order-history,application,candidate,0,unverified_candidate,500,,"adaptive_js,mitmproxy",,,endpoint_43b71e7baa654e279aa88511b552e767
+GET,/rest/order-history/orders,application,observed,0,,403,,"adaptive_js,mitmproxy",application/json; charset=utf-8,,endpoint_c7f57a2ec488461c8ad2127b8e840a19
+PUT,/rest/order-history/{e}/delivery-status,application,candidate,0,unverified_candidate,,path:e (string),adaptive_js,,,endpoint_50fe8ecae3e94823873120144f24f468
+GET,/rest/products/:id/reviews,application,verified,0,,200,,"adaptive_js_template,mitmproxy",application/json,,endpoint_ce0e5163572b437cbcdce9b0d0ed7947
+PATCH,/rest/products/reviews,application,candidate,0,unverified_candidate,,,adaptive_js,,,endpoint_db749d0700164bac938f287c7b7d73c9
+POST,/rest/products/reviews,application,candidate,0,unverified_candidate,,,adaptive_js,,,endpoint_fe641d4f08a141c68cca2544b98e574d
+GET,/rest/products/search,application,observed,0,,,query:q (string),"adaptive_js,playwright_interaction",,,endpoint_6b01ce983b3346b694cbe428810cb59e
+GET,/rest/products/{e}/reviews,application,candidate,0,unverified_candidate,,path:e (string),adaptive_js,,,endpoint_ba5da33ce6d442dd981c2caf0657d4ce
+PUT,/rest/products/{e}/reviews,application,candidate,0,unverified_candidate,,path:e (string),adaptive_js,,,endpoint_6db6486b53b9464da23f402c38df5b5e
+GET,/rest/repeat-notification,application,verified,0,,200,,"adaptive_js,mitmproxy",text/plain; charset=utf-8,,endpoint_18c2664502ac46e89a58ffe1ebacd95d
+GET,/rest/saveLoginIp,application,observed,0,,401,,"adaptive_js,mitmproxy",text/plain; charset=utf-8,,endpoint_628c0e50c45e41ca84fe969c29009778
+GET,/rest/track-order/{e},application,candidate,0,unverified_candidate,,path:e (string),adaptive_js,,,endpoint_40ab57d9ea5d45779744d06375398ac9
+GET,/rest/user/authentication-details,application,candidate,0,unverified_candidate,401,,"adaptive_js,mitmproxy",,,endpoint_b0d6a879a46e41d69773c6962b0bf00e
+GET,/rest/user/change-password,application,candidate,0,unverified_candidate,401,query:current (string),"adaptive_js,mitmproxy",,,endpoint_c00a6e005b9e4bd290f774c49122a8c5
+POST,/rest/user/data-export,application,candidate,0,unverified_candidate,,,adaptive_js,,,endpoint_fffb78a0ea0140f18844a2c4bdc09795
+POST,/rest/user/erasure-request,application,candidate,0,unverified_candidate,,,adaptive_js,,,endpoint_fc11f19b2e6b419cbde6a8926f057d50
+POST,/rest/user/login,application,candidate,0,unverified_candidate,,,adaptive_js,,,endpoint_7415b8b7ead042e1aef001a3d4b1f8ab
+POST,/rest/user/reset-password,application,candidate,0,unverified_candidate,,,adaptive_js,,,endpoint_011a1b4b74fc484cba80ec9bed50275a
+GET,/rest/user/security-question,application,verified,0,,200,query:email (string),"adaptive_js,mitmproxy",application/json; charset=utf-8,,endpoint_c42a6c3c07664037a02abf0b38caa370
+GET,/rest/user/whoami,application,verified,0,,200,,"adaptive_js,mitmproxy",application/json; charset=utf-8,,endpoint_adf203732f364df38d5014af819096c4
+GET,/rest/wallet/balance,application,candidate,0,unverified_candidate,401,,"adaptive_js,mitmproxy",,,endpoint_49b3960dd88d44f6a0e97a40024dd5e6
+PUT,/rest/wallet/balance,application,candidate,0,unverified_candidate,,,adaptive_js,,,endpoint_55e388e83b2246a48e4f28167645500c
+GET,/rest/web3/nftMintListen,application,verified,0,,200,,"adaptive_js,mitmproxy",application/json; charset=utf-8,,endpoint_c478ca53caa848818907bcb6ee9bb0f3
+GET,/rest/web3/nftUnlocked,application,verified,0,,200,,"adaptive_js,mitmproxy",application/json; charset=utf-8,,endpoint_caf3510274204c7b890f02c7a68029bc
+POST,/rest/web3/submitKey,application,candidate,0,unverified_candidate,,,adaptive_js,,,endpoint_1ad6d5e73d1b4acfb1a1a9f54320998e
+POST,/rest/web3/walletExploitAddress,application,candidate,0,unverified_candidate,,,adaptive_js,,,endpoint_149006234bbd43eaaf11c0705138ff6c
+POST,/rest/web3/walletNFTVerify,application,candidate,0,unverified_candidate,,,adaptive_js,,,endpoint_3a3e68cb2f69437db9498322c470e10a
+GET,/scripts.js,static/support,verified,1,static_asset,200,,"katana_auth_standard,mitmproxy,playwright_interaction",application/javascript; charset=UTF-8,,endpoint_9e3d5031078a4f348ecf74a4156a930d
+GET,/snippets/.well-known/security.txt,static/support,verified,0,,200,,"ffuf,mitmproxy",text/html; charset=UTF-8,,endpoint_674455df4d8646d9bba7e860a23d8353
+GET,/snippets/:param,application,verified,0,,"200,404",path:t (string),"adaptive_js,adaptive_js_detail_candidate,adaptive_js_response_argument,mitmproxy",application/json,,endpoint_0253969bcd6d4df1b25eac4579dcefff
+GET,/snippets/debug/users,application,verified,0,,200,,"ffuf,mitmproxy",text/html; charset=UTF-8,,endpoint_fc39be5c3d4542e59465cafe986b6e78
+POST,/snippets/fixes,application,candidate,0,unverified_candidate,,,adaptive_js,,,endpoint_82484e9c919540088aa3364956098bd0
+GET,/snippets/fixes/:param,application,verified,0,,"200,404",path:t (string),"adaptive_js,adaptive_js_detail_candidate,adaptive_js_response_argument,mitmproxy",application/json,,endpoint_6d26a61f46d644f89b9b0a678a9a2676
+POST,/snippets/verdict,application,candidate,0,unverified_candidate,,,adaptive_js,,,endpoint_e61836ff0c8a4ce19c4fe2ed0b1baeef
+GET,/socket.io,runtime-support,verified,0,,200,query:EIO (integer); query:sid (string); query:t (string); query:transport (string),"mitmproxy,playwright_interaction",,,endpoint_1cef166f9fbd4fe2850060fb53a747c0
+POST,/socket.io,runtime-support,observed,0,,,query:EIO (string); query:sid (string); query:t (string); query:transport (string),playwright_interaction,,,endpoint_0b8c84a25f0f4bf1bdeb5ee83d254c01
+GET,/styles.css,static/support,verified,1,static_asset,200,,"katana_auth_standard,mitmproxy,playwright_interaction",text/css; charset=UTF-8,,endpoint_f8df7fc780e3493eb62838573705e1a9

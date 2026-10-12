@@ -526,7 +526,8 @@ class RuntimeBrowserProgramPageReader(PlaywrightProgramPageReader):
     ) -> ProgramPage:
         views: list[tuple[str, str]] = []
         primary_views: list[PrimaryPolicyView] = []
-        seen: set[tuple[str, str]] = set()
+        seen_bodies: set[str] = set()
+        seen_evidence: set[tuple[str, tuple[tuple[str, str], ...]]] = set()
         attempted: dict[tuple[str, str], set[int]] = {}
         captured = False
         max_views = 6
@@ -539,10 +540,21 @@ class RuntimeBrowserProgramPageReader(PlaywrightProgramPageReader):
                 raise ProgramPageError("Scope navigation left the exact program page")
             self._output(f"프로그램 정책 화면 읽기를 완료했습니다. 단계 {step + 1}/{max_views}, 텍스트 {len(body)}자입니다.")
             current = (page.url, body)
-            if current not in seen:
+            captured_view = self._capture_primary_view(page, body)
+            body_digest = hashlib.sha256(body.encode("utf-8")).hexdigest()
+            evidence_identity = (
+                body_digest,
+                tuple(
+                    (str(link.url), link.label)
+                    for link in captured_view.observed_links
+                ),
+            )
+            if body_digest not in seen_bodies:
                 views.append(current)
-                seen.add(current)
-            primary_views.append(self._capture_primary_view(page, body))
+                seen_bodies.add(body_digest)
+            if evidence_identity not in seen_evidence:
+                primary_views.append(captured_view)
+                seen_evidence.add(evidence_identity)
             choices, locators = self._navigation_candidates(page, program_url)
             available = [choice for choice in choices if choice["id"] not in attempted.get(current, set())]
             self._output(

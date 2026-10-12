@@ -15,7 +15,7 @@ from ..contracts.models import ReproductionObservation
 from .request_broker import (ValidationCredentialError, ValidationPolicyRejection,
                              ValidationRequestBroker)
 from ..contracts.runtime_contract import HttpRequestTemplate, render_http_request
-from .credentials import credential_preflight_reason
+from .credentials import credential_unsupported_reason
 
 
 class OobObserver(Protocol):
@@ -54,8 +54,9 @@ class OobReproductionPort:
         if blind_case.credential_references and self.credential_resolver is None:
             return "credential_resolver_missing"
         for reference in blind_case.credential_references:
-            reason = credential_preflight_reason(
-                self.credential_resolver, reference, blind_case.endpoint,
+            reason = credential_unsupported_reason(
+                self.credential_resolver, reference,
+                destination_url=blind_case.endpoint,
             )
             if reason is not None:
                 return reason

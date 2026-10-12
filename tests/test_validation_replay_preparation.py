@@ -4,6 +4,8 @@ import json
 from types import SimpleNamespace
 from unittest.mock import Mock
 
+from aidast.validation import HttpRuntimeContract
+
 from aidast.validation.orchestration.replay_preparation import (
     CodexReplayPreparer, ReplayPreparationDraft, prepare_missing_http_replay,
 )
@@ -65,3 +67,18 @@ def test_planner_decodes_scalar_envelope_to_executable_contract():
     assert prepared.runtime_contract.target.identity_mode == "case"
     assert "negative_control" not in prepared.runtime_contract.model_dump(mode="json")
     assert prepared.runtime_contract.target.assertions[0].path == ("data", 0, "id")
+
+
+def test_legacy_control_endpoints_are_not_part_of_prepared_replay():
+    proof = [{"assertion_id": "effect", "kind": "body_contains", "expected": "marker"}]
+    runtime = HttpRuntimeContract.model_validate({
+        "schema_version": 1,
+        "target": {"request": {}, "assertions": proof},
+        "positive_control": {"request": {}, "assertions": proof},
+        "negative_control": {
+            "endpoint_template": "/__aidast_negative_control_missing__",
+            "request": {}, "assertions": proof,
+        },
+    })
+    assert runtime.target.endpoint_template is None
+    assert set(runtime.model_dump(mode="json")) == {"schema_version", "target"}

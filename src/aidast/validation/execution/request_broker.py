@@ -135,7 +135,9 @@ class ValidationRequestBroker:
             if self.credential_resolver is None:
                 raise ValidationCredentialError("credential references require a trusted resolver")
             try:
-                resolved = resolve_credential_headers(self.credential_resolver, reference, url)
+                resolved = resolve_credential_headers(
+                    self.credential_resolver, reference, destination_url=url,
+                )
             except (OSError, ValueError) as exc:
                 raise ValidationCredentialError("credential reference resolution failed") from exc
             if not isinstance(resolved, Mapping) or any(not isinstance(k, str) or not isinstance(v, str)
@@ -338,7 +340,7 @@ class ValidationRequestBroker:
                 raise
         self.request_ids.append(request_id)
         try:
-            self._permits[request_id] = self.governor.reserve(
+            self._permits[request_id] = self.governor.acquire(
                 url, timeout_seconds=self.policy.limits.timeout_seconds,
             )
         except GovernorError as exc:

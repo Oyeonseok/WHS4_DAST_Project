@@ -289,6 +289,65 @@ class ValidationRequestBrokerTests(unittest.TestCase):
         self.assertEqual(calls[0].get_header("Authorization"), "Bearer private")
         self.assertEqual(calls[0].get_header("Cookie"), "login=private")
 
+    def test_target_can_select_one_identity_without_header_collision(self):
+        calls, resolutions = [], []
+        proof = [{"assertion_id": "effect", "kind": "body_contains", "expected": "ok"}]
+        runtime = HttpRuntimeContract.model_validate({
+            "schema_version": 1,
+            "target": {"request": {"path_parameters": {"id": 7}}, "assertions": proof,
+                       "credential_roles": ["identity_a"]},
+            "positive_control": {"request": {"path_parameters": {"id": 7}}, "assertions": proof,
+                                 "credential_roles": ["identity_b"]},
+            "negative_control": {"request": {"path_parameters": {"id": 7}}, "assertions": proof,
+                                 "identity_mode": "anonymous"},
+        })
+        blind = self.blind.model_copy(update={
+            "required_identity_roles": ("identity_a", "identity_b"),
+            "credential_references": ("credential-a", "credential-b"),
+            "runtime_contract": runtime.model_dump(mode="json"),
+        })
+        def resolve(reference):
+            resolutions.append(reference)
+            return {"Authorization": "Bearer " + reference}
+        def transport(request, timeout):
+            calls.append(request.get_header("Authorization"))
+            return Response()
+        port = HttpReproductionPort(transport=transport, credential_resolver=resolve)
+        port.execute(blind, attempt_kind="target", batch_no=1, ordinal=1,
+                     attempt_id=self.attempt, db_path=self.path, scan_id="scan",
+                     stage_run_id=self.stage, case_id="case", policy=self.policy)
+        self.assertEqual(resolutions, ["credential-a"])
+        self.assertEqual(calls, ["Bearer credential-a"])
+
+    def test_legacy_negative_control_endpoint_is_never_dispatched(self):
+        calls = []
+        proof = [{"assertion_id": "effect", "kind": "body_contains", "expected": "secret"}]
+        runtime = HttpRuntimeContract.model_validate({
+            "schema_version": 1,
+            "target": {"request": {"path_parameters": {"id": 1}}, "assertions": proof},
+            "positive_control": {"request": {"path_parameters": {"id": 1}}, "assertions": proof},
+            "negative_control": {
+                "endpoint_template": "/items/__aidast_negative_control_missing__",
+                "request": {}, "assertions": proof,
+            },
+        })
+        blind = self.blind.model_copy(update={
+            "credential_references": (),
+            "runtime_contract": runtime.model_dump(mode="json"),
+        })
+        def transport(request, timeout):
+            calls.append(request.full_url)
+            response = Response()
+            response.status = 404
+            response.read = lambda maximum: b"missing"
+            return response
+        HttpReproductionPort(transport=transport).execute(
+            blind, attempt_kind="target", batch_no=1, ordinal=1,
+            attempt_id=self.attempt, db_path=self.path, scan_id="scan",
+            stage_run_id=self.stage, case_id="case", policy=self.policy,
+        )
+        self.assertEqual(calls, ["https://test/items/1"])
+
     def test_request_is_policy_checked_and_persists_redacted_ledger(self):
         result = self.broker().request("https://test/items/7?token=private", method="GET")
         self.assertEqual(result.body, b"ok")

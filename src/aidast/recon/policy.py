@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from fnmatch import fnmatchcase
 from typing import Annotated, Literal
-from urllib.parse import SplitResult, urlsplit
+from urllib.parse import SplitResult, urlsplit, urlunsplit
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -121,6 +121,22 @@ def normalize_read_only_attack_policy(policy: TargetPolicyProposal) -> TargetPol
             *policy.policy_notes,
             "Python normalized Attack authorization to read_only because no "
             "state-changing methods are authorized; method permissions were preserved.",
+        ],
+    })
+
+
+def normalize_recon_read_only_methods(policy: TargetPolicyProposal) -> TargetPolicyProposal:
+    """Repair model output that copied Attack mutation methods into Recon."""
+    safe = [method for method in policy.allowed_methods if method in SAFE_METHODS]
+    if not safe:
+        safe = ["GET", "HEAD", "OPTIONS"]
+    if safe == policy.allowed_methods:
+        return policy
+    return policy.model_copy(update={
+        "allowed_methods": safe,
+        "policy_notes": [
+            *policy.policy_notes,
+            "Python removed state-changing methods from Recon allowed_methods.",
         ],
     })
 
@@ -452,6 +468,19 @@ def canonical_host_for_asset(asset_type: AssetType, asset: str) -> str | None:
     return None
 
 
+def default_start_url_for_target(asset_type: AssetType, asset: str) -> str | None:
+    """Return the exact safe HTTP start for URL/API assets.
+
+    Bug bounty platforms frequently store a URL asset as a bare hostname. Keep
+    the policy module's HTTPS default in one place so exclusion preparation and
+    request-policy validation cannot disagree about the first request.
+    """
+    parsed = _normalized_web_asset_url(asset_type, asset)
+    if parsed is None or parsed.username or parsed.password or parsed.query or parsed.fragment:
+        return None
+    return urlunsplit((parsed.scheme.lower(), parsed.netloc, parsed.path or "/", "", ""))
+
+
 def validate_start_url_for_target(
     start_url: str, *, asset_type: AssetType, asset: str
 ) -> None:
@@ -622,7 +651,8 @@ def validate_policy_for_target(
             raise ValueError("read-only permission cannot authorize active Attack testing")
         if re.search(
             r"security (?:test|testing|assessment)|penetration test|"
-            r"vulnerability (?:test|testing|assessment)|보안 테스트|취약점 테스트|능동",
+            r"vulnerability (?:test|testing|assessment|validation)|"
+            r"보안 (?:테스트|검증)|취약점 (?:테스트|검증)|능동",
             quote,
             re.IGNORECASE,
         ) is None:

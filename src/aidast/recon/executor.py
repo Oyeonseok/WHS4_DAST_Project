@@ -39,7 +39,12 @@ from aidast.scope.models import AssetType
 from aidast.recon.tools.asset_dns_port import run_dnsx, run_naabu, run_nmap, run_subfinder
 from aidast.recon.tools.endpoint_discovery import discover_endpoints, _make_default_session_file
 from aidast.recon.tools.http_probe import ProbeResult, probe
-from aidast.recon.tools.mitm_proxy import ingest_mitm_capture, start_mitmproxy, stop_mitmproxy
+from aidast.recon.tools.mitm_proxy import (
+    ingest_mitm_capture,
+    start_mitmproxy,
+    stop_mitmproxy,
+    update_mitmproxy_auth,
+)
 
 
 class ReconExecutionError(RuntimeError):
@@ -852,6 +857,9 @@ class ReconExecutor:
                 interactive_login=self.interactive_login and session is None,
                 automatic_login=self.automatic_login and session is None,
                 request_headers=self.request_headers,
+                external_auth_handoff=(
+                    lambda headers: update_mitmproxy_auth(proxy_process, headers)
+                ),
                 browser_context_token=browser_context_token,
                 diagnostic_callback=self._diagnostic,
                 authentication_endpoint_callback=(
@@ -876,6 +884,45 @@ class ReconExecutor:
                     "proxy_capture_ingested", task_id=task.task_id,
                     allowed_count=ingested, blocked_count=blocked,
                 )
+                # Reconcile from the durable capture. Live discovery consumes
+                # an append-only cursor and can otherwise miss a response that
+                # arrives between analysis passes.
+                from aidast.recon.tools.passive_declarations import (
+                    declarations_from_captured_responses,
+                )
+                captured = self.conn.execute(
+                    """SELECT url,content_type,response_body FROM http_transactions
+                       WHERE origin_id=? AND method='GET'
+                         AND response_status BETWEEN 200 AND 299
+                         AND response_body IS NOT NULL ORDER BY captured_at""",
+                    (origin_id,),
+                ).fetchall()
+                declarations = declarations_from_captured_responses(
+                    captured, base_url=url, target_policy=policy, limit=500)
+                if declarations:
+                    recorder.record('passive_reconciliation', declarations[:500])
+                self._diagnostic(
+                    'passive_reconciliation', task_id=task.task_id,
+                    declaration_count=len(declarations[:500]),
+                )
+                try:
+                    progress = json.loads(capture_path.with_suffix('.progress.json').read_text())
+                except (OSError, ValueError, TypeError):
+                    progress = {}
+                allowed_count = progress.get('allowed_requests')
+                blocked_count = progress.get('blocked_requests')
+                if type(allowed_count) is int and type(blocked_count) is int:
+                    for signal_type, value in (
+                        ('proxy_allowed_requests', allowed_count),
+                        ('proxy_blocked_requests', blocked_count),
+                        ('recon_quality', 'coverage_incomplete'
+                         if blocked_count > max(10, allowed_count) else 'adequate'),
+                    ):
+                        self.conn.execute(
+                            "INSERT INTO surface_signals(signal_id,origin_id,signal_type,value) VALUES (?,?,?,?)",
+                            (dbmod.new_id('signal'), origin_id, signal_type, str(value)),
+                        )
+                    self.conn.commit()
 
         merged = merge_and_normalize(raw)
         self._diagnostic(

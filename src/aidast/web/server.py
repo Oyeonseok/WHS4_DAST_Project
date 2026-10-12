@@ -25,6 +25,11 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from aidast.auth.manual_login import ManualLoginStore
+from aidast.attack.preconditions import (
+    acknowledge_operator_action,
+    list_operator_actions,
+    resolve_attack_preconditions,
+)
 from aidast.core.model_calls import SQLiteModelCallSink
 from aidast.orchestration.scope import CoordinatorError, ScopeCoordinator
 from aidast.paths import RESULT_ROOT
@@ -50,6 +55,10 @@ DEFAULT_ORIGINS = (
 
 class ManualLoginConfirmation(BaseModel):
     request_id: str = Field(pattern=r'^[a-f0-9]{32}$')
+
+
+class OperatorActionAcknowledgement(BaseModel):
+    operator: str = Field(default="dashboard-operator", min_length=1, max_length=120)
 
 
 class ReportBodyLimit:
@@ -389,6 +398,42 @@ def create_app(
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
 
+    @app.get("/api/v1/scans/{scan_id}/operator-actions")
+    async def operator_actions(scan_id: str) -> dict[str, Any]:
+        database_path = projector.locate_database(scan_id)
+        try:
+            with sqlite3.connect(database_path) as conn:
+                if not conn.execute(
+                    """SELECT 1 FROM sqlite_master
+                       WHERE type='table' AND name='attack_operator_actions'"""
+                ).fetchone():
+                    return {"actions": []}
+                conn.row_factory = sqlite3.Row
+                resolve_attack_preconditions(conn, scan_id)
+                return {"actions": list_operator_actions(conn, scan_id)}
+        except sqlite3.Error as exc:
+            raise HTTPException(status_code=503, detail="operator actions unavailable") from exc
+
+    @app.post("/api/v1/scans/{scan_id}/operator-actions/{action_id}/acknowledge")
+    async def acknowledge_action(
+        scan_id: str, action_id: str, payload: OperatorActionAcknowledgement,
+        request: Request,
+    ) -> dict[str, Any]:
+        require_same_origin(request)
+        database_path = projector.locate_database(scan_id)
+        try:
+            with sqlite3.connect(database_path) as conn:
+                conn.row_factory = sqlite3.Row
+                return acknowledge_operator_action(
+                    conn, scan_id, action_id, operator=payload.operator,
+                )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="operator action not found") from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except sqlite3.Error as exc:
+            raise HTTPException(status_code=503, detail="operator action update unavailable") from exc
+
     @app.get("/api/v1/scans/{scan_id}/attack-tasks")
     async def attack_tasks(scan_id: str) -> dict[str, Any]:
         try:
@@ -455,6 +500,14 @@ def create_app(
         if scan_id is not None:
             projector.validate_scan_id(scan_id)
         return {"reports": reports.list(scan_id=scan_id)}
+
+    @app.get("/api/v1/scans/{scan_id}/summary")
+    async def scan_summary(scan_id: str) -> dict[str, Any]:
+        projector.validate_scan_id(scan_id)
+        try:
+            return reports.scan_summary(scan_id)
+        except ReportNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     @app.get("/api/v1/reports/{report_id}", response_class=PlainTextResponse)
     async def report_markdown(report_id: str) -> PlainTextResponse:

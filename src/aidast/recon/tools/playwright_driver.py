@@ -32,13 +32,14 @@ import urllib.request
 from dataclasses import dataclass, field
 from collections.abc import Callable
 from pathlib import Path
-from urllib.parse import urljoin, urlparse
+from urllib.parse import parse_qsl, unquote, urljoin, urlparse
 
 from playwright.sync_api import (
     Browser,
     BrowserContext,
     Page,
     Playwright,
+    TimeoutError as PlaywrightTimeoutError,
     sync_playwright,
 )
 
@@ -51,6 +52,7 @@ from aidast.core.http_safety import (
 )
 from aidast.recon.tools.api_secondary_discovery import _http_request
 from aidast.recon.tools.page_identity import canonical_visit_key, screen_fingerprint
+from aidast.recon.tools.user_action import visible_user_action
 
 
 def _wait_for_manual_login(
@@ -139,6 +141,12 @@ class ManualSessionConfig:
     # Dashboard confirmation is operator attestation, not an API auth check.
     operator_confirmation: Callable[[Callable[[], str | None]], bool] | None = None
 
+    # Runtime HITL uses the already visible CDP browser. A missing event pump
+    # means the runtime is headless/unavailable; it must not open another GUI.
+    operator_action_confirmation: Callable[
+        [str, Callable[[], str | None], Callable[[], None] | None], bool
+    ] | None = None
+
     # Storage 값을 HTTP Header로 변환
     #
     # 예:
@@ -175,6 +183,62 @@ _DIALOG_CLOSE_SELECTOR = (
     'button[mat-dialog-close], [role="button"][aria-label*="close" i])'
 )
 _READ_ACTION_LABEL = re.compile(r"\b(?:view|details?|show|read)\b|more information|상세|정보 보기", re.I)
+_REQUEST_FIELD_NAME = re.compile(r"[A-Za-z_$][\w$.-]{0,127}\Z")
+
+
+def _request_shape_parameters(request) -> tuple[str | None, list[dict[str, str]]]:
+    """Return field names/types from one browser request without its values."""
+    try:
+        headers = getattr(request, "headers", {}) or {}
+        if callable(headers):
+            headers = headers()
+    except Exception:
+        headers = {}
+    content_type = next(
+        (str(value).split(";", 1)[0].strip().casefold()
+         for name, value in headers.items() if str(name).casefold() == "content-type"),
+        "",
+    ) if isinstance(headers, dict) else ""
+    try:
+        raw = getattr(request, "post_data_buffer", None)
+        if callable(raw):
+            raw = raw()
+        if isinstance(raw, bytes):
+            raw = raw.decode("utf-8", errors="strict")
+    except Exception:
+        raw = None
+    if not isinstance(raw, str) or not raw or len(raw.encode("utf-8")) > 131_072:
+        return content_type or None, []
+
+    fields: dict[str, str] = {}
+    if "json" in content_type or raw.lstrip().startswith("{"):
+        try:
+            value = json.loads(raw)
+        except (ValueError, TypeError, RecursionError):
+            value = None
+        if isinstance(value, dict):
+            for name, item in value.items():
+                if not isinstance(name, str) or not _REQUEST_FIELD_NAME.fullmatch(name):
+                    continue
+                fields[name] = (
+                    "object" if isinstance(item, dict)
+                    else "array" if isinstance(item, list)
+                    else "boolean" if isinstance(item, bool)
+                    else "number" if isinstance(item, (int, float))
+                    else "string"
+                )
+    elif content_type == "application/x-www-form-urlencoded":
+        try:
+            for name, _ in parse_qsl(raw, keep_blank_values=True, max_num_fields=100):
+                if _REQUEST_FIELD_NAME.fullmatch(name):
+                    fields.setdefault(name, "string")
+        except ValueError:
+            fields = {}
+    return content_type or None, [
+        {"name": name, "location": "form" if content_type == "application/x-www-form-urlencoded" else "json",
+         "data_type": data_type}
+        for name, data_type in list(fields.items())[:100]
+    ]
 
 
 @dataclass
@@ -333,6 +397,7 @@ class PlaywrightDriver:
         # flow has actually started.
         self._interactive_authentication_enabled = bool(preauthenticated)
         self._operator_confirmed_login = False
+        self._operator_action_failures: set[str] = set()
 
         # 외부 Chromium Process
         self._chrome_process: (
@@ -796,14 +861,14 @@ class PlaywrightDriver:
             )
         )
 
-    def _launch_managed_runtime(self) -> None:
+    def _launch_managed_runtime(self, *, headless: bool = True) -> None:
         self._ensure_playwright()
         assert self.playwright is not None
 
         self._shutdown_runtime()
 
         launch_options: dict = {
-            "headless": True,
+            "headless": headless,
             "args": [
                 "--disable-dev-shm-usage",
                 "--disable-blink-features=AutomationControlled",
@@ -935,7 +1000,7 @@ class PlaywrightDriver:
                     raise ValueError('browser request budget exhausted')
                 # A configured proxy owns its shared permit; direct routes own theirs.
                 governor = RequestGovernor(None if self.proxy_url else self.target_policy.request_governor)
-                permit = governor.reserve(request.url, timeout_seconds=self.target_policy.limits.timeout_seconds)
+                permit = governor.acquire(request.url, timeout_seconds=self.target_policy.limits.timeout_seconds)
                 fetched = None
                 try:
                     permit.wait()
@@ -1417,7 +1482,8 @@ class PlaywrightDriver:
             for item in self.authentication_observations
         ):
             from aidast.recon import db
-            self.authentication_observations.append({
+            content_type, parameters = _request_shape_parameters(request)
+            observation = {
                 "context": {
                     "context_key": "auth_bootstrap",
                     "action_type": "operator_login",
@@ -1429,10 +1495,13 @@ class PlaywrightDriver:
                 "discovery_kind": "passive_login_observation",
                 "method": endpoint.method,
                 "path": endpoint.path,
-                "content_type": None,
+                "content_type": content_type,
                 "source": "auth_bootstrap",
                 "traffic_class": "browser_observation",
-            })
+            }
+            if parameters:
+                observation["declared_parameters"] = parameters
+            self.authentication_observations.append(observation)
 
     def _register_authentication_observer(self) -> None:
         if self.context is not None:
@@ -1488,6 +1557,9 @@ class PlaywrightDriver:
                     "visible login form", "visible login control",
                 }:
                     return "login_form_visible"
+                required_action = visible_user_action(page)
+                if required_action is not None:
+                    return required_action
                 text = page.locator("body").inner_text(timeout=3000).lower()
                 if any(marker in text for marker in (
                     "use the invitation code to get access", "invite code is required",
@@ -1500,18 +1572,100 @@ class PlaywrightDriver:
             return "browser_unavailable"
         return None if target_page_seen else "target_page_missing"
 
+    def resolve_user_action(self, page: Page | None = None, *, problem: str | None = None) -> bool:
+        """Wait for operator input in the same visible runtime BrowserContext.
+
+        Headless/login_mode=none runs do not become GUI sessions mid-run. A
+        blocked page is skipped and the dashboard explains that limitation.
+        Policy routing remains enabled throughout the operator interaction.
+        """
+        confirmation = self.session_config.operator_action_confirmation
+        if confirmation is None:
+            return True
+        page = page or self._ensure_page()
+        try:
+            if page.is_closed() or not self._same_origin(page.url):
+                return True
+            if self.target_policy is not None and not self.target_policy.allows_url(page.url):
+                return True
+            detected = visible_user_action(page, include_login=self._interactive_authentication_enabled)
+        except Exception:
+            return True
+        problem = problem or detected
+        if problem is None:
+            return True
+        if problem not in {'login_form_visible', 'mfa_required', 'captcha_required', 'access_required'}:
+            raise ValueError('unsupported operator UI action')
+        if problem in self._operator_action_failures:
+            return False
+        context = self.context
+        def browser_problem():
+            try:
+                if self.context is not context or page.is_closed():
+                    return 'browser_unavailable'
+                self.context.cookies()  # dispatch navigation before reading the current page
+                if not self._same_origin(page.url):
+                    return 'target_page_missing'
+                if self.target_policy is not None and not self.target_policy.allows_url(page.url):
+                    return 'target_page_missing'
+                return visible_user_action(page, include_login=True)
+            except Exception:
+                return 'browser_unavailable'
+        poll_browser = (lambda: page.wait_for_timeout(50)) if self._browser_kind == 'cdp' else None
+        try:
+            accepted = confirmation(problem, browser_problem, poll_browser)
+            if accepted and self.context is context and browser_problem() is None:
+                if not self.save_session():
+                    raise RuntimeError('could not save the operator-completed browser state')
+                self._auth_expired = False
+                return True
+        except Exception:
+            # Keep the browser/session and partial Recon evidence available.
+            # Expiry or closure only stops automatic actions on this page.
+            pass
+        self._operator_action_failures.add(problem)
+        return False
+
     def capture_and_start(self) -> None:
         """Log in once and keep the same Chromium context for Recon."""
         self._phase = "login"
         self._operator_confirmed_login = False
         self.authentication_endpoints.clear()
         try:
-            # Keep login direct. Attach CDP only for passive endpoint metadata;
-            # routing and policy interception remain disabled until login ends.
-            self._launch_manual_browser(manual_login=True)
-            self._attach_manual_browser()
-            self._register_authentication_observer()
-            print("  [Playwright] 직접 연결 로그인 창을 열었습니다. 브라우저에서 로그인해주세요.")
+            policy_managed_login = has_request_exclusions(self.target_policy)
+            if policy_managed_login:
+                # A visible Playwright runtime keeps the same proxy and request
+                # guard as Recon.  This permits operator login without opening
+                # an unmanaged network path around request exclusions.
+                self._launch_managed_runtime(headless=False)
+                self._register_authentication_observer()
+                assert self.page is not None
+                try:
+                    self.page.goto(
+                        self.session_config.login_url,
+                        wait_until="domcontentloaded",
+                        timeout=self.session_config.timeout_ms,
+                    )
+                except PlaywrightTimeoutError:
+                    # Rate-limited SPAs can commit the approved document while
+                    # deferred scripts keep DOMContentLoaded pending.  The
+                    # operator can still finish login in that committed page.
+                    current_url = str(getattr(self.page, "url", "") or "")
+                    parsed = urlparse(current_url)
+                    if (
+                        parsed.scheme not in {"http", "https"}
+                        or self.target_policy is None
+                        or not self.target_policy.allows_url(current_url)
+                    ):
+                        raise
+                print("  [Playwright] 정책이 적용된 로그인 창을 열었습니다. 브라우저에서 로그인해주세요.")
+            else:
+                # Where no request exclusions exist, preserve the direct login
+                # flow for identity providers which reject proxied automation.
+                self._launch_manual_browser(manual_login=True)
+                self._attach_manual_browser()
+                self._register_authentication_observer()
+                print("  [Playwright] 직접 연결 로그인 창을 열었습니다. 브라우저에서 로그인해주세요.")
             dashboard_confirmation = self.session_config.operator_confirmation
             if dashboard_confirmation is not None:
                 operator_confirmed = dashboard_confirmation(self._manual_login_problem)
@@ -1571,7 +1725,8 @@ class PlaywrightDriver:
             # Active policy enforcement is attached only after login; the login
             # flow contributes only secret-free passive endpoint coordinates.
             self._phase = "runtime"
-            self._register_context_handlers()
+            if not policy_managed_login:
+                self._register_context_handlers()
             for page in self.context.pages:
                 self._register_page_handlers(page)
         except BaseException:
@@ -1647,11 +1802,30 @@ class PlaywrightDriver:
         if restore_saved_session:
             self._restore_target_session()
         page = self._ensure_page()
-        response = page.goto(
-            self.base_url,
-            wait_until="domcontentloaded",
-            timeout=self.session_config.timeout_ms,
-        )
+        try:
+            response = page.goto(
+                self.base_url,
+                wait_until="domcontentloaded",
+                timeout=self.session_config.timeout_ms,
+            )
+        except PlaywrightTimeoutError:
+            # A SPA can commit its document quickly while rate-limited script
+            # and stylesheet requests keep DOMContentLoaded pending.  The page
+            # is still usable for capture and discovery once it has reached an
+            # approved HTTP(S) URL.  A timeout before navigation commits keeps
+            # about:blank (or another URL) and remains a hard failure.
+            current_url = str(getattr(page, "url", "") or "")
+            parsed = urlparse(current_url)
+            if (parsed.scheme not in {"http", "https"}
+                    or (self.target_policy is not None
+                        and not self.target_policy.allows_url(current_url))):
+                raise
+            response = None
+            print(
+                "  [Playwright] 문서는 열렸지만 일부 자원 로딩이 지연되어 "
+                "정찰을 계속합니다.",
+                flush=True,
+            )
         if self.target_policy is not None and not self.target_policy.allows_url(page.url):
             raise RuntimeError(
                 "unauthenticated browser left the approved start URL boundary"
@@ -2972,6 +3146,8 @@ class PlaywrightDriver:
         page = (
             self._ensure_page()
         )
+        if not self.resolve_user_action(page):
+            return 0
 
         config = (
             self.interaction_config
@@ -3158,6 +3334,8 @@ class PlaywrightDriver:
 
                 actions += 1
                 close_failed = False
+                if not self.resolve_user_action(page):
+                    break
 
                 if (
                     self._auth_expired
@@ -3272,7 +3450,8 @@ class PlaywrightDriver:
                 path += "#" + parsed.fragment
             if self._path_looks_dangerous(path):
                 continue
-            if any(marker in path.lower() for marker in ("{", "}", "%7b", "%7d")):
+            decoded_path = unquote(unquote(path))
+            if any(marker in decoded_path for marker in ("{", "}")):
                 continue
             paths.append(path)
         return paths
@@ -3390,6 +3569,9 @@ class PlaywrightDriver:
             )
 
             if not path:
+                continue
+
+            if any(marker in unquote(unquote(path)) for marker in ("{", "}")):
                 continue
 
             url = urljoin(self.base_url.rstrip("/") + "/", path)

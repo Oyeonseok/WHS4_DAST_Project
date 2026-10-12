@@ -152,6 +152,24 @@ def _load_policy(path: Path, target_url: str) -> TargetPolicy:
     return matching[0]
 
 
+def _scope_authorizes_disposable_fixtures(scope: str) -> bool:
+    """Recognize the approved local-fixture grant without locale coupling."""
+    normalized = " ".join(scope.casefold().split())
+    english = (
+        "disposable local lab fixtures is authorized" in normalized
+        or (
+            "scanner-created synthetic account" in normalized
+            and "disposable" in normalized
+        )
+    )
+    korean = (
+        "스캐너가 생성한 합성 계정" in scope
+        and "일회성 데이터" in scope
+        and "허용" in scope
+    )
+    return english or korean
+
+
 def _environment_name(scan_id: str, label: str) -> str:
     suffix = scan_id.removeprefix("scan_")[:12].upper()
     return f"AIDAST_VULNBANK_{suffix}_{label.upper().replace('-', '_')}"
@@ -177,7 +195,7 @@ def bootstrap_vulnbank(
     if parsed.scheme not in {"http", "https"} or not loopback:
         raise VulnBankBootstrapError("VulnBank benchmark bootstrap is loopback-only")
     scope = Path(scope_path).read_text(encoding="utf-8")
-    if "disposable local lab fixtures is authorized" not in scope:
+    if not _scope_authorizes_disposable_fixtures(scope):
         raise VulnBankBootstrapError("Scope does not authorize disposable lab fixtures")
     policy = _load_policy(policy_path, target_url)
     for path in (
@@ -212,8 +230,10 @@ def bootstrap_vulnbank(
     )
     nonce = secrets.token_hex(5)
     identities: list[dict[str, str]] = []
-    for label, extra_fields in (
-        ("user-a", {}), ("user-b", {}), ("admin-a", {"is_admin": True}),
+    for label, role, extra_fields in (
+        ("user-a", "authenticated", {}),
+        ("user-b", "identity_b", {}),
+        ("admin-a", "identity_synthetic", {"is_admin": True}),
     ):
         username = f"aidast_{label.replace('-', '')}_{nonce}_{secrets.token_hex(2)}"
         password = secrets.token_urlsafe(18)
@@ -230,7 +250,7 @@ def bootstrap_vulnbank(
         if not all(isinstance(value, (str, int)) for value in (token, account, user_id)):
             raise VulnBankBootstrapError("user fixture response omitted token or owned object")
         identities.append({
-            "label": label, "role": label, "token": str(token),
+            "label": label, "role": role, "token": str(token),
             "principal": username, "account_number": str(account),
             "user_id": str(user_id),
         })
@@ -290,7 +310,10 @@ def bootstrap_vulnbank(
                 raise VulnBankBootstrapError("admin fixture page omitted the owned loan ID")
             user_a["loan_id"] = match.group("loan_id")
 
-    for label in ("merchant-a", "merchant-b"):
+    for label, role in (
+        ("merchant-a", "merchant_synthetic"),
+        ("merchant-b", "merchant_b"),
+    ):
         email = f"aidast-{label}-{nonce}-{secrets.token_hex(2)}@example.invalid"
         result = send(urljoin(target_url, "/api/v1/merchants/register"), {
             "name": f"AIDAST {label}", "email": email,
@@ -302,7 +325,7 @@ def bootstrap_vulnbank(
         if not isinstance(token, str) or not isinstance(merchant_id, (str, int)):
             raise VulnBankBootstrapError("merchant fixture response omitted token or object ID")
         identities.append({
-            "label": label, "role": label, "token": token,
+            "label": label, "role": role, "token": token,
             "principal": email, "merchant_id": str(merchant_id),
         })
 
@@ -370,6 +393,15 @@ def bootstrap_vulnbank(
                     "object_id": identity[object_type],
                     "object_type": object_type,
                     "principal": identity["principal"],
+                    "identity_role": identity["role"],
+                    "resource": (
+                        "merchant" if object_type == "merchant_id"
+                        else "virtual_card" if object_type == "card_id"
+                        else "loan" if object_type == "loan_id"
+                        else "account"
+                    ),
+                    "disposable": True,
+                    "cleanup_allowed": True,
                 }, ensure_ascii=False, sort_keys=True)
                 conn.execute(
                     """INSERT INTO attack_facts

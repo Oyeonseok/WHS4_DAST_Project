@@ -29,6 +29,7 @@ PYTHON DB_HELPER commit-attempt --db PIPELINE_DB --scan-id SCAN_ID --payload FIL
 PYTHON DB_HELPER resolve-attempt --db PIPELINE_DB --scan-id SCAN_ID --payload FILE
 PYTHON DB_HELPER commit-fact --db PIPELINE_DB --scan-id SCAN_ID --payload FILE
 PYTHON DB_HELPER commit-finding --db PIPELINE_DB --scan-id SCAN_ID --payload FILE
+PYTHON DB_HELPER commit-checkpoint --db PIPELINE_DB --scan-id SCAN_ID --payload FILE
 PYTHON DB_HELPER transition-task --db PIPELINE_DB --scan-id SCAN_ID --stage-run-id STAGE_RUN_ID --task-id TASK_ID --status running|completed|skipped|failed [--reason TEXT]
 ```
 
@@ -67,11 +68,32 @@ candidate and submit it as another guarded request only if needed.
 {"task_id":"configured task ID","skill_name":"hunt-example","endpoint_id":"endpoint_id or empty","request_fingerprint":"fingerprint returned by HTTP helper","method":"GET","url":"https://target/path","identity_role":"unauthenticated","payload_variant":"short label","response_status":200,"response_signature":"sha256 digest","outcome":"negative|lead|inconclusive"}
 ```
 
+Before completing a task with negative or rejected evidence, append an intent
+checkpoint. It contains labels and ledger references only; never include raw
+requests, responses, URLs, tokens, cookies, or credentials:
+
+```json
+{"task_id":"configured task ID","strategy_families":["syntax mutation","identity differential"],"payload_families":["boolean control"],"response_features":[{"request_id":"target request ID","status":200,"body_sha256":"64 lowercase hex characters","assertion_kinds":["status_equals"]},{"request_id":"control request ID","status":401,"body_sha256":"64 lowercase hex characters","assertion_kinds":["body_digest_differs"]}],"acquired_fact_refs":[],"remaining_todos":[],"control_request_ids":["control request ID"]}
+```
+
+One denial, one payload, or one strategy is weak evidence and cannot close a
+coverage item as `tested_negative`. A later retry receives the latest checkpoint
+in its task payload and must select a materially different remaining strategy.
+
 `commit-finding` requires `scan_id`, optional `endpoint_id`, `vuln_type`,
 `severity`, `title`, `description`, optional CVSS/CWE fields, and a non-empty
 `evidence` array. Include the IDs of every supporting open lead in
 `lead_attempt_ids`; the helper atomically changes them to `confirmed` and links
 them to the finding. It also requires exactly one `reproduction` object:
+
+Each evidence item uses the compact shape below. Header values can be either a
+newline-delimited string or a JSON object; request and response bodies can be a
+string or JSON value. Keep only the fields shown, redact credentials and exposed
+secrets, and use the HTTP helper's status and timing values.
+
+```json
+{"role":"unauthenticated","method":"GET","url":"https://target.test/api/items","request_headers":{"Accept":"application/json"},"request_body":null,"response_status":200,"response_headers":{"Content-Type":"application/json"},"response_body":{"data":"[REDACTED]"},"response_time_ms":12}
+```
 
 ```json
 {"method":"GET","endpoint_template":"/api/items/{id}","injection_location":"path","parameter_name":"id","payload_template":{"id":"<slot:string>"},"required_identity_roles":[],"source_request_ids":["HTTP ledger request ID"],"runtime_contract":{"schema_version":1,"target":{"request":{"path_parameters":{"id":"target-object"}},"assertions":[{"assertion_id":"target-effect","kind":"json_equals","path":["owner_id"],"expected":"other-user"}]},"positive_control":{"request":{"path_parameters":{"id":"owned-object"}},"assertions":[{"assertion_id":"healthy-path","kind":"status_equals","expected":200}]},"negative_control":{"request":{"path_parameters":{"id":"inert-object"}},"assertions":[{"assertion_id":"target-effect","kind":"json_equals","path":["owner_id"],"expected":"other-user"}]}}}
@@ -84,7 +106,24 @@ context before replay; do not treat this missing metadata as a verdict.
 For HTTP findings, each attempt declares path/query
 values, non-secret headers, one JSON or text body, and one to sixteen assertions.
 Supported assertion kinds are `status_equals`, `header_equals`, `body_contains`,
-`json_equals`, `duration_at_least_ms`, and `duration_at_most_ms`.
+`json_equals`, `json_path_nonempty_string`, `duration_at_least_ms`, and
+`duration_at_most_ms`. `json_path_nonempty_string` uses `expected: true` and
+records only boolean/digest metadata, so it can prove that a token or other
+secret-shaped field was issued without retaining its value.
+Preserve the content encoding that produced the Attack evidence. In particular,
+an `application/x-www-form-urlencoded` source request must use an encoded
+`text_body` and the matching `Content-Type`; do not convert it to `json_body`.
+Likewise, do not convert a captured JSON request into form data. The positive
+control must first prove that the chosen encoding reaches the healthy path.
+
+For a read-only `GET` or `HEAD` finding on a literal exposure path, an inert
+negative control may declare `endpoint_template` on the `negative_control`
+attempt only. Use a same-origin, origin-relative, deliberately nonexistent path
+such as `/__aidast_negative_control_missing__`, and evaluate the exact same
+effect assertions as the target. This is the correct control when headers or
+query parameters are ignored by the server and would return the target body
+again. Do not use alternate endpoints for state-changing methods, target, or
+positive control attempts.
 
 For optional deeper HTTP login impact checks, add `session_verification` to the runtime
 contract. Capture a same-origin protected GET resource during Attack and declare
@@ -280,11 +319,22 @@ identity, and parser path and should pass. Negative-control assertions also
 describe the vulnerability effect, so they should fail for the inert input. Do
 not write an "effect is absent" assertion for the negative control because a
 passing assertion means `signal_observed=true`.
+For literal read-only disclosure routes, prefer the bounded missing-path
+negative control above over `Range`, `Accept`, cache, or other headers unless
+Attack directly observed that the header produces an inert response.
 
 Do not place credentials in runtime headers. Declare `required_identity_roles`
 and let the trusted Validation runtime resolve their opaque references. Browser,
 OOB, and multi-step findings may omit this HTTP-only contract until their
 dedicated runtime contract is available.
+
+When a finding requires more than one test identity, an HTTP attempt may add
+`credential_roles`, selecting a non-empty subset of `required_identity_roles`.
+Use this for an owner control and a separate attacker target; never merge two
+session credentials into one request. For example, the owner control can select
+`["identity_b"]` while the target selects `["identity_a"]`. An anonymous
+attempt must continue to use `identity_mode: "anonymous"` and cannot select a
+credential role.
 
 `reproduction` may also include one immutable `development_contract` when
 Attack knows the exact prerequisite request needed to recover from an objective

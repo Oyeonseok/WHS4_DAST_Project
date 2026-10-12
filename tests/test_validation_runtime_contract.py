@@ -147,6 +147,16 @@ class ValidationRuntimeContractTests(unittest.TestCase):
         self.assertEqual(set(validated.model_dump(mode="json")), {"schema_version", "target"})
         self.assertNotEqual(canonical_sha256(validated.model_dump(mode="json")), canonical_sha256(raw))
 
+    def test_legacy_negative_control_endpoint_is_discarded(self):
+        raw = legacy_contract_document()
+        raw["negative_control"] = {
+            **raw["negative_control"],
+            "endpoint_template": "/__aidast_negative_control_missing__",
+        }
+        validated = validate_runtime_contract(raw)
+        self.assertNotIn("negative_control", validated.model_dump(mode="json"))
+        self.assertIsNone(validated.target.endpoint_template)
+
     def test_session_verification_rejects_external_write_and_status_only_requests(self):
         base = legacy_contract_document()
         verification = {
@@ -184,6 +194,23 @@ class ValidationRuntimeContractTests(unittest.TestCase):
         validate_runtime_semantics(contract, SkillProfileResolver().resolve("hunt-api-misconfig").profile)
         self.assertNotIn("negative_control", contract.model_dump(mode="json"))
         self.assertNotIn("identity_mode", contract.target.model_dump(mode="json"))
+
+    def test_attempt_can_select_one_declared_credential_role(self):
+        raw = legacy_contract_document()
+        raw["target"] = {**raw["target"], "credential_roles": ["identity_a"]}
+        contract = validate_runtime_contract(raw)
+        self.assertEqual(contract.target.credential_roles, ("identity_a",))
+        self.assertEqual(
+            contract.target.model_dump(mode="json")["credential_roles"],
+            ["identity_a"],
+        )
+        with self.assertRaises(ValueError):
+            validate_runtime_contract({
+                **raw,
+                "target": {
+                    **raw["target"], "identity_mode": "anonymous",
+                },
+            })
 
     def test_unknown_explicit_runtime_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "unsupported runtime kind"):

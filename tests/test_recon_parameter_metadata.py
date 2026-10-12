@@ -138,6 +138,17 @@ def test_adaptive_script_provenance_is_sanitized_and_persistable() -> None:
     assert evidence == {"source_scripts": ["https://example.test/main.js?v="]}
 
 
+def test_openapi_operation_metadata_is_bounded_and_secret_sanitized() -> None:
+    evidence = sanitize_evidence({
+        "operation_summary": "Transfer funds",
+        "operation_description": "password=hidden Check account ownership",
+        "operation_tags": ["payments", "authorization"],
+    })
+    assert evidence["operation_summary"] == "Transfer funds"
+    assert "hidden" not in evidence["operation_description"]
+    assert evidence["operation_tags"] == ["payments", "authorization"]
+
+
 def test_learned_dynamic_routes_retain_observations_without_duplicate_surface(tmp_path) -> None:
     with db.connect(tmp_path / "Recon.db") as connection:
         db.insert_scan(connection, scan_id="scan", scope_type="url", scope_value="https://example.test")
@@ -204,7 +215,7 @@ def test_learned_dynamic_routes_retain_observations_without_duplicate_surface(tm
 def test_recon_schema_version_tracks_metadata_without_downgrading_live_database(tmp_path) -> None:
     database = tmp_path / "Recon.db"
     with db.connect(database) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == db.RECON_SCHEMA_VERSION == 11
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == db.RECON_SCHEMA_VERSION == 12
         connection.execute("PRAGMA user_version=12")
         connection.commit()
     with db.connect(database) as connection:

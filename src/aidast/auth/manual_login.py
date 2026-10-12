@@ -28,6 +28,13 @@ class ManualLoginStore:
                 created_at REAL NOT NULL, expires_at REAL NOT NULL,
                 confirmed_at REAL, auth_state TEXT, problem TEXT
             )''')
+            columns = {row[1] for row in conn.execute('PRAGMA table_info(manual_login)')}
+            if 'action_kind' not in columns:
+                try:
+                    conn.execute("ALTER TABLE manual_login ADD COLUMN action_kind TEXT NOT NULL DEFAULT 'login'")
+                except sqlite3.OperationalError:
+                    if 'action_kind' not in {row[1] for row in conn.execute('PRAGMA table_info(manual_login)')}:
+                        raise
 
     @contextmanager
     def _connect(self):
@@ -39,14 +46,26 @@ class ManualLoginStore:
         finally:
             conn.close()
 
-    def begin(self, scan_id: str, target_origin: str, timeout_seconds: float) -> dict:
+    def begin(self, scan_id: str, target_origin: str, timeout_seconds: float, *,
+              action_kind: str = 'login', problem: str | None = None) -> dict:
+        if action_kind not in {'login', 'recon_login', 'mfa', 'captcha', 'access'}:
+            raise ValueError('invalid operator action kind')
+        if problem not in {None, 'login_form_visible', 'mfa_required', 'captcha_required',
+                           'access_required', 'runtime_browser_required'}:
+            raise ValueError('invalid operator action problem')
         now = time.time()
         request_id = uuid4().hex
         with self._connect() as conn:
             conn.execute('''INSERT OR REPLACE INTO manual_login
-                VALUES (?, ?, ?, 'waiting', ?, ?, NULL, NULL, NULL)''',
-                (scan_id, request_id, target_origin, now, now + timeout_seconds))
-        return self.read(scan_id)
+                (scan_id, request_id, target_origin, status, created_at, expires_at,
+                 confirmed_at, auth_state, problem, action_kind)
+                VALUES (?, ?, ?, 'waiting', ?, ?, NULL, NULL, ?, ?)''',
+                (scan_id, request_id, target_origin, now, now + timeout_seconds, problem, action_kind))
+            # Return the row written by this transaction. A later read by scan
+            # alone could return a replacement request owned by another gate.
+            row = conn.execute('SELECT * FROM manual_login WHERE scan_id=? AND request_id=?',
+                               (scan_id, request_id)).fetchone()
+        return dict(row)
 
     def read(self, scan_id: str) -> dict | None:
         with self._connect() as conn:
@@ -65,7 +84,9 @@ class ManualLoginStore:
                 (now, scan_id, request_id, now)).rowcount
             if not changed:
                 raise ValueError('login request is no longer waiting or does not match this scan')
-        return self.read(scan_id)
+            row = conn.execute('SELECT * FROM manual_login WHERE scan_id=? AND request_id=?',
+                               (scan_id, request_id)).fetchone()
+        return dict(row)
 
     def reject_confirmation(self, scan_id: str, request_id: str, problem: str) -> None:
         with self._connect() as conn:
@@ -98,10 +119,13 @@ class ManualLoginGate:
         self.timeout_seconds = timeout_seconds
         self.poll_interval = poll_interval
 
-    def wait(self, browser_problem: Callable[[], str | None]) -> bool:
-        request = self.store.begin(self.scan_id, self.target_origin, self.timeout_seconds)
+    def wait(self, browser_problem: Callable[[], str | None], *,
+             action_kind: str = 'login', problem: str | None = None,
+             poll_browser: Callable[[], None] | None = None) -> bool:
+        request = self.store.begin(self.scan_id, self.target_origin, self.timeout_seconds,
+                                   action_kind=action_kind, problem=problem)
         request_id = request['request_id']
-        print('  [Playwright] 브라우저에서 로그인한 뒤 대시보드의 로그인 완료 버튼을 눌러주세요.', flush=True)
+        print('  [Playwright] 열린 브라우저에서 필요한 사용자 조치를 마친 뒤 대시보드에서 완료를 확인해주세요.', flush=True)
         try:
             while True:
                 current = self.store.read(self.scan_id)
@@ -117,9 +141,18 @@ class ManualLoginGate:
                     self.store.reject_confirmation(self.scan_id, request_id, problem)
                 elif current['status'] != 'waiting':
                     raise RuntimeError('manual login request is no longer active')
+                if poll_browser is not None:
+                    # Dispatch the existing Playwright route/event handlers so
+                    # operator input is not stalled while the worker is waiting.
+                    poll_browser()
                 time.sleep(self.poll_interval)
         except BaseException:
             current = self.store.read(self.scan_id)
             if current and current['request_id'] == request_id and current['status'] in {'waiting', 'confirmed'}:
-                self.store.finish(self.scan_id, request_id, 'failed')
+                try:
+                    self.store.finish(self.scan_id, request_id, 'failed')
+                except ValueError:
+                    # Another gate may replace the row after read(). Leave its
+                    # request intact and preserve the original browser error.
+                    pass
             raise

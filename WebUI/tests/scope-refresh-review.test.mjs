@@ -29,6 +29,28 @@ test('new approval selection uses exact scope ID when multiple versions share on
   assert.equal(scope.selectApprovedScope([], 'missing'), '');
 });
 
+test('late responses cannot change a closed or replaced Scope workflow', async () => {
+  const guard = scope.createScopeResponseGuard();
+  let applyOldResponse;
+  const delayed = new Promise(resolve => { applyOldResponse = resolve; });
+  const oldCurrent = guard.capture();
+  const applied = delayed.then(() => oldCurrent() ? 'old program' : 'ignored');
+  guard.invalidate();
+  const newCurrent = guard.capture();
+  applyOldResponse();
+  assert.equal(await applied, 'ignored');
+  assert.equal(newCurrent(), true);
+  guard.invalidate();
+  assert.equal(newCurrent(), false);
+});
+
+test('responses remain usable while the same Scope workflow stays selected', () => {
+  const guard = scope.createScopeResponseGuard();
+  const current = guard.capture();
+  assert.equal(current(), true);
+  assert.equal(current(), true);
+});
+
 test('reference review exposes URL, status, applicability, provenance and failures compactly', async () => {
   const {ScopePolicyReferences} = await import('../src/components/ScopePolicyReferences.ts');
   const refs = [{requested_url:'https://docs.example.test/testing',final_url:'https://docs.example.test/v2',status:'captured',applicability:'testing',source_quote:'Read our testing guide.',error:null},

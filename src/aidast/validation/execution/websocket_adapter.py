@@ -13,7 +13,7 @@ from typing import Callable
 from uuid import uuid4
 
 from websockets.exceptions import ConnectionClosed, ProtocolError
-from websockets.frames import CLOSE, PONG, DATA_OPCODES
+from websockets.frames import DATA_OPCODES, Opcode
 from websockets.sync.client import ClientConnection, connect
 
 from aidast.recon.policy import TargetPolicy
@@ -25,11 +25,19 @@ from ..contracts.websocket_contract import (
     json_bytes, policy_url,
 )
 from ..persistence.evidence_policy import sanitize_metadata
-from .credentials import PipelineCredentialResolver
+from .credentials import PipelineCredentialResolver, resolve_credential_headers
 from .transport_broker import (
     TransportDispatchResult, TransportOperationSpec, ValidationTransportBroker,
     ValidationTransportError,
 )
+
+
+# openai-agents currently constrains the integrated Strix environment to
+# websockets 15/16, where control opcodes live on the Opcode enum.  Keep the
+# adapter compatible with that API while preserving the same comparisons used
+# by the standalone artex environment on websockets 17.
+CLOSE = Opcode.CLOSE
+PONG = Opcode.PONG
 
 
 class WebSocketSessionError(ValidationTransportError):
@@ -143,7 +151,9 @@ class WebSocketReproductionPort:
             if self.credential_resolver is None:
                 return self._blocked(blind_case, "credential_reference_unavailable")
             try:
-                raw_headers = self.credential_resolver(reference)
+                raw_headers = resolve_credential_headers(
+                    self.credential_resolver, reference, destination_url=url,
+                )
             except (ImportError, OSError, KeyError, ValueError, sqlite3.Error):
                 return self._blocked(blind_case, "credential_reference_unavailable")
             except Exception:
@@ -228,7 +238,7 @@ class WebSocketReproductionPort:
                     close_timeout=remaining(), max_size=min(attempt.max_frame_bytes, attempt.max_received_bytes),
                     # The event guard rejects overflow before queue insertion;
                     # valid buffered frames cannot pause a synchronous close.
-                    max_queue=attempt.max_received_frames, logger=_QUIET_LOGGER, legacy=True,
+                    max_queue=attempt.max_received_frames, logger=_QUIET_LOGGER,
                     create_connection=partial(_BoundedConnection, frame_limit=attempt.max_received_frames,
                                               byte_limit=attempt.max_received_bytes),
                 )

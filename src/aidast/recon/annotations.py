@@ -8,10 +8,15 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from aidast.agents.main import MainAgentError
 from aidast.pipeline.lifecycle import audit_event
 from aidast.recon import db
 from aidast.recon.judgment import normalize_path, is_static_asset, query_signature
 from aidast.recon.verification import result_verification_status
+from aidast.recon.ui_synthesis import (
+    persist_synthetic_ui_candidate,
+    reconcile_synthetic_ui_candidates,
+)
 
 
 TAXONOMY = {
@@ -96,6 +101,23 @@ def parameter_context(conn, endpoint_id: str) -> list[dict]:
             for name, location, data_type, role, is_identifier in rows]
 
 
+def persist_declared_parameters(conn, endpoint_id: str, parameters) -> None:
+    """Persist bounded schema/form field names while discarding all field values."""
+    if not isinstance(parameters, list):
+        return
+    for parameter in parameters[:100]:
+        if not isinstance(parameter, dict):
+            continue
+        name, location, data_type = (parameter.get(key) for key in ("name", "location", "data_type"))
+        if (not isinstance(name, str) or not re.fullmatch(r"[A-Za-z_$][\w$.-]{0,127}", name)
+                or not isinstance(location, str) or location not in {"path", "query", "json", "form", "header"}):
+            continue
+        role = _parameter_role(name)
+        db.upsert_parameter(conn, endpoint_id=endpoint_id, name=name, location=location,
+            data_type=data_type if isinstance(data_type, str) and data_type in {"string", "integer", "number", "boolean", "array", "object"} else "string",
+            role=role, is_identifier=role == "identifier")
+
+
 def sanitize_evidence(value) -> dict:
     """Allowlisted metadata only; never forward raw tool records or bodies."""
     if not isinstance(value, dict):
@@ -107,8 +129,37 @@ def sanitize_evidence(value) -> dict:
     for key in ('html_tag', 'html_attribute', 'content_type'):
         if isinstance(value.get(key), str):
             result[key] = safe_text(value[key])[:200]
+    for key, limit in (
+        ('operation_summary', 500),
+        ('operation_description', 1000),
+    ):
+        if isinstance(value.get(key), str) and value[key].strip():
+            result[key] = safe_text(value[key])[:limit]
+    tags = value.get('operation_tags')
+    if isinstance(tags, list):
+        result['operation_tags'] = [
+            safe_text(tag)[:100] for tag in tags[:20]
+            if isinstance(tag, str) and tag.strip()
+        ]
     if isinstance(value.get('verification_reason'), str):
         result['verification_reason'] = safe_text(value['verification_reason'])[:80]
+    if value.get('synthesis_kind') == 'navigation':
+        result['synthesis_kind'] = 'navigation'
+    if value.get('required_role_hint') in {'unknown', 'authenticated', 'administrator'}:
+        result['required_role_hint'] = value['required_role_hint']
+    if isinstance(value.get('source_document_sha256'), str) and re.fullmatch(
+        r'[a-f0-9]{64}', value['source_document_sha256']
+    ):
+        result['source_document_sha256'] = value['source_document_sha256']
+    if value.get('derivation_rule') in {
+        'api_prefix_alias', 'api_collection_alias',
+        'authentication_ui_companion', 'versionless_api_action',
+        'authenticated_resource_landing', 'authenticated_resource_dashboard',
+        'well_known_imds_family',
+    }:
+        result['derivation_rule'] = value['derivation_rule']
+    if isinstance(value.get('inferred_from'), str) and value['inferred_from'].startswith('/'):
+        result['inferred_from'] = safe_url(value['inferred_from'])
     if (isinstance(value.get('access_status'), str)
             and value['access_status'] in {'authentication_required', 'forbidden'}):
         result['access_status'] = value['access_status']
@@ -151,6 +202,7 @@ class ObservationRecorder:
         self.scan_id = scan_id
         self.agent = agent
         self.last_failure_retryable = False
+        self.last_failure_splittable = False
         self.context_ids: dict[str, str] = {}
         # A deferred worker has no single origin/session.  Keep the recorder
         # reusable without manufacturing an invalid foreign-key reference.
@@ -184,6 +236,7 @@ class ObservationRecorder:
                 verification_status=verification_status,
             )
             persist_url_parameters(self.conn, endpoint_id, item.get('url', path), path)
+            persist_declared_parameters(self.conn, endpoint_id, item.get('declared_parameters'))
             context = item.get('context') or {}
             key = str(context.get('context_key') or 'phase:' + phase)
             context_id = self.context_ids.get(key)
@@ -202,6 +255,13 @@ class ObservationRecorder:
             else:
                 self.conn.execute('UPDATE discovery_contexts SET ended_at=? WHERE context_id=?', (db.now(), context_id))
             evidence = sanitize_evidence(item.get('evidence'))
+            if item.get('discovery_kind') == 'synthetic_ui_candidate':
+                persist_synthetic_ui_candidate(
+                    self.conn, scan_id=self.scan_id, origin_id=self.origin_id,
+                    method=method, path=path,
+                    source_url=str(evidence.get('parent_url') or context.get('page_url') or path),
+                    evidence=evidence,
+                )
             if unverified_candidate:
                 evidence['verification_status'] = 'candidate'
             if item.get('traffic_class'):
@@ -235,6 +295,8 @@ class ObservationRecorder:
                 'phase': phase,
                 'parameters': parameter_context(self.conn, endpoint_id),
             })
+        if self.origin_id:
+            reconcile_synthetic_ui_candidates(self.conn, origin_id=self.origin_id)
         self.conn.commit()
         if self.agent is not None:
             payload.sort(key=lambda item: item.get('observed_at') or '')
@@ -247,6 +309,7 @@ class ObservationRecorder:
 
     def _classify(self, payload: list[dict], *, index: int, total: int) -> bool:
         self.last_failure_retryable = False
+        self.last_failure_splittable = False
         run_id = db.new_id('annotation_run')
         self.conn.execute('''INSERT INTO annotation_runs
             (annotation_run_id,scan_id,model,prompt_version,taxonomy_version,status,started_at)
@@ -296,7 +359,13 @@ class ObservationRecorder:
                                  'processed_count': len(payload), 'failed_count': 0})
             return True
         except Exception as exc:
-            self.last_failure_retryable = isinstance(exc, AnnotationContractError)
+            # Contract failures can often be isolated by splitting the input.
+            # Operational Codex failures are commonly transient, so allow the
+            # deferred tagger to retry the unchanged bounded batch once.
+            self.last_failure_splittable = isinstance(exc, AnnotationContractError)
+            self.last_failure_retryable = self.last_failure_splittable or isinstance(
+                exc, MainAgentError
+            )
             self.conn.rollback()
             self.conn.execute("UPDATE annotation_runs SET status='failed',error_message=?,finished_at=? WHERE annotation_run_id=?", (type(exc).__name__, db.now(), run_id))
             self.conn.commit()
@@ -307,9 +376,16 @@ class ObservationRecorder:
             return False
 
 
+MAX_SAFE_TAG_BATCH_SIZE = 25
+
+
 def tag_pending_observations(conn, *, scan_id: str, agent, batch_size: int = 200,
                              progress=None) -> tuple[int, int]:
     """Tag only observations without annotations, preserving stored context/time."""
+    # Large prompts can reach the agent deadline before a structured response is
+    # returned. Keep the public setting backward compatible while bounding every
+    # actual model call to the batch size proven stable in live scans.
+    effective_batch_size = min(max(1, batch_size), MAX_SAFE_TAG_BATCH_SIZE)
     rows = conn.execute('''
         SELECT o.observation_id, o.source_tool, o.discovery_kind, o.observed_url,
                o.association_method, o.observed_at, o.evidence_json, e.method, e.path,
@@ -321,41 +397,115 @@ def tag_pending_observations(conn, *, scan_id: str, agent, batch_size: int = 200
         JOIN assets s ON s.asset_id=g.asset_id AND s.scan_id=?
         LEFT JOIN discovery_contexts c ON c.context_id=o.context_id
         WHERE NOT EXISTS (SELECT 1 FROM endpoint_annotations a WHERE a.observation_id=o.observation_id)
+          AND COALESCE(e.is_excluded,0)=0
         ORDER BY o.observed_at, o.observation_id
     ''', (scan_id,)).fetchall()
     recorder = ObservationRecorder(conn, origin_id='', scan_id=scan_id, agent=agent)
 
+    payloads = []
+    for row in rows:
+        try:
+            evidence = sanitize_evidence(json.loads(row[6] or "{}"))
+        except (TypeError, json.JSONDecodeError):
+            evidence = {}
+        payloads.append({
+            'observation_id': row[0], 'source': row[1],
+            'discovery_kind': row[2], 'url': row[3], 'method': row[7],
+            'path': row[8], 'observed_at': row[5], 'evidence': evidence,
+            'phase': row[2],
+            'page_url': row[9], 'page_title': row[10],
+            'action': row[12], 'auth_state': row[13],
+            'association_method': row[4],
+            'parameters': parameter_context(conn, row[15]),
+        })
+
+    # Crawlers, the browser, the policy proxy and reconciliation can report the
+    # same normalized black-box evidence many times.  Classify one exact
+    # evidence shape and transparently copy that classification to its
+    # equivalent observation IDs.  Distinct URLs, contexts, authentication
+    # states, sources, response evidence or parameters still go to the model.
+    representatives = []
+    equivalents: dict[str, list[str]] = {}
+    representative_by_key: dict[str, str] = {}
+    for payload in payloads:
+        comparable = {key: value for key, value in payload.items()
+                      if key not in {'observation_id', 'observed_at'}}
+        key = json.dumps(comparable, ensure_ascii=False, sort_keys=True,
+                         separators=(',', ':'))
+        representative_id = representative_by_key.get(key)
+        if representative_id is None:
+            representative_id = payload['observation_id']
+            representative_by_key[key] = representative_id
+            representatives.append(payload)
+        else:
+            equivalents.setdefault(representative_id, []).append(
+                payload['observation_id'])
+
+    equivalent_run_id: str | None = None
+
+    def copy_equivalent_annotations(payload: list[dict]) -> int:
+        nonlocal equivalent_run_id
+        selected = [(item['observation_id'], equivalents.get(item['observation_id'], []))
+                    for item in payload]
+        selected = [(representative, duplicates) for representative, duplicates in selected
+                    if duplicates]
+        if not selected:
+            return 0
+        if equivalent_run_id is None:
+            equivalent_run_id = db.new_id('annotation_run')
+            conn.execute('''INSERT INTO annotation_runs
+                (annotation_run_id,scan_id,model,prompt_version,taxonomy_version,status,started_at,finished_at)
+                VALUES (?,?,'deterministic-equivalent','equivalent-black-box-evidence-1','1',
+                        'completed',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)''',
+                (equivalent_run_id, scan_id))
+        copied = 0
+        for representative, duplicates in selected:
+            annotations = conn.execute('''
+                SELECT category,tag,rationale,confidence
+                FROM endpoint_annotations
+                WHERE observation_id=? AND category<>'attack_hypothesis'
+                ORDER BY created_at,annotation_id
+            ''', (representative,)).fetchall()
+            for duplicate in duplicates:
+                for category, tag, rationale, confidence in annotations:
+                    conn.execute('''INSERT INTO endpoint_annotations
+                        (annotation_id,observation_id,annotation_run_id,category,tag,
+                         rationale,confidence,created_at)
+                        VALUES (?,?,?,?,?,?,?,CURRENT_TIMESTAMP)''',
+                        (db.new_id('annotation'), duplicate, equivalent_run_id,
+                         category, tag,
+                         '동일한 정규화 블랙박스 관측 증거의 분류를 재사용함. '
+                         + safe_text(rationale), confidence))
+                copied += 1
+        conn.commit()
+        if copied:
+            audit_event(conn, scan_id=scan_id, event_type='recon.activity', details={
+                'phase': 'observation_tagging_equivalent', 'state': 'finished',
+                'count': copied,
+            })
+        return copied
+
     def classify_with_split(payload: list[dict], index: int) -> tuple[int, int]:
         if recorder._classify(payload, index=index, total=batches):
-            return len(payload), 0
-        if recorder.last_failure_retryable and len(payload) > 1:
+            return len(payload) + copy_equivalent_annotations(payload), 0
+        if recorder.last_failure_retryable and not recorder.last_failure_splittable:
+            if recorder._classify(payload, index=index, total=batches):
+                return len(payload) + copy_equivalent_annotations(payload), 0
+        if recorder.last_failure_splittable and len(payload) > 1:
             midpoint = len(payload) // 2
             left_done, left_failed = classify_with_split(payload[:midpoint], index)
             right_done, right_failed = classify_with_split(payload[midpoint:], index)
             return left_done + right_done, left_failed + right_failed
-        return 0, len(payload)
+        failed = sum(1 + len(equivalents.get(item['observation_id'], []))
+                     for item in payload)
+        return 0, failed
 
     total = 0
     failed = 0
-    batches = (len(rows) + batch_size - 1) // batch_size
-    for offset in range(0, len(rows), batch_size):
-        batch_number = offset // batch_size + 1
-        payload = []
-        for row in rows[offset:offset + batch_size]:
-            try:
-                evidence = sanitize_evidence(json.loads(row[6] or "{}"))
-            except (TypeError, json.JSONDecodeError):
-                evidence = {}
-            payload.append({
-                'observation_id': row[0], 'source': row[1],
-                'discovery_kind': row[2], 'url': row[3], 'method': row[7],
-                'path': row[8], 'observed_at': row[5], 'evidence': evidence,
-                'phase': row[2],
-                'page_url': row[9], 'page_title': row[10],
-                'action': row[12], 'auth_state': row[13],
-                'association_method': row[4],
-                'parameters': parameter_context(conn, row[15]),
-            })
+    batches = (len(representatives) + effective_batch_size - 1) // effective_batch_size
+    for offset in range(0, len(representatives), effective_batch_size):
+        batch_number = offset // effective_batch_size + 1
+        payload = representatives[offset:offset + effective_batch_size]
         try:
             done_count, failed_count = classify_with_split(payload, batch_number)
             total += done_count

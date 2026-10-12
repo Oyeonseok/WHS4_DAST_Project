@@ -18,14 +18,24 @@ class ImpactResult:
     underpowered: bool
 
 
-def evaluate_impact(boundary: int, sensitivity: int, actor_requirements: int) -> ImpactResult:
+def evaluate_impact(
+    boundary: int, sensitivity: int, actor_requirements: int, *,
+    zero_sensitivity_boundary_confirmation: bool = False,
+) -> ImpactResult:
     values = (boundary, sensitivity, actor_requirements)
     if any(type(value) is not int or not 0 <= value <= 3 for value in values):
         raise ValueError("impact axes must be integers from zero through three")
     score = sum(values)
     severity = "INFO" if score <= 2 else "LOW" if score <= 4 else "MEDIUM" if score <= 6 else "HIGH" if score <= 8 else "CRITICAL"
+    # Most profiles require a sensitivity effect before confirmation. Some
+    # mechanisms (for example controlled SQL query behavior) establish a
+    # technical vulnerability through the boundary effect itself. Profiles
+    # must opt into that narrower rule explicitly.
     return ImpactResult(boundary, sensitivity, actor_requirements, score, severity,
-                        boundary == 0 or sensitivity == 0 or score < 3)
+                        boundary == 0 or score < 3 or (
+                            sensitivity == 0
+                            and not zero_sensitivity_boundary_confirmation
+                        ))
 
 
 @dataclass(frozen=True)

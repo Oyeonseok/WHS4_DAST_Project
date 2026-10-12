@@ -158,3 +158,26 @@ def test_dashboard_endpoint_discovery_wires_confirmation_gate(tmp_path, monkeypa
         with pytest.raises(RuntimeError, match='stop before network'):
             discover_endpoints('https://example.com/', run_id='scan_test', interactive_login=True)
         assert callable(driver.call_args.args[1].operator_confirmation)
+
+
+def test_dashboard_login_gate_pumps_managed_browser_events(tmp_path, monkeypatch):
+    from aidast.recon.tools.endpoint_discovery import discover_endpoints
+
+    monkeypatch.setenv('AIDAST_DASHBOARD_MANUAL_LOGIN', '1')
+    with patch('aidast.recon.tools.endpoint_discovery.RESULT_ROOT', tmp_path), patch(
+        'aidast.recon.tools.endpoint_discovery.PlaywrightDriver'
+    ) as driver, patch.object(ManualLoginGate, 'wait', return_value=True) as wait:
+        page = driver.return_value.page = Mock()
+
+        def capture():
+            confirmation = driver.call_args.args[1].operator_confirmation
+            assert confirmation(lambda: None) is True
+            raise RuntimeError('stop after confirmation wiring')
+
+        driver.return_value.capture_and_start.side_effect = capture
+        with pytest.raises(RuntimeError, match='stop after confirmation wiring'):
+            discover_endpoints('https://example.com/', run_id='scan_test', interactive_login=True)
+
+        pump = wait.call_args.kwargs['poll_browser']
+        pump()
+        page.wait_for_timeout.assert_called_once_with(50)

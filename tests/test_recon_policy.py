@@ -284,6 +284,27 @@ class TargetPolicyTests(unittest.TestCase):
             max_depth=None, max_concurrency=None, timeout_seconds=None)
         self.assertEqual(next(iter(capped.values())).limits.requests_per_second, 1)
 
+    def test_bug_bounty_profile_preserves_lower_rate_and_disables_ffuf(self) -> None:
+        from aidast.cli import _apply_policy_caps
+
+        default = policy(limits=PolicyLimits(requests_per_second=10))
+        capped = _apply_policy_caps(
+            {("URL", default.asset): default},
+            profile="bug-bounty-safe",
+            max_rps=None,
+            scope_max_rps=10,
+            max_requests=None,
+            max_depth=None,
+            max_concurrency=None,
+            timeout_seconds=None,
+        )
+
+        effective = next(iter(capped.values()))
+        self.assertEqual(effective.limits.requests_per_second, 0.2)
+        self.assertEqual(effective.limits.concurrency, 1)
+        self.assertFalse(effective.tools.ffuf_enabled)
+        self.assertFalse(effective.tools.ffuf_recursion)
+
     def test_only_validated_rate_evidence_can_override_structured_rate(self) -> None:
         from aidast.cli import _apply_policy_caps
         quote = "Automated tooling: max. 10 requests per second."
@@ -498,6 +519,36 @@ class TargetPolicyTests(unittest.TestCase):
         self.assertEqual(
             result[(AssetType.URL.value, active.asset)].attack_authorization_mode,
             "active_non_destructive",
+        )
+
+    def test_korean_vulnerability_validation_is_an_explicit_active_grant(self) -> None:
+        authorization = (
+            "이 로컬 일회성 VulnBank 컨테이너의 블랙박스 취약점 검증을 위해 "
+            "GET, HEAD, OPTIONS, POST, PUT, PATCH, DELETE 요청을 허용합니다."
+        )
+        active = TargetPolicyProposal(
+            asset_type=AssetType.URL,
+            asset="http://127.0.0.1:5002/",
+            allowed_schemes=["http"],
+            allowed_hosts=["127.0.0.1"],
+            allowed_ports=[5002],
+            attack_authorization_mode="active_non_destructive",
+            attack_allowed_methods=[
+                "GET", "HEAD", "OPTIONS", "POST", "PUT", "PATCH", "DELETE",
+            ],
+            attack_authorization_evidence=authorization,
+        )
+        scope_markdown = (
+            "## Allowed activities\n\n"
+            f"- {authorization}\n\n"
+            "## Prohibited activities\n\n- 서비스 거부 테스트를 금지합니다.\n"
+        )
+
+        validate_policy_for_target(
+            active,
+            asset_type=active.asset_type,
+            asset=active.asset,
+            scope_markdown=scope_markdown,
         )
 
     def test_codex_schema_requires_every_nested_policy_property(self) -> None:

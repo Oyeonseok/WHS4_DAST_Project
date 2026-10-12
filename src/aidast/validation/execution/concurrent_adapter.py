@@ -31,7 +31,7 @@ from ..contracts.runtime_contract import (
     HttpRequestTemplate, _HEADER_NAME, evaluate_http_response, render_http_request,
 )
 from ..persistence.evidence_policy import sanitize_metadata
-from .credentials import PipelineCredentialResolver
+from .credentials import PipelineCredentialResolver, resolve_credential_headers
 from .http_deadline import DeadlineHttpTransport
 from .transport_broker import (
     TransportDispatchResult, TransportOperationSpec, TransportReservation,
@@ -157,7 +157,10 @@ class ConcurrentReproductionPort:
         headers: dict[str, str] = {}
         for reference in blind_case.credential_references:
             try:
-                raw = self.credential_resolver(reference)
+                raw = resolve_credential_headers(
+                    self.credential_resolver, reference,
+                    destination_url=blind_case.endpoint,
+                )
             except (ImportError, OSError, KeyError, sqlite3.Error):
                 raise _CredentialUnavailable from None
             except ValueError:

@@ -5,9 +5,12 @@ import hashlib
 import json
 import os
 import platform
+import re
 import shutil
+import select
 import socket
 import subprocess
+import sys
 import time
 from dataclasses import dataclass
 from collections.abc import Iterable
@@ -70,6 +73,80 @@ def filter_snapshot(raw: dict, target_url: str) -> tuple[dict, dict]:
     return {"cookies": cookies, "origins": origins}, {target_origin: storage.get(target_origin, {})}
 
 
+def auth_headers_from_session(state_path: Path, target_url: str) -> dict[str, str]:
+    """Build same-origin auth headers from the persisted browser state.
+
+    Use a conservative header fallback:
+    only host-matching cookies and a single unambiguous JWT-like storage value
+    are forwarded. No browser runtime is started to read a JSON snapshot.
+    """
+    target = urlsplit(target_url)
+    target_host = (target.hostname or "").lower()
+    headers: dict[str, str] = {}
+    try:
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise BrowserLoginError("cannot read target session state") from exc
+
+    cookies = []
+    for item in state.get("cookies", []):
+        if not isinstance(item, dict):
+            continue
+        name, value = item.get("name"), item.get("value")
+        domain = str(item.get("domain", "")).lstrip(".").lower()
+        if (not name or value is None or not domain
+                or not (target_host == domain or target_host.endswith("." + domain))):
+            continue
+        if item.get("secure") and target.scheme != "https":
+            continue
+        cookies.append(f"{name}={value}")
+    if cookies:
+        headers["Cookie"] = "; ".join(cookies)
+
+    storage_values: dict[str, str] = {}
+    target_origin = origin(target_url)
+    for item in state.get("origins", []):
+        if not isinstance(item, dict) or item.get("origin") != target_origin:
+            continue
+        for entry in item.get("localStorage", []):
+            if isinstance(entry, dict) and entry.get("name") and entry.get("value") is not None:
+                storage_values[str(entry["name"])] = str(entry["value"])
+
+    session_path = Path(str(state_path) + ".sessionstorage.json")
+    try:
+        session_state = json.loads(session_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        session_state = {}
+    same_origin_session = session_state.get(target_origin, {}) if isinstance(session_state, dict) else {}
+    if isinstance(same_origin_session, dict):
+        storage_values.update({str(key): str(value) for key, value in same_origin_session.items() if value is not None})
+
+    jwt_candidates = {
+        value.strip().removeprefix("Bearer ").strip('"\'')
+        for key, value in storage_values.items()
+        if re.search(r"token|jwt|auth", key, re.I)
+        and value.count(".") == 2
+        and all(part for part in value.split("."))
+    }
+    if len(jwt_candidates) == 1:
+        headers["Authorization"] = "Bearer " + next(iter(jwt_candidates))
+
+    identity_path = Path(str(state_path) + ".identity-headers.json")
+    try:
+        identity_doc = json.loads(identity_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        identity_doc = {}
+    if isinstance(identity_doc, dict) and identity_doc.get("origin") == target_origin:
+        extra = identity_doc.get("headers", {})
+        if isinstance(extra, dict):
+            for name, value in extra.items():
+                if (re.search(r"(?:authorization|auth[-_]?token|api[-_]?key|csrf)", str(name), re.I)
+                        and str(name).casefold() not in {"cookie", "set-cookie", "proxy-authorization"}
+                        and len(str(value)) <= 16_384):
+                    headers[str(name)] = str(value)
+    return headers
+
+
 @dataclass(frozen=True)
 class TargetSession:
     bundle_path: Path
@@ -89,7 +166,11 @@ class TargetSession:
                         "asset_type": self.asset_type, "asset": self.asset}
             if any(doc.get(key) != value for key, value in expected.items()):
                 raise ValueError("session binding changed")
-            for path in (self.state_path, Path(str(self.state_path) + ".sessionstorage.json")):
+            paths = [self.state_path, Path(str(self.state_path) + ".sessionstorage.json")]
+            identity_headers_path = Path(str(self.state_path) + ".identity-headers.json")
+            if identity_headers_path.is_file():
+                paths.append(identity_headers_path)
+            for path in paths:
                 if hashlib.sha256(path.read_bytes()).hexdigest() != doc["sha256"][path.name]:
                     raise ValueError("session snapshot changed")
             has_provenance = "authentication_endpoints" in doc
@@ -166,6 +247,157 @@ def _capture_windows(url: str, output: Path) -> dict:
     return json.loads(output.read_text(encoding="utf-8-sig"))
 
 
+def _wait_for_login(timeout_seconds: int = 60) -> None:
+    """Wait briefly for operator confirmation; unattended runs still continue."""
+    print(
+        f"로그인 완료 후 Enter (미입력 시 {timeout_seconds}초 후 자동 진행) > ",
+        end="", flush=True,
+    )
+    if os.name == "nt":
+        import msvcrt
+        deadline = time.monotonic() + timeout_seconds
+        while time.monotonic() < deadline:
+            if msvcrt.kbhit():
+                msvcrt.getwch()
+                return
+            time.sleep(0.2)
+        print("\n[agent-browser] 입력 시간 초과; 세션 확인을 진행합니다.")
+        return
+    try:
+        ready, _, _ = select.select([sys.stdin], [], [], timeout_seconds)
+    except (OSError, ValueError, TypeError, AttributeError):
+        print("\n[agent-browser] 대화형 입력 불가; 세션 확인을 진행합니다.")
+        return
+    if ready:
+        sys.stdin.readline()
+    else:
+        print("\n[agent-browser] 입력 시간 초과; 세션 확인을 진행합니다.")
+
+
+def _capture_agent_browser(url: str, output: Path) -> dict:
+    """Open the target with agent-browser and pause only when login is detected.
+
+    The login browser is direct, matching the existing operator-auth flow where
+    third-party identity providers may be outside the target Scope. Subsequent
+    Recon browsing and all crawler requests still use the Scope-enforcing proxy.
+    """
+    from aidast.recon.tools.agent_browser import AgentBrowserError, _unwrap_json, find_agent_browser
+
+    binary = find_agent_browser()
+    if not binary:
+        raise BrowserLoginError(
+            "agent-browser CLI is required for login; install it or provide --session-bundle"
+        )
+    session_name = "aidast-login-" + hashlib.sha256(
+        f"{os.getpid()}:{time.time_ns()}:{url}".encode()
+    ).hexdigest()[:16]
+
+    headed = False
+
+    def call(*args: str, timeout: int = 90):
+        command = [binary, "--session", session_name]
+        if headed:
+            command.append("--headed")
+        command.extend(["--json", *args])
+        try:
+            completed = subprocess.run(
+                command, capture_output=True, text=True, timeout=timeout, check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise BrowserLoginError(f"agent-browser {args[0]} failed to complete") from exc
+        if completed.returncode != 0:
+            raise BrowserLoginError(
+                f"agent-browser {args[0]} exited {completed.returncode}: "
+                f"{completed.stderr.strip()[-500:]}"
+            )
+        try:
+            return _unwrap_json(completed.stdout)
+        except AgentBrowserError as exc:
+            raise BrowserLoginError(str(exc)) from exc
+
+    try:
+        print("[agent-browser] target session inspection started")
+        call("open", url, timeout=120)
+        login_state = call(
+            "eval",
+            "(() => { const visible = e => !!e && !!(e.offsetWidth || e.offsetHeight || e.getClientRects().length); "
+            "const fields = [...document.querySelectorAll('input')].filter(visible); "
+            "const password = fields.some(e => e.type === 'password'); "
+            "const credential = fields.some(e => /email|user|login|account/i.test((e.name||'')+' '+(e.id||'')+' '+(e.autocomplete||''))); "
+            "const text = (document.body?.innerText || '').slice(0,12000); "
+            "const loginText = /\\b(sign[ -]?in|log[ -]?in|authenticate|password)\\b/i.test(text); "
+            "return { password, credential, loginText, requiresLogin: password || (credential && loginText) }; })()",
+        )
+        if isinstance(login_state, str):
+            try:
+                login_state = json.loads(login_state)
+            except json.JSONDecodeError:
+                login_state = {}
+        requires_login = isinstance(login_state, dict) and login_state.get("requiresLogin") is True
+        if requires_login:
+            # Relaunch headed only when the anonymous page actually exposes
+            # credential entry; ordinary public targets need no operator wait.
+            try:
+                call("close", timeout=15)
+            except BrowserLoginError:
+                pass
+            headed = True
+            print("[agent-browser] login form detected; opening operator browser")
+            call("open", url, timeout=120)
+            _wait_for_login()
+        else:
+            print("[agent-browser] no login form detected; continuing anonymously")
+        current_url = call("get", "url")
+        if not isinstance(current_url, str) or origin(current_url) != origin(url):
+            raise BrowserLoginError(
+                "return to the selected target origin before exporting the session"
+            )
+
+        output.parent.mkdir(parents=True, exist_ok=True)
+        call("state", "save", str(output))
+        if not output.is_file():
+            raise BrowserLoginError("agent-browser did not export an auth-state file")
+        output.chmod(0o600)
+        try:
+            raw = json.loads(output.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise BrowserLoginError("agent-browser exported an invalid auth-state file") from exc
+        if not isinstance(raw, dict):
+            raise BrowserLoginError("agent-browser auth-state must be a JSON object")
+
+        session_storage = call(
+            "eval",
+            "Object.fromEntries(Array.from({length:sessionStorage.length},(_,i)=>{const k=sessionStorage.key(i);return [k,sessionStorage.getItem(k)]}))",
+        )
+        if isinstance(session_storage, str):
+            try:
+                session_storage = json.loads(session_storage)
+            except json.JSONDecodeError:
+                session_storage = {}
+        raw["session_storage"] = {
+            origin(url): session_storage if isinstance(session_storage, dict) else {},
+        }
+        raw["authentication_endpoints"] = []
+        # Proxy-side HTTP capture is the authoritative Recon observation source;
+        # this optional browser command is only used to persist auth state.
+        raw.setdefault("identity_headers", {})
+        output.write_text(json.dumps(raw, ensure_ascii=False), encoding="utf-8")
+        output.chmod(0o600)
+        return raw
+    finally:
+        try:
+            call("close", timeout=15)
+        except Exception:
+            pass
+
+
+def _persist_agent_browser_state(raw: dict, state_path: Path, target_url: str) -> None:
+    """Store agent-browser export in the existing compatible state layout."""
+    state, session_storage = filter_snapshot(raw, target_url)
+    _write(state_path, state)
+    _write(Path(str(state_path) + ".sessionstorage.json"), session_storage)
+
+
 def _capture_native(url: str, output: Path) -> dict:
     from playwright.sync_api import sync_playwright
     executable = next((shutil.which(name) for name in ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser")
@@ -200,8 +432,23 @@ def _capture_native(url: str, output: Path) -> dict:
             authentication_endpoints: dict[
                 tuple[str, str, str], AuthenticationEndpoint
             ] = {}
+            identity_headers: dict[str, str] = {}
 
             def observe_authentication_request(request) -> None:
+                try:
+                    if origin(request.url) == origin(url):
+                        for name, value in request.all_headers().items():
+                            normalized = str(name).casefold()
+                            if (
+                                normalized not in {"cookie", "set-cookie", "proxy-authorization"}
+                                and re.search(r"(?:authorization|auth[-_]?token|api[-_]?key|csrf)", normalized)
+                                and len(str(value)) <= 16_384
+                            ):
+                                identity_headers[str(name)] = str(value)
+                except Exception:
+                    # Header capture is an optional auth enhancement; cookie
+                    # storage-state export remains the primary path.
+                    pass
                 endpoint = AuthenticationEndpoint.from_request(
                     request.method, request.url, target_origin=origin(url)
                 )
@@ -232,6 +479,7 @@ def _capture_native(url: str, output: Path) -> dict:
             raw["authentication_endpoints"] = serialize_authentication_endpoints(
                 authentication_endpoints.values()
             )
+            raw["identity_headers"] = identity_headers
             return raw
     finally:
         if process.poll() is None:
@@ -279,12 +527,33 @@ def collect_target_sessions(targets, *, scope_id: str, run_id: str, identity: st
         try:
             raw = capture(url, raw_path)
             state, storage = filter_snapshot(raw, url)
-            if not state["cookies"] and not any(item.get("localStorage") for item in state["origins"]) and not storage.get(origin(url)):
+            observed_headers = (
+                raw.get("identity_headers", {}) if identity == "identity_b" else {}
+            )
+            if not isinstance(observed_headers, dict):
+                observed_headers = {}
+            if not state["cookies"] and not any(item.get("localStorage") for item in state["origins"]) and not storage.get(origin(url)) and not observed_headers:
                 raise BrowserLoginError("no target session data was exported; Recon was not started")
             state_path = directory / "storage.json"
             storage_path = Path(str(state_path) + ".sessionstorage.json")
             _write(state_path, state)
             _write(storage_path, storage)
+            observed_headers = (
+                raw.get("identity_headers", {}) if identity == "identity_b" else {}
+            )
+            if not isinstance(observed_headers, dict):
+                observed_headers = {}
+            identity_headers = {
+                str(name): str(value)
+                for name, value in list(observed_headers.items())[:32]
+                if re.search(r"(?:authorization|auth[-_]?token|api[-_]?key|csrf)", str(name), re.I)
+                and str(name).casefold() not in {"cookie", "set-cookie", "proxy-authorization"}
+                and len(str(value)) <= 16_384
+            }
+            _write(
+                Path(str(state_path) + ".identity-headers.json"),
+                {"origin": origin(url), "headers": identity_headers},
+            )
             endpoints = []
             for item in raw.get("authentication_endpoints", []):
                 if not isinstance(item, dict):
@@ -311,7 +580,10 @@ def collect_target_sessions(targets, *, scope_id: str, run_id: str, identity: st
                            "asset_type": key[0], "asset": key[1], "start_url": url, "identity": identity,
                            "authentication": "operator_confirmed", "created_at": time.time(),
                            "authentication_endpoints": serialize_authentication_endpoints(endpoints),
-                           "sha256": {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in (state_path, storage_path)}})
+                           "sha256": {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in (
+                               state_path, storage_path,
+                               Path(str(state_path) + ".identity-headers.json"),
+                           )}})
             session = TargetSession(bundle, state_path, url, identity, scope_id, *key,
                                     tuple(endpoints), True)
             session.verify()

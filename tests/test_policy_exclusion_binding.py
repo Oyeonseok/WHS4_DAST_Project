@@ -164,7 +164,7 @@ def interpretation():
     return {'required_request_headers': [], 'execution_rules': {'exclusions': [rule().model_dump()]}}
 
 
-def test_legacy_embedded_rules_upgrade_v4_and_preserve_approval_bytes(tmp_path):
+def test_legacy_embedded_rules_upgrade_v5_and_preserve_approval_bytes(tmp_path):
     document = doc()
     approval = tmp_path / 'Approval.json'
     approval.write_bytes(b'{"approved": "original bytes"}\n')
@@ -174,7 +174,7 @@ def test_legacy_embedded_rules_upgrade_v4_and_preserve_approval_bytes(tmp_path):
         calls.append(page)
         return interpretation()
     binding = execution_rules.ScopeExecutionResolver(tmp_path / 'cache', interpret)
-    assert execution_rules.EXECUTION_INTERPRETATION_VERSION == '4'
+    assert execution_rules.EXECUTION_INTERPRETATION_VERSION == '5'
     assert binding.cached(document) is None
     assert not execution_rules.execution_interpretation_complete(document.analysis)
     result = binding.resolve(document)
@@ -269,14 +269,14 @@ def test_tampered_sidecar_policy_never_authorizes(tmp_path):
     assert gate(binding.resolve(**data), data['candidates'][0]) == 'hold'
 
 
-def test_reviewed_v4_sidecar_takes_precedence_over_complete_embedded_rules(tmp_path):
+def test_reviewed_v5_sidecar_takes_precedence_over_complete_embedded_rules(tmp_path):
     document = doc()
     document.analysis.execution_rules.exclusions = []
     binding = execution_rules.ScopeExecutionResolver(tmp_path, lambda _: pytest.fail('cache must not interpret'))
     reviewed = binding._validate(document, interpretation(), fresh=True)
     requirements = dict(required_request_headers=[], execution_rules=reviewed.execution_rules.model_dump())
     binding.cache_path(document).write_text(json.dumps(dict(
-        interpretation_version='4', approved_digest=binding.digest(document), requirements=requirements)))
+        interpretation_version='5', approved_digest=binding.digest(document), requirements=requirements)))
     assert binding.cached(document).execution_rules.exclusions == [rule()]
 
 
@@ -293,7 +293,7 @@ def test_classifier_direct_context_never_invokes_model(monkeypatch, adapter):
 def test_adapter_subprocess_disables_tools_and_browser(monkeypatch, adapter, operation):
     from pathlib import Path
     from types import SimpleNamespace
-    agent = adapter.CodexMainAgent()
+    agent = adapter.CodexMainAgent(timeout_seconds=600)
     data = inputs()
     context = {k: [_x.model_dump(mode='json') for _x in v] if isinstance(v, list) else v for k, v in data.items()}
     monkeypatch.setattr(adapter.shutil, 'which', lambda _: '/fake/codex')
@@ -314,7 +314,7 @@ def test_adapter_subprocess_disables_tools_and_browser(monkeypatch, adapter, ope
         payload = decisions(context) if operation == 'classification' else interpretation()
         Path(command[command.index('--output-last-message') + 1]).write_text(json.dumps(payload))
         return SimpleNamespace(returncode=0, stderr='')
-    monkeypatch.setattr(adapter.subprocess, 'run', run)
+    monkeypatch.setattr(adapter.codex_process, 'run_codex', run)
     if operation == 'classification':
         assert agent.classify_exclusion_resources(context).decisions[0].classification == 'match'
     else:

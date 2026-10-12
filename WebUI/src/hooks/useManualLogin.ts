@@ -6,7 +6,7 @@ export function useManualLogin(scanId: string, scanStatus: string, enabled: bool
   const [request, setRequest] = useState<ManualLoginRequest | null>(null);
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState<{ scanId: string; message: string } | null>(null);
-  const base = import.meta.env.VITE_API_BASE || location.origin;
+  const base = import.meta.env.VITE_API_BASE_URL || location.origin;
 
   useEffect(() => {
     if (!enabled || !scanId) return;

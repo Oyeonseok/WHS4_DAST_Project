@@ -7,12 +7,15 @@ import json
 import re
 import sqlite3
 from contextlib import closing
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from aidast.pipeline.models import HandoffManifest
 from aidast.pipeline.locations import scan_run_directory
+from aidast.pipeline.model_settings import (
+    MODEL_SETTINGS_FILE, ScanModelChoices, load_scan_model_choices, read_scan_model_choices,
+)
 
 
 _SCAN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
@@ -28,6 +31,8 @@ class ResumePlan:
     scope_path: Path
     policy_path: Path
     targets: tuple[str, ...]
+    models: ScanModelChoices = field(default_factory=ScanModelChoices.resolve)
+    program_url: str | None = None
 
 
 def _sha256(path: Path) -> str:
@@ -36,6 +41,67 @@ def _sha256(path: Path) -> str:
         for block in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+def _resumable_validation_stages(
+    conn: sqlite3.Connection, scan_id: str,
+) -> tuple[str, ...]:
+    """Return failed Validation runs that still own unfinished cases."""
+    tables = {
+        str(row[0]) for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )
+    }
+    if "validation_cases" not in tables:
+        return ()
+    rows = conn.execute(
+        """SELECT DISTINCT v.latest_stage_run_id
+           FROM validation_cases v
+           JOIN stage_runs s ON s.stage_run_id=v.latest_stage_run_id
+           WHERE v.scan_id=? AND v.processing_phase IN ('queued','interrupted')
+             AND s.stage='validation' AND s.status='failed'
+           ORDER BY s.rowid""",
+        (scan_id,),
+    ).fetchall()
+    return tuple(str(row[0]) for row in rows)
+
+
+def _current_validation_covers_attack_results(
+    database: Path, scan_id: str,
+) -> bool:
+    """Return whether every current Attack result already has a final decision."""
+    with closing(sqlite3.connect(database)) as conn:
+        targets = {
+            ("finding", str(row[0])) for row in conn.execute(
+                """SELECT DISTINCT f.finding_id FROM findings f
+                   WHERE f.scan_id=? AND f.status IN ('unreviewed','confirmed')
+                     AND EXISTS (
+                         SELECT 1 FROM attack_attempts a
+                         WHERE a.finding_id=f.finding_id AND a.outcome='confirmed'
+                     )""",
+                (scan_id,),
+            )
+        }
+        targets.update(
+            ("chain", str(row[0])) for row in conn.execute(
+                """SELECT chain_id FROM finding_chains
+                   WHERE scan_id=? AND status='demonstrated'""",
+                (scan_id,),
+            )
+        )
+        if not targets:
+            return False
+        covered = {
+            (str(row[0]), str(row[1])) for row in conn.execute(
+                """SELECT target_kind,COALESCE(finding_id,chain_id)
+                   FROM validation_cases
+                   WHERE scan_id=? AND processing_phase='completed'
+                     AND current_status IS NOT NULL
+                     AND decision_stage_run_id=latest_stage_run_id""",
+                (scan_id,),
+            )
+        }
+        return targets <= covered
 
 
 def inspect_resume(result_root: Path, scan_id: str) -> ResumePlan:
@@ -76,6 +142,19 @@ def inspect_resume(result_root: Path, scan_id: str) -> ResumePlan:
     policy = json.loads(policy_path.read_text(encoding="utf-8"))
     if policy.get("scope_id") != scope_id:
         raise ValueError("target policy does not match the approved Scope")
+    saved_models = load_scan_model_choices(root, scan_id)
+    model_path = verified.get(MODEL_SETTINGS_FILE)
+    if model_path is not None:
+        models = read_scan_model_choices(model_path, scan_id=scan_id)
+        if saved_models is not None and saved_models != models:
+            raise ValueError("scan model settings do not match the verified handoff")
+    else:
+        # Existing source imports and older scans have no model record.
+        models = saved_models if saved_models is not None else ScanModelChoices.resolve()
+    source_document = scope_document.get("source")
+    program_url = source_document.get("requested_url") if isinstance(source_document, dict) else None
+    if not isinstance(program_url, str):
+        program_url = None
 
     with closing(sqlite3.connect(database.resolve().as_uri() + "?mode=ro", uri=True)) as conn:
         source = conn.execute(
@@ -87,7 +166,14 @@ def inspect_resume(result_root: Path, scan_id: str) -> ResumePlan:
         scan = conn.execute(
             "SELECT status,scope_value FROM scans WHERE scan_id=?", (scan_id,)
         ).fetchone()
-        if scan is None or scan[0] not in {"completed", "completed_with_errors"} or scan[1] != scope_id:
+        # An explicit dashboard cancellation after Recon is a resumable
+        # checkpoint.  The cancellation closes the active post-Recon stage and
+        # marks the shared scan row cancelled, but it does not invalidate the
+        # already verified Recon handoff.  Keep requiring that completed Recon
+        # stage below so an interrupted Recon run can never enter Attack.
+        if scan is None or scan[0] not in {
+            "completed", "completed_with_errors", "cancelled",
+        } or scan[1] != scope_id:
             raise ValueError("retry requires a completed approved Recon scan")
         latest: dict[str, tuple[str, str]] = {}
         for stage_run_id, stage, status in conn.execute(
@@ -99,6 +185,7 @@ def inspect_resume(result_root: Path, scan_id: str) -> ResumePlan:
             raise ValueError("retry requires a completed Recon stage")
         from aidast.attack.coverage_snapshot import attack_work_unfinished
         unfinished_attack = attack_work_unfinished(conn, scan_id)
+        resumable_validation_stages = _resumable_validation_stages(conn, scan_id)
         targets = tuple(
             str(row[0]) for row in conn.execute(
                 "SELECT DISTINCT identifier FROM assets WHERE scan_id=? ORDER BY identifier",
@@ -106,29 +193,72 @@ def inspect_resume(result_root: Path, scan_id: str) -> ResumePlan:
             )
         )
 
-    for stage in ("attack", "chaining", "validation"):
+    # Once Validation owns queued or interrupted cases, resume that exact
+    # failed run. A residual Attack review gap must not start new upstream
+    # stages and then collide with the durable Validation cases.
+    if resumable_validation_stages:
+        return ResumePlan(
+            scan_id, scope_id, "validation", resumable_validation_stages[0],
+            database, scope_path, policy_path, targets, models, program_url,
+        )
+
+    for stage in ("attack", "chaining", "validation", "report"):
         previous = latest.get(stage)
         if previous is None:
-            return ResumePlan(scan_id, scope_id, stage, None, database, scope_path, policy_path, targets)
+            return ResumePlan(scan_id, scope_id, stage, None, database, scope_path, policy_path,
+                              targets, models, program_url)
         stage_run_id, status = previous
-        if status == "failed" or (stage == "attack" and status == "completed" and unfinished_attack):
-            return ResumePlan(scan_id, scope_id, stage, stage_run_id, database, scope_path, policy_path, targets)
+        if status in {"failed", "cancelled"} or (
+            stage == "attack" and status == "completed" and unfinished_attack
+        ):
+            return ResumePlan(scan_id, scope_id, stage, stage_run_id, database, scope_path, policy_path,
+                              targets, models, program_url)
         if status not in ({"completed"} if stage == "attack" else {"completed", "skipped"}):
             raise ValueError(f"{stage} is still active or cannot be retried: {status}")
     raise ValueError("all post-Recon stages have already completed")
 
 
-def execute_resume(plan: ResumePlan, *, agent: Any | None = None, validation_factory: Any | None = None) -> None:
+def execute_resume(
+    plan: ResumePlan,
+    *,
+    agent: Any | None = None,
+    planning_agent: Any | None = None,
+    validation_factory: Any | None = None,
+) -> None:
     """Continue from the selected stage through Validation using the same scan ID."""
+    # ``inspect_resume`` has already re-verified the immutable Recon handoff.
+    # Dashboard cancellation marks the shared scan row cancelled even when
+    # Recon finished long before a post-Recon worker was stopped.  Restore that
+    # verified checkpoint before coordinators enforce their completed-Recon
+    # precondition.
+    with closing(sqlite3.connect(plan.database)) as conn, conn:
+        restored = conn.execute(
+            """UPDATE scans SET status='completed'
+               WHERE scan_id=? AND status='cancelled'""",
+            (plan.scan_id,),
+        ).rowcount
+        if restored:
+            from aidast.pipeline.lifecycle import audit_event
+            audit_event(
+                conn, scan_id=plan.scan_id,
+                event_type="scan.post_recon_checkpoint_restored",
+                details={"resume_stage": plan.stage},
+            )
+    if plan.stage == "report":
+        # Report retries are entirely offline; the CLI drafts from the current
+        # verified cases after this function returns.
+        return
     from aidast.agents.main import CodexMainAgent
     from aidast.orchestration.attack import AttackCoordinator
     from aidast.orchestration.chaining import ChainingCoordinator
     from aidast.validation import build_native_validation_coordinator
 
-    main_agent = (agent or CodexMainAgent()) if plan.stage in {"attack", "chaining"} else None
+    main_agent = (agent or CodexMainAgent(**plan.models.agent_options())) if plan.stage in {"attack", "chaining"} else None
     if plan.stage == "attack":
         AttackCoordinator(
-            agent=main_agent, db_path=plan.database,
+            agent=main_agent,
+            planning_agent=(planning_agent or CodexMainAgent(main_model=plan.models.attack_model)),
+            db_path=plan.database,
             scope_path=plan.scope_path, policy_path=plan.policy_path,
         ).run(plan.scan_id)
     if plan.stage in {"attack", "chaining"}:
@@ -136,12 +266,32 @@ def execute_resume(plan: ResumePlan, *, agent: Any | None = None, validation_fac
             agent=main_agent, db_path=plan.database,
             scope_path=plan.scope_path, policy_path=plan.policy_path,
         ).run(plan.scan_id)
+    with closing(sqlite3.connect(plan.database)) as conn:
+        validation_stage_run_ids = _resumable_validation_stages(conn, plan.scan_id)
+    if (
+        not validation_stage_run_ids
+        and plan.stage in {"attack", "chaining"}
+        and _current_validation_covers_attack_results(plan.database, plan.scan_id)
+    ):
+        with closing(sqlite3.connect(plan.database)) as conn, conn:
+            from aidast.pipeline.lifecycle import audit_event
+            audit_event(
+                conn, scan_id=plan.scan_id,
+                event_type="validation.current_results_reused",
+                details={"resume_stage": plan.stage},
+            )
+        return
     coordinator = (
-        validation_factory(db_path=plan.database, policy_path=plan.policy_path)
+        validation_factory(db_path=plan.database, policy_path=plan.policy_path,
+                           validation_model=plan.models.validation_model)
         if validation_factory is not None else
-        build_native_validation_coordinator(db_path=plan.database, policy_path=plan.policy_path)
+        build_native_validation_coordinator(db_path=plan.database, policy_path=plan.policy_path,
+                                             validation_model=plan.models.validation_model)
     )
-    if plan.stage == "validation" and plan.stage_run_id:
-        coordinator.resume(plan.stage_run_id)
+    if not validation_stage_run_ids and plan.stage == "validation" and plan.stage_run_id:
+        validation_stage_run_ids = (plan.stage_run_id,)
+    if validation_stage_run_ids:
+        for validation_stage_run_id in validation_stage_run_ids:
+            coordinator.resume(validation_stage_run_id)
     else:
         coordinator.run(plan.scan_id)

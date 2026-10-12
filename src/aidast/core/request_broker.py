@@ -106,7 +106,7 @@ class RequestBroker:
             request = Request(url, data=urllib_request_data(descriptor), headers=descriptor["headers"], method=method)
             self.request_count += 1
             try:
-                permit = self.governor.reserve(url, timeout_seconds=effective_timeout)
+                permit = self.governor.acquire(url, timeout_seconds=effective_timeout)
             except GovernorError as exc:
                 raise RequestPolicyError(str(exc)) from exc
             try:

@@ -87,6 +87,7 @@ class ValidationProfile(StrictContract):
     runtime_kinds: tuple[RuntimeKind, ...] = Field(min_length=1, max_length=3)
     target_expected_signal: ProfileTargetSignal
     baseline_samples: int | None = Field(default=None, ge=3, le=20)
+    zero_sensitivity_boundary_confirmation: bool = False
     impact_rules: ProfileImpactRules
     allowed_development_actions: tuple[DevelopmentAction, ...] = Field(max_length=2)
     impact_expansion_paths: tuple[ImpactExpansionPath, ...] = Field(max_length=32)

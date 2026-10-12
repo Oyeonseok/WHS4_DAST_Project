@@ -12,6 +12,7 @@ from pydantic import ValidationError as PydanticValidationError
 
 from aidast.pipeline.lifecycle import finish_stage_run, resume_validation_stage_run, start_stage_run
 from aidast.recon.policy import TargetPolicy
+from aidast.agents.errors import AgentInvocationError
 from aidast.agents.policy_guidance import policy_guidance_context
 
 from ..core.decision import DecisionEngine, DecisionInput
@@ -46,6 +47,10 @@ class ValidationCoordinatorError(RuntimeError):
     pass
 
 
+class ValidationAgentUnavailable(ValidationCoordinatorError):
+    """A bounded model retry could not produce a Validation decision."""
+
+
 class ValidationAgentRunner(Protocol):
     agent_id: str
 
@@ -58,6 +63,19 @@ class ValidationAgentRunner(Protocol):
 
 class PolicyProvider(Protocol):
     def __call__(self, endpoint: str, method: str) -> TargetPolicy: ...
+
+
+def _material_claim_conflict(comparison: ClaimComparison) -> bool:
+    """Return whether an Attack/Validation disagreement contests existence.
+
+    Validation owns the final impact score.  A sensitivity-only disagreement
+    therefore narrows that score while a class or boundary disagreement still
+    requires the separate CONTESTED outcome.
+    """
+    return (
+        comparison.alignment == "conflicting"
+        and any(axis != "sensitivity" for axis in comparison.conflict_axes)
+    )
 
 
 def _impact_planning_context(candidate: ValidatedCandidate,
@@ -714,9 +732,23 @@ class ValidationCoordinator:
                     "WHERE case_id=? AND stage_run_id=? LIMIT 1",
                     (case["case_id"], stage_run_id),
                 ).fetchone())
+                self._validate_assessment_refs(
+                    assessment, case["case_id"], evidence_ids, observations,
+                )
             else:
                 try:
-                    assessment = self._assessment(blind_view, tuple(observations), policy=policy)
+                    assessment = self._validated_assessment(
+                        blind_view, tuple(observations),
+                        case_id=case["case_id"], evidence_ids=evidence_ids,
+                        policy=policy,
+                    )
+                except ValidationAgentUnavailable:
+                    repo.finalize(
+                        case["case_id"], stage_run_id=stage_run_id, expected_version=version,
+                        status="INCONCLUSIVE", decision={"reason": "agent_unavailable",
+                        "phase": "blind_assessment"}, evidence_ids=evidence_ids,
+                    )
+                    return True
                 except ValidationCoordinatorError:
                     repo.finalize(
                         case["case_id"], stage_run_id=stage_run_id, expected_version=version,
@@ -724,7 +756,6 @@ class ValidationCoordinator:
                         "phase": "blind_assessment"}, evidence_ids=evidence_ids,
                     )
                     return True
-            self._validate_assessment_refs(assessment, case["case_id"], evidence_ids, observations)
             if sealed_preimpact is None:
                 development_used = False
             if sealed_preimpact is None and assessment.blocker_axis in {
@@ -750,7 +781,20 @@ class ValidationCoordinator:
                     if stop_incomplete_replay(observations, evidence_ids):
                         return True
                     try:
-                        assessment = self._assessment(blind_view, tuple(observations), policy=policy)
+                        assessment = self._validated_assessment(
+                            blind_view, tuple(observations),
+                            case_id=case["case_id"], evidence_ids=evidence_ids,
+                            policy=policy,
+                        )
+                    except ValidationAgentUnavailable:
+                        repo.finalize(
+                            case["case_id"], stage_run_id=stage_run_id,
+                            expected_version=version, status="INCONCLUSIVE",
+                            decision={"reason": "agent_unavailable",
+                            "phase": "post_development_blind_assessment"},
+                            evidence_ids=evidence_ids,
+                        )
+                        return True
                     except ValidationCoordinatorError:
                         repo.finalize(
                             case["case_id"], stage_run_id=stage_run_id, expected_version=version,
@@ -759,9 +803,6 @@ class ValidationCoordinator:
                             evidence_ids=evidence_ids,
                         )
                         return True
-                    self._validate_assessment_refs(
-                        assessment, case["case_id"], evidence_ids, observations
-                    )
             raw_axes = [assessment.impact_boundary.score,
                         assessment.impact_sensitivity.score,
                         assessment.impact_actor_requirements.score]
@@ -822,6 +863,9 @@ class ValidationCoordinator:
                 assessment.impact_boundary.score,
                 assessment.impact_sensitivity.score,
                 assessment.impact_actor_requirements.score,
+                zero_sensitivity_boundary_confirmation=(
+                    candidate.profile.profile.zero_sensitivity_boundary_confirmation
+                ),
             )
             if (assessment.reproduced is True and impact_before_development.underpowered
                     and allow_impact_hypotheses
@@ -869,6 +913,13 @@ class ValidationCoordinator:
                 comparison = self._comparison(
                     claim, assessment.model_dump(mode="json"), blind_view=blind_view, policy=policy,
                 )
+            except ValidationAgentUnavailable:
+                repo.finalize(
+                    case["case_id"], stage_run_id=stage_run_id, expected_version=version,
+                    status="INCONCLUSIVE", decision={"reason": "agent_unavailable",
+                    "phase": "claim_comparison"}, evidence_ids=evidence_ids,
+                )
+                return True
             except ValidationCoordinatorError:
                 repo.finalize(
                     case["case_id"], stage_run_id=stage_run_id, expected_version=version,
@@ -876,15 +927,54 @@ class ValidationCoordinator:
                     "phase": "claim_comparison"}, evidence_ids=evidence_ids,
                 )
                 return True
+            try:
+                self._validate_comparison_references(
+                    comparison, case_id=case["case_id"], assessment_sha=assessment_sha,
+                    attack_claim_sha=candidate.staged.attack_claim_sha256,
+                    validation_evidence_ids=evidence_ids,
+                    attack_evidence_ids=claim["attack_evidence_ids"],
+                )
+            except ValidationCoordinatorError:
+                correction = (
+                    "Use only the exact evidence identifiers supplied for this case. "
+                    f"validation_evidence_ids must be chosen from {sorted(evidence_ids)!r}; "
+                    "attack_evidence_ids must be chosen from "
+                    f"{sorted(claim['attack_evidence_ids'])!r}. Preserve the exact case and digests."
+                )
+                try:
+                    comparison = self._comparison(
+                        claim, assessment.model_dump(mode="json"), blind_view=blind_view,
+                        policy=policy, correction=correction,
+                    )
+                    self._validate_comparison_references(
+                        comparison, case_id=case["case_id"], assessment_sha=assessment_sha,
+                        attack_claim_sha=candidate.staged.attack_claim_sha256,
+                        validation_evidence_ids=evidence_ids,
+                        attack_evidence_ids=claim["attack_evidence_ids"],
+                    )
+                except ValidationAgentUnavailable:
+                    repo.finalize(
+                        case["case_id"], stage_run_id=stage_run_id,
+                        expected_version=version, status="INCONCLUSIVE",
+                        decision={"reason": "agent_unavailable",
+                        "phase": "claim_comparison"}, evidence_ids=evidence_ids,
+                    )
+                    return True
+                except ValidationCoordinatorError:
+                    repo.finalize(
+                        case["case_id"], stage_run_id=stage_run_id, expected_version=version,
+                        status="INCONCLUSIVE", decision={"reason": "agent_reference_invalid",
+                        "phase": "claim_comparison"}, evidence_ids=evidence_ids,
+                    )
+                    return True
         else:
             comparison, comparison_evidence = stored_comparison
-        if comparison.case_id != case["case_id"] or comparison.blind_assessment_sha256 != assessment_sha \
-                or comparison.attack_claim_sha256 != candidate.staged.attack_claim_sha256:
-            raise ValidationCoordinatorError("claim comparison digest or case mismatch")
-        if not set(comparison.validation_evidence_ids) <= set(evidence_ids):
-            raise ValidationCoordinatorError("claim comparison cites foreign Validation evidence")
-        if not set(comparison.attack_evidence_ids) <= set(claim["attack_evidence_ids"]):
-            raise ValidationCoordinatorError("claim comparison cites foreign Attack evidence")
+            self._validate_comparison_references(
+                comparison, case_id=case["case_id"], assessment_sha=assessment_sha,
+                attack_claim_sha=candidate.staged.attack_claim_sha256,
+                validation_evidence_ids=evidence_ids,
+                attack_evidence_ids=claim["attack_evidence_ids"],
+            )
         if stored_comparison is None:
             comparison_sha = canonical_sha256(comparison.model_dump(mode="json"))
             comparison_evidence = repo.add_evidence(
@@ -957,7 +1047,12 @@ class ValidationCoordinator:
             assessment.impact_actor_requirements.score,
         )
         from ..core.decision import evaluate_impact
-        impact_result = evaluate_impact(*impact_tuple)
+        impact_result = evaluate_impact(
+            *impact_tuple,
+            zero_sensitivity_boundary_confirmation=(
+                candidate.profile.profile.zero_sensitivity_boundary_confirmation
+            ),
+        )
         observed_target_evidence = {
             item["evidence_id"] for item in observations
             if item["attempt_kind"] == "target" and item["signal_observed"] is True
@@ -1015,7 +1110,10 @@ class ValidationCoordinator:
             development_used=development_used, target_observations=targets,
             target_outcomes=tuple(item["outcome"] for item in observations
                                   if item["attempt_kind"] == "target"),
-            semantic_conflict=comparison.alignment == "conflicting",
+            # A sensitivity-only disagreement narrows the demonstrated impact;
+            # it does not negate a freshly reproduced mechanism.  Boundary and
+            # vulnerability-class conflicts remain contested.
+            semantic_conflict=_material_claim_conflict(comparison),
             attack_has_positive_evidence=bool(comparison.attack_evidence_ids),
             impact=impact_result if impact_grounded else None,
         ))
@@ -1026,6 +1124,9 @@ class ValidationCoordinator:
             "claim_comparison": comparison.model_dump(mode="json"),
             "evidence_ids": evidence_ids,
         }
+        if (comparison.alignment == "conflicting"
+                and comparison.conflict_axes == ("sensitivity",)):
+            decision["claim_impact_narrowed_by_validation"] = True
         if contradictory_reproduction:
             decision["blind_replay_consistency"] = "assessment_denied_positive_replay"
         if not impact_grounded:
@@ -1053,6 +1154,9 @@ class ValidationCoordinator:
             case["case_id"], stage_run_id=stage_run_id, expected_version=version,
             status=status, decision=decision, evidence_ids=evidence_ids,
             impact=impact_tuple if status in {"CONFIRMED", "UNDERPOWERED"} else None,
+            zero_sensitivity_boundary_confirmation=(
+                candidate.profile.profile.zero_sensitivity_boundary_confirmation
+            ),
         )
         return True
 
@@ -1659,8 +1763,46 @@ class ValidationCoordinator:
         )
 
     def _assessment(self, blind: dict[str, Any], observations: tuple[dict[str, Any], ...],
-                    *, policy: TargetPolicy | None = None) -> BlindAssessment:
-        return self._agent_call("assess", blind, observations, model=BlindAssessment, policy=policy)
+                    *, policy: TargetPolicy | None = None,
+                    correction: str | None = None) -> BlindAssessment:
+        return self._agent_call(
+            "assess", blind, observations, model=BlindAssessment, policy=policy,
+            initial_correction=correction,
+        )
+
+    def _validated_assessment(
+        self, blind: dict[str, Any], observations: tuple[dict[str, Any], ...],
+        *, case_id: str, evidence_ids: list[str],
+        policy: TargetPolicy | None = None,
+    ) -> BlindAssessment:
+        """Obtain one batch-bound assessment with one semantic repair turn."""
+        assessment = self._assessment(blind, observations, policy=policy)
+        try:
+            self._validate_assessment_refs(
+                assessment, case_id, evidence_ids, list(observations),
+            )
+            return assessment
+        except ValidationCoordinatorError:
+            target_ids = [
+                item["attempt_id"] for item in observations
+                if item["attempt_kind"] == "target"
+            ]
+            correction = (
+                "The previous object cited IDs outside this replay batch. "
+                f"Use case_id={case_id!r}; evidence_ids must be a subset of "
+                f"{list(evidence_ids)!r}; target_attempt_ids must equal "
+                f"{target_ids!r}. Every nested impact-axis evidence_ids list "
+                "must also use only the supplied evidence IDs. Keep the "
+                "evidence-based conclusion unchanged except where an invalid "
+                "reference forced an unsupported claim."
+            )
+            repaired = self._assessment(
+                blind, observations, policy=policy, correction=correction,
+            )
+            self._validate_assessment_refs(
+                repaired, case_id, evidence_ids, list(observations),
+            )
+            return repaired
 
     def _develop_impact(
         self, repo: ValidationRepository, candidate: ValidatedCandidate,
@@ -2016,7 +2158,7 @@ class ValidationCoordinator:
 
     def _comparison(
         self, claim: dict[str, Any], assessment: dict[str, Any], *,
-        blind_view: dict[str, Any], policy,
+        blind_view: dict[str, Any], policy, correction: str | None = None,
     ) -> ClaimComparison:
         if self.agent is None:
             from .codex_runner import CodexBlindValidationRunner
@@ -2028,9 +2170,27 @@ class ValidationCoordinator:
         prepare = getattr(self.agent, "prepare_comparison", None)
         if callable(prepare):
             prepare(blind_view)
-        return self._agent_call("compare", claim, assessment, model=ClaimComparison, policy=policy)
+        return self._agent_call(
+            "compare", claim, assessment, model=ClaimComparison, policy=policy,
+            initial_correction=correction,
+        )
 
-    def _agent_call(self, method: str, first: Any, second: Any, *, model, policy=None):
+    @staticmethod
+    def _validate_comparison_references(
+        comparison: ClaimComparison, *, case_id: str, assessment_sha: str,
+        attack_claim_sha: str, validation_evidence_ids, attack_evidence_ids,
+    ) -> None:
+        if (comparison.case_id != case_id
+                or comparison.blind_assessment_sha256 != assessment_sha
+                or comparison.attack_claim_sha256 != attack_claim_sha):
+            raise ValidationCoordinatorError("claim comparison digest or case mismatch")
+        if not set(comparison.validation_evidence_ids) <= set(validation_evidence_ids):
+            raise ValidationCoordinatorError("claim comparison cites foreign Validation evidence")
+        if not set(comparison.attack_evidence_ids) <= set(attack_evidence_ids):
+            raise ValidationCoordinatorError("claim comparison cites foreign Attack evidence")
+
+    def _agent_call(self, method: str, first: Any, second: Any, *, model, policy=None,
+                    initial_correction: str | None = None):
         if self.agent is None:
             from .codex_runner import CodexBlindValidationRunner
             self.agent = (
@@ -2044,16 +2204,25 @@ class ValidationCoordinator:
                 self.agent.set_policy_context(policy)
         if self.agent.agent_id not in self._used_agent_ids:
             self._used_agent_ids.append(self.agent.agent_id)
-        correction = None
-        for attempt in range(2):
+        correction = initial_correction
+        schema_attempt = 0
+        invocation_attempt = 0
+        while True:
             try:
                 raw = getattr(self.agent, method)(first, second, correction=correction)
                 return raw if isinstance(raw, model) else model.model_validate(raw)
+            except AgentInvocationError as exc:
+                if invocation_attempt == 0:
+                    invocation_attempt += 1
+                    continue
+                raise ValidationAgentUnavailable(
+                    f"Agent {method} unavailable after retry"
+                ) from exc
             except (PydanticValidationError, TypeError, ValueError):
-                if attempt:
+                if schema_attempt:
                     raise ValidationCoordinatorError(f"Agent {method} output failed schema correction") from None
+                schema_attempt += 1
                 correction = "The previous object failed schema validation; correct only invalid fields."
-        raise AssertionError("unreachable")
 
     def _close_owned_agent(self) -> None:
         for impact_agent in self._impact_agents:

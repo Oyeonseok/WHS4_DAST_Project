@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import importlib.util
 from collections import deque
+import os
 import socket
 import subprocess
 import sqlite3
@@ -52,6 +53,7 @@ def start_mitmproxy(
 ) -> tuple[subprocess.Popen | None, str | None]:
     required = scope_rules is not None and scope_rules.get("enforcement_required", True) is not False
     scope_file: Path | None = None
+    auth_file: Path | None = None
     if scope_rules is not None:
         validate_scope_rules(scope_rules)
     if importlib.util.find_spec("mitmproxy") is None:
@@ -83,6 +85,19 @@ def start_mitmproxy(
         "--set", f"enforcement_required={'true' if required else 'false'}",
     ]
 
+    # External crawlers normally receive authenticated browser headers through
+    # command-line flags.  Process listings expose those values to every local
+    # observer.  Give the policy proxy a private, mutable handoff file instead;
+    # endpoint discovery fills it only after the browser session is available.
+    auth_handle = tempfile.NamedTemporaryFile(
+        mode="w", suffix=".json", encoding="utf-8", delete=False
+    )
+    auth_file = Path(auth_handle.name)
+    json.dump({"version": 1, "headers": {}}, auth_handle)
+    auth_handle.close()
+    os.chmod(auth_file, 0o600)
+    command += ["--set", f"auth_file={auth_file}"]
+
     if scope_rules is not None:
         handle = tempfile.NamedTemporaryFile(
             mode="w", suffix=".json", encoding="utf-8", delete=False
@@ -97,6 +112,8 @@ def start_mitmproxy(
     except OSError as exc:
         if scope_file is not None:
             scope_file.unlink(missing_ok=True)
+        if auth_file is not None:
+            auth_file.unlink(missing_ok=True)
         if required:
             raise RuntimeError("required policy proxy could not start") from exc
         print(f"  [경고] mitmdump 실행 실패: {exc} - mitmproxy 관찰 없이 진행")
@@ -111,6 +128,8 @@ def start_mitmproxy(
             proc.kill()
         if scope_file is not None:
             scope_file.unlink(missing_ok=True)
+        if auth_file is not None:
+            auth_file.unlink(missing_ok=True)
         if required:
             raise RuntimeError("required policy proxy did not become ready")
         return None, None
@@ -118,6 +137,7 @@ def start_mitmproxy(
     # Keep cleanup metadata on the process without changing the public return
     # contract used by the executor and embedding applications.
     proc._aidast_scope_file = scope_file  # type: ignore[attr-defined]
+    proc._aidast_auth_file = auth_file  # type: ignore[attr-defined]
     print(f"  [mitmproxy] 127.0.0.1:{selected_port}에서 관찰 시작")
     return proc, f"http://127.0.0.1:{selected_port}"
 
@@ -126,6 +146,7 @@ def stop_mitmproxy(proc: subprocess.Popen | None) -> None:
     if proc is None:
         return
     scope_file = getattr(proc, "_aidast_scope_file", None)
+    auth_file = getattr(proc, "_aidast_auth_file", None)
     try:
         proc.terminate()
         try:
@@ -136,6 +157,55 @@ def stop_mitmproxy(proc: subprocess.Popen | None) -> None:
     finally:
         if isinstance(scope_file, Path):
             scope_file.unlink(missing_ok=True)
+        if isinstance(auth_file, Path):
+            auth_file.unlink(missing_ok=True)
+
+
+def update_mitmproxy_auth(
+    proc: subprocess.Popen | None,
+    headers: dict[str, str] | None,
+) -> bool:
+    """Atomically publish browser credentials without putting them in argv."""
+    if proc is None:
+        return False
+    auth_file = getattr(proc, "_aidast_auth_file", None)
+    if not isinstance(auth_file, Path):
+        return False
+    safe_headers: dict[str, str] = {}
+    for name, value in (headers or {}).items():
+        if not isinstance(name, str) or not isinstance(value, str):
+            raise ValueError("proxy auth headers must be strings")
+        if not name or len(name) > 128 or any(
+            ord(char) <= 32 or ord(char) >= 127 or char in "()<>@,;:\\\"/[]?={}"
+            for char in name
+        ):
+            raise ValueError("proxy auth header name is invalid")
+        if len(value) > 16384 or "\r" in value or "\n" in value:
+            raise ValueError("proxy auth header value is invalid")
+        if name.casefold() in {
+            "host", "content-length", "transfer-encoding", "connection",
+            "proxy-connection", "upgrade", "te", "trailer",
+            "x-aidast-source", "x-aidast-phase",
+        }:
+            raise ValueError("proxy auth header cannot control routing or framing")
+        safe_headers[name] = value
+    handle = tempfile.NamedTemporaryFile(
+        mode="w", suffix=".json", encoding="utf-8",
+        dir=auth_file.parent, delete=False,
+    )
+    replacement = Path(handle.name)
+    try:
+        json.dump({"version": 1, "headers": safe_headers}, handle)
+        handle.flush()
+        os.fsync(handle.fileno())
+        handle.close()
+        os.chmod(replacement, 0o600)
+        os.replace(replacement, auth_file)
+    finally:
+        if not handle.closed:
+            handle.close()
+        replacement.unlink(missing_ok=True)
+    return True
 
 
 def ingest_mitm_capture(conn: sqlite3.Connection, jsonl_path: Path, *, origin_id: str | None = None) -> tuple[int, int]:

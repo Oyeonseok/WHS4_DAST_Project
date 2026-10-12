@@ -156,7 +156,9 @@ def test_generic_report_does_not_invent_a_draft_without_confirmed_cases(case):
     case.complete(status="DISPROVEN")
     output = case.path.parent.parent / "ReportRun" / "scan"
     assert generate_scan_reports(case.path, output, scan_id="scan", platform="generic") == []
-    assert not output.exists()
+    assert (output / "ScanSummary.json").is_file()
+    assert (output / "ScanSummary.md").is_file()
+    assert not (output / "Report.md").exists()
 
 
 def test_case_report_cli_accepts_generic_format(case, capsys):

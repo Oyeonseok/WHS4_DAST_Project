@@ -149,7 +149,9 @@ class _Masker:
                             self._add(part.split("=", 1)[1].strip(), "token")
             for match in _ASSIGN.finditer(value):
                 raw = next((group for group in match.groups()[1:] if group is not None), "")
-                self._add(raw, "email" if _EMAIL.fullmatch(raw) else "token")
+                labelled_email = re.search(r"email", match.group(1), re.I) is not None
+                if not labelled_email or _EMAIL.fullmatch(raw):
+                    self._add(raw, "email" if _EMAIL.fullmatch(raw) else "token")
             for match in _BEARER.finditer(value):
                 self._add(match[1], "token")
             for match in _URL.finditer(value):

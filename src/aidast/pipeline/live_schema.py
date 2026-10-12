@@ -34,6 +34,237 @@ CREATE TRIGGER IF NOT EXISTS pipeline_sources_no_delete
 BEFORE DELETE ON pipeline_sources
 BEGIN SELECT RAISE(ABORT, 'pipeline source provenance is immutable'); END;
 
+CREATE TABLE IF NOT EXISTS attack_graph_nodes (
+    node_id TEXT PRIMARY KEY NOT NULL,
+    scan_id TEXT NOT NULL REFERENCES scans(scan_id),
+    node_kind TEXT NOT NULL CHECK(node_kind IN (
+        'endpoint','parameter','coverage','finding','lead','fact','credential',
+        'identity','object','role','precondition','chain','synthetic_candidate','tool_run'
+    )),
+    node_key TEXT NOT NULL CHECK(length(trim(node_key)) > 0),
+    state TEXT NOT NULL DEFAULT 'active' CHECK(state IN (
+        'active','queued','running','blocked','satisfied','resolved','retired'
+    )),
+    priority INTEGER NOT NULL DEFAULT 50 CHECK(priority BETWEEN 0 AND 100),
+    metadata_json TEXT NOT NULL DEFAULT '{}' CHECK(
+        json_valid(metadata_json) AND length(CAST(metadata_json AS BLOB)) <= 8192
+    ),
+    content_sha256 TEXT NOT NULL CHECK(length(content_sha256)=64),
+    first_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(scan_id,node_kind,node_key)
+);
+CREATE INDEX IF NOT EXISTS idx_attack_graph_nodes_scan
+    ON attack_graph_nodes(scan_id,node_kind,state,priority DESC);
+
+CREATE TABLE IF NOT EXISTS attack_graph_edges (
+    edge_id TEXT PRIMARY KEY NOT NULL,
+    scan_id TEXT NOT NULL REFERENCES scans(scan_id),
+    from_node_id TEXT NOT NULL REFERENCES attack_graph_nodes(node_id),
+    to_node_id TEXT NOT NULL REFERENCES attack_graph_nodes(node_id),
+    relationship TEXT NOT NULL CHECK(length(trim(relationship)) > 0),
+    state TEXT NOT NULL DEFAULT 'active' CHECK(state IN ('active','resolved','retired')),
+    evidence_json TEXT NOT NULL DEFAULT '{}' CHECK(
+        json_valid(evidence_json) AND length(CAST(evidence_json AS BLOB)) <= 8192
+    ),
+    content_sha256 TEXT NOT NULL CHECK(length(content_sha256)=64),
+    first_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(scan_id,from_node_id,to_node_id,relationship)
+);
+CREATE INDEX IF NOT EXISTS idx_attack_graph_edges_scan
+    ON attack_graph_edges(scan_id,from_node_id,to_node_id);
+
+CREATE TABLE IF NOT EXISTS attack_graph_revisions (
+    revision_id TEXT PRIMARY KEY NOT NULL,
+    scan_id TEXT NOT NULL REFERENCES scans(scan_id),
+    stage_run_id TEXT REFERENCES stage_runs(stage_run_id),
+    trigger_kind TEXT NOT NULL CHECK(length(trim(trigger_kind)) > 0),
+    graph_sha256 TEXT NOT NULL CHECK(length(graph_sha256)=64),
+    node_count INTEGER NOT NULL CHECK(node_count >= 0),
+    edge_count INTEGER NOT NULL CHECK(edge_count >= 0),
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(scan_id,graph_sha256)
+);
+CREATE INDEX IF NOT EXISTS idx_attack_graph_revisions_scan
+    ON attack_graph_revisions(scan_id,created_at);
+
+CREATE TABLE IF NOT EXISTS attack_graph_events (
+    event_id TEXT PRIMARY KEY NOT NULL,
+    scan_id TEXT NOT NULL REFERENCES scans(scan_id),
+    stage_run_id TEXT REFERENCES stage_runs(stage_run_id),
+    node_id TEXT REFERENCES attack_graph_nodes(node_id),
+    edge_id TEXT REFERENCES attack_graph_edges(edge_id),
+    event_kind TEXT NOT NULL CHECK(event_kind IN (
+        'node.added','node.changed','edge.added','edge.changed','planner.revision'
+    )),
+    details_json TEXT NOT NULL DEFAULT '{}' CHECK(
+        json_valid(details_json) AND length(CAST(details_json AS BLOB)) <= 4096
+    ),
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_attack_graph_events_scan
+    ON attack_graph_events(scan_id,created_at);
+CREATE TRIGGER IF NOT EXISTS attack_graph_events_no_update
+BEFORE UPDATE ON attack_graph_events
+BEGIN SELECT RAISE(ABORT, 'attack graph events are append-only'); END;
+CREATE TRIGGER IF NOT EXISTS attack_graph_events_no_delete
+BEFORE DELETE ON attack_graph_events
+BEGIN SELECT RAISE(ABORT, 'attack graph events are append-only'); END;
+
+CREATE TABLE IF NOT EXISTS attack_lead_queue (
+    lead_queue_id TEXT PRIMARY KEY NOT NULL,
+    scan_id TEXT NOT NULL REFERENCES scans(scan_id),
+    source_node_id TEXT NOT NULL REFERENCES attack_graph_nodes(node_id),
+    coverage_id TEXT NOT NULL REFERENCES attack_coverage_items(coverage_id),
+    endpoint_id TEXT NOT NULL REFERENCES endpoints(endpoint_id),
+    vuln_class TEXT NOT NULL CHECK(length(trim(vuln_class)) > 0),
+    skill_name TEXT NOT NULL CHECK(length(trim(skill_name)) > 0),
+    priority INTEGER NOT NULL CHECK(priority BETWEEN 0 AND 100),
+    state TEXT NOT NULL DEFAULT 'queued' CHECK(state IN (
+        'queued','claimed','completed','deferred','cancelled'
+    )),
+    reason TEXT NOT NULL CHECK(length(trim(reason)) > 0),
+    source_revision_id TEXT REFERENCES attack_graph_revisions(revision_id),
+    stage_run_id TEXT REFERENCES stage_runs(stage_run_id),
+    task_id TEXT REFERENCES attack_tasks(task_id),
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    claimed_at TEXT,
+    finished_at TEXT,
+    UNIQUE(scan_id,source_node_id,coverage_id)
+);
+CREATE INDEX IF NOT EXISTS idx_attack_lead_queue_scan
+    ON attack_lead_queue(scan_id,state,priority DESC,created_at);
+
+CREATE TABLE IF NOT EXISTS attack_preconditions (
+    precondition_id TEXT PRIMARY KEY NOT NULL,
+    scan_id TEXT NOT NULL REFERENCES scans(scan_id),
+    coverage_id TEXT NOT NULL REFERENCES attack_coverage_items(coverage_id),
+    kind TEXT NOT NULL CHECK(kind IN (
+        'usable_session','required_role','second_identity','scanner_owned_object',
+        'fresh_token','prior_state'
+    )),
+    state TEXT NOT NULL DEFAULT 'required' CHECK(state IN (
+        'required','satisfied','waived','retired'
+    )),
+    requirement_json TEXT NOT NULL DEFAULT '{}' CHECK(
+        json_valid(requirement_json) AND length(CAST(requirement_json AS BLOB)) <= 4096
+    ),
+    resolution_reference_type TEXT CHECK(resolution_reference_type IS NULL OR
+        resolution_reference_type IN ('credential_reference','attack_fact','operator_ack')),
+    resolution_reference_id TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    satisfied_at TEXT,
+    UNIQUE(scan_id,coverage_id,kind)
+);
+CREATE INDEX IF NOT EXISTS idx_attack_preconditions_scan
+    ON attack_preconditions(scan_id,state,kind);
+
+CREATE TABLE IF NOT EXISTS attack_operator_actions (
+    action_id TEXT PRIMARY KEY NOT NULL,
+    scan_id TEXT NOT NULL REFERENCES scans(scan_id),
+    precondition_id TEXT NOT NULL REFERENCES attack_preconditions(precondition_id),
+    action_kind TEXT NOT NULL CHECK(action_kind IN (
+        'login','provide_role','provide_second_identity','create_owned_object',
+        'refresh_token','establish_state'
+    )),
+    status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN (
+        'pending','acknowledged','completed','expired','cancelled'
+    )),
+    title TEXT NOT NULL CHECK(length(trim(title)) > 0),
+    instruction TEXT NOT NULL CHECK(length(trim(instruction)) > 0),
+    acknowledged_by TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    completed_at TEXT,
+    UNIQUE(precondition_id)
+);
+CREATE INDEX IF NOT EXISTS idx_attack_operator_actions_scan
+    ON attack_operator_actions(scan_id,status,created_at);
+
+CREATE TABLE IF NOT EXISTS attack_chain_leads (
+    chain_lead_id TEXT PRIMARY KEY NOT NULL,
+    scan_id TEXT NOT NULL REFERENCES scans(scan_id),
+    source_finding_id TEXT NOT NULL REFERENCES findings(finding_id),
+    followup_coverage_id TEXT NOT NULL REFERENCES attack_coverage_items(coverage_id),
+    relationship TEXT NOT NULL CHECK(relationship IN (
+        'same_endpoint_followup','same_origin_identifier_followup',
+        'credential_boundary_followup'
+    )),
+    state TEXT NOT NULL DEFAULT 'queued' CHECK(state IN (
+        'queued','running','completed','retired'
+    )),
+    priority INTEGER NOT NULL CHECK(priority BETWEEN 0 AND 100),
+    source_stage_run_id TEXT REFERENCES stage_runs(stage_run_id),
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(scan_id,source_finding_id,followup_coverage_id)
+);
+CREATE INDEX IF NOT EXISTS idx_attack_chain_leads_scan
+    ON attack_chain_leads(scan_id,state,priority DESC,created_at);
+
+CREATE TABLE IF NOT EXISTS attack_tool_runs (
+    tool_run_id TEXT PRIMARY KEY NOT NULL,
+    scan_id TEXT NOT NULL REFERENCES scans(scan_id),
+    stage_run_id TEXT NOT NULL,
+    task_id TEXT NOT NULL,
+    adapter_id TEXT NOT NULL CHECK(adapter_id IN (
+        'nuclei-http-template-v1','sqlmap-payload-family-v1'
+    )),
+    manifest_sha256 TEXT NOT NULL CHECK(length(manifest_sha256)=64),
+    status TEXT NOT NULL DEFAULT 'running' CHECK(status IN (
+        'running','completed','failed','outcome_unknown'
+    )),
+    planned_request_count INTEGER NOT NULL CHECK(planned_request_count BETWEEN 1 AND 20),
+    completed_request_count INTEGER NOT NULL DEFAULT 0 CHECK(completed_request_count BETWEEN 0 AND 20),
+    request_ids_json TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(request_ids_json)),
+    result_summary_json TEXT NOT NULL DEFAULT '{}' CHECK(
+        json_valid(result_summary_json) AND length(CAST(result_summary_json AS BLOB)) <= 4096
+    ),
+    error_code TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    finished_at TEXT,
+    FOREIGN KEY(stage_run_id,scan_id) REFERENCES stage_runs(stage_run_id,scan_id),
+    FOREIGN KEY(task_id,scan_id) REFERENCES attack_tasks(task_id,scan_id)
+);
+CREATE INDEX IF NOT EXISTS idx_attack_tool_runs_scan
+    ON attack_tool_runs(scan_id,status,created_at);
+
+CREATE TABLE IF NOT EXISTS attack_intent_checkpoints (
+    checkpoint_id TEXT PRIMARY KEY NOT NULL,
+    scan_id TEXT NOT NULL REFERENCES scans(scan_id),
+    coverage_id TEXT NOT NULL REFERENCES attack_coverage_items(coverage_id),
+    stage_run_id TEXT NOT NULL,
+    task_id TEXT NOT NULL,
+    sequence INTEGER NOT NULL CHECK(sequence > 0),
+    strategy_families_json TEXT NOT NULL CHECK(json_valid(strategy_families_json)),
+    payload_families_json TEXT NOT NULL CHECK(json_valid(payload_families_json)),
+    response_features_json TEXT NOT NULL CHECK(
+        json_valid(response_features_json)
+        AND length(CAST(response_features_json AS BLOB)) <= 16384
+    ),
+    acquired_fact_refs_json TEXT NOT NULL CHECK(json_valid(acquired_fact_refs_json)),
+    remaining_todos_json TEXT NOT NULL CHECK(
+        json_valid(remaining_todos_json)
+        AND length(CAST(remaining_todos_json AS BLOB)) <= 8192
+    ),
+    control_request_ids_json TEXT NOT NULL CHECK(json_valid(control_request_ids_json)),
+    evidence_quality TEXT NOT NULL CHECK(evidence_quality IN ('weak','adequate','strong')),
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(stage_run_id,scan_id) REFERENCES stage_runs(stage_run_id,scan_id),
+    FOREIGN KEY(task_id,scan_id) REFERENCES attack_tasks(task_id,scan_id),
+    UNIQUE(coverage_id,sequence)
+);
+CREATE INDEX IF NOT EXISTS idx_attack_intent_checkpoints
+    ON attack_intent_checkpoints(scan_id,coverage_id,sequence DESC);
+CREATE TRIGGER IF NOT EXISTS attack_intent_checkpoints_no_update
+BEFORE UPDATE ON attack_intent_checkpoints
+BEGIN SELECT RAISE(ABORT, 'intent checkpoints are append-only'); END;
+CREATE TRIGGER IF NOT EXISTS attack_intent_checkpoints_no_delete
+BEFORE DELETE ON attack_intent_checkpoints
+BEGIN SELECT RAISE(ABORT, 'intent checkpoints are append-only'); END;
+
 CREATE TABLE IF NOT EXISTS attack_http_requests (
     request_id TEXT PRIMARY KEY NOT NULL,
     scan_id TEXT NOT NULL REFERENCES scans(scan_id),
@@ -643,6 +874,19 @@ def _add_attack_attempt_columns(conn: sqlite3.Connection) -> None:
 
 
 def _add_live_columns(conn: sqlite3.Connection) -> None:
+    # The recon/AI-Dast (Strix) recon engine's own ``endpoints`` table never
+    # defined this column, but Attack's eligibility/graph queries
+    # (attack/surface.py, attack/graph.py) read it unconditionally. NULL is
+    # correct for every endpoint that engine discovers from real captured
+    # traffic -- the eligibility SQL only special-cases
+    # verification_status='candidate' for AI-pattern-inferred routes, and
+    # otherwise gates purely on is_excluded, which this column does not touch.
+    endpoint_columns = {
+        row[1] for row in conn.execute("PRAGMA table_info(endpoints)")
+    }
+    if "verification_status" not in endpoint_columns:
+        conn.execute("ALTER TABLE endpoints ADD COLUMN verification_status TEXT")
+
     request_columns = {
         row[1] for row in conn.execute("PRAGMA table_info(attack_http_requests)")
     }
