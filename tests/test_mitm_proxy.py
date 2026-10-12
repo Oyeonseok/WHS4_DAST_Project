@@ -24,10 +24,11 @@ from aidast.scope.models import AssetType
 
 class MitmAddonBudgetTests(unittest.TestCase):
     @staticmethod
-    def _addon():
+    def _addon(auth_path: Path | None = None):
         proxy_module = types.ModuleType("mitmproxy")
         proxy_module.ctx = SimpleNamespace(
-            log=SimpleNamespace(warn=MagicMock())
+            log=SimpleNamespace(warn=MagicMock()),
+            options=SimpleNamespace(auth_file=str(auth_path) if auth_path else ""),
         )
         proxy_module.http = SimpleNamespace(
             Response=SimpleNamespace(
@@ -43,6 +44,8 @@ class MitmAddonBudgetTests(unittest.TestCase):
         with patch.dict(sys.modules, {"mitmproxy": proxy_module}):
             namespace = runpy.run_path(str(addon_path))
         addon = namespace["ScopeAndCaptureAddon"]()
+        if auth_path is not None:
+            addon.configure({"auth_file"})
         addon.scope_loaded = True
         addon.allowed_hosts = {"example.com"}
         addon.rules = {
@@ -153,7 +156,6 @@ class MitmAddonBudgetTests(unittest.TestCase):
         self.assertTrue(static.metadata["aidast_static_resource"])
 
     def test_tool_auth_is_injected_from_private_file_only_for_scoped_tools(self):
-        addon = self._addon()
         with tempfile.TemporaryDirectory() as temporary_dir:
             auth_path = Path(temporary_dir) / "auth.json"
             auth_path.write_text(
@@ -161,19 +163,42 @@ class MitmAddonBudgetTests(unittest.TestCase):
                 encoding="utf-8",
             )
             auth_path.chmod(0o600)
-            addon.auth_path = auth_path
+            addon = self._addon(auth_path)
             tool = self._flow("/api/me", headers={"X-AIDAST-Source": "ffuf"})
-            asyncio.run(addon.request(tool))
+            addon.request(tool)
             self.assertEqual(tool.request.headers["Authorization"], "Bearer private")
 
             ordinary = self._flow("/api/other")
-            asyncio.run(addon.request(ordinary))
+            addon.request(ordinary)
             self.assertNotIn("Authorization", ordinary.request.headers)
 
             outside = self._flow("/api/outside", headers={"X-AIDAST-Source": "katana"})
             outside.request.pretty_url = "https://outside.example/api/outside"
-            asyncio.run(addon.request(outside))
+            addon.request(outside)
             self.assertNotIn("Authorization", outside.request.headers)
+
+            self.assertTrue(update_mitmproxy_auth(
+                SimpleNamespace(_aidast_auth_file=auth_path),
+                {"Authorization": "Bearer refreshed"},
+            ))
+            refreshed = self._flow("/api/me", headers={"X-AIDAST-Source": "katana"})
+            addon.request(refreshed)
+            self.assertEqual(refreshed.request.headers["Authorization"], "Bearer refreshed")
+
+    def test_tool_auth_fails_closed_when_handoff_file_is_invalid(self):
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            auth_path = Path(temporary_dir) / "auth.json"
+            auth_path.write_text('{"version":1,"headers":[]}', encoding="utf-8")
+            auth_path.chmod(0o600)
+            addon = self._addon(auth_path)
+            tool = self._flow("/api/me", headers={"X-AIDAST-Source": "katana"})
+            addon.request(tool)
+            self.assertEqual(tool.response.status_code, 403)
+            self.assertNotIn("Authorization", tool.request.headers)
+
+            browser = self._flow("/api/me")
+            addon.request(browser)
+            self.assertIsNone(browser.response)
 
     def test_candidate_probe_marker_is_captured_but_not_forwarded(self):
         addon = self._addon()

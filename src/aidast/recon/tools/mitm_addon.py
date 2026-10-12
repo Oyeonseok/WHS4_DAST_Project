@@ -14,6 +14,7 @@ normalization is a separate downstream projection.
 from __future__ import annotations
 
 import json
+import os
 import re
 import runpy
 from fnmatch import fnmatchcase
@@ -35,6 +36,33 @@ _SENSITIVE_BODY_KEY = re.compile(
     r"refresh[_-]?token|access[_-]?token|session[_-]?id|csrf)",
     re.I,
 )
+
+_AUTH_TOOL_SOURCES = frozenset({"katana", "ffuf"})
+_AUTH_FORBIDDEN_HEADERS = frozenset({
+    "host", "content-length", "transfer-encoding", "connection",
+    "proxy-connection", "upgrade", "te", "trailer",
+    "x-aidast-source", "x-aidast-phase",
+})
+
+
+def _read_auth_headers(path: Path) -> dict[str, str]:
+    if path.is_symlink():
+        raise ValueError("authentication handoff is not a regular file")
+    stat = path.stat()
+    if not path.is_file() or stat.st_size > 65536 or (os.name == "posix" and stat.st_mode & 0o077):
+        raise ValueError("authentication handoff is not private")
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict) or data.get("version") != 1 or not isinstance(data.get("headers"), dict):
+        raise ValueError("authentication handoff has an invalid format")
+    headers = data["headers"]
+    for name, value in headers.items():
+        if (not isinstance(name, str) or not name or len(name) > 128
+                or any(ord(char) <= 32 or ord(char) >= 127 or char in '()<>@,;:\\\"/[]?={}' for char in name)
+                or name.casefold() in _AUTH_FORBIDDEN_HEADERS
+                or not isinstance(value, str) or len(value) > 16384
+                or "\r" in value or "\n" in value):
+            raise ValueError("authentication handoff contains an invalid header")
+    return headers
 
 
 def _redact_body_for_capture(value: str | None, content_type: str | None) -> str | None:
@@ -146,6 +174,7 @@ class ScopeAndCaptureAddon:
         self.allowed_hosts: set[str] = set()
         self.scope_loaded = False
         self.out_path: Path | None = None
+        self.auth_path: Path | None = None
         self.enforcement_required = True
         # Metrics only; these values never reject an otherwise in-scope request.
         self.request_count = 0
@@ -157,6 +186,10 @@ class ScopeAndCaptureAddon:
             help="Approved Scope allow-list JSON path.",
         )
         loader.add_option(
+            name="auth_file", typespec=str, default="",
+            help="Private authentication handoff JSON path.",
+        )
+        loader.add_option(
             name="enforcement_required", typespec=bool, default=True,
             help="Block all requests when the Scope configuration is unavailable.",
         )
@@ -166,6 +199,8 @@ class ScopeAndCaptureAddon:
         )
 
     def configure(self, updated) -> None:
+        if "auth_file" in updated:
+            self.auth_path = Path(ctx.options.auth_file) if ctx.options.auth_file else None
         if "enforcement_required" in updated:
             self.enforcement_required = bool(ctx.options.enforcement_required)
         if "out_file" in updated and ctx.options.out_file:
@@ -272,6 +307,15 @@ class ScopeAndCaptureAddon:
         # identity-provider origins reached during browsing.
         for header_name, header_value in self.rules.get("request_headers", {}).items():
             flow.request.headers[header_name] = header_value
+
+        if source in _AUTH_TOOL_SOURCES and self.auth_path is not None:
+            try:
+                auth_headers = _read_auth_headers(self.auth_path)
+            except (OSError, ValueError, TypeError):
+                self._block(flow, "auth_unavailable")
+                return
+            for header_name, header_value in auth_headers.items():
+                flow.request.headers[header_name] = header_value
 
         self.request_count += 1
         flow.metadata["aidast_scope_allowed"] = True

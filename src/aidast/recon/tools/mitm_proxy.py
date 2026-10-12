@@ -54,7 +54,6 @@ def start_mitmproxy(
     if scope_rules is None or scope_rules.get("enforcement_required", True) is False:
         raise RuntimeError("mitmproxy requires an approved, fail-closed Scope boundary")
     validate_scope_rules(scope_rules)
-    scope_file: Path | None = None
     if shutil.which("mitmdump") is None:
         raise RuntimeError("required Scope proxy is unavailable: mitmdump is not installed")
 
@@ -77,19 +76,31 @@ def start_mitmproxy(
         "--set", "enforcement_required=true",
     ]
 
-    handle = tempfile.NamedTemporaryFile(
+    with tempfile.NamedTemporaryFile(
         mode="w", suffix=".json", encoding="utf-8", delete=False
-    )
-    scope_file = Path(handle.name)
-    json.dump(scope_rules, handle)
-    handle.close()
-    command += ["--set", f"scope_file={scope_file}"]
+    ) as handle:
+        scope_file = Path(handle.name)
+        json.dump(scope_rules, handle)
+    auth_file: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".json", encoding="utf-8", delete=False
+        ) as handle:
+            auth_file = Path(handle.name)
+            json.dump({"version": 1, "headers": {}}, handle)
+        os.chmod(auth_file, 0o600)
+    except Exception:
+        scope_file.unlink(missing_ok=True)
+        if auth_file is not None:
+            auth_file.unlink(missing_ok=True)
+        raise
+    command += ["--set", f"scope_file={scope_file}", "--set", f"auth_file={auth_file}"]
 
     try:
         proc = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except OSError as exc:
-        if scope_file is not None:
-            scope_file.unlink(missing_ok=True)
+        scope_file.unlink(missing_ok=True)
+        auth_file.unlink(missing_ok=True)
         raise RuntimeError("required Scope proxy could not start") from exc
 
     if not _wait_for_proxy_port(selected_port, process=proc):
@@ -98,13 +109,14 @@ def start_mitmproxy(
             proc.wait(timeout=10)
         except subprocess.TimeoutExpired:
             proc.kill()
-        if scope_file is not None:
-            scope_file.unlink(missing_ok=True)
+        scope_file.unlink(missing_ok=True)
+        auth_file.unlink(missing_ok=True)
         raise RuntimeError("required Scope proxy did not become ready")
 
     # Keep cleanup metadata on the process without changing the public return
     # contract used by the executor and embedding applications.
     proc._aidast_scope_file = scope_file  # type: ignore[attr-defined]
+    proc._aidast_auth_file = auth_file  # type: ignore[attr-defined]
     print(f"  [mitmproxy] 127.0.0.1:{selected_port}에서 관찰 시작")
     return proc, f"http://127.0.0.1:{selected_port}"
 
@@ -113,6 +125,7 @@ def stop_mitmproxy(proc: subprocess.Popen | None) -> None:
     if proc is None:
         return
     scope_file = getattr(proc, "_aidast_scope_file", None)
+    auth_file = getattr(proc, "_aidast_auth_file", None)
     try:
         proc.terminate()
         try:
@@ -123,6 +136,8 @@ def stop_mitmproxy(proc: subprocess.Popen | None) -> None:
     finally:
         if isinstance(scope_file, Path):
             scope_file.unlink(missing_ok=True)
+        if isinstance(auth_file, Path):
+            auth_file.unlink(missing_ok=True)
 
 
 def ingest_mitm_capture(
@@ -566,12 +581,9 @@ def update_mitmproxy_auth(
 ) -> bool:
     """Atomically publish browser credentials without putting them in argv.
 
-    Ported unchanged from artex's original recon/tools/mitm_proxy.py. The
-    Strix engine's own capture path (start_mitmproxy/stop_mitmproxy/
-    ingest_mitm_capture above) does not call this; it exists only so that
-    the still-present (but unused in this integrated tree) deterministic
-    recon/executor.py can still be imported without an ImportError. See
-    how_to_Integrated.md section 4-2.
+    The endpoint discovery executor calls this after browser login. The
+    proxy addon receives the file path at startup; applying these headers
+    to scoped tool traffic is a separate step.
     """
     if proc is None:
         return False
