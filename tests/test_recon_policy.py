@@ -305,6 +305,35 @@ class TargetPolicyTests(unittest.TestCase):
         self.assertFalse(effective.tools.ffuf_enabled)
         self.assertFalse(effective.tools.ffuf_recursion)
 
+    def test_exact_start_url_revalidates_active_policy_with_scope_evidence(self) -> None:
+        from aidast.cli import _bind_exact_start_urls
+
+        authorization = "Automated scanning against web resources and APIs is permitted."
+        scope_markdown = (
+            f"## Allowed activities\n\n- {authorization}\n\n"
+            "## Prohibited activities\n\n- Denial-of-service is prohibited.\n"
+        )
+        target = TargetPolicy(
+            scope_id="scope_test",
+            policy_id="policy_test",
+            asset_type=AssetType.DOMAIN,
+            asset="example.com",
+            allowed_hosts=["example.com"],
+            attack_authorization_mode="active_non_destructive",
+            attack_authorization_evidence=authorization,
+            attack_allowed_methods=["GET", "POST"],
+        )
+
+        result = _bind_exact_start_urls(
+            {(AssetType.DOMAIN.value, target.asset): target},
+            {(AssetType.DOMAIN.value, target.asset): "https://example.com/app"},
+            scope_markdown=scope_markdown,
+        )
+
+        narrowed = result[(AssetType.DOMAIN.value, target.asset)]
+        self.assertEqual(narrowed.allowed_path_prefixes, ["/app"])
+        self.assertEqual(narrowed.attack_allowed_methods, ["GET", "POST"])
+
     def test_only_validated_rate_evidence_can_override_structured_rate(self) -> None:
         from aidast.cli import _apply_policy_caps
         quote = "Automated tooling: max. 10 requests per second."

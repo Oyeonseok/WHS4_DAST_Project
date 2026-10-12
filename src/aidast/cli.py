@@ -1418,7 +1418,11 @@ def _run_recon(
             scope_markdown=scope_markdown,
         )
         if args.profile == "bug-bounty-safe":
-            policies = _bind_exact_start_urls(policies, start_urls)
+            policies = _bind_exact_start_urls(
+                policies,
+                start_urls,
+                scope_markdown=scope_markdown,
+            )
         policies = _apply_policy_caps(
             policies,
             profile=args.profile,
@@ -1968,6 +1972,8 @@ def _apply_scope_host_exclusions(
 def _bind_exact_start_urls(
     policies: dict[tuple[str, str], TargetPolicy],
     start_urls: dict[tuple[str, str], str],
+    *,
+    scope_markdown: str,
 ) -> dict[tuple[str, str], TargetPolicy]:
     """Narrow selected policies to the operator-approved concrete URL."""
     result: dict[tuple[str, str], TargetPolicy] = {}
@@ -2000,6 +2006,7 @@ def _bind_exact_start_urls(
                 narrowed,
                 asset_type=narrowed.asset_type,
                 asset=narrowed.asset,
+                scope_markdown=scope_markdown,
             )
         except ValueError as exc:
             raise ReconCoordinatorError(

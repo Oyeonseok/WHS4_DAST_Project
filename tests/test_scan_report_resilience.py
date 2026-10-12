@@ -363,6 +363,10 @@ def test_scan_summary_reports_attack_coverage_and_only_latest_stage_in_markdown(
         INSERT INTO attack_attempts
             (attempt_id,scan_id,skill_name,request_fingerprint,outcome)
             VALUES ('attempt-b','scan','hunt-sqli',printf('%064d',4),'inconclusive');
+        INSERT INTO attack_endpoint_reviews
+            (scan_id,endpoint_id,evidence_sha256,status,reason,hypothesis_count)
+            VALUES ('scan','endpoint',printf('%064d',5),'insufficient_evidence',
+                    'captured evidence does not support a bounded hypothesis',0);
     """)
     case.conn.execute(
         """INSERT INTO stage_runs
@@ -382,12 +386,16 @@ def test_scan_summary_reports_attack_coverage_and_only_latest_stage_in_markdown(
 
     assert result["attack"] == {
         "available": True,
+        "review_statuses": {"insufficient_evidence": 1},
+        "endpoint_reviews": 1,
         "coverage_statuses": {"tested_negative": 1, "unsupported": 1},
         "coverage_items": 2,
         "attempt_outcomes": {"inconclusive": 2},
         "attempts": 2,
     }
     markdown = (output_for(case) / "ScanSummary.md").read_text()
+    assert "검토한 엔드포인트: 1" in markdown
+    assert r"엔드포인트 검토 상태 insufficient\_evidence: 1" in markdown
     assert "커버리지 항목: 2" in markdown
     assert "기록된 HTTP 시도: 2" in markdown
     assert markdown.count("| report |") == 1

@@ -105,13 +105,26 @@ def _snapshot(database: Path, scan_id: str) -> dict:
                     AND decision_stage_run_id=latest_stage_run_id""", (scan_id,),
             ).fetchone()[0]
         attack = {
-            "available": "attack_coverage_items" in tables,
+            "available": (
+                "attack_coverage_items" in tables
+                or "attack_endpoint_reviews" in tables
+            ),
+            "review_statuses": {},
+            "endpoint_reviews": 0,
             "coverage_statuses": {},
             "coverage_items": 0,
             "attempt_outcomes": {},
             "attempts": 0,
         }
-        if attack["available"]:
+        if "attack_endpoint_reviews" in tables:
+            attack["review_statuses"] = _counts(
+                conn,
+                """SELECT status,count(*) FROM attack_endpoint_reviews
+                    WHERE scan_id=? GROUP BY status""",
+                scan_id,
+            )
+            attack["endpoint_reviews"] = sum(attack["review_statuses"].values())
+        if "attack_coverage_items" in tables:
             attack["coverage_statuses"] = _counts(
                 conn,
                 """SELECT status,count(*) FROM attack_coverage_items
@@ -222,9 +235,14 @@ def write_scan_summary(
     if summary["attack"]["available"]:
         markdown.extend([
             "", "## 공격 실행 결과", "",
+            f"- 검토한 엔드포인트: {summary['attack']['endpoint_reviews']}",
             f"- 커버리지 항목: {summary['attack']['coverage_items']}",
             f"- 기록된 HTTP 시도: {summary['attack']['attempts']}",
         ])
+        markdown.extend(
+            f"- 엔드포인트 검토 상태 {_markdown_text(status)}: {count}"
+            for status, count in summary["attack"]["review_statuses"].items()
+        )
         markdown.extend(
             f"- 커버리지 상태 {_markdown_text(status)}: {count}"
             for status, count in summary["attack"]["coverage_statuses"].items()
