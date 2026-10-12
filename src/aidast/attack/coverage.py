@@ -22,6 +22,10 @@ from aidast.validation.execution.credentials import PipelineCredentialResolver
 from aidast.validation.persistence.evidence_policy import sanitize_metadata
 from aidast.attack.surface import ATTACK_ELIGIBLE_ENDPOINT_SQL
 from aidast.attack.observed_objects import seed_observed_object_facts
+from aidast.attack.intent_checkpoint import (
+    latest_intent_checkpoint,
+    negative_evidence_quality,
+)
 
 
 VULNERABILITY_SKILLS: dict[str, str] = {
@@ -1406,12 +1410,11 @@ def requeue_auth_gated_negative_coverage(
 def reclassify_explicit_auth_denial_coverage(
     conn: sqlite3.Connection, scan_id: str,
 ) -> int:
-    """Treat an exact anonymous 401/403 as a tested auth-bypass negative.
+    """Promote an exact anonymous denial only with a sufficient checkpoint.
 
-    Some model runs conservatively label an explicit authentication denial as
-    inconclusive. For an unauthenticated auth-bypass hypothesis the denial is
-    the expected bounded negative control. This requires a durable exact
-    attempt and completed HTTP evidence; route names alone prove nothing.
+    A single 401/403 establishes that authentication was demanded, but it does
+    not establish that alternate bypass strategies were covered. The durable
+    intent checkpoint carries that bounded quality proof.
     """
     rows = conn.execute(
         """SELECT c.*,e.method FROM attack_coverage_items c
@@ -1426,24 +1429,31 @@ def reclassify_explicit_auth_denial_coverage(
     for row in rows:
         attempts = conn.execute(
             """SELECT attempt_id,endpoint_id,request_fingerprint,response_status,
-                      identity_role,outcome
+                      response_signature,identity_role,payload_variant,outcome
                FROM attack_attempts
                WHERE scan_id=? AND task_id=? AND outcome='inconclusive'
                  AND identity_role='unauthenticated' AND response_status IN (401,403)
                ORDER BY created_at,attempt_id""",
             (scan_id, row["last_task_id"]),
         ).fetchall()
-        if not any(
-            _selected_http_evidence(
+        selected = [
+            attempt for attempt in attempts if _selected_http_evidence(
                 conn, row, attempt, str(row["last_stage_run_id"]),
                 str(row["last_task_id"]), exact=True,
             )
-            for attempt in attempts
-        ):
+        ]
+        if not selected:
+            continue
+        sufficient, quality_reason, _ = negative_evidence_quality(
+            conn, scan_id=scan_id, coverage_id=str(row["coverage_id"]),
+            task_id=str(row["last_task_id"]),
+            selected_attempts=[dict(item) for item in selected],
+        )
+        if not sufficient:
             continue
         reason = (
             "exact unauthenticated request received an explicit authentication "
-            "denial; auth-bypass hypothesis was tested negative"
+            f"denial; {quality_reason}"
         )
         _event(
             conn, row, "tested_negative", reason,
@@ -2051,6 +2061,7 @@ def _adopt_existing_findings(conn: sqlite3.Connection, scan_id: str) -> int:
 def claim_coverage_batch(
     conn: sqlite3.Connection, *, scan_id: str, stage_run_id: str,
     batch_size: int, max_attempts: int = 3,
+    preferred_coverage_ids: Iterable[str] = (),
 ) -> list[dict[str, Any]]:
     if not 1 <= batch_size <= 50:
         raise ValueError("coverage batch size must be between 1 and 50")
@@ -2069,9 +2080,17 @@ def claim_coverage_batch(
         (scan_id, max_attempts),
     ).fetchone())
     effective_batch_size = 1 if has_retryable else batch_size
+    preferred = tuple(dict.fromkeys(
+        str(item) for item in preferred_coverage_ids if str(item).strip()
+    ))[:batch_size]
+    preferred_sql = (
+        "c.coverage_id IN (" + ",".join("?" for _ in preferred) + ")"
+        if preferred else "0"
+    )
     rows = conn.execute(
-        """WITH ranked AS (
+        f"""WITH ranked AS (
                SELECT c.*,e.method,e.normalized_path,o.base_url AS origin_url,
+                      CASE WHEN {preferred_sql} THEN 1 ELSE 0 END AS lead_queue_signal,
                       EXISTS (
                           SELECT 1 FROM endpoint_observations api
                           WHERE api.endpoint_id=c.endpoint_id
@@ -2134,7 +2153,8 @@ def claim_coverage_batch(
                  AND c.attempt_count < ?
            )
            SELECT * FROM ranked
-           ORDER BY CASE status WHEN 'error_retryable' THEN 0 ELSE 1 END,
+           ORDER BY CASE WHEN lead_queue_signal=1 THEN 0 ELSE 1 END,
+                    CASE status WHEN 'error_retryable' THEN 0 ELSE 1 END,
                     CASE WHEN historical_runtime_signal=1 THEN 0 ELSE 1 END,
                     CASE WHEN public_security_signal=1 OR login_security_signal=1
                          THEN 0 ELSE 1 END,
@@ -2152,7 +2172,7 @@ def claim_coverage_batch(
                     END,
                     vuln_class,normalized_path,coverage_id
            LIMIT ?""",
-        (scan_id, max_attempts, effective_batch_size),
+        (*preferred, scan_id, max_attempts, effective_batch_size),
     ).fetchall()
     claimed: list[dict[str, Any]] = []
     for row in rows:
@@ -2195,6 +2215,9 @@ def claim_coverage_batch(
         source_context = _source_context(
             conn, str(row["endpoint_id"]), str(row["annotation_id"]),
         )
+        prior_checkpoint = latest_intent_checkpoint(
+            conn, str(row["coverage_id"]),
+        )
         if source_context.get('active_annotation', {}).get('category') == 'attack_hypothesis':
             parameter_candidates = [item for item in parameter_candidates
                 if (item['location'], item['name']) == (row['injection_location'], row['parameter_name'])]
@@ -2217,6 +2240,7 @@ def claim_coverage_batch(
                 "test_fixtures": test_fixtures,
                 "context_facts": context_facts,
                 "source_context": source_context,
+                "intent_checkpoint": prior_checkpoint,
             },
         )
         transition_coverage(
@@ -2247,6 +2271,7 @@ def claim_coverage_batch(
             "test_fixtures": test_fixtures,
             "context_facts": context_facts,
             "source_context": source_context,
+            "intent_checkpoint": prior_checkpoint,
         })
     return claimed
 
@@ -2340,7 +2365,8 @@ def reconcile_coverage_batch(
     for row in rows:
         attempts = conn.execute(
             """SELECT attempt_id,outcome,finding_id,request_fingerprint,endpoint_id,
-                      response_status,identity_role,resolution_reason FROM attack_attempts
+                      response_status,response_signature,identity_role,payload_variant,
+                      resolution_reason FROM attack_attempts
                WHERE scan_id=? AND task_id=? ORDER BY created_at,attempt_id""",
             (row["scan_id"], row["last_task_id"]),
         ).fetchall()
@@ -2361,14 +2387,7 @@ def reconcile_coverage_batch(
         # endpoint hypothesis. Reconcile only exact, completed HTTP evidence.
         outcomes = {str(item["outcome"] or "") for item in selected_attempts}
         negative_http_evidence = bool(selected_attempts)
-        if finding_ids:
-            transition_coverage(
-                conn, row["coverage_id"], "candidate",
-                "Attack produced an evidence-bound finding",
-                stage_run_id=stage_run_id, task_id=row["last_task_id"],
-                finding_id=finding_ids[0],
-            )
-        elif task_status == "completed" and negative_http_evidence and (
+        negative_shape = negative_http_evidence and (
             outcomes <= {"negative", "rejected"}
             or (
                 row["vuln_class"] == "auth_bypass"
@@ -2379,12 +2398,41 @@ def reconcile_coverage_batch(
                     for item in selected_attempts
                 )
             )
-        ):
+        )
+        if finding_ids:
             transition_coverage(
-                conn, row["coverage_id"], "tested_negative",
-                "Attack completed with terminal negative evidence",
+                conn, row["coverage_id"], "candidate",
+                "Attack produced an evidence-bound finding",
                 stage_run_id=stage_run_id, task_id=row["last_task_id"],
+                finding_id=finding_ids[0],
             )
+        elif task_status == "completed" and negative_shape:
+            sufficient, quality_reason, _ = negative_evidence_quality(
+                conn, scan_id=str(row["scan_id"]),
+                coverage_id=str(row["coverage_id"]),
+                task_id=str(row["last_task_id"]),
+                selected_attempts=[dict(item) for item in selected_attempts],
+            )
+            if sufficient:
+                transition_coverage(
+                    conn, row["coverage_id"], "tested_negative",
+                    f"Attack completed with terminal negative evidence: {quality_reason}",
+                    stage_run_id=stage_run_id, task_id=row["last_task_id"],
+                )
+            else:
+                terminal = row["attempt_count"] >= retry_limit
+                transition_coverage(
+                    conn, row["coverage_id"],
+                    "unsupported" if terminal else "error_retryable",
+                    (
+                        "bounded retry limit reached without sufficient negative "
+                        f"evidence quality: {quality_reason}"
+                        if terminal else
+                        "negative evidence quality is insufficient; retry with an "
+                        f"alternate strategy and control: {quality_reason}"
+                    ),
+                    stage_run_id=stage_run_id, task_id=row["last_task_id"],
+                )
         elif task_status == "completed" and negative_http_evidence and outcomes and outcomes <= {
             "negative", "rejected", "inconclusive",
         }:

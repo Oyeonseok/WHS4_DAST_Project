@@ -8,10 +8,15 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from aidast.agents.main import MainAgentError
 from aidast.pipeline.lifecycle import audit_event
 from aidast.recon import db
 from aidast.recon.judgment import normalize_path, is_static_asset, query_signature
 from aidast.recon.verification import result_verification_status
+from aidast.recon.ui_synthesis import (
+    persist_synthetic_ui_candidate,
+    reconcile_synthetic_ui_candidates,
+)
 
 
 TAXONOMY = {
@@ -138,6 +143,14 @@ def sanitize_evidence(value) -> dict:
         ]
     if isinstance(value.get('verification_reason'), str):
         result['verification_reason'] = safe_text(value['verification_reason'])[:80]
+    if value.get('synthesis_kind') == 'navigation':
+        result['synthesis_kind'] = 'navigation'
+    if value.get('required_role_hint') in {'unknown', 'authenticated', 'administrator'}:
+        result['required_role_hint'] = value['required_role_hint']
+    if isinstance(value.get('source_document_sha256'), str) and re.fullmatch(
+        r'[a-f0-9]{64}', value['source_document_sha256']
+    ):
+        result['source_document_sha256'] = value['source_document_sha256']
     if value.get('derivation_rule') in {
         'api_prefix_alias', 'api_collection_alias',
         'authentication_ui_companion', 'versionless_api_action',
@@ -189,6 +202,7 @@ class ObservationRecorder:
         self.scan_id = scan_id
         self.agent = agent
         self.last_failure_retryable = False
+        self.last_failure_splittable = False
         self.context_ids: dict[str, str] = {}
         # A deferred worker has no single origin/session.  Keep the recorder
         # reusable without manufacturing an invalid foreign-key reference.
@@ -241,6 +255,13 @@ class ObservationRecorder:
             else:
                 self.conn.execute('UPDATE discovery_contexts SET ended_at=? WHERE context_id=?', (db.now(), context_id))
             evidence = sanitize_evidence(item.get('evidence'))
+            if item.get('discovery_kind') == 'synthetic_ui_candidate':
+                persist_synthetic_ui_candidate(
+                    self.conn, scan_id=self.scan_id, origin_id=self.origin_id,
+                    method=method, path=path,
+                    source_url=str(evidence.get('parent_url') or context.get('page_url') or path),
+                    evidence=evidence,
+                )
             if unverified_candidate:
                 evidence['verification_status'] = 'candidate'
             if item.get('traffic_class'):
@@ -274,6 +295,8 @@ class ObservationRecorder:
                 'phase': phase,
                 'parameters': parameter_context(self.conn, endpoint_id),
             })
+        if self.origin_id:
+            reconcile_synthetic_ui_candidates(self.conn, origin_id=self.origin_id)
         self.conn.commit()
         if self.agent is not None:
             payload.sort(key=lambda item: item.get('observed_at') or '')
@@ -286,6 +309,7 @@ class ObservationRecorder:
 
     def _classify(self, payload: list[dict], *, index: int, total: int) -> bool:
         self.last_failure_retryable = False
+        self.last_failure_splittable = False
         run_id = db.new_id('annotation_run')
         self.conn.execute('''INSERT INTO annotation_runs
             (annotation_run_id,scan_id,model,prompt_version,taxonomy_version,status,started_at)
@@ -335,7 +359,13 @@ class ObservationRecorder:
                                  'processed_count': len(payload), 'failed_count': 0})
             return True
         except Exception as exc:
-            self.last_failure_retryable = isinstance(exc, AnnotationContractError)
+            # Contract failures can often be isolated by splitting the input.
+            # Operational Codex failures are commonly transient, so allow the
+            # deferred tagger to retry the unchanged bounded batch once.
+            self.last_failure_splittable = isinstance(exc, AnnotationContractError)
+            self.last_failure_retryable = self.last_failure_splittable or isinstance(
+                exc, MainAgentError
+            )
             self.conn.rollback()
             self.conn.execute("UPDATE annotation_runs SET status='failed',error_message=?,finished_at=? WHERE annotation_run_id=?", (type(exc).__name__, db.now(), run_id))
             self.conn.commit()
@@ -458,7 +488,10 @@ def tag_pending_observations(conn, *, scan_id: str, agent, batch_size: int = 200
     def classify_with_split(payload: list[dict], index: int) -> tuple[int, int]:
         if recorder._classify(payload, index=index, total=batches):
             return len(payload) + copy_equivalent_annotations(payload), 0
-        if recorder.last_failure_retryable and len(payload) > 1:
+        if recorder.last_failure_retryable and not recorder.last_failure_splittable:
+            if recorder._classify(payload, index=index, total=batches):
+                return len(payload) + copy_equivalent_annotations(payload), 0
+        if recorder.last_failure_splittable and len(payload) > 1:
             midpoint = len(payload) // 2
             left_done, left_failed = classify_with_split(payload[:midpoint], index)
             right_done, right_failed = classify_with_split(payload[midpoint:], index)

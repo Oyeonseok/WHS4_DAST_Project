@@ -37,12 +37,7 @@ class TransientAPIError(RuntimeError):
 @dataclass(frozen=True)
 class SoakConfig:
     base_url: str
-    baseline_id: str
-    target_id: str
     total: int
-    min_baseline_count: int = 81
-    min_matched_count: int = 73
-    min_recall: float = 0.90
 
 
 class DashboardClient:
@@ -114,14 +109,11 @@ def evaluate_run(
     scan_id: str,
     snapshot: dict[str, Any],
     audit: dict[str, Any],
-    wiki: dict[str, Any],
     validations: dict[str, Any],
     report_response: dict[str, Any],
-    config: SoakConfig,
 ) -> dict[str, Any]:
     stages = snapshot.get("stage_statuses") or {}
     errors = _errors(snapshot, audit)
-    comparison = wiki.get("comparison") or {}
     cases = [item for item in validations.get("cases") or [] if isinstance(item, dict)]
     completed_cases = [
         item for item in cases if str(item.get("processing_phase", "")).lower() == "completed"
@@ -151,16 +143,6 @@ def evaluate_run(
         "completed": snapshot.get("status") == "completed",
         "stages_completed": all(stages.get(stage) == "completed" for stage in REQUIRED_STAGES),
         "zero_errors": not errors,
-        "wiki_lint": wiki.get("configured") is True and (wiki.get("lint") or {}).get("ok") is True,
-        "baseline": (
-            comparison.get("baseline_id") == config.baseline_id
-            and comparison.get("baseline_count") == config.min_baseline_count
-        ),
-        "recon_recall": (
-            isinstance(comparison.get("exact_recall"), (int, float))
-            and comparison["exact_recall"] >= config.min_recall
-            and comparison.get("matched_count", 0) >= config.min_matched_count
-        ),
         "validation_cases": bool(cases),
         "validations_completed": len(completed_cases) == len(cases),
         "confirmed_findings": bool(confirmed_ids),
@@ -188,12 +170,6 @@ def evaluate_run(
             },
             "missing_languages": missing_report_languages,
             "contaminated_titles": contaminated_titles,
-        },
-        "wiki": {
-            "baseline_count": comparison.get("baseline_count"),
-            "matched_count": comparison.get("matched_count"),
-            "exact_recall": comparison.get("exact_recall"),
-            "lint_ok": (wiki.get("lint") or {}).get("ok"),
         },
         "checks": checks,
         "passed": all(checks.values()),
@@ -230,7 +206,6 @@ class SoakSupervisor:
         value.update({
             "schema_version": "2.0",
             "target_runs": self.config.total,
-            "baseline_id": self.config.baseline_id,
         })
         value.setdefault("started_at", utc_now())
         value.setdefault("runs", [])
@@ -264,14 +239,9 @@ class SoakSupervisor:
             return snapshot, None
         prefix = "/api/v1/scans/" + quote(scan_id, safe="")
         audit = self.client.call(prefix + "/audit")
-        wiki = self.client.call(prefix + "/recon-wiki", {
-            "baseline_id": self.config.baseline_id,
-            "baseline_kind": "source",
-            "target_id": self.config.target_id,
-        })
         validations = self.client.call(prefix + "/validations")
         reports = self.client.call("/api/v1/reports?scan_id=" + quote(scan_id, safe=""))
-        return snapshot, evaluate_run(scan_id, snapshot, audit, wiki, validations, reports, self.config)
+        return snapshot, evaluate_run(scan_id, snapshot, audit, validations, reports)
 
     def run(self, *, resume_after_failure: bool = False) -> int:
         state = self.load_state()
@@ -338,8 +308,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--payload", type=Path, required=True)
     parser.add_argument("--ids", type=Path, required=True)
     parser.add_argument("--state", type=Path, required=True)
-    parser.add_argument("--baseline-id", required=True)
-    parser.add_argument("--target-id", required=True)
     parser.add_argument("--total", type=int, default=10)
     parser.add_argument("--poll-seconds", type=float, default=30.0)
     parser.add_argument("--resume-after-failure", action="store_true")
@@ -353,7 +321,7 @@ def main() -> int:
     payload = json.loads(args.payload.read_text(encoding="utf-8"))
     if not isinstance(payload, dict):
         raise SystemExit("launch payload must be a JSON object")
-    config = SoakConfig(args.base_url, args.baseline_id, args.target_id, args.total)
+    config = SoakConfig(args.base_url, args.total)
     supervisor = SoakSupervisor(
         client=DashboardClient(args.base_url), config=config, ids_path=args.ids,
         state_path=args.state, launch_payload=payload, poll_seconds=args.poll_seconds,

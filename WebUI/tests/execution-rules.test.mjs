@@ -1,6 +1,23 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import * as scan from '../src/lib/scan.ts';
+
+test('bug bounty profile requires one target and an exact wildcard start URL', () => {
+ const targets = [{asset:'*.example.test',asset_type:'WILDCARD'}];
+ assert.equal(scan.bugBountyTargetReady('bug-bounty-safe', [], targets, ''), false);
+ assert.equal(scan.bugBountyTargetReady('bug-bounty-safe', ['*.example.test'], targets, ''), false);
+ assert.equal(scan.bugBountyTargetReady('bug-bounty-safe', ['*.example.test'], targets, 'https://app.example.test/'), true);
+ assert.equal(scan.validStartUrl('https://app.example.test/'), true);
+ assert.equal(scan.validStartUrl('http://app.example.test/'), true);
+ assert.equal(scan.validStartUrl('http://app.example.test/', true), false);
+ assert.equal(scan.validStartUrl('https://user:pass@app.example.test/'), false);
+ assert.equal(scan.validStartUrl('https://app.example.test/?token=value'), false);
+});
+
+test('bug bounty profile keeps its lower rate when policy allows more', () => {
+ const requirements = {profiles:[{id:'bug-bounty-safe',limits:{concurrency:1,max_requests:300,timeout_seconds:15,max_depth:2,requests_per_second:0.2}}],scope_max_requests_per_second:10,execution_rules:{option_limits:[]}};
+ assert.equal(scan.resolveExecutionLimits(requirements, 'bug-bounty-safe').requests_per_second, 0.2);
+});
 const input = { key:'email',label:'Testing email',kind:'email',allowed_email_domains:['example.com'],target_assets:['https://prod/'],source_quote:'Use example.com.' };
 const confirmation = {key:'contact',label:'Contacted production',target_assets:['https://prod/'],source_quote:'Contact production.'};
 const requirements = { execution_requirements_status:'ready', execution_rules:{request_limits:[],option_limits:[],exclusions:[]},policy_inputs:[input],policy_confirmations:[confirmation],policy_blockers:[] };

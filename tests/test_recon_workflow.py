@@ -116,6 +116,7 @@ class FakeReconMainAgent:
         self.received_scope_markdown: str | None = None
         self.received_allowed_targets: list[ScopeAsset] | None = None
         self.received_start_urls = None
+        self.received_policy_plan: ReconPlan | None = None
 
     def collect_scope(self, program_url: str) -> tuple[ProgramPage, ScopeAnalysis]:
         return program_page(), scope_analysis()
@@ -143,6 +144,7 @@ class FakeReconMainAgent:
         execution_start_urls=None,
     ):
         self.received_start_urls = execution_start_urls
+        self.received_policy_plan = plan
         return {
             (AssetType.WILDCARD.value, "*.example.com"): TargetPolicy(
                 scope_id=scope_id,
@@ -924,11 +926,50 @@ class ReconCliTests(unittest.TestCase):
                     "--policy-only",
                     "--output-dir", str(root),
                 ])
-
         self.assertEqual(result, 0)
         # A concrete start URL must not collapse an approved wildcard into a
         # single host/path; wildcard Recon starts with scoped asset discovery.
         self.assertEqual(fake_main.received_start_urls, {})
+
+    def test_bug_bounty_profile_narrows_wildcard_to_exact_start_url(self) -> None:
+        start_url = "https://app.example.com/owned/project"
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir) / "Scope"
+            fake_main = FakeReconMainAgent()
+            with (
+                patch("aidast.cli.CodexMainAgent", return_value=fake_main),
+                patch("builtins.input", return_value="y"),
+                redirect_stdout(io.StringIO()),
+            ):
+                result = main([
+                    "recon", PROGRAM_URL,
+                    "--target", "*.example.com",
+                    "--start-url", start_url,
+                    "--profile", "bug-bounty-safe",
+                    "--policy-only",
+                    "--output-dir", str(root),
+                ])
+            policy_payload = json.loads(
+                (root / "bugcrowd" / "example" / "TargetPolicy.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+
+        self.assertEqual(result, 0)
+        self.assertEqual(
+            fake_main.received_start_urls,
+            {(AssetType.WILDCARD.value, "*.example.com"): start_url},
+        )
+        self.assertEqual(fake_main.received_policy_plan.targets[0].steps, [
+            ReconStep.HTTP_PROBE,
+            ReconStep.ORIGIN_DISCOVERY,
+            ReconStep.ENDPOINT_DISCOVERY,
+        ])
+        narrowed = policy_payload["policies"][0]
+        self.assertEqual(narrowed["allowed_hosts"], ["app.example.com"])
+        self.assertEqual(narrowed["allowed_path_prefixes"], ["/owned/project"])
+        self.assertFalse(narrowed["include_subdomains"])
+        self.assertFalse(narrowed["tools"]["ffuf_enabled"])
 
     def test_start_url_outside_selected_target_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_dir:

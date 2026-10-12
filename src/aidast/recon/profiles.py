@@ -10,7 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from aidast.scope.models import ScopeAnalysis
 
-ProfileId = Literal["safe-recon", "focused-discovery"]
+ProfileId = Literal["safe-recon", "focused-discovery", "bug-bounty-safe"]
 
 
 class ProfileCaps(BaseModel):
@@ -39,6 +39,13 @@ EXECUTION_PROFILES: Final[Mapping[ProfileId, ProfileCaps]] = MappingProxyType(
             max_depth=3,
             max_requests=2000,
         ),
+        "bug-bounty-safe": ProfileCaps(
+            requests_per_second=0.2,
+            concurrency=1,
+            timeout_seconds=15,
+            max_depth=2,
+            max_requests=300,
+        ),
     }
 )
 
@@ -53,4 +60,7 @@ def grounded_scope_request_rate(analysis: ScopeAnalysis) -> float | None:
 
 def profile_request_rate(profile: ProfileId, scope_rate: float | None) -> float:
     """Use the approved rate; profiles supply a fallback when none is declared."""
+    if profile == "bug-bounty-safe":
+        limit = EXECUTION_PROFILES[profile].requests_per_second
+        return min(scope_rate, limit) if scope_rate is not None else limit
     return min(scope_rate, 50) if scope_rate is not None else EXECUTION_PROFILES[profile].requests_per_second

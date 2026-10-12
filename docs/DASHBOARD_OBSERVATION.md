@@ -9,8 +9,6 @@
 - 최종 상태 `completed`, Scope/Recon/Attack/Chaining/Validation/Report 단계가
   `completed` 또는 `skipped`이고 실패하거나 실행 중인 단계가 없음.
 - 대시보드 로그/감사 이벤트에 오류가 없으며 관찰 중 API 오류가 없음.
-- Recon Wiki lint 성공, 비교 기준 엔드포인트 수 81개,
-  method+path exact recall 90% 이상. 75/81은 약 92.59%로 이 기준을 충족한다.
 - 해당 스캔의 요약 보고서 또는 내용을 읽을 수 있는 finding 보고서가 존재함.
 - 원래 선택한 모델이 `result/.webui/scan-models/<scan_id>.json`에 저장되어 있음.
   `--expected-models`를 지정하면 저장된 6개 선택값도 정확히 비교함.
@@ -22,29 +20,18 @@
    이 관찰 스크립트가 실행한 것처럼 기록하지 않는다.
 2. ID를 `result/dashboard-scan-ids.txt`에 한 줄씩 기록한다. 이미 실행 중인
    스캔과 완료한 스캔을 함께 관찰할 수 있다. 중복 ID는 허용하지 않는다.
-3. 상세 화면의 Recon Wiki에서 엔드포인트 81개인 source/benchmark 기준 DB를
-   선택하고, 스캔 완료 후 비교 결과를 생성한다. 기준 DB의 불투명 ID는
-   대시보드 API `/api/v1/recon-wiki/databases`의 `database_id` 값이다.
-   브라우저 개발자 도구의 Network 응답에서도 확인할 수 있다.
-4. 실행 중 오류 메시지, 수동 로그인 대기, 실패한 단계가 있으면 원인을
+3. 실행 중 오류 메시지, 수동 로그인 대기, 실패한 단계가 있으면 원인을
    해결한다. 과거 실행의 오류 기록은 이 스크립트가 지우지 않으며 그 실행을
    성공으로 처리하지 않는다. 실제로 수정한 뒤 새로 실행한 결과를 검증한다.
 
-대시보드에서 비교를 이미 수행했다면 GET 요청만으로 확인한다.
+관찰 도구는 대시보드의 조회 API만 호출한다.
 
 ```bash
 uv run python scripts/observe_dashboard_runs.py \
   --base-url http://127.0.0.1:8000 \
   --scan-ids result/dashboard-scan-ids.txt \
-  --baseline-id <dashboard-database-id> \
   --output result/dashboard-observation
 ```
-
-비교 작업만 스크립트에 맡기려면 `--compare-wiki`를 추가한다. 이것은
-`completed`/`failed`/`cancelled` 상태 확인 후 기존 대시보드의 Recon Wiki
-API를 호출하며, 시작·재개를 대신하지 않는다. `--baseline-id`가 필수이고
-기준 DB의 provenance 및 엔드포인트 수를 먼저 확인한다. 기본 provenance는
-`source`이다. benchmark DB라면 `--baseline-kind benchmark`를 함께 지정한다.
 
 모델 선택을 비교하려면 다음 형식의 JSON 파일을 `--expected-models`에 넘긴다.
 실제 실행 때 선택한 ID를 기입한다. Chaining은 현재 대시보드의 Attack 모델
@@ -63,15 +50,14 @@ API를 호출하며, 시작·재개를 대신하지 않는다. `--baseline-id`�
 
 ## 결과 확인
 
-출력 디렉터리의 `dashboard-observation.md`에서 스캔별 상태, exact recall,
-오류 개수, 보고서 존재 여부, 실패 기준을 확인한다. 상세 값과 저장된 모델은
+출력 디렉터리의 `dashboard-observation.md`에서 스캔별 상태, 오류 개수,
+보고서 존재 여부, 실패 기준을 확인한다. 상세 값과 저장된 모델은
 `dashboard-observation.json`에 있다. 종료 코드는 성공 `0`, 기준 미충족 `1`,
 설정/연결 준비 오류 `2`이다. 10개 미만이면 개별 결과가 좋아도 전체 성공으로
 처리하지 않는다. `PASS`는 관찰한 배치의 명시된 기준 충족을 의미한다.
 
 기본값은 5초 간격, 최대 4시간, 최종 상태 확인 후 5초의 산출물 생성 여유다.
 필요하면 `--timeout`, `--poll-seconds`, `--settle-seconds`를 조정한다.
-`--min-recall 1.0`은 81/81을 요구하며 기본 90% 기준보다 엄격하다.
 서버가 다른 result root를 사용하면 `--result-root`도 동일하게 설정한다.
 
 로그 API는 최근 500개로 제한된다. 제한에 걸린 실행은 기존
@@ -81,7 +67,4 @@ API를 호출하며, 시작·재개를 대신하지 않는다. `--baseline-id`�
 지정한다. 원본 오류 메시지, 요청 본문, 인증정보 및 보고서 본문은 증거 파일에
 저장하지 않는다.
 
-exact recall은 엔드포인트 목록의 method+path 일치율이다. JSON에 confirmed /
-declared candidate / inferred candidate 일치 수도 별도로 저장하므로 실제
-관측과 선언 기반 발견을 구분해서 확인한다. 이 값만으로 취약점 판정의 정확도를
-증명할 수는 없다. finding이 없어도 실행 요약 보고서는 정상 보고서 산출물이다.
+finding이 없어도 실행 요약 보고서는 정상 보고서 산출물이다.

@@ -15,14 +15,11 @@ def test_controlled_negative_assessment_keeps_citations_with_zero_axes():
     agent = ControlledReplayAssessmentAgent()
     blind = {"case_id": "case", "blind_case_sha256": "a" * 64,
              "signal_types": ["authorization_boundary"]}
-    observations = [_observation("positive_control", 1, True),
-                    _observation("negative_control", 1, False)] + [
-        _observation("target", index, False) for index in (1, 2, 3)]
+    observations = [_observation("target", index, False) for index in (1, 2, 3)]
     assessment = BlindAssessment.model_validate(agent.assess(blind, observations))
     assert assessment.reproduced is False
     assert assessment.impact_boundary.score == 0
-    assert assessment.impact_boundary.evidence_ids == (
-        "e-target-1", "e-negative_control-1")
+    assert assessment.impact_boundary.evidence_ids == ("e-target-1",)
     claim = {"blind_assessment_sha256": canonical_sha256(assessment.model_dump(mode="json")),
              "attack_claim_sha256": "b" * 64,
              "attack_evidence_ids": ["attack-evidence"]}
@@ -35,9 +32,7 @@ def test_controlled_positive_assessment_keeps_sensitivity_zero():
     agent = ControlledReplayAssessmentAgent()
     blind = {"case_id": "case", "blind_case_sha256": "a" * 64,
              "signal_types": ["error_signature"]}
-    observations = [_observation("positive_control", 1, True),
-                    _observation("negative_control", 1, False)] + [
-        _observation("target", index, True) for index in (1, 2, 3)]
+    observations = [_observation("target", index, True) for index in (1, 2, 3)]
     assessment = BlindAssessment.model_validate(agent.assess(blind, observations))
     assert assessment.reproduced is True
     assert [assessment.impact_boundary.score, assessment.impact_sensitivity.score,

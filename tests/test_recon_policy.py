@@ -284,6 +284,27 @@ class TargetPolicyTests(unittest.TestCase):
             max_depth=None, max_concurrency=None, timeout_seconds=None)
         self.assertEqual(next(iter(capped.values())).limits.requests_per_second, 1)
 
+    def test_bug_bounty_profile_preserves_lower_rate_and_disables_ffuf(self) -> None:
+        from aidast.cli import _apply_policy_caps
+
+        default = policy(limits=PolicyLimits(requests_per_second=10))
+        capped = _apply_policy_caps(
+            {("URL", default.asset): default},
+            profile="bug-bounty-safe",
+            max_rps=None,
+            scope_max_rps=10,
+            max_requests=None,
+            max_depth=None,
+            max_concurrency=None,
+            timeout_seconds=None,
+        )
+
+        effective = next(iter(capped.values()))
+        self.assertEqual(effective.limits.requests_per_second, 0.2)
+        self.assertEqual(effective.limits.concurrency, 1)
+        self.assertFalse(effective.tools.ffuf_enabled)
+        self.assertFalse(effective.tools.ffuf_recursion)
+
     def test_only_validated_rate_evidence_can_override_structured_rate(self) -> None:
         from aidast.cli import _apply_policy_caps
         quote = "Automated tooling: max. 10 requests per second."

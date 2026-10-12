@@ -920,6 +920,8 @@ Reuse compatible input keys; never invent operator values or confirmations.
                     "yourself and send it only through the configured policy-enforcing request helper; never use "
                     "curl, wget, Invoke-WebRequest, a browser, sockets, or another transport. Commit results "
                     "through the configured DB helper. "
+                    "Use external_tool_helper_path only for allowlisted structured manifests; it still sends "
+                    "every physical request through the same policy-enforcing request boundary. "
                     "Do not spawn agents, run codex exec, perform chaining, or widen Scope. "
                     "Return exactly these completion keys: stage, status, scan_id, db_path, "
                     "stage_run_id, finding_ids, summary. stage is ATTACK and status is "
@@ -1228,6 +1230,12 @@ Reuse compatible input keys; never invent operator values or confirmations.
                 broker=helper_broker,
                 helper="attack_template",
             )
+            external_tool_helper_path = helper_dir / "external_tool_cli.py"
+            stage_helper_client(
+                external_tool_helper_path,
+                broker=helper_broker,
+                helper="attack_tool",
+            )
             local_scope = work_dir / "scope.md"
             local_policy = work_dir / "TargetPolicy.json"
             local_scope.write_bytes(scope_path.read_bytes())
@@ -1240,6 +1248,7 @@ Reuse compatible input keys; never invent operator values or confirmations.
                 "db_helper_path": str(helper_path),
                 "http_request_helper_path": str(request_helper_path),
                 "template_helper_path": str(template_helper_path),
+                "external_tool_helper_path": str(external_tool_helper_path),
                 "scope_path": str(local_scope),
                 "target_policy_path": str(local_policy),
                 "policy_skill_path": str(work_dir / ".agents/skills/aidast-policy/SKILL.md"),

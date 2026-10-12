@@ -21,7 +21,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -71,6 +71,35 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def _scan_process_environment(*, project_root: Path, result_root: Path) -> dict[str, str]:
+    """Build a scan environment that can find user-local tools under launchd."""
+    env = os.environ.copy()
+    env["AIDAST_RESULT_ROOT"] = str(result_root)
+    env["AIDAST_DASHBOARD_MANUAL_LOGIN"] = "1"
+    env["PYTHONUNBUFFERED"] = "1"
+
+    candidates = [
+        project_root / ".venv" / ("Scripts" if _windows_host() else "bin"),
+        Path.home() / ".local" / "bin",
+        Path("/opt/homebrew/bin"),
+        Path("/usr/local/bin"),
+        *(Path(item) for item in env.get("PATH", "").split(os.pathsep) if item),
+    ]
+    ordered: list[str] = []
+    for directory in candidates:
+        value = str(directory)
+        if directory.is_dir() and value not in ordered:
+            ordered.append(value)
+    if ordered:
+        env["PATH"] = os.pathsep.join(ordered)
+
+    source_root = project_root / "src"
+    if source_root.is_dir():
+        prior = env.get("PYTHONPATH", "")
+        env["PYTHONPATH"] = str(source_root) + (os.pathsep + prior if prior else "")
+    return env
+
+
 class ScanLaunchRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -84,6 +113,7 @@ class ScanLaunchRequest(BaseModel):
     max_depth: int | None = Field(default=None, ge=0, le=10)
     ffuf_max_time_seconds: int = Field(default=150, ge=0, le=86400)
     tag_batch_size: int = Field(default=25, ge=1, le=200)
+    recon_engine: Literal["integrated", "native"] = "integrated"
     recon_model: str | None = Field(default=None, min_length=1, max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:/-]*$")
     attack_model: str | None = Field(default=None, min_length=1, max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:/-]*$")
     validation_model: str | None = Field(default=None, min_length=1, max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:/-]*$")
@@ -168,6 +198,9 @@ class ScanLaunchRequest(BaseModel):
             raise ValueError("timeout exceeds the selected profile")
         if self.max_depth is not None and self.max_depth > profile.max_depth:
             raise ValueError("depth exceeds the selected profile")
+        if self.profile == "bug-bounty-safe":
+            if len(self.targets) != 1:
+                raise ValueError("bug-bounty-safe requires exactly one target")
         if self.start_url and len(self.targets) != 1:
             raise ValueError("a specific start URL requires exactly one target")
         return self
@@ -370,10 +403,20 @@ class ScanLaunchManager:
         allowed = {item["asset"] for item in scope.targets}
         if any(target not in allowed for target in request.targets):
             raise ValueError("one or more targets are not in the approved Scope")
+        selected = next(
+            item for item in scope.targets if item["asset"] == request.targets[0]
+        ) if len(request.targets) == 1 else None
+        if (
+            request.profile == "bug-bounty-safe"
+            and selected is not None
+            and AssetType(selected["asset_type"]) == AssetType.WILDCARD
+            and request.start_url is None
+        ):
+            raise ValueError("bug-bounty-safe requires an exact start URL for a wildcard target")
         if request.start_url:
-            selected = next(
-                item for item in scope.targets if item["asset"] == request.targets[0]
-            )
+            if request.profile == "bug-bounty-safe" and not request.start_url.lower().startswith("https://"):
+                raise ValueError("bug-bounty-safe start URL must use HTTPS")
+            assert selected is not None
             try:
                 validate_start_url_for_target(
                     request.start_url,
@@ -413,10 +456,15 @@ class ScanLaunchManager:
             if value is not None and value > getattr(effective, field):
                 raise ValueError(f'{field} exceeds the approved policy cap')
         targets = [target for target in document.analysis.in_scope_assets if target.asset in request.targets]
-        starts = normalize_start_urls({(targets[0].asset_type.value,targets[0].asset):request.start_url} if request.start_url else {})
+        starts = normalize_start_urls(
+            {(targets[0].asset_type.value, targets[0].asset): request.start_url}
+            if request.start_url else {},
+            preserve_wildcard_starts=request.profile == "bug-bounty-safe",
+        )
         preparation = prepare_exclusions(document=document, analysis=analysis, targets=targets,
             result_root=self.result_root, start_urls=starts, headers=headers,
-            login_mode=request.login_mode, resolver=self.exclusion_resolver, refresh=refresh)
+            login_mode=request.login_mode, resolver=self.exclusion_resolver, refresh=refresh,
+            preserve_wildcard_starts=request.profile == "bug-bounty-safe")
         return scope, preparation
 
     def prepare_resources(self, request: ExclusionPreparationRequest) -> dict[str, Any]:
@@ -441,6 +489,8 @@ class ScanLaunchManager:
             scope.program_url,
             "--scan-id",
             scan_id,
+            "--recon-engine",
+            request.recon_engine,
         ]
         for target in request.targets:
             argv.extend(("--target", target))
@@ -477,7 +527,7 @@ class ScanLaunchManager:
         if request.max_rps is not None:
             argv.extend(("--max-rps", str(request.max_rps)))
         wordlist = self.project_root / "resources" / "wordlists" / "common.txt"
-        if wordlist.is_file():
+        if request.profile != "bug-bounty-safe" and wordlist.is_file():
             argv.extend(("--ffuf-wordlist", str(wordlist)))
         argv.extend(("--ffuf-max-time-seconds", str(request.ffuf_max_time_seconds)))
         if request.max_depth is not None:
@@ -505,14 +555,10 @@ class ScanLaunchManager:
         with self._lock:
             self._jobs[scan_id] = job
         self._log(scan_id, "launch.accepted", "Scope", "Scan request accepted after approval verification.", message_code="pipeline.accepted")
-        env = os.environ.copy()
-        env["AIDAST_RESULT_ROOT"] = str(self.result_root)
-        env["AIDAST_DASHBOARD_MANUAL_LOGIN"] = "1"
-        env["PYTHONUNBUFFERED"] = "1"
-        source_root = self.project_root / "src"
-        if source_root.is_dir():
-            prior = env.get("PYTHONPATH", "")
-            env["PYTHONPATH"] = str(source_root) + (os.pathsep + prior if prior else "")
+        env = _scan_process_environment(
+            project_root=self.project_root,
+            result_root=self.result_root,
+        )
         try:
             with self._process_output(job) as output:
                 process = self.process_factory(
@@ -561,14 +607,10 @@ class ScanLaunchManager:
             sys.executable, "-m", "aidast", "resume", scan_id,
             "--result-root", str(self.result_root),
         ]
-        env = os.environ.copy()
-        env["AIDAST_RESULT_ROOT"] = str(self.result_root)
-        env["AIDAST_DASHBOARD_MANUAL_LOGIN"] = "1"
-        env["PYTHONUNBUFFERED"] = "1"
-        source_root = self.project_root / "src"
-        if source_root.is_dir():
-            prior = env.get("PYTHONPATH", "")
-            env["PYTHONPATH"] = str(source_root) + (os.pathsep + prior if prior else "")
+        env = _scan_process_environment(
+            project_root=self.project_root,
+            result_root=self.result_root,
+        )
         with self._lock:
             existing = self._jobs.get(scan_id)
             if existing is not None and existing.status in {"pending", "running", "paused"}:
@@ -987,7 +1029,6 @@ class ScanLaunchManager:
         with self._lock:
             job.finished_at = _now()
             job.status = "completed" if code == 0 else "failed"
-        self._accumulate_runtime_wiki(job)
         self._log(
             job.scan_id, f"resume:{attempt_id}:finished", stage.title(),
             "Resumed scan completed." if code == 0 else "Resumed scan exited with an error.",
@@ -1005,7 +1046,6 @@ class ScanLaunchManager:
         with self._lock:
             job.finished_at = _now()
             job.status = "completed" if code == 0 else "failed"
-        self._accumulate_runtime_wiki(job)
         try:
             stage = self.projector.snapshot(job.scan_id)["stage"]
         except ScanNotFoundError:
@@ -1029,37 +1069,8 @@ class ScanLaunchManager:
                           "error", message_code="pipeline.cancel_persist_failed")
             job.finished_at = _now()
             job.status = "cancelled"
-            self._accumulate_runtime_wiki(job)
             self._log(job.scan_id, "cancel.finished", stage, "Scan cancelled by operator.",
                       "warning", message_code="pipeline.cancelled")
-
-    def _accumulate_runtime_wiki(self, job: LaunchJob) -> None:
-        """Archive each stable Recon.db without feeding it back into execution."""
-        program_id = getattr(getattr(job, "scope", None), "program_id", None)
-        if not isinstance(program_id, str) or not program_id:
-            return
-        try:
-            from .recon_wiki import ReconWikiCatalog
-            ReconWikiCatalog(self.result_root).accumulate(
-                job.scan_id,
-                program_id=program_id,
-                baseline_id=None,
-                baseline_kind="source",
-                target_id=program_id,
-            )
-        except (OSError, sqlite3.Error, ValueError, RuntimeError) as exc:
-            self._log(
-                job.scan_id, "recon-wiki:auto:failed", "Recon",
-                "Recon Wiki automatic accumulation failed.", "warning",
-                message_code="recon_wiki.auto_failed",
-                message_params={"error_type": type(exc).__name__},
-            )
-        else:
-            self._log(
-                job.scan_id, "recon-wiki:auto:completed", "Recon",
-                "Recon.db was accumulated in the Recon Wiki.", "success",
-                message_code="recon_wiki.auto_completed",
-            )
 
     def _log(self, scan_id: str, key: str, stage: str, message: str, level: str = "info", *, message_code: str, message_params: dict[str, Any] | None = None) -> None:
         self.projector.record_event(

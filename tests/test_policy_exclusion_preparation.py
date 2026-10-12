@@ -523,6 +523,19 @@ def test_url_startup_ignores_model_proposed_domain_discovery_steps(tmp_path):
     assert result.public()['held']==0
 
 
+def test_bare_hostname_url_startup_uses_policy_https_default(tmp_path):
+    doc=retarget_document('URL','app.aikido.dev')
+    target=doc.analysis.in_scope_assets[0]
+    from aidast.recon.models import ReconPlan,ReconPlanTarget
+    plan=ReconPlan(plan_id='bare_url_fixture',scope_id=doc.scope_id,objective='Offline',mode='FULL_RECON',
+        targets=[ReconPlanTarget(asset_type=target.asset_type,asset=target.asset,
+            steps=['HTTP_PROBE'],constraints=[])],global_constraints=[],completion_criteria=['review'])
+
+    operations=api().selected_startup_operations([target],plan=plan)
+
+    assert operations[target.asset] == [api().StartupOperation('HTTP_PROBE','https://app.aikido.dev/')]
+
+
 def test_empty_explicit_startup_map_does_not_fall_back_to_an_invented_probe(tmp_path):
     doc=document(False)
     result=api().prepare_exclusions(document=doc,analysis=doc.analysis,targets=doc.analysis.in_scope_assets,

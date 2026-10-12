@@ -10,7 +10,7 @@ A tag describes observed functionality; it does not establish a vulnerability.
 No scan-wide top-eight restriction applies. Eight is an execution batch size.
 Keep separate hypotheses for distinct parameter locations/names and required identities.
 For a normal dashboard scan, use only black-box Recon evidence. Source vulnerability
-annotations, benchmark catalog claims, prior Wiki baselines, and answer inventories are
+annotations, benchmark catalog claims, historical baselines, and answer inventories are
 evaluation-only and must never enter this planning prompt. Explicit `source_import`
 workflows bypass this rule through their separate source-assisted coverage path. Never
 imply that an endpoint was tested during planning.

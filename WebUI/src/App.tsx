@@ -37,12 +37,14 @@ import {
   type ScopeExecutionRules,
   type ExclusionPreparation,
   isValidTagBatchSize,
+  bugBountyTargetReady,
   resolveExecutionLimits,
   scanRetryAction,
   type ExecutionProfileId,
   type RequiredRequestHeader,
   type ScopeExecutionRequirements,
   approvedScopeSelection,
+  validStartUrl,
 } from './lib/scan';
 import { createScopeResponseGuard, isValidScopeModel, programRegistrationUrlError, scopeRequestForStatus, selectApprovedScope } from './lib/scope';
 import type { PolicyReferenceSummary } from './lib/scope';
@@ -52,12 +54,14 @@ import { activityHeightBounds, clampPanelWidth, panelBounds } from './lib/layout
 import { filterFindings, findingVerdict, findingValidationStatus, knownSourceCase, parseValidationCases, reportCaseForFinding, type FindingVerdict, type ValidationCase, type ValidationStatus } from './lib/validation';
 import { ResizeHandle } from './components/ResizeHandle';
 import { ManualLoginNotice } from './components/ManualLoginNotice';
+import { OperatorActions } from './components/OperatorActions';
 import { ScopeExecutionRules as ScopeExecutionRulesView, ScopeExclusionStatus, ScopePolicyAdvisories } from './components/ScopeExecutionRules';
 import { ScopeHeaderRequirements } from './components/ScopeHeaderRequirements';
 import { ReportSubmission } from './components/ReportSubmission';
 import { reportLanguageChoices } from './lib/reportSubmission';
 import { confirmedReportSummaries, requestReportSummaries, requestScanExecutionSummary, type ReportSummary, type ScanExecutionSummary } from './lib/reports';
 import { useManualLogin } from './hooks/useManualLogin';
+import { useOperatorActions } from './hooks/useOperatorActions';
 import { parseScanTokenUsage, type ScanTokenUsage, type TokenBucket } from './lib/modelCalls';
 import { ModelCallLog } from './components/ModelCallLog';
 
@@ -75,12 +79,6 @@ type ScopeDraft = { scope_id: string; created_at: string; source_url: string; pr
 type ScopeApproval = { approved_by: string; approved_at: string };
 type ThemeChoice = 'system' | 'dark' | 'light';
 type TokenUsageState = { scanId: string; data: ScanTokenUsage | null; error: boolean };
-type WikiDatabase = { database_id: string; scan_id: string; status: string; started_at: string; kind: 'runtime' | 'source' | 'benchmark'; target: string; endpoint_count: number; method_counts: Record<string, number>; label: string };
-type WikiComparison = { comparison_id: string; baseline_count: number; observed_count: number; matched_count: number; exact_recall: number; path_recall: number; missing: number; report_path: string; report_markdown: string; baseline_id: string; baseline_label: string; baseline_kind: 'source' | 'benchmark'; confirmed_count?: number; declared_candidate_count?: number; inferred_candidate_count?: number; confirmed_matched_count?: number; declared_candidate_matched_count?: number; inferred_candidate_matched_count?: number };
-type WikiStatus = { configured: boolean; scan_id: string; program_id?: string; target_id?: string; source_id?: string; endpoint_count?: number; wiki_index?: string; comparison?: WikiComparison | null; lint?: { ok: boolean; issues: string[] } };
-type AttackWikiDatabase = { database_id: string; scan_id: string; kind: 'runtime' | 'source'; label: string; target: string; started_at: string; hypothesis_count: number; execution_mode: 'black_box' | 'source_assisted' };
-type AttackWikiComparison = { baseline_id: string; baseline_label: string; baseline_kind: 'runtime' | 'source' | 'benchmark'; baseline_count: number; baseline_positive_count: number; planned_matched_count: number; tested_matched_count: number; candidate_matched_count: number; confirmed_matched_count: number; planned_recall: number; tested_recall: number; candidate_recall: number | null; confirmed_recall: number | null; missing: number; report_path: string; report_markdown: string };
-type AttackWikiStatus = { configured: boolean; scan_id: string; program_id?: string; target_id?: string; source_id?: string; hypothesis_count?: number; tested_count?: number; candidate_count?: number; confirmed_count?: number; execution_mode?: 'black_box' | 'source_assisted'; wiki_index?: string; comparison?: AttackWikiComparison | null; lint?: { ok: boolean; issues: string[] } };
 const scopeStatusLabel: Record<ScopeStatus, string> = { scope_required: 'Scope required', collecting: 'Collecting', awaiting_browser: 'Login required', paused: 'Paused', cancelling: 'Cancelling', cancelled: 'Cancelled', review_required: 'Review Yes / No', approved: 'Approved', rejected: 'Rejected', failed: 'Failed' };
 const scopeStatusTone = (status: ScopeStatus) => status === 'approved' ? 'success' : status === 'failed' || status === 'rejected' ? 'critical' : status === 'cancelled' ? '' : 'warning';
 const THEME_KEY = 'aidast-theme';
@@ -349,17 +347,19 @@ export default function App() {
   const [scopeModel, setScopeModel] = useState('gpt-5.6-sol');
   const [scopeId, setScopeId] = useState('');
   const [selectedTargets, setSelectedTargets] = useState<string[]>([]);
-  const [scanProfile, setScanProfile] = useState<ExecutionProfileId>('safe-recon');
+  const [scanProfile, setScanProfile] = useState<ExecutionProfileId>('bug-bounty-safe');
+  const [reconEngine, setReconEngine] = useState<'integrated' | 'native'>('integrated');
   const [reconModel, setReconModel] = useState('gpt-6.1-sol');
   const [attackModel, setAttackModel] = useState('gpt-6.1-sol');
   const [validationModel, setValidationModel] = useState('gpt-6-sol');
   const [reportModel, setReportModel] = useState('gpt-6.1-sol');
-  const [maxRequests, setMaxRequests] = useState(500);
-  const [maxRps, setMaxRps] = useState(0.5);
-  const [maxConcurrency, setMaxConcurrency] = useState(2);
+  const [maxRequests, setMaxRequests] = useState(300);
+  const [maxRps, setMaxRps] = useState(0.2);
+  const [maxConcurrency, setMaxConcurrency] = useState(1);
   const [timeoutSeconds, setTimeoutSeconds] = useState(15);
   const [maxDepth, setMaxDepth] = useState(2);
-  const [ffufMaxTimeSeconds, setFfufMaxTimeSeconds] = useState(150);
+  const [ffufMaxTimeSeconds, setFfufMaxTimeSeconds] = useState(60);
+  const [startUrl, setStartUrl] = useState('');
   const [tagBatchSize, setTagBatchSize] = useState(25);
   const [policyValues, setPolicyValues] = useState<Record<string, string>>({});
   const [identityValues, setIdentityValues] = useState<Record<string, string>>({});
@@ -423,20 +423,11 @@ export default function App() {
   const [reportScanId, setReportScanId] = useState<string | null>(null);
   const [selectedReport, setSelectedReport] = useState<ReportSummary | null>(null);
   const [resultRoot, setResultRoot] = useState(demo ? 'Synthetic demo data (memory)' : '');
-  const [wikiDatabases, setWikiDatabases] = useState<WikiDatabase[]>([]);
-  const [wikiBaselineId, setWikiBaselineId] = useState('');
-  const [wikiTargetId, setWikiTargetId] = useState('');
-  const [wikiStatus, setWikiStatus] = useState<WikiStatus | null>(null);
-  const [wikiBusy, setWikiBusy] = useState(false);
-  const [wikiError, setWikiError] = useState('');
-  const [attackWikiDatabases, setAttackWikiDatabases] = useState<AttackWikiDatabase[]>([]);
-  const [attackWikiBaselineId, setAttackWikiBaselineId] = useState('');
-  const [attackWikiTargetId, setAttackWikiTargetId] = useState('');
-  const [attackWikiStatus, setAttackWikiStatus] = useState<AttackWikiStatus | null>(null);
-  const [attackWikiBusy, setAttackWikiBusy] = useState(false);
-  const [attackWikiError, setAttackWikiError] = useState('');
   const { snapshot, state, error, refresh } = useScanSocket(scanId);
   const manualLogin = useManualLogin(scanId, snapshot?.status || '', !demo && !!scanId);
+  const operatorActions = useOperatorActions(
+    scanId, !demo && !!scanId, snapshot?.status || '',
+  );
   const tokenUsage = tokenUsageState?.scanId === scanId ? tokenUsageState.data : null;
   const tokenStatus = tokenUsageState?.scanId === scanId
     ? tokenUsageState.error ? 'error' : tokenUsage ? 'ready' : 'loading'
@@ -588,86 +579,6 @@ export default function App() {
     })();
     return () => abort.abort();
   }, [demo]);
-  useEffect(() => {
-    setWikiTargetId('');
-    setWikiStatus(null);
-    setWikiError('');
-    setAttackWikiTargetId('');
-    setAttackWikiStatus(null);
-    setAttackWikiError('');
-  }, [scanId]);
-  useEffect(() => {
-    if (demo || page !== 'Scans' || !scanId) return;
-    const abort = new AbortController();
-    void (async () => {
-      try {
-        const base = import.meta.env.VITE_API_BASE_URL || location.origin;
-        const [catalogResponse, statusResponse] = await Promise.all([
-          fetch(new URL('/api/v1/recon-wiki/databases', base), {
-            signal: abort.signal, credentials: 'same-origin', cache: 'no-store',
-          }),
-          fetch(new URL(`/api/v1/scans/${encodeURIComponent(scanId)}/recon-wiki`, base), {
-            signal: abort.signal, credentials: 'same-origin', cache: 'no-store',
-          }),
-        ]);
-        const catalogBody = await catalogResponse.json() as { databases?: WikiDatabase[]; detail?: unknown };
-        const statusBody = await statusResponse.json() as WikiStatus & { detail?: unknown };
-        if (!catalogResponse.ok || !Array.isArray(catalogBody.databases)) {
-          throw new Error(apiErrorMessage(catalogBody.detail, `Recon Wiki catalog returned ${catalogResponse.status}`));
-        }
-        if (!statusResponse.ok || typeof statusBody.configured !== 'boolean') {
-          throw new Error(apiErrorMessage(statusBody.detail, `Recon Wiki status returned ${statusResponse.status}`));
-        }
-        if (abort.signal.aborted) return;
-        const baselines = catalogBody.databases.filter(item => item.kind === 'source' || item.kind === 'benchmark');
-        setWikiDatabases(catalogBody.databases);
-        setWikiStatus(statusBody);
-        setWikiBaselineId(current => baselines.some(item => item.database_id === current)
-          ? current : statusBody.comparison?.baseline_id || baselines[0]?.database_id || '');
-        setWikiTargetId(current => current || statusBody.target_id || snapshot?.program_id || '');
-        setWikiError('');
-      } catch (error) {
-        if (!abort.signal.aborted) setWikiError(error instanceof Error ? error.message : 'Recon Wiki unavailable');
-      }
-    })();
-    return () => abort.abort();
-  }, [demo, page, scanId, snapshot?.program_id]);
-  useEffect(() => {
-    if (demo || page !== 'Scans' || !scanId) return;
-    const abort = new AbortController();
-    void (async () => {
-      try {
-        const base = import.meta.env.VITE_API_BASE_URL || location.origin;
-        const [catalogResponse, statusResponse] = await Promise.all([
-          fetch(new URL('/api/v1/attack-wiki/databases', base), {
-            signal: abort.signal, credentials: 'same-origin', cache: 'no-store',
-          }),
-          fetch(new URL(`/api/v1/scans/${encodeURIComponent(scanId)}/attack-wiki`, base), {
-            signal: abort.signal, credentials: 'same-origin', cache: 'no-store',
-          }),
-        ]);
-        const catalogBody = await catalogResponse.json() as { databases?: AttackWikiDatabase[]; detail?: unknown };
-        const statusBody = await statusResponse.json() as AttackWikiStatus & { detail?: unknown };
-        if (!catalogResponse.ok || !Array.isArray(catalogBody.databases)) {
-          throw new Error(apiErrorMessage(catalogBody.detail, `Attack Wiki catalog returned ${catalogResponse.status}`));
-        }
-        if (!statusResponse.ok || typeof statusBody.configured !== 'boolean') {
-          throw new Error(apiErrorMessage(statusBody.detail, `Attack Wiki status returned ${statusResponse.status}`));
-        }
-        if (abort.signal.aborted) return;
-        const baselines = catalogBody.databases.filter(item => item.scan_id !== scanId);
-        setAttackWikiDatabases(catalogBody.databases);
-        setAttackWikiStatus(statusBody);
-        setAttackWikiBaselineId(current => baselines.some(item => item.database_id === current)
-          ? current : statusBody.comparison?.baseline_id || baselines[0]?.database_id || '');
-        setAttackWikiTargetId(current => current || statusBody.target_id || snapshot?.program_id || '');
-        setAttackWikiError('');
-      } catch (error) {
-        if (!abort.signal.aborted) setAttackWikiError(error instanceof Error ? error.message : 'Attack Wiki unavailable');
-      }
-    })();
-    return () => abort.abort();
-  }, [demo, page, scanId, snapshot?.program_id]);
   useEffect(() => {
     if (demo || !scanId || (modal !== 'scan-progress' && page !== 'Scans')) return;
     const abort = new AbortController();
@@ -1001,7 +912,7 @@ export default function App() {
   useEffect(() => {
     exclusionGeneration.current += 1;
     setExclusionPreparation(null);
-  }, [scopeId, selectedTargets, identityValues, policyValues, loginMode, scanProfile, modal]);
+  }, [scopeId, selectedTargets, startUrl, identityValues, policyValues, loginMode, scanProfile, modal]);
   const policyConfirmations = selectedScope
     ? policyConfirmationKeys(selectedScope.execution_requirements, selectedTargets, authorizationConfirmed)
     : [];
@@ -1018,6 +929,7 @@ export default function App() {
     setMaxConcurrency(selectedLimits.concurrency);
     setTimeoutSeconds(selectedLimits.timeout_seconds);
     setMaxDepth(selectedLimits.max_depth);
+    setFfufMaxTimeSeconds(scanProfile === 'bug-bounty-safe' ? 60 : 150);
   }, [selectedScope?.scope_id, scanProfile, selectedLimits?.max_requests, selectedLimits?.requests_per_second, selectedLimits?.concurrency, selectedLimits?.timeout_seconds, selectedLimits?.max_depth]);
   const registerProgram = async () => {
     if (!scopeProgramUrl.trim()) return;
@@ -1135,7 +1047,7 @@ export default function App() {
         method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({...approvedScopeSelection(selectedScope.scope_id, selectedTargets), profile:scanProfile,
           max_requests:maxRequests, max_rps:maxRps, max_concurrency:maxConcurrency, timeout_seconds:timeoutSeconds, max_depth:maxDepth,
-          login_mode:loginMode, authorization_confirmed:true, refresh:true,
+          login_mode:loginMode, start_url:startUrl.trim() || null, authorization_confirmed:true, refresh:true,
           identity_values:headerIdentityValues(selectedScope.execution_requirements,identityValues),
           ...policyLaunchValues(selectedScope.execution_requirements,selectedTargets,policyValues,policyConfirmations)}),
       });
@@ -1154,12 +1066,13 @@ export default function App() {
         method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           ...approvedScopeSelection(selectedScope.scope_id, selectedTargets), profile: scanProfile,
+          recon_engine: reconEngine,
           recon_model: reconModel, attack_model: attackModel,
           validation_model: validationModel, report_model: reportModel,
           max_requests: maxRequests, max_rps: maxRps, max_concurrency: maxConcurrency,
           timeout_seconds: timeoutSeconds, max_depth: maxDepth, tag_batch_size: tagBatchSize,
           ffuf_max_time_seconds: ffufMaxTimeSeconds,
-          login_mode: loginMode, authorization_confirmed: true,
+          login_mode: loginMode, start_url: startUrl.trim() || null, authorization_confirmed: true,
           identity_values: headerIdentityValues(selectedScope.execution_requirements, identityValues),
           ...policyLaunchValues(selectedScope.execution_requirements, selectedTargets, policyValues, policyConfirmations),
         }),
@@ -1171,62 +1084,6 @@ export default function App() {
       setScanId(created.scan_id); setRepeatSource(null); go('Scans'); setModal('scan-progress');
     } catch (e) { setLaunchError(e instanceof Error ? e.message : 'The scan could not be started.'); }
     finally { setLaunching(false); }
-  };
-  const updateReconWiki = async (compare: boolean) => {
-    if (demo || !scanId || wikiBusy) return;
-    const baseline = wikiDatabases.find(item => item.database_id === wikiBaselineId);
-    if (compare && !baseline) {
-      setWikiError(tk('비교할 source 또는 benchmark ReconDB를 선택하세요.', 'Select a source or benchmark ReconDB to compare.'));
-      return;
-    }
-    setWikiBusy(true); setWikiError('');
-    try {
-      const base = import.meta.env.VITE_API_BASE_URL || location.origin;
-      const response = await fetch(new URL(`/api/v1/scans/${encodeURIComponent(scanId)}/recon-wiki`, base), {
-        method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          baseline_id: compare ? baseline?.database_id : null,
-          baseline_kind: baseline?.kind === 'benchmark' ? 'benchmark' : 'source',
-          target_id: wikiTargetId.trim(),
-        }),
-      });
-      const body = await response.json() as WikiStatus & { detail?: unknown };
-      if (!response.ok || !body.configured) {
-        throw new Error(apiErrorMessage(body.detail, `Recon Wiki update returned ${response.status}`));
-      }
-      setWikiStatus(body);
-      setWikiTargetId(body.target_id || wikiTargetId);
-    } catch (error) {
-      setWikiError(error instanceof Error ? error.message : tk('Recon Wiki를 갱신하지 못했습니다.', 'Could not update Recon Wiki.'));
-    } finally { setWikiBusy(false); }
-  };
-  const updateAttackWiki = async (compare: boolean) => {
-    if (demo || !scanId || attackWikiBusy) return;
-    const baseline = attackWikiDatabases.find(item => item.database_id === attackWikiBaselineId);
-    if (compare && !baseline) {
-      setAttackWikiError(tk('비교할 Attack 기준 DB를 선택하세요.', 'Select an Attack baseline database to compare.'));
-      return;
-    }
-    setAttackWikiBusy(true); setAttackWikiError('');
-    try {
-      const base = import.meta.env.VITE_API_BASE_URL || location.origin;
-      const response = await fetch(new URL(`/api/v1/scans/${encodeURIComponent(scanId)}/attack-wiki`, base), {
-        method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          baseline_id: compare ? baseline?.database_id : null,
-          baseline_kind: baseline?.kind === 'source' ? 'source' : 'runtime',
-          target_id: attackWikiTargetId.trim(),
-        }),
-      });
-      const body = await response.json() as AttackWikiStatus & { detail?: unknown };
-      if (!response.ok || !body.configured) {
-        throw new Error(apiErrorMessage(body.detail, `Attack Wiki update returned ${response.status}`));
-      }
-      setAttackWikiStatus(body);
-      setAttackWikiTargetId(body.target_id || attackWikiTargetId);
-    } catch (error) {
-      setAttackWikiError(error instanceof Error ? error.message : tk('Attack Wiki를 갱신하지 못했습니다.', 'Could not update Attack Wiki.'));
-    } finally { setAttackWikiBusy(false); }
   };
   const resumeScan = async () => {
     if (demo || !scanId || resuming) return;
@@ -1335,6 +1192,7 @@ export default function App() {
     setSelectedTargets([]);
     setIdentityValues({});
     setPolicyValues({});
+    setReconEngine('integrated');
     setReconModel('gpt-6.1-sol');
     setAttackModel('gpt-6.1-sol');
     setValidationModel('gpt-6-sol');
@@ -1352,6 +1210,7 @@ export default function App() {
     setSelectedTargets(approved ? source.targets.filter(target => approved.targets.some(item => item.asset === target)) : []);
     setIdentityValues({});
     setPolicyValues({});
+    setReconEngine('integrated');
     setReconModel('gpt-6.1-sol');
     setAttackModel('gpt-6.1-sol');
     setValidationModel('gpt-6-sol');
@@ -1413,6 +1272,7 @@ export default function App() {
   const latestReconPhase = latestReconActivity?.message_params?.phase;
   const latestReconState = latestReconActivity?.message_params?.state;
   const manualLoginNotice = <ManualLoginNotice {...manualLogin} language={language}/>;
+  const operatorActionNotice = <OperatorActions {...operatorActions} language={language}/>;
   const workLogs = snapshot?.logs.filter(log => log.message_code === 'agent.work') ?? [];
   const currentWork = [...(snapshot?.logs ?? [])].reverse().find(log =>
     log.stage === snapshot?.stage && (log.message_code === 'agent.work' || log.message_code === 'recon.activity'));
@@ -1439,108 +1299,6 @@ export default function App() {
     <button className="secondary-button" onClick={() => void changePause(snapshot.status === 'running' ? 'pause' : 'continue')} disabled={!!pauseBusy || cancelling}>{pauseBusy === 'pause' ? tk("일시정지 처리 중…", "Pausing…") : pauseBusy === 'continue' ? tk("계속 처리 중…", "Continuing…") : snapshot.status === 'running' ? tk("일시정지", "Pause") : tk("계속", "Continue")}</button>
     <button className="secondary-button" onClick={() => void cancelScan()} disabled={cancelling || !!pauseBusy}>{cancelPhase === 'requesting' ? tk("취소 요청 전달 중…", "Sending cancellation request…") : cancelling ? tk("취소 확인 중…", "Confirming cancellation…") : tk("스캔 취소", "Cancel scan")}</button>
   </> : null;
-  const wikiBaselines = wikiDatabases.filter(item => item.kind === 'source' || item.kind === 'benchmark');
-  const selectedWikiBaseline = wikiBaselines.find(item => item.database_id === wikiBaselineId);
-  const wikiReady = !!snapshot && ['completed', 'failed', 'cancelled'].includes(snapshot.status);
-  const reconWikiPanel = !demo && <Panel
-    title={tk('Recon Wiki 누적·비교', 'Recon Wiki accumulation and comparison')}
-    subtitle={tk('런타임 결과와 기준 목록의 출처를 분리해 메서드·경로 커버리지를 계산합니다.', 'Keeps runtime and reference provenance separate and measures method/path coverage.')}
-  >
-    <div className="recon-wiki-controls">
-      <label className="form-field"><span>{tk('논리 대상·버전 ID', 'Logical target and version ID')}</span>
-        <input value={wikiTargetId} onChange={event => setWikiTargetId(event.target.value)} maxLength={160}
-          placeholder={snapshot?.program_id || tk('예: vulnbank@commit', 'For example vulnbank@commit')}/>
-        <small>{tk('loopback과 공개 기준 DB가 동일한 배포일 때 같은 ID를 사용합니다.', 'Use the same ID only when loopback and reference databases represent the same deployment.')}</small>
-      </label>
-      <label className="form-field"><span>{tk('비교 기준 ReconDB', 'Baseline ReconDB')}</span>
-        <select value={wikiBaselineId} onChange={event => setWikiBaselineId(event.target.value)}>
-          <option value="">{tk('기준 없이 현재 DB만 누적', 'Accumulate current DB without a baseline')}</option>
-          {wikiBaselines.map(item => <option key={item.database_id} value={item.database_id}>
-            [{item.kind}] {item.target} · {item.endpoint_count} · {item.scan_id.slice(0, 16)}
-          </option>)}
-        </select>
-        <small>{selectedWikiBaseline ? `${selectedWikiBaseline.kind.toUpperCase()} · ${Object.entries(selectedWikiBaseline.method_counts).map(([method, count]) => `${method} ${count}`).join(', ')}` : tk('source/benchmark DB가 결과 루트에 있으면 목록에 나타납니다.', 'Source and benchmark databases under the result root appear here.')}</small>
-      </label>
-      <div className="button-row">
-        <button className="secondary-button" disabled={!wikiReady || wikiBusy} onClick={() => void updateReconWiki(false)}>
-          {wikiBusy ? tk('처리 중…', 'Working…') : tk('현재 Recon.db 누적', 'Accumulate current Recon.db')}
-        </button>
-        <button className="primary-button" disabled={!wikiReady || wikiBusy || !selectedWikiBaseline} onClick={() => void updateReconWiki(true)}>
-          {tk('누적 후 기준과 비교', 'Accumulate and compare')}
-        </button>
-      </div>
-      {!wikiReady && <p className="requirements-note">{tk('스캔이 완료·실패·취소 상태에 도달하면 안정된 Recon.db를 누적할 수 있습니다.', 'A stable Recon.db can be accumulated after the scan completes, fails, or is cancelled.')}</p>}
-      {wikiError && <p className="form-error" role="alert">{wikiError}</p>}
-      {wikiStatus?.configured && <div className="recon-wiki-result" role="status">
-        <div className="scan-stats">
-          <div><span>{tk('누적 경로', 'Accumulated routes')}</span><strong>{wikiStatus.endpoint_count ?? 0}</strong></div>
-          <div><span>{tk('무결성 검사', 'Integrity lint')}</span><strong>{wikiStatus.lint?.ok ? 'OK' : tk('확인 필요', 'Review')}</strong></div>
-          {wikiStatus.comparison && <><div><span>{tk('메서드+경로 일치', 'Method/path matches')}</span><strong>{wikiStatus.comparison.matched_count}/{wikiStatus.comparison.baseline_count}</strong></div>
-          <div><span>{tk('정확 재현율', 'Exact recall')}</span><strong>{(wikiStatus.comparison.exact_recall * 100).toFixed(2)}%</strong></div>
-          {typeof wikiStatus.comparison.confirmed_count === 'number' && <div><span>{tk('실제 응답 확인', 'Runtime confirmed')}</span><strong>{wikiStatus.comparison.confirmed_matched_count}/{wikiStatus.comparison.confirmed_count}</strong></div>}
-          {typeof wikiStatus.comparison.declared_candidate_count === 'number' && <div><span>{tk('문서 직접 선언 후보', 'Direct declaration candidates')}</span><strong>{wikiStatus.comparison.declared_candidate_matched_count}/{wikiStatus.comparison.declared_candidate_count}</strong></div>}
-          {typeof wikiStatus.comparison.inferred_candidate_count === 'number' && <div><span>{tk('규칙 기반 추론 후보', 'Convention inferred candidates')}</span><strong>{wikiStatus.comparison.inferred_candidate_matched_count}/{wikiStatus.comparison.inferred_candidate_count}</strong></div>}
-          <div><span>{tk('누락', 'Missing')}</span><strong>{wikiStatus.comparison.missing}</strong></div></>}
-        </div>
-        <p><code>{wikiStatus.wiki_index}</code></p>
-        {wikiStatus.comparison && <details><summary>{tk('메서드별 비교와 누락 경로 보기', 'View method comparison and missing routes')}</summary><pre>{wikiStatus.comparison.report_markdown}</pre></details>}
-        {!!wikiStatus.lint?.issues.length && <ul>{wikiStatus.lint.issues.map(issue => <li key={issue}>{issue}</li>)}</ul>}
-      </div>}
-    </div>
-  </Panel>;
-  const attackWikiBaselines = attackWikiDatabases.filter(item => item.scan_id !== scanId);
-  const selectedAttackWikiBaseline = attackWikiBaselines.find(item => item.database_id === attackWikiBaselineId);
-  const attackWikiPanel = !demo && <Panel
-    title={tk('Attack Wiki 누적·검증', 'Attack Wiki accumulation and evaluation')}
-    subtitle={tk('완료 후에만 블랙박스 실행 증거와 별도 기준을 비교합니다. 계획·실제 테스트·후보·독립 검증을 각각 계산합니다.', 'Compares black-box execution evidence with a separate baseline only after completion. Planned, tested, candidate, and independently confirmed recall are measured separately.')}
-  >
-    <div className="recon-wiki-controls">
-      <label className="form-field"><span>{tk('논리 대상·버전 ID', 'Logical target and version ID')}</span>
-        <input value={attackWikiTargetId} onChange={event => setAttackWikiTargetId(event.target.value)} maxLength={160}
-          placeholder={snapshot?.program_id || tk('예: juice-shop@20.2.0', 'For example juice-shop@20.2.0')}/>
-        <small>{tk('같은 배포를 평가할 때만 실행 DB와 기준 DB에 동일한 ID를 사용합니다.', 'Use the same ID for runtime and baseline only when they represent the same deployment.')}</small>
-      </label>
-      <label className="form-field"><span>{tk('비교 기준 Attack DB', 'Attack baseline database')}</span>
-        <select value={attackWikiBaselineId} onChange={event => setAttackWikiBaselineId(event.target.value)}>
-          <option value="">{tk('기준 없이 현재 실행만 누적', 'Accumulate this run without a baseline')}</option>
-          {attackWikiBaselines.map(item => <option key={item.database_id} value={item.database_id}>
-            [{item.kind}] {item.target} · {item.hypothesis_count} · {item.scan_id.slice(0, 16)}
-          </option>)}
-        </select>
-        <small>{selectedAttackWikiBaseline
-          ? `${selectedAttackWikiBaseline.execution_mode} · ${selectedAttackWikiBaseline.hypothesis_count} hypotheses`
-          : tk('source-assisted 기준은 실행 전에 읽히지 않으며 완료 후 평가에만 사용됩니다.', 'Source-assisted baselines are unavailable to execution and used only for post-run evaluation.')}</small>
-      </label>
-      <div className="button-row">
-        <button className="secondary-button" disabled={!wikiReady || attackWikiBusy} onClick={() => void updateAttackWiki(false)}>
-          {attackWikiBusy ? tk('처리 중…', 'Working…') : tk('현재 Attack 결과 누적', 'Accumulate current Attack result')}
-        </button>
-        <button className="primary-button" disabled={!wikiReady || attackWikiBusy || !selectedAttackWikiBaseline} onClick={() => void updateAttackWiki(true)}>
-          {tk('누적 후 기준과 비교', 'Accumulate and compare')}
-        </button>
-      </div>
-      {!wikiReady && <p className="requirements-note">{tk('스캔이 종료된 뒤에만 Attack 실행 증거를 Wiki에 누적할 수 있습니다.', 'Attack evidence can be accumulated only after the scan reaches a terminal state.')}</p>}
-      {attackWikiError && <p className="form-error" role="alert">{attackWikiError}</p>}
-      {attackWikiStatus?.configured && <div className="recon-wiki-result" role="status">
-        <div className="scan-stats">
-          <div><span>{tk('계획 가설', 'Planned hypotheses')}</span><strong>{attackWikiStatus.hypothesis_count ?? 0}</strong></div>
-          <div><span>{tk('실제 테스트', 'Actually tested')}</span><strong>{attackWikiStatus.tested_count ?? 0}</strong></div>
-          <div><span>{tk('Attack 후보', 'Attack candidates')}</span><strong>{attackWikiStatus.candidate_count ?? 0}</strong></div>
-          <div><span>{tk('독립 검증 확인', 'Independently confirmed')}</span><strong>{attackWikiStatus.confirmed_count ?? 0}</strong></div>
-          <div><span>{tk('실행 모드', 'Execution mode')}</span><strong>{attackWikiStatus.execution_mode === 'source_assisted' ? tk('소스 보조', 'Source assisted') : tk('블랙박스', 'Black box')}</strong></div>
-          {attackWikiStatus.comparison && <>
-            <div><span>{tk('실제 테스트 재현율', 'Tested recall')}</span><strong>{(attackWikiStatus.comparison.tested_recall * 100).toFixed(2)}%</strong></div>
-            <div><span>{tk('후보 재현율', 'Candidate recall')}</span><strong>{attackWikiStatus.comparison.candidate_recall == null ? 'N/A' : `${(attackWikiStatus.comparison.candidate_recall * 100).toFixed(2)}%`}</strong></div>
-            <div><span>{tk('독립 검증 재현율', 'Confirmed recall')}</span><strong>{attackWikiStatus.comparison.confirmed_recall == null ? 'N/A' : `${(attackWikiStatus.comparison.confirmed_recall * 100).toFixed(2)}%`}</strong></div>
-            <div><span>{tk('미테스트 기준 좌표', 'Untested baseline coordinates')}</span><strong>{attackWikiStatus.comparison.missing}</strong></div>
-          </>}
-        </div>
-        <p><code>{attackWikiStatus.wiki_index}</code></p>
-        {attackWikiStatus.comparison && <details><summary>{tk('정확 좌표 비교와 누락 보기', 'View exact-coordinate comparison and gaps')}</summary><pre>{attackWikiStatus.comparison.report_markdown}</pre></details>}
-        {!!attackWikiStatus.lint?.issues.length && <ul>{attackWikiStatus.lint.issues.map(issue => <li key={issue}>{issue}</li>)}</ul>}
-      </div>}
-    </div>
-  </Panel>;
   const scanPanel = <Panel className="scan-summary-panel" title={demo ? tr('Local lab · API assessment') : scanTargetLabel} subtitle={demo ? tr('Synthetic fixture · isolated from program inventory') : `${snapshot?.program_name ? `${snapshot.program_name} · ` : ''}${scanId}`} action={<div className="scan-panel-actions"><Badge tone={snapshot?.status === 'failed' ? 'critical' : snapshot?.status === 'completed' ? 'success' : 'warning'}><span className="dot"/>{cancelling ? tk("취소 처리 중", "Cancelling") : tr(snapshot?.status || state)}</Badge>{scanControls}{!demo && retryAction === 'resume' && <button className="secondary-button" onClick={resumeScan} disabled={resuming}>{resuming ? tk("재실행 요청 중…", "Requesting rerun…") : snapshot?.stage === 'Report' ? tk("보고서만 다시 생성", "Retry report only") : tk("실패 단계부터 재실행", "Rerun from failed stage")}</button>}{!demo && retryAction === 'rescan' && <button className="secondary-button" onClick={openRepeatScan}>{tk("정찰부터 다시 스캔", "Rescan from recon")}</button>}{!demo && scanId && <button className="secondary-button" onClick={() => setModal('scan-progress')}>{snapshot?.stage === 'Recon' ? tk("도구 작업·발견 URL 보기", "View tools and URLs") : tk("진행 창 열기", "Open progress window")}</button>}</div>}>
     {snapshot ? <>
       <Pipeline snapshot={{ ...snapshot, progress: scanProgress }} language={language} reportDraft={reportDraftStatus}
@@ -1565,6 +1323,7 @@ export default function App() {
   </Panel>;
   const scanProgressContent = <div className="scan-progress-dialog">
     {manualLoginNotice}
+    {operatorActionNotice}
     {cancelError && <p className="scan-progress-failed" role="alert"><strong>{tk("스캔 취소 실패 ·", "Scan cancellation failed ·")} </strong>{cancelError}</p>}
     {pauseError && <p className="scan-progress-failed" role="alert"><strong>{tk("일시정지 상태 변경 실패 ·", "Pause state change failed ·")} </strong>{pauseError}</p>}
     <div className="scan-progress-overview">
@@ -1650,9 +1409,14 @@ export default function App() {
   const modelsValid = [reconModel, attackModel, validationModel, reportModel].every(
     model => modelNamePattern.test(model) && !model.includes('://'),
   );
+  const startUrlReady = validStartUrl(startUrl, scanProfile === 'bug-bounty-safe')
+    && (!startUrl.trim() || selectedTargets.length === 1);
+  const bugBountyReady = selectedScope
+    ? bugBountyTargetReady(scanProfile, selectedTargets, selectedScope.targets, startUrl)
+    : false;
   const canLaunch = !demo && !!selectedScope && selectedTargets.length > 0
     && selectedTargets.every(target => selectedScope.targets.some(item => item.asset === target))
-    && authorizationConfirmed && limitsValid && modelsValid
+    && authorizationConfirmed && limitsValid && modelsValid && startUrlReady && bugBountyReady
     && canLaunchWithHeaderInputs(selectedScope.execution_requirements, identityValues)
     && canLaunchWithPolicyInputs(selectedScope.execution_requirements, selectedTargets, policyValues, policyConfirmations, identityValues) && !launching;
   const journeySteps = [
@@ -1673,12 +1437,12 @@ export default function App() {
           : { label: reviewCount ? tk("검증 대기열 열기", "Open validation queue") : tk("스캔 화면 열기", "Open scans"), run: () => go(reviewCount ? 'Validation' : 'Scans') };
   const newScanContent = <div className="scan-form">
     <div className="notice"><Icon name="lock"/><div><strong>{tr('Approved Scope only')}</strong><p>{tr('The backend re-verifies approval integrity and the Python orchestrator enforces TargetPolicy and request budgets.')}</p></div></div>
-    <div className="notice"><Icon name="search"/><div><strong>{tk('블랙박스 실행', 'Black-box execution')}</strong><p>{tk('실행 에이전트는 대상의 HTTP 응답, DOM, 브라우저 트래픽, 공개 클라이언트 자산만 사용합니다. Wiki 기준과 공개 정답 목록은 스캔 종료 후 평가에만 사용됩니다.', 'Runtime agents use only target HTTP responses, DOM, browser traffic, and public client assets. Wiki baselines and public answer catalogs are used only for post-run evaluation.')}</p></div></div>
+    <div className="notice"><Icon name="search"/><div><strong>{tk('블랙박스 실행', 'Black-box execution')}</strong><p>{tk('실행 에이전트는 대상의 HTTP 응답, DOM, 브라우저 트래픽, 공개 클라이언트 자산만 사용합니다. 공개 정답 목록과 소스 기준 목록은 실행 입력으로 사용되지 않습니다.', 'Runtime agents use only target HTTP responses, DOM, browser traffic, and public client assets. Public answer catalogs and source baselines are never used as execution input.')}</p></div></div>
     {demo ? <p className="form-error">{tr('Switch to the live local dashboard to start a scan.')}</p> : <>
       {repeatSource && <div className="notice" role="status"><Icon name="scope"/><div><strong>{tk("정찰부터 새 스캔", "New scan from recon")}</strong><p>{tk(`기존 스캔 ${repeatSource.scanId}의 결과는 유지됩니다. 새 스캔 ID를 만들고 Scope·대상·실행 제한·로그인 방식을 확인한 뒤 정찰부터 다시 시작합니다. 이전 실행 설정은 저장되지 않아 현재 승인된 Scope와 프로필 기본값을 사용합니다.`, `Results for scan ${repeatSource.scanId} are kept. A new scan ID is created. Review the Scope, targets, limits, and login method before starting again from recon. Previous run settings were not saved, so the current approved Scope and profile defaults are used.`)}</p></div></div>}
       {repeatSource && !scopes.some(scope => scope.scope_id === repeatSource.scopeId) && <p className="form-error" role="alert">{tk("기존 스캔의 승인된 Scope를 찾을 수 없습니다. 새로 승인된 Scope를 직접 선택하고 대상을 확인하세요.", "The approved Scope for the previous scan is unavailable. Select a newly approved Scope and check the targets.")}</p>}
       {repeatSource && selectedScope?.scope_id === repeatSource.scopeId && repeatSource.targets.some(target => !selectedScope.targets.some(item => item.asset === target)) && <p className="form-error" role="alert">{tk("이전 스캔의 일부 대상은 현재 승인된 Scope에 없어 선택하지 않았습니다. 대상 목록을 확인하세요.", "Some targets from the previous scan are outside the currently approved Scope and were not selected. Check the target list.")}</p>}
-      <label className="form-field"><span>{tr('Verified Scope')}</span><select aria-label={tr('Approved program')} value={scopeId} onChange={event => { setScopeId(event.target.value); setSelectedTargets([]); setIdentityValues({}); setAuthorizationConfirmed(false); }}><option value="">{tr('Select a recent approved scope')}</option>{scopes.map(scope => <option key={scope.scope_id} value={scope.scope_id}>{scope.program_name} · {scope.platform}</option>)}</select></label>
+      <label className="form-field"><span>{tr('Verified Scope')}</span><select aria-label={tr('Approved program')} value={scopeId} onChange={event => { setScopeId(event.target.value); setSelectedTargets([]); setStartUrl(''); setIdentityValues({}); setAuthorizationConfirmed(false); }}><option value="">{tr('Select a recent approved scope')}</option>{scopes.map(scope => <option key={scope.scope_id} value={scope.scope_id}>{scope.program_name} · {scope.platform}</option>)}</select></label>
       {selectedScope && <>
         {!headerRequirementsReady && (headerResolutionError
           ? <p className="form-error" role="alert">{tk('실행 요구 사항을 확인하지 못해 스캔을 시작할 수 없습니다.', 'The scan cannot start until execution requirements are resolved.')} {headerResolutionError}</p>
@@ -1691,16 +1455,22 @@ export default function App() {
         </div>
         <p className="form-hint">{tr('Select Codex models from GPT-5.6 onward, or enter a custom model ID.')}</p>
         {!modelsValid && <p className="form-error" role="alert">{tr('Enter valid model IDs before starting the scan.')}</p>}
-        <fieldset className="target-fieldset"><legend>{tr('Targets')} <small>{selectedTargets.length}{tr('selected')}</small></legend><div className="target-actions"><button type="button" className="text-button" onClick={() => setSelectedTargets(selectedScope.targets.map(item => item.asset))}>{tr('Select all')}</button><button type="button" className="text-button" onClick={() => setSelectedTargets([])}>{tr('Clear')}</button></div><div className="target-list">{selectedScope.targets.map(target => <label key={`${target.asset_type}:${target.asset}`}><input type="checkbox" checked={selectedTargets.includes(target.asset)} onChange={() => setSelectedTargets(current => current.includes(target.asset) ? current.filter(item => item !== target.asset) : [...current, target.asset])}/><span><strong>{target.asset}</strong><small>{target.asset_type} · {tk("최대", "maximum")} {tr(target.maximum_severity || 'program policy')}</small></span></label>)}</div></fieldset>
+        <fieldset className="target-fieldset"><legend>{tr('Targets')} <small>{selectedTargets.length}{tr('selected')}</small></legend><div className="target-actions">{scanProfile !== 'bug-bounty-safe' && <button type="button" className="text-button" onClick={() => { setSelectedTargets(selectedScope.targets.map(item => item.asset)); setStartUrl(''); }}>{tr('Select all')}</button>}<button type="button" className="text-button" onClick={() => { setSelectedTargets([]); setStartUrl(''); }}>{tr('Clear')}</button></div><div className="target-list">{selectedScope.targets.map(target => <label key={`${target.asset_type}:${target.asset}`}><input type="checkbox" checked={selectedTargets.includes(target.asset)} onChange={() => { setSelectedTargets(current => scanProfile === 'bug-bounty-safe' ? (current.includes(target.asset) ? [] : [target.asset]) : (current.includes(target.asset) ? current.filter(item => item !== target.asset) : [...current, target.asset])); setStartUrl(''); }}/><span><strong>{target.asset}</strong><small>{target.asset_type} · {tk("최대", "maximum")} {tr(target.maximum_severity || 'program policy')}</small></span></label>)}</div></fieldset>
         {selectedTargets.length > 0 && selectedLimits && <section className="execution-requirements"><div className="execution-requirements-heading"><div><h3>{tr('Execution requirements')}</h3></div><div className="stage-badges"><Badge>{tr('Recon')}</Badge><Badge>{tr('Attack')}</Badge><Badge>{tr('Validation')}</Badge></div></div><div className="requirements-summary"><div><span>{tr('Policy request-rate ceiling')}</span><strong>{selectedScope.execution_requirements.scope_max_requests_per_second ? `${selectedScope.execution_requirements.scope_max_requests_per_second} ${tr('requests per second unit')}` : tr('Not specified by policy')}</strong></div><div><span>{tr('Required request header')}</span><strong className="mono">{headerRequirementsReady ? (selectedScope.execution_requirements.required_headers.length ? selectedScope.execution_requirements.required_headers.map(header => <span key={header.name} title={header.source_quote}>{header.name}: {header.value_template}<br/></span>) : tr('None')) : tk('확인 중', 'Pending')}</strong></div></div></section>}
-        <div className="form-grid"><label className="form-field"><span>{tr('Execution profile')}</span><select value={scanProfile} onChange={event => setScanProfile(event.target.value as ExecutionProfileId)}><option value="safe-recon">{tr('Safe recon')}</option><option value="focused-discovery">{tr('Focused discovery')}</option></select></label><label className="form-field"><span>{tk('공유 스캔 요청 예산', 'Shared scan request budget')} <small>≤ {selectedLimits?.max_requests.toLocaleString()}</small></span><input type="number" min="1" max={selectedLimits?.max_requests} value={maxRequests} onChange={event => setMaxRequests(Number(event.target.value))}/></label></div>
+        <div className="form-grid"><label className="form-field"><span>{tr('Execution profile')}</span><select value={scanProfile} onChange={event => { setScanProfile(event.target.value as ExecutionProfileId); setSelectedTargets([]); setStartUrl(''); }}><option value="bug-bounty-safe">{tk('버그바운티 안전', 'Bug bounty safe')}</option><option value="safe-recon">{tr('Safe recon')}</option><option value="focused-discovery">{tr('Focused discovery')}</option></select></label><label className="form-field"><span>{tk('정찰 엔진', 'Recon engine')}</span><select value={reconEngine} onChange={event => setReconEngine(event.target.value as 'integrated' | 'native')}><option value="integrated">{tk('Strix 통합 · 기본 정찰 자동 대체', 'Integrated Strix · automatic native fallback')}</option><option value="native">{tk('기본 정찰 엔진', 'Native recon engine')}</option></select><small>{tk('Strix 실행 환경이 막히거나 결과가 비어 있으면 같은 승인 정책으로 기본 정찰을 이어서 실행합니다.', 'If the Strix runtime is unavailable or returns no endpoints, native Recon continues under the same approved policy.')}</small></label></div>
+        <label className="form-field"><span>{tk('공유 스캔 요청 예산', 'Shared scan request budget')} <small>≤ {selectedLimits?.max_requests.toLocaleString()}</small></span><input type="number" min="1" max={selectedLimits?.max_requests} value={maxRequests} onChange={event => setMaxRequests(Number(event.target.value))}/></label>
+        {scanProfile === 'bug-bounty-safe' && <div className="notice"><Icon name="scope"/><div><strong>{tk('실제 버그바운티 프로그램용 보수적 실행', 'Conservative execution for a real bug bounty program')}</strong><p>{tk('한 번에 승인된 자산 하나만 실행하며 일반 워드리스트 경로 대입은 사용하지 않습니다. 와일드카드는 아래에 정확한 HTTPS 시작 URL이 필요합니다.', 'Run one approved asset at a time without generic wordlist path guessing. Wildcards require an exact HTTPS start URL below.')}</p></div></div>}
+        {selectedTargets.length === 1 && <label className="form-field"><span>{tk('정확한 시작 URL', 'Exact start URL')} <small>{selectedScope.targets.find(item => item.asset === selectedTargets[0])?.asset_type === 'WILDCARD' && scanProfile === 'bug-bounty-safe' ? tk('필수', 'required') : tk('선택', 'optional')}</small></span><input type="url" placeholder="https://approved.example/path" value={startUrl} onChange={event => setStartUrl(event.target.value)} aria-invalid={!validStartUrl(startUrl, scanProfile === 'bug-bounty-safe')}/><small>{scanProfile === 'bug-bounty-safe' ? tk('승인된 자산 안의 HTTPS URL만 입력하세요.', 'Enter only an HTTPS URL inside the approved asset.') : tk('승인된 자산 안의 HTTP(S) URL만 입력하세요.', 'Enter only an HTTP(S) URL inside the approved asset.')}</small></label>}
+        {!startUrlReady && <p className="form-error" role="alert">{scanProfile === 'bug-bounty-safe' ? tk('시작 URL은 쿼리·프래그먼트·자격 증명이 없는 HTTPS URL이어야 하며 대상 하나를 선택해야 합니다.', 'The start URL must be an HTTPS URL without a query, fragment, or embedded credentials and requires one selected target.') : tk('시작 URL은 쿼리·프래그먼트·자격 증명이 없는 HTTP(S) URL이어야 하며 대상 하나를 선택해야 합니다.', 'The start URL must be an HTTP(S) URL without a query, fragment, or embedded credentials and requires one selected target.')}</p>}
+        {scanProfile === 'bug-bounty-safe' && selectedTargets.length === 1 && selectedScope.targets.find(item => item.asset === selectedTargets[0])?.asset_type === 'WILDCARD' && !startUrl.trim() && <p className="form-error" role="alert">{tk('와일드카드 대상에는 정확한 HTTPS 시작 URL이 필요합니다.', 'An exact HTTPS start URL is required for a wildcard target.')}</p>}
         <div className="form-grid"><label className="form-field"><span>{tr('Requests per second')} <small>≤ {selectedLimits?.requests_per_second}</small></span><input type="number" min="0.1" step="0.1" max={selectedLimits?.requests_per_second} value={maxRps} onChange={event => setMaxRps(Number(event.target.value))}/></label><label className="form-field"><span>{tr('Concurrency')} <small>≤ {selectedLimits?.concurrency}</small></span><input type="number" min="1" max={selectedLimits?.concurrency} value={maxConcurrency} onChange={event => setMaxConcurrency(Number(event.target.value))}/></label></div>
         <div className="scan-rate-summary" aria-live="polite"><span>{tk('이번 스캔의 공유 요청 속도 상한', 'This scan shared request-rate cap')}</span><strong>{maxRps > 0 ? `${maxRps} ${tr('requests per second unit')}` : tr('Enter a valid request rate')}</strong>{requestInterval !== null && <small>{language === 'ko' ? `평균 ${requestInterval}초에 1회 요청` : `Average one request every ${requestInterval} seconds`}</small>}</div>
         <div className="form-grid"><label className="form-field"><span>{tr('Timeout seconds')} <small>≤ {selectedLimits?.timeout_seconds}</small></span><input type="number" min="1" max={selectedLimits?.timeout_seconds} value={timeoutSeconds} onChange={event => setTimeoutSeconds(Number(event.target.value))}/></label><label className="form-field"><span>{tr('Maximum depth')} <small>≤ {selectedLimits?.max_depth}</small></span><input type="number" min="0" max={selectedLimits?.max_depth} value={maxDepth} onChange={event => setMaxDepth(Number(event.target.value))}/></label></div>
-        <label className="form-field"><span>{tk('추가 경로 탐색 전체 시간 (초)', 'Total additional path discovery time (seconds)')} <small>{tk('모든 루트가 공유 · 0 = 시간 제한 없음', 'Shared by all roots · 0 = no time limit')}</small></span><input type="number" min="0" max="86400" value={ffufMaxTimeSeconds} onChange={event => setFfufMaxTimeSeconds(Number(event.target.value))}/></label>
+        <label className="form-field"><span>{tk('추가 경로 탐색 전체 시간 (초)', 'Total additional path discovery time (seconds)')} <small>{scanProfile === 'bug-bounty-safe' ? tk('일반 워드리스트 탐색 비활성', 'Generic wordlist discovery disabled') : tk('모든 루트가 공유 · 0 = 시간 제한 없음', 'Shared by all roots · 0 = no time limit')}</small></span><input type="number" min="0" max={scanProfile === 'bug-bounty-safe' ? 60 : 86400} value={ffufMaxTimeSeconds} disabled={scanProfile === 'bug-bounty-safe'} onChange={event => setFfufMaxTimeSeconds(Number(event.target.value))}/></label>
         <div className="form-grid"><label className="form-field"><span>{tr('Tag batch size')} <small>1–200</small></span><input type="number" min="1" max="200" step="1" value={tagBatchSize} onChange={event => setTagBatchSize(Number(event.target.value))} aria-describedby="tag-batch-size-hint"/><small id="tag-batch-size-hint">{tr('Observations per model call · 25 recommended (300-second model timeout)')}</small></label><label className="form-field"><span>{tr('Login behavior')}</span><select value={loginMode} onChange={event => setLoginMode(event.target.value as 'none' | 'runtime-browser')}><option value="none">{tr('No login prompt')}</option><option value="runtime-browser">{tr('Open runtime browser')}</option></select></label></div>
         {!!selectedScope.execution_requirements.execution_rules?.exclusions?.length && <div><ScopeExclusionStatus count={selectedScope.execution_requirements.execution_rules.exclusions.length} preparation={exclusionPreparation}/><button className="secondary-button" disabled={!canLaunch || preparingExclusions} onClick={() => void prepareExclusions()}>{tk(preparingExclusions ? '확인 중…' : '저장된 증거로 제외 조건 확인', preparingExclusions ? 'Checking…' : 'Check exclusions from saved evidence')}</button></div>}
         {loginMode === 'runtime-browser' && <p className="requirements-note">{tk('스캔 중 열린 브라우저에서 5분 안에 로그인을 완료하세요. 인증 토큰과 로그인 화면 종료가 확인되면 자동으로 진행합니다. 토큰을 사용하지 않는 사이트는 자동 확인에 실패할 수 있습니다.', 'Complete login in the opened browser within five minutes. The scan continues when an authentication token is detected and the login form closes. Sites without a token may not be confirmed automatically.')}</p>}
+        {loginMode === 'runtime-browser' && reconEngine === 'integrated' && <p className="requirements-note">{tk('사람이 로그인하는 실행에서는 같은 브라우저 세션을 유지하기 위해 기본 정찰 엔진으로 자동 전환합니다.', 'Operator login automatically uses native Recon so the same browser session is preserved.')}</p>}
         <p className="requirements-note">{tk('요청 예산은 모든 대상과 정찰·공격·검증 단계가 공유합니다.', 'The request budget is shared across all targets and Recon, Attack, and Validation.')}</p>
         {applicablePolicyRequirements(selectedScope.execution_requirements.policy_blockers, selectedTargets).map((blocker, index) => <div className="form-error" role="alert" key={index}><strong>{blocker.label}</strong><p>{blocker.reason}</p></div>)}
         <ScopePolicyAdvisories advisories={selectedScope.execution_requirements.execution_rules?.advisories} selectedAssets={selectedTargets} language={language}/>
@@ -1798,7 +1568,7 @@ export default function App() {
           <div className="workspace-footer"><Icon name="lock" size={13}/><span>{tr('Python enforces scope, request budget, and authorization gates.')}</span><span>AI DAST · v0.1</span></div>
         </>}
         {page === 'Scopes / Programs' && <><div className="notice"><Icon name="lock"/><div><strong>{tk(`사용자가 등록한 프로그램 ${totalProgramCount}개. ${approvedScopeCount ? `검증된 스코프 산출물 ${approvedScopeCount}개를 불러왔습니다.` : tr('No executable assets.')}`, `${totalProgramCount} registered programs. ${approvedScopeCount ? `${approvedScopeCount} verified Scope artifacts loaded.` : tr('No executable assets.')}`)}</strong><p>{tr('No programs are preloaded. Registration does not establish authorization; only an explicitly approved, integrity-verified Scope becomes executable.')}</p></div></div>{verifiedScopesPanel}{registeredPrograms.length > 0 ? <><div className="toolbar"><label className="search-field"><Icon name="search" size={16}/><input aria-label={tr('Search programs')} value={search} onChange={e => setSearch(e.target.value)} placeholder={tr('Filter registered programs or platforms…')}/></label><button className="secondary-button" onClick={() => setPrivateVisible(v => !v)}>{tr(privateVisible ? 'Hide private name' : 'Reveal private name')}</button></div><Panel title={tr('Scope intake queue')} subtitle={tk(`로컬 등록 프로그램 ${registeredPrograms.length}개 · 명시적인 승인 또는 거절 결정이 필요합니다`, `${registeredPrograms.length} locally registered programs · explicit approval or rejection required`)}><div className="intake-list">{visiblePrograms.map(item => <div key={item.id}><span className="artifact-icon"><Icon name={item.visibility === 'private' ? 'lock' : 'scope'}/></span><div><strong>{item.visibility === 'private' && !privateVisible ? tr('Private program') : item.program}</strong><p>{item.platform} · {tk("등록", "registered")} {new Date(item.created_at).toLocaleString(language === 'ko' ? 'ko-KR' : 'en-GB')}{item.scope_error ? ` · ${item.scope_error}` : ''}</p></div><div className="intake-actions"><Badge tone={scopeStatusTone(item.scope_status)}>{tr(scopeStatusLabel[item.scope_status])}</Badge><button className="secondary-button" onClick={() => openScopeWorkflow(item)}>{tr(item.scope_status === 'review_required' ? 'Review Yes / No' : item.scope_status === 'collecting' || item.scope_status === 'awaiting_browser' || item.scope_status === 'paused' || item.scope_status === 'cancelling' ? 'View progress' : item.scope_status === 'approved' ? 'View result' : 'Collect Scope')}</button></div></div>)}{visiblePrograms.length === 0 && <p className="table-empty">{tr('No registered programs match this filter.')}</p>}</div></Panel></> : <Panel title={tr('No programs registered')} subtitle={tr('Start with a program policy URL')}><Empty title={tr('Your Scope queue is empty')}>{tr('Choose Add program, enter the bug bounty program URL, and select Public or Private. Nothing is added automatically.')}</Empty></Panel>}</>}
-        {page === 'Scans' && <>{!demo && <div className="toolbar"><label>{tr('Persisted scan')} <select aria-label={tr('Select persisted scan')} value={scanId} onChange={event => setScanId(event.target.value)}>{!scanOptions.some(item => item.scan_id === scanId) && scanId && <option value={scanId}>{scanId}</option>}{scanOptions.map(item => <option key={item.scan_id} value={item.scan_id}>{item.targets?.length ? `${item.targets[0]}${item.targets.length > 1 ? tk(` 외 ${item.targets.length - 1}개`, ` + ${item.targets.length - 1} more`) : ''} · ${item.scan_id.slice(0, 13)}` : item.scan_id} · {tr(item.status)}</option>)}</select></label><button className="secondary-button" onClick={refresh}>{tr('Reload snapshot')}</button></div>}{scanPanel}{reconWikiPanel}{attackWikiPanel}{!demo && attackTasksContent}<Panel title={tr('Run artifacts & provenance')} subtitle={tr('Mapped to the existing aidast pipeline')}><div className="artifact-list">{[['Scope.json + Approval.json','Scope',tr('Policy, approved assets, and integrity hashes')],['Recon.db + Surface.json','Recon',tr('Observed assets, origins, endpoints, and sessions')],['Handoff.json','Handoff',tr('Hashes and roles of immutable source artifacts')],['Pipeline.db','Attack → Validation','stage_runs · attack_tasks · findings · chain_candidates'],['Report.md + Report.json','Report',tr('Validated local draft; no automatic submission')]].map(([name,s,description]) => <div key={name}><span className="artifact-icon"><Icon name="report"/></span><div><strong className="mono">{name}</strong><p>{description}</p></div><Badge>{tr(s)}</Badge></div>)}</div></Panel></>}
+        {page === 'Scans' && <>{!demo && <div className="toolbar"><label>{tr('Persisted scan')} <select aria-label={tr('Select persisted scan')} value={scanId} onChange={event => setScanId(event.target.value)}>{!scanOptions.some(item => item.scan_id === scanId) && scanId && <option value={scanId}>{scanId}</option>}{scanOptions.map(item => <option key={item.scan_id} value={item.scan_id}>{item.targets?.length ? `${item.targets[0]}${item.targets.length > 1 ? tk(` 외 ${item.targets.length - 1}개`, ` + ${item.targets.length - 1} more`) : ''} · ${item.scan_id.slice(0, 13)}` : item.scan_id} · {tr(item.status)}</option>)}</select></label><button className="secondary-button" onClick={refresh}>{tr('Reload snapshot')}</button></div>}{scanPanel}{!demo && attackTasksContent}<Panel title={tr('Run artifacts & provenance')} subtitle={tr('Mapped to the existing aidast pipeline')}><div className="artifact-list">{[['Scope.json + Approval.json','Scope',tr('Policy, approved assets, and integrity hashes')],['Recon.db + Surface.json','Recon',tr('Observed assets, origins, endpoints, and sessions')],['Handoff.json','Handoff',tr('Hashes and roles of immutable source artifacts')],['Pipeline.db','Attack → Validation','stage_runs · attack_tasks · findings · chain_candidates'],['Report.md + Report.json','Report',tr('Validated local draft; no automatic submission')]].map(([name,s,description]) => <div key={name}><span className="artifact-icon"><Icon name="report"/></span><div><strong className="mono">{name}</strong><p>{description}</p></div><Badge>{tr(s)}</Badge></div>)}</div></Panel></>}
         {page === 'Findings' && <>
           {validationError && <div className="error-banner" role="alert">{tr('Validation results unavailable')}</div>}
           <div className="toolbar finding-filters">

@@ -1863,7 +1863,7 @@ def test_legacy_anonymous_auth_gate_reopens_once_session_is_available(
         ) == 0
 
 
-def test_exact_anonymous_auth_denial_is_a_tested_bypass_negative(
+def test_single_anonymous_auth_denial_is_not_a_tested_bypass_negative(
     tmp_path: Path,
 ) -> None:
     imported = imported_pipeline(tmp_path)
@@ -1927,11 +1927,11 @@ def test_exact_anonymous_auth_denial_is_a_tested_bypass_negative(
 
         assert reclassify_explicit_auth_denial_coverage(
             conn, imported.scan_id,
-        ) == 1
+        ) == 0
         assert conn.execute(
             "SELECT status FROM attack_coverage_items WHERE coverage_id=?",
             (coverage["coverage_id"],),
-        ).fetchone()[0] == "tested_negative"
+        ).fetchone()[0] == "unsupported"
         assert reclassify_explicit_auth_denial_coverage(
             conn, imported.scan_id,
         ) == 0

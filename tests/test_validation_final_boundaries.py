@@ -10,7 +10,7 @@ from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import grpc
-from websockets.frames import CLOSE, PONG
+from websockets.frames import Opcode
 from websockets.sync.client import connect
 
 import test_validation_coordinator as coordinator_fixture
@@ -25,6 +25,10 @@ from aidast.validation.contracts.models import ReproductionObservation, canonica
 from aidast.validation.execution.multipart_adapter import MultipartReproductionPort
 from aidast.validation.execution.transport_broker import ValidationTransportError
 from aidast.validation.persistence.repository import ValidationRepository
+
+
+CLOSE = Opcode.CLOSE
+PONG = Opcode.PONG
 
 
 class GrpcProvenanceTests(unittest.TestCase):

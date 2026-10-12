@@ -900,6 +900,24 @@ def declarations_from_captured_responses(rows, *, base_url: str, target_policy=N
                 pass
         elif media in {"text/plain", "application/xml", "text/xml", "application/sitemap+xml"}:
             captured = declared_index_routes(text, **options)
+        if media in {
+            "text/html", "application/xhtml+xml", "application/javascript",
+            "text/javascript", "application/x-javascript",
+        }:
+            # UI-only route declarations are kept synthetic until a captured
+            # target response proves the route. Import locally to avoid a
+            # module cycle: the synthesis helper reuses this module's strict
+            # same-origin candidate normalization.
+            from aidast.recon.ui_synthesis import synthesize_client_ui_routes
+            known = {(item["method"], item["url"]) for item in captured}
+            synthetic = [
+                item for item in synthesize_client_ui_routes(
+                    text, media_type=media, document_url=document_url,
+                    base_url=base_url, target_policy=target_policy, limit=cap,
+                )
+                if (item["method"], item["url"]) not in known
+            ]
+            captured = _unique([*captured, *synthetic], cap)
         # Count unique method/URL pairs after every document. Repeated captures
         # must not consume the route cap or erase parameters declared later.
         declarations = _unique([*declarations, *captured], cap)
@@ -1039,7 +1057,7 @@ def inferred_openapi_routes(document: dict, *, document_url: str, base_url: str,
     These candidates are conventions supported by a captured declaration. They
     are never requested here and remain distinguishable from contract routes.
     Only route structure, operation metadata, and well-known protocol paths are
-    used; benchmark and Recon Wiki comparison data are not inputs.
+    used; benchmark comparison data is not an input.
     """
     if (limit <= 0 or not isinstance(document, dict) or not isinstance(document.get("paths"), dict)
             or not (str(document.get("openapi", "")).startswith("3.") or document.get("swagger") == "2.0")):

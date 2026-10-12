@@ -4,6 +4,7 @@ import json
 import tempfile
 from pathlib import Path
 
+from aidast.agents.main import MainAgentError
 from aidast.recon import db
 from aidast.recon.annotations import (
     AnnotationBatch,
@@ -51,6 +52,21 @@ class PartialFirstAgent(RecordingAgent):
         if self.calls == 1:
             return AnnotationBatch(annotations=result.annotations[:1])
         return result
+
+
+class TransientMainAgent(RecordingAgent):
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def _run_structured(self, **kwargs):
+        self.calls += 1
+        if self.calls == 1:
+            raise MainAgentError(
+                "temporary Codex failure",
+                failure_code="nonzero_exit",
+                exit_code=1,
+            )
+        return super()._run_structured(**kwargs)
 
 
 def test_deferred_tagging_reuses_sanitized_observation_evidence() -> None:
@@ -247,3 +263,33 @@ def test_deferred_tagging_splits_batch_after_incomplete_model_result() -> None:
     assert annotations == 4
     assert agent.calls == 3
     assert run_statuses == {"completed": 2, "failed": 1}
+
+
+def test_deferred_tagging_retries_transient_main_agent_failure() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        database = Path(temporary) / "Recon.db"
+        with db.connect(database) as connection:
+            db.insert_scan(connection, scan_id="scan", scope_type="test", scope_value="scope")
+            asset_id = db.insert_asset(
+                connection, scan_id="scan", identifier="example.com", asset_type="DOMAIN"
+            )
+            origin_id = db.upsert_origin(
+                connection, asset_id=asset_id, scheme="https", host="example.com",
+                port=443, base_url="https://example.com",
+            )
+            ObservationRecorder(connection, origin_id=origin_id, scan_id="scan").record(
+                "fixture",
+                [{"method": "GET", "path": f"/item/{index}", "source": "fixture"}
+                 for index in range(3)],
+            )
+            agent = TransientMainAgent()
+            completed, failed = tag_pending_observations(
+                connection, scan_id="scan", agent=agent, batch_size=3,
+            )
+            run_statuses = dict(connection.execute(
+                "SELECT status, COUNT(*) FROM annotation_runs GROUP BY status"
+            ).fetchall())
+
+    assert (completed, failed) == (3, 0)
+    assert agent.calls == 2
+    assert run_statuses == {"completed": 1, "failed": 1}

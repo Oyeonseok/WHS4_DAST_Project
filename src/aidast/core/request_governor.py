@@ -90,6 +90,23 @@ class RequestGovernor:
         # Freeze a trusted binding so later mutable caller edits cannot widen it.
         self.binding = json.loads(json.dumps(binding, allow_nan=False))
 
+    def remaining_scan_requests(self) -> int:
+        """Read the shared scan balance without reserving or charging requests."""
+        b = self.binding
+        if b is None:
+            raise GovernorError('shared governor required')
+        if not Path(self.path).exists():
+            return b['scan_max_requests']
+        try:
+            with sqlite3.connect(Path(self.path).as_uri() + '?mode=ro',
+                                 uri=True, timeout=5) as conn:
+                used = conn.execute(
+                    'SELECT coalesce(sum(units),0) FROM governor_requests WHERE program=? AND scan=?',
+                    (b['program_id'], b['scan_id'])).fetchone()[0]
+        except sqlite3.Error as exc:
+            raise GovernorError('shared governor ledger unavailable') from exc
+        return max(0, b['scan_max_requests'] - used)
+
     @contextmanager
     def _transaction(self, *, nonblocking=False):
         conn = None

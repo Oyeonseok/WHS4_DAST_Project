@@ -22,6 +22,7 @@ import os
 import runpy
 import time
 from datetime import datetime, timezone
+from fnmatch import fnmatchcase
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -99,6 +100,13 @@ def _host_matches(host: str, pattern: str) -> bool:
     return host == root or (
         normalized.startswith("*.") and host.endswith("." + root)
     )
+
+
+def _target_rule_matches(host: str, pattern: str) -> bool:
+    """Match per-target host globs without adding a wildcard apex."""
+    normalized = str(pattern).lower().rstrip(".")
+    candidate = host.lower().rstrip(".")
+    return fnmatchcase(candidate, normalized) if "*" in normalized else candidate == normalized
 
 
 class ScopeAndCaptureAddon:
@@ -249,9 +257,11 @@ class ScopeAndCaptureAddon:
         excluded_hosts = self.rules.get("excluded_hosts", [])
         include_subdomains = bool(self.rules.get("include_subdomains", False))
         host_excluded = any(_host_matches(host, pattern) for pattern in excluded_hosts)
-        host_allowed = not host_excluded and (host in allowed_hosts or (
+        host_allowed = not host_excluded and (any(
+            _host_matches(host, pattern) for pattern in allowed_hosts
+        ) or (
             include_subdomains
-            and any(host.endswith("." + root) for root in allowed_hosts)
+            and any(host.endswith("." + root.removeprefix("*.")) for root in allowed_hosts)
         ))
         path = parsed.path or "/"
         allowed_paths = self.rules.get("allowed_path_prefixes", ["/"])
@@ -262,18 +272,42 @@ class ScopeAndCaptureAddon:
         browser_reserve = max(1, int(budget_total * 0.20))
         noncritical_limit = max(0, budget_total - browser_reserve)
         self.active_request_limit = noncritical_limit
+        method = flow.request.method.upper()
+        target_rules = self.rules.get("target_rules")
+        target_allowed = True if target_rules is None else any(
+            _target_rule_matches(host, str(rule.get("host_pattern") or ""))
+            and parsed.scheme in rule.get("schemes", [])
+            and ("*" in rule.get("ports", []) or port in rule.get("ports", []))
+            and method in rule.get("methods", [])
+            and any(self._path_matches(path, prefix) for prefix in rule.get("paths", []))
+            for rule in target_rules
+        )
+        excluded_target = any(
+            _target_rule_matches(host, str(rule.get("host_pattern") or ""))
+            and parsed.scheme in rule.get("schemes", [])
+            and ("*" in rule.get("ports", []) or port in rule.get("ports", []))
+            and method in rule.get("methods", [])
+            and any(self._path_matches(path, prefix) for prefix in rule.get("paths", []))
+            for rule in self.rules.get("excluded_target_rules", [])
+        )
         support_mode = self._authorized_browser_support(
-            flow, parsed, host_allowed, host_excluded
+            flow, parsed,
+            host_allowed and target_allowed and not excluded_target,
+            host_excluded or excluded_target,
         )
         phase_hint = str(flow.request.headers.pop("X-AIDAST-Phase", "")).lower()
         source_hint = str(flow.request.headers.pop("X-AIDAST-Source", "")).lower()
         flow.metadata["aidast_candidate_probe"] = phase_hint == "candidate_probe"
-        method = flow.request.method.upper()
         boundary_allowed = (
             host_allowed
+            and target_allowed
+            and not excluded_target
             and not (parsed.username or parsed.password)
             and parsed.scheme in self.rules.get("allowed_schemes", ["https"])
-            and port in self.rules.get("allowed_ports", [443])
+            and (
+                "*" in self.rules.get("allowed_ports", [443])
+                or port in self.rules.get("allowed_ports", [443])
+            )
             and method in allowed_methods
             and any(self._path_matches(path, prefix) for prefix in allowed_paths)
             and not any(self._path_matches(path, prefix) for prefix in excluded_paths)
@@ -350,6 +384,12 @@ class ScopeAndCaptureAddon:
             for name in list(flow.request.headers):
                 if name.casefold() in {key.casefold() for key in required_headers}:
                     flow.request.headers.pop(name, None)
+        if allowed and host_allowed:
+            for name, value in self.rules.get("request_headers", {}).items():
+                for existing in list(flow.request.headers):
+                    if existing.casefold() == str(name).casefold():
+                        flow.request.headers.pop(existing, None)
+                flow.request.headers[str(name)] = str(value)
         def admit():
             if _protocol_exchange(flow.request) and has_request_exclusions(self.rules):
                 raise ValueError('exclusion hold: protocol exchange has no complete enforceable descriptor')
@@ -445,7 +485,10 @@ class ScopeAndCaptureAddon:
             return mode if (
                 host_allowed
             and parsed.scheme in self.rules.get("allowed_schemes", ["https"])
-            and port in self.rules.get("allowed_ports", [443])
+            and (
+                "*" in self.rules.get("allowed_ports", [443])
+                or port in self.rules.get("allowed_ports", [443])
+            )
             and (method in self.rules.get("allowed_methods", ["GET", "HEAD", "OPTIONS"]) or method == "POST")
                 and not any(
                     self._path_matches(parsed.path or "/", path)

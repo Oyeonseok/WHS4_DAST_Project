@@ -48,6 +48,7 @@ def test_scope_requirements_use_grounded_rate_and_identity_header() -> None:
     assert {item.id: item.limits.requests_per_second for item in requirements.profiles} == {
         "safe-recon": 10,
         "focused-discovery": 10,
+        "bug-bounty-safe": 0.2,
     }
     assert requirements.required_header is not None
     assert requirements.required_header.name == "X-Intigriti-Username"
@@ -60,6 +61,7 @@ def test_scope_requirements_use_grounded_rate_and_identity_header() -> None:
     } == {
         "safe-recon": 500,
         "focused-discovery": 2000,
+        "bug-bounty-safe": 300,
     }
 
 

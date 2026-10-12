@@ -96,6 +96,33 @@ class MitmAddonBudgetTests(unittest.TestCase):
         self.assertTrue(flow.metadata["aidast_policy_blocked"])
         self.assertEqual(addon.request_count, 0)
 
+    def test_strix_wildcard_rule_allows_only_matching_subdomain_and_injects_header(self):
+        addon = self._addon()
+        addon.allowed_hosts = {"*.example.com"}
+        addon.rules.update(
+            allowed_hosts=["*.example.com"],
+            allowed_ports=["*"],
+            request_headers={"X-Researcher": "approved"},
+            target_rules=[{
+                "host_pattern": "*.example.com",
+                "schemes": ["https"],
+                "ports": ["*"],
+                "paths": ["/"],
+                "methods": ["GET"],
+            }],
+            excluded_target_rules=[],
+        )
+        allowed = self._flow("/api")
+        allowed.request.pretty_url = "https://api.example.com:8443/api"
+        asyncio.run(addon.request(allowed))
+        self.assertIsNone(allowed.response)
+        self.assertEqual(allowed.request.headers["X-Researcher"], "approved")
+
+        apex = self._flow("/api")
+        apex.request.pretty_url = "https://example.com/api"
+        asyncio.run(addon.request(apex))
+        self.assertEqual(apex.response.status_code, 403)
+
     def test_blocked_low_priority_requests_do_not_spend_browser_reserve(self):
         addon = self._addon()
         for index in range(8):

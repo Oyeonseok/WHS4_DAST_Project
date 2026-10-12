@@ -281,6 +281,17 @@ same temporary file.
    ```json
    {"method":"GET","url":"https://target.test/api/me","headers":{},"credential_reference_id":"credref_existing"}
    ```
+   When several requests match an allowlisted nuclei HTTP template or sqlmap
+   payload family, you may instead write one bounded manifest and invoke
+   `external_tool_helper_path run` with the same DB, scan, stage, task and
+   policy arguments plus `--manifest`. The only adapter IDs are
+   `nuclei-http-template-v1` and `sqlmap-payload-family-v1`. The helper accepts
+   structured HTTP requests only, rejects shell/raw/workflow/proxy fields and
+   credential headers, and dispatches every physical request through the same
+   guarded request ledger. It does not execute nuclei, sqlmap, Bash, or an
+   independent network stack. Use opaque `credential_reference_id` values for
+   authentication and keep the manifest within the task's existing endpoint,
+   method, authorization envelope, and request budget.
 8. When observed behavior satisfies the active Skill's confirmation criteria,
    write a minimal redacted evidence JSON and use `commit-finding`. Include all
    supporting open attempt IDs in `lead_attempt_ids` and the official
@@ -311,7 +322,16 @@ same temporary file.
    form-urlencoded evidence uses an encoded `text_body` plus its Content-Type,
    while JSON evidence uses `json_body`. A format conversion that the target
    rejects makes both the positive control and the finding unusable.
-9. Close all leads for the task, then transition it to `completed`. A coverage
+9. Before completing a coverage task with only negative or rejected evidence,
+   call `commit-checkpoint` with the strategy-family labels, payload-family
+   labels, bounded response features, acquired fact IDs, remaining safe TODOs,
+   and completed control request IDs. Never include request/response bodies,
+   URLs, cookies, tokens, passwords, or other credentials. One 401/403, one
+   payload, or one strategy is weak evidence and cannot establish a terminal
+   negative. On a retry, read `intent_checkpoint` from the task payload and
+   choose a materially different remaining strategy. A checkpoint records work;
+   it never proves a finding by itself.
+10. Close all leads for the task, then transition it to `completed`. A coverage
    task with no request/attempt evidence must be `skipped` with the exact blocker,
    including when a request-bound policy decision denies a task after it entered
    `running`; that denial is not a task failure

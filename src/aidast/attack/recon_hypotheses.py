@@ -726,7 +726,7 @@ commands, browse, or send requests; this step only produces a testing plan.
             progress(reviewed, total)
         # Ensure planner-rule upgrades are also applied to endpoints whose
         # evidence digest was already reviewed and therefore skipped above.
-        # This second pass is idempotent and never imports Wiki/source answers.
+        # This second pass is idempotent and never imports source answers.
         supplement_grounded_hypotheses(database, scan_id)
         counts = dict(conn.execute('SELECT status,count(*) FROM attack_endpoint_reviews WHERE scan_id=? GROUP BY status', (scan_id,)))
         return {'total_endpoints': total, 'by_status': counts}

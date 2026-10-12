@@ -1,7 +1,6 @@
 """Observe existing local dashboard scans and save bounded acceptance evidence.
 
-This utility never launches, resumes, or controls a scan. The only optional
-write is the dashboard's terminal-only Recon Wiki comparison action.
+This utility never launches, resumes, controls, or mutates a scan.
 """
 from __future__ import annotations
 
@@ -28,7 +27,6 @@ from aidast.pipeline.model_settings import load_scan_model_choices  # noqa: E402
 TERMINAL = {"completed", "failed", "cancelled"}
 STAGES = ("Scope", "Recon", "Attack", "Chaining", "Validation", "Report")
 SCAN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
-BASELINE_ID = re.compile(r"^[a-f0-9]{24}$")
 MAX_RESPONSE_BYTES = 8_000_000
 
 
@@ -66,9 +64,8 @@ class DashboardClient:
         if not path.startswith("/api/v1/") or ".." in path:
             raise ValueError("invalid dashboard API path")
         method = "POST" if payload is not None else "GET"
-        if method == "POST" and not re.fullmatch(
-                r"/api/v1/scans/[A-Za-z0-9][A-Za-z0-9_.-]{0,127}/recon-wiki", path):
-            raise ValueError("only terminal Recon Wiki comparison writes are supported")
+        if method == "POST":
+            raise ValueError("dashboard observation is read-only")
         headers = {"Accept": "text/markdown" if markdown else "application/json"}
         if payload is not None:
             headers |= {"Origin": self.base_url, "Content-Type": "application/json"}
@@ -149,8 +146,8 @@ def collect_full_ledger(row: dict, result_root: Path) -> None:
         connection.close()
 
 
-def finalize(client, row: dict, *, result_root: Path, baseline_id: str | None,
-             baseline_kind: str, compare_wiki: bool, expected_models: dict | None) -> None:
+def finalize(client, row: dict, *, result_root: Path,
+             expected_models: dict | None) -> None:
     scan_id = row["scan_id"]
     prefix = f"/api/v1/scans/{scan_id}"
     if row["terminal_status"] not in TERMINAL:
@@ -165,20 +162,6 @@ def finalize(client, row: dict, *, result_root: Path, baseline_id: str | None,
             row["observation_errors"].append(f"{name} unavailable")
             return None
 
-    wiki = collect("Recon Wiki", lambda: client.request(prefix + "/recon-wiki", {
-        "baseline_id": baseline_id, "baseline_kind": baseline_kind, "target_id": "",
-    } if compare_wiki else None))
-    if isinstance(wiki, dict):
-        comparison = wiki.get("comparison") or {}
-        row["recon_wiki"] = {
-            "configured": wiki.get("configured") is True,
-            "lint_ok": wiki.get("lint", {}).get("ok") is True,
-            **{key: comparison.get(key) for key in (
-                "baseline_id", "baseline_kind", "baseline_count", "observed_count",
-                "matched_count", "exact_recall", "path_recall", "confirmed_matched_count",
-                "declared_candidate_matched_count", "inferred_candidate_matched_count", "missing",
-            )},
-        }
     summary = collect("scan summary", lambda: client.request(prefix + "/summary"), missing_ok=True)
     row["summary_present"] = bool(isinstance(summary, dict)
                                   and summary.get("scan_id") == scan_id
@@ -203,10 +186,7 @@ def finalize(client, row: dict, *, result_root: Path, baseline_id: str | None,
         collect("full dashboard event ledger", lambda: collect_full_ledger(row, result_root))
 
 
-def assess(row: dict, *, baseline_id: str | None, baseline_count: int,
-           min_recall: float, required_stages=STAGES) -> dict[str, bool]:
-    wiki = row.get("recon_wiki") or {}
-    exact = wiki.get("exact_recall")
+def assess(row: dict, *, required_stages=STAGES) -> dict[str, bool]:
     stages = row.get("stage_statuses", {})
     return {
         "completed": row.get("terminal_status") == "completed",
@@ -217,28 +197,19 @@ def assess(row: dict, *, baseline_id: str | None, baseline_count: int,
         "error_free": not row.get("error_events"),
         "event_coverage_complete": row.get("event_coverage_complete") is True,
         "observation_complete": not row.get("observation_errors"),
-        "wiki_ready": wiki.get("configured") is True and wiki.get("lint_ok") is True,
-        "baseline_count": wiki.get("baseline_count") == baseline_count,
-        "baseline_selection": bool(wiki.get("baseline_id")) and
-                              (baseline_id is None or wiki.get("baseline_id") == baseline_id),
-        "exact_recall": (isinstance(exact, (int, float)) and not isinstance(exact, bool)
-                         and math.isfinite(exact) and min_recall <= exact <= 1),
         "report_present": row.get("summary_present") is True or bool(row.get("reports")),
         "models_persisted": bool(row.get("persisted_models")),
         "model_selection": row.get("expected_models_match") is True,
     }
 
 
-def evidence(rows: list[dict], *, baseline_id=None, baseline_count=81, min_recall=.90) -> dict:
+def evidence(rows: list[dict]) -> dict:
     for row in rows:
-        row["checks"] = assess(row, baseline_id=baseline_id, baseline_count=baseline_count,
-                               min_recall=min_recall)
+        row["checks"] = assess(row)
         row["passed"] = all(row["checks"].values())
     count_ok = 10 <= len(rows) <= 20 and len({row["scan_id"] for row in rows}) == len(rows)
     return {"schema_version": "1.0", "observed_at": datetime.now(timezone.utc).isoformat(),
-            "criteria": {"minimum_runs": 10, "maximum_runs": 20,
-                         "baseline_id": baseline_id, "baseline_count": baseline_count,
-                         "minimum_exact_recall": min_recall},
+            "criteria": {"minimum_runs": 10, "maximum_runs": 20},
             "run_count": len(rows), "run_count_valid": count_ok,
             "passed_runs": sum(row["passed"] for row in rows),
             "passed": count_ok and all(row["passed"] for row in rows), "scans": rows}
@@ -249,19 +220,14 @@ def write_evidence(destination: Path, document: dict) -> None:
     lines = ["# Dashboard observation evidence", "",
              f"Acceptance: {'PASS' if document['passed'] else 'FAIL'}; "
              f"{document['passed_runs']}/{document['run_count']} scans passed.", "",
-             "| Scan | Terminal | Exact recall | Errors | Report | Failed checks |",
-             "| --- | --- | --- | --- | --- | --- |"]
+             "| Scan | Terminal | Errors | Report | Failed checks |",
+             "| --- | --- | --- | --- | --- |"]
     for row in document["scans"]:
-        wiki = row.get("recon_wiki") or {}
-        exact = wiki.get("exact_recall")
-        recall = f"{exact:.2%}" if isinstance(exact, (int, float)) else "unavailable"
         failed = ", ".join(key for key, ok in row["checks"].items() if not ok) or "none"
         lines.append(f"| {row['scan_id']} | {row.get('terminal_status') or 'pending'} | "
-                     f"{recall} | {len(row['error_events'])} | "
+                     f"{len(row['error_events'])} | "
                      f"{'yes' if row.get('summary_present') or row.get('reports') else 'no'} | {failed} |")
-    lines += ["", "Method+path recall measures inventory coverage. Confirmed and declared matches "
-              "are recorded separately in JSON; recall does not establish vulnerability accuracy.", "",
-              "Scan summaries count as report artifacts even when there are no finding drafts. "
+    lines += ["", "Scan summaries count as report artifacts even when there are no finding drafts. "
               "No request bodies, report content, credentials, or free-form error messages are saved.", ""]
     for filename, body in (("dashboard-observation.json", json.dumps(document, ensure_ascii=False, indent=2) + "\n"),
                            ("dashboard-observation.md", "\n".join(lines))):
@@ -271,9 +237,8 @@ def write_evidence(destination: Path, document: dict) -> None:
 
 
 def observe(client, ids: list[str], *, result_root: Path, destination: Path,
-            baseline_id: str | None, baseline_kind: str, compare_wiki: bool,
-            baseline_count: int, min_recall: float, timeout: float,
-            poll_seconds: float, settle_seconds: float, expected_models: dict | None = None) -> dict:
+            timeout: float, poll_seconds: float, settle_seconds: float,
+            expected_models: dict | None = None) -> dict:
     rows = [{"scan_id": scan_id, "terminal_status": None, "stage_statuses": {},
              "error_events": {}, "observation_errors": [], "event_coverage_complete": True,
              "finalized": False} for scan_id in ids]
@@ -297,8 +262,7 @@ def observe(client, ids: list[str], *, result_root: Path, destination: Path,
                 if row["terminal_status"] in TERMINAL:
                     terminal_since.setdefault(scan_id, time.monotonic())
                     if time.monotonic() - terminal_since[scan_id] >= settle_seconds:
-                        finalize(client, row, result_root=result_root, baseline_id=baseline_id,
-                                 baseline_kind=baseline_kind, compare_wiki=compare_wiki,
+                        finalize(client, row, result_root=result_root,
                                  expected_models=expected_models)
                         row["finalized"] = True
                 else:
@@ -314,8 +278,7 @@ def observe(client, ids: list[str], *, result_root: Path, destination: Path,
             for row in rows:
                 if not row["finalized"]:
                     row["observation_errors"].append("observation deadline reached")
-        document = evidence(rows, baseline_id=baseline_id, baseline_count=baseline_count,
-                            min_recall=min_recall)
+        document = evidence(rows)
         write_evidence(destination, document)
         if expired or all(row["finalized"] for row in rows):
             return document
@@ -328,12 +291,6 @@ def main(argv=None) -> int:
     parser.add_argument("--base-url", default="http://127.0.0.1:8000")
     parser.add_argument("--result-root", type=Path, default=ROOT / "result")
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--baseline-id")
-    parser.add_argument("--baseline-kind", choices=("source", "benchmark"), default="source")
-    parser.add_argument("--baseline-count", type=int, default=81)
-    parser.add_argument("--min-recall", type=float, default=.90)
-    parser.add_argument("--compare-wiki", action="store_true",
-                        help="perform the dashboard Recon Wiki comparison only after terminal")
     parser.add_argument("--expected-models", type=Path,
                         help="JSON object with the six expected persisted model choices")
     parser.add_argument("--timeout", type=float, default=14400)
@@ -341,12 +298,7 @@ def main(argv=None) -> int:
     parser.add_argument("--settle-seconds", type=float, default=5)
     args = parser.parse_args(argv)
     try:
-        if args.baseline_id is not None and not BASELINE_ID.fullmatch(args.baseline_id):
-            raise ValueError("baseline ID must be the dashboard's 24-character opaque ID")
-        if args.compare_wiki and args.baseline_id is None:
-            raise ValueError("--compare-wiki requires an explicit --baseline-id")
-        if (not math.isfinite(args.min_recall) or not 0 <= args.min_recall <= 1
-                or args.baseline_count < 1 or args.timeout <= 0
+        if (args.timeout <= 0
                 or not 0 < args.poll_seconds <= 60 or not 0 <= args.settle_seconds <= 60
                 or not all(math.isfinite(value) for value in
                            (args.timeout, args.poll_seconds, args.settle_seconds))):
@@ -358,21 +310,12 @@ def main(argv=None) -> int:
             expected = ScanModelChoices.model_validate_json(
                 args.expected_models.read_text(encoding="utf-8")).model_dump()
         client = DashboardClient(args.base_url)
-        if args.compare_wiki:
-            entries = client.request("/api/v1/recon-wiki/databases").get("databases", [])
-            selected = next((entry for entry in entries
-                             if entry.get("database_id") == args.baseline_id), None)
-            if (selected is None or selected.get("kind") != args.baseline_kind
-                    or selected.get("endpoint_count") != args.baseline_count):
-                raise ValueError("selected baseline provenance or endpoint count differs from criteria")
         document = observe(client, ids, result_root=args.result_root, destination=args.output,
-                           baseline_id=args.baseline_id, baseline_kind=args.baseline_kind,
-                           compare_wiki=args.compare_wiki, baseline_count=args.baseline_count,
-                           min_recall=args.min_recall, timeout=args.timeout,
+                           timeout=args.timeout,
                            poll_seconds=args.poll_seconds, settle_seconds=args.settle_seconds,
                            expected_models=expected)
     except (ObservationError, ValueError, OSError):
-        print("Observation setup failed; check local dashboard, IDs, baseline, and model settings.",
+        print("Observation setup failed; check local dashboard, IDs, and model settings.",
               file=sys.stderr)
         return 2
     print(f"{'PASS' if document['passed'] else 'FAIL'}: "

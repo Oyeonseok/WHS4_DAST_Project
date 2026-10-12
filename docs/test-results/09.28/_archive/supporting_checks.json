@@ -224,7 +224,7 @@
     },
     "redirects_followed": false,
     "required_header": {
-      "X-Bug-Bounty": "lkhlkh0823"
+      "X-Bug-Bounty": "researcher-placeholder"
     },
     "source": "result/test-runs/09.28/neon-transport-20260928/results.json",
     "source_sha256": "027f0f7597e2a6ada4f251a7e36686dd7ca9ea5a673e7786f8fd54c86b893451",

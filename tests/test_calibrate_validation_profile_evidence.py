@@ -59,9 +59,8 @@ class ProfileCalibrationTests(unittest.TestCase):
                 "case_id": "case", "blind_case_sha256": "f" * 64,
                 "reproduced": True, "signal_types": ["error_signature"],
                 "target_attempt_ids": ["t1", "t2", "t3"],
-                "control_attempt_ids": ["p1", "n1"],
-                "evidence_ids": ["e-t1", "e-t2", "e-t3", "e-p1", "e-n1"],
-                "impact_boundary": axis(1, ["e-t1", "e-n1"]),
+                "evidence_ids": ["e-t1", "e-t2", "e-t3"],
+                "impact_boundary": axis(1, ["e-t1"]),
                 "impact_sensitivity": axis(0, ["e-t1"]),
                 "impact_actor_requirements": axis(2, ["e-t1"]),
                 "conclusion": "Controlled replay fixture.",
@@ -84,10 +83,8 @@ class ProfileCalibrationTests(unittest.TestCase):
             "raw_axes": [1, 0, 2], "effective_axes": [1, 0, 2],
             "runtime_kind": "http",
             "target_attempt_ids": ["t1", "t2", "t3"],
-            "control_attempt_ids": ["p1", "n1"],
             "observed_target_evidence_ids": ["e-t1", "e-t2", "e-t3"],
-            "inert_negative_evidence_ids": ["e-n1"],
-            "facts": [{"kind": "assertion_differential",
+            "facts": [{"kind": "target_assertion_observed",
                        "profile_id": "hunt-source-leak", "runtime_kind": "http",
                        "assertion_kind": "body_contains",
                        "assertion_id_sha256": "c" * 64,
@@ -95,8 +92,6 @@ class ProfileCalibrationTests(unittest.TestCase):
                        "expected_sha256": "e" * 64,
                        "target_attempt_ids": ["t1", "t2", "t3"],
                        "target_evidence_ids": ["e-t1", "e-t2", "e-t3"],
-                       "negative_attempt_id": "n1",
-                       "negative_evidence_id": "e-n1",
                        "provenance": "contract_bound_adapter_summary"}],
         } | changes
         with sqlite3.connect(self.pipeline) as conn:
@@ -136,7 +131,7 @@ class ProfileCalibrationTests(unittest.TestCase):
         self.assertEqual(report["summary"]["current_audits_binding_valid"], 0)
 
     def test_fact_without_replay_citations_is_invalid(self):
-        self.audit(facts=[{"kind": "assertion_differential"}])
+        self.audit(facts=[{"kind": "target_assertion_observed"}])
         report = self.calibrate()
         self.assertEqual(report["cases"][0]["audit_status"], "INVALID_BINDING")
 
@@ -148,7 +143,7 @@ class ProfileCalibrationTests(unittest.TestCase):
 
     def test_nonempty_value_receipt_requires_a_path_digest_and_shape(self):
         self.audit(facts=[{
-            "kind": "json_value_differential",
+            "kind": "target_assertion_observed",
             "profile_id": "hunt-source-leak", "runtime_kind": "http",
             "assertion_kind": "json_path_nonempty_string",
             "assertion_id_sha256": "c" * 64,
@@ -158,7 +153,6 @@ class ProfileCalibrationTests(unittest.TestCase):
             "value_shape": "nonempty_string",
             "target_attempt_ids": ["t1", "t2", "t3"],
             "target_evidence_ids": ["e-t1", "e-t2", "e-t3"],
-            "negative_attempt_id": "n1", "negative_evidence_id": "e-n1",
             "provenance": "contract_bound_adapter_summary",
         }])
         self.assertEqual(self.calibrate()["cases"][0]["audit_status"], "VALID_BINDING")
