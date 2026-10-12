@@ -116,9 +116,16 @@ class StrixReconExecutor:
             phase="mitm_capture",
             error_type=(type(reason).__name__ if isinstance(reason, BaseException) else "RuntimeError"),
         )
+        error_type = type(reason).__name__ if isinstance(reason, BaseException) else "RuntimeError"
+        try:
+            from aidast.attack.store import _redact
+
+            detail = str(_redact(str(reason))).replace("\n", " ").replace("\r", " ")[:500]
+        except (TypeError, ValueError):
+            detail = ""
         print(
             "Strix 정찰을 시작하지 못해 같은 승인 정책으로 기본 정찰 엔진을 실행합니다: "
-            f"{type(reason).__name__ if isinstance(reason, BaseException) else reason}",
+            f"{error_type}" + (f": {detail}" if detail else ""),
             flush=True,
         )
         self._fallback = self._fallback_factory()

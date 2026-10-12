@@ -170,6 +170,13 @@ class ScopeAndCaptureAddon:
                 self.budget_used_before = max(0, int(data.get("budget_used_before", 0)))
                 self.scope_loaded = True
                 ctx.log.info(f"[scope] {len(self.allowed_hosts)}개 호스트 로드됨")
+                # Stable machine-readable readiness signal for the sandbox
+                # launcher. Emit it only after every fail-closed policy
+                # dependency and the approved Scope document have loaded.
+                ctx.log.info(
+                    "AIDAST_SCOPE_PROXY_READY "
+                    f"allowed_host_patterns={len(self.allowed_hosts)}"
+                )
             except (OSError, ValueError, TypeError):
                 ctx.log.warn("[scope] 유효한 scope_file 설정 없음")
 

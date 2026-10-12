@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import time
 from contextlib import closing
 from pathlib import Path
 from typing import Any, Iterator, Literal
@@ -25,6 +26,41 @@ from aidast.attack.hypothesis_validation import PlanningIssue, hypothesis_fields
 
 
 MAX_REPAIR_ATTEMPTS = 2
+MAX_INVOCATION_RETRIES = 2
+
+
+def _retryable_planner_invocation(exc: BaseException) -> tuple[bool, str]:
+    """Classify side-effect-free planner transport failures for bounded retry."""
+    details = getattr(exc, "failure_diagnostics", None)
+    if not isinstance(details, dict):
+        return False, "unknown"
+    code = str(details.get("failure_code") or "")
+    diagnostic = f"{exc}\n{getattr(exc, 'diagnostic', '')}".casefold()
+    if any(marker in diagnostic for marker in (
+        "cybersecurity safety rejection", "cybersecurity review rejected",
+        "model policy refusal", "safety policy refusal",
+    )):
+        return False, code or "policy_refusal"
+    return code in {
+        "nonzero_exit", "timeout", "missing_result", "invalid_result",
+    }, code or "unknown"
+
+
+def _run_planner_structured(
+    agent: Any, *, retry_progress=None, retry_context: tuple[int, int], **kwargs,
+) -> Any:
+    """Retry only offline structured planning calls with no target side effects."""
+    for invocation in range(MAX_INVOCATION_RETRIES + 1):
+        try:
+            return agent._run_structured(**kwargs)
+        except Exception as exc:
+            retryable, reason = _retryable_planner_invocation(exc)
+            if not retryable or invocation >= MAX_INVOCATION_RETRIES:
+                raise
+            if retry_progress is not None:
+                retry_progress(*retry_context, invocation + 1, reason)
+            time.sleep(2 ** invocation)
+    raise AssertionError("unreachable planner invocation retry state")
 
 
 class ReconHypothesis(BaseModel):
@@ -528,7 +564,7 @@ def supplement_grounded_hypotheses(database: Path, scan_id: str) -> int:
     return added
 
 
-def plan_recon_attack(database: Path, scan_id: str, *, agent: Any, batch_size: int = 16, progress=None, repair_progress=None, stage_run_id: str | None = None) -> dict:
+def plan_recon_attack(database: Path, scan_id: str, *, agent: Any, batch_size: int = 16, progress=None, repair_progress=None, retry_progress=None, stage_run_id: str | None = None) -> dict:
     """Plan every included endpoint once per evidence snapshot, without sending HTTP."""
     if not 1 <= batch_size <= 16:
         raise ValueError('planning batch size must be between 1 and 16')
@@ -592,7 +628,8 @@ commands, browse, or send requests; this step only produces a testing plan.
 ''' + json.dumps(payload, ensure_ascii=False) + '\n</untrusted_recon_json>'
                 if feedback:
                     prompt += "\nThis is a correction round. Fix the supplied validation failures using the captured name/location pairs exactly. Return one disposition per supplied endpoint. Keep validated hypotheses; if a rejected proposal has no grounded input, withdraw it with an explicit insufficient_evidence reason. Do not invent a replacement input or change a parameter test into an endpoint-wide test merely to pass validation."
-                response = agent._run_structured(prompt=prompt, model_type=ReconAttackPlan,
+                response = _run_planner_structured(agent, retry_progress=retry_progress,
+                    retry_context=(reviewed, total), prompt=prompt, model_type=ReconAttackPlan,
                     artifact_name='recon-attack-hypotheses', operation='plan endpoint Attack hypotheses',
                     native_skill=('aidast.skills.attack.planning', 'aidast-recon-attack-planning'), allow_browser=False)
                 plan = response if isinstance(response, ReconAttackPlan) else ReconAttackPlan.model_validate(response)

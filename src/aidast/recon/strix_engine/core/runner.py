@@ -207,6 +207,7 @@ async def run_strix_scan(
     proxy_scope_rules: dict[str, Any] | None = None,
     proxy_addon_source: str | None = None,
     proxy_safety_source: str | None = None,
+    proxy_dependency_sources: dict[str, str] | None = None,
     proxy_capture_path: str = "/workspace/.aidast/mitm_capture.jsonl",
     proxy_capture_host_path: str | None = None,
 ) -> RunResultBase | None:
@@ -340,6 +341,7 @@ async def run_strix_scan(
         proxy_scope_rules=proxy_scope_rules,
         proxy_addon_source=proxy_addon_source,
         proxy_safety_source=proxy_safety_source,
+        proxy_dependency_sources=proxy_dependency_sources,
         proxy_capture_path=proxy_capture_path,
     )
     report("Waiting for the first model response")

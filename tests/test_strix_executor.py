@@ -87,7 +87,9 @@ def test_strix_capture_is_canonicalized_and_persisted_for_attack(tmp_path: Path)
         executor.close()
 
 
-def test_integrated_executor_falls_back_when_strix_runtime_is_blocked(tmp_path: Path) -> None:
+def test_integrated_executor_falls_back_when_strix_runtime_is_blocked(
+    tmp_path: Path, capsys,
+) -> None:
     target = ScopeAsset(
         asset_type=AssetType.DOMAIN,
         asset="example.com",
@@ -112,6 +114,7 @@ def test_integrated_executor_falls_back_when_strix_runtime_is_blocked(tmp_path: 
     ):
         assert executor.run([]) == 0
     fallback.run.assert_called_once_with([])
+    assert "RuntimeError: docker unavailable" in capsys.readouterr().out
     executor.close()
     fallback.close.assert_called_once()
 

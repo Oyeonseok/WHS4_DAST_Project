@@ -326,6 +326,74 @@ def test_empty_scan_summary_is_written_without_calling_a_writer(case):
     assert (output_for(case) / "ScanSummary.md").is_file()
 
 
+def test_scan_summary_reports_attack_coverage_and_only_latest_stage_in_markdown(case):
+    complete_validation(case)
+    case.conn.executescript("""
+        INSERT INTO endpoint_observations
+            (observation_id,endpoint_id,source_tool,discovery_kind,
+             association_method,observed_at)
+            VALUES ('observation','endpoint','fixture','tool_report','direct',
+                    CURRENT_TIMESTAMP);
+        INSERT INTO annotation_runs
+            (annotation_run_id,scan_id,model,prompt_version,taxonomy_version,status)
+            VALUES ('annotation-run','scan','fixture','1','1','completed');
+        INSERT INTO endpoint_annotations
+            (annotation_id,observation_id,annotation_run_id,category,tag,
+             rationale,confidence,created_at)
+            VALUES ('annotation-a','observation','annotation-run',
+                    'source_vulnerability','xss','fixture',1,CURRENT_TIMESTAMP);
+        INSERT INTO endpoint_annotations
+            (annotation_id,observation_id,annotation_run_id,category,tag,
+             rationale,confidence,created_at)
+            VALUES ('annotation-b','observation','annotation-run',
+                    'source_vulnerability','sqli','fixture',1,CURRENT_TIMESTAMP);
+        INSERT INTO attack_coverage_items
+            (coverage_id,coverage_key,scan_id,endpoint_id,annotation_id,
+             vuln_class,skill_name,status)
+            VALUES ('coverage-a',printf('%064d',1),'scan','endpoint',
+                    'annotation-a','xss','hunt-xss','unsupported');
+        INSERT INTO attack_coverage_items
+            (coverage_id,coverage_key,scan_id,endpoint_id,annotation_id,
+             vuln_class,skill_name,status)
+            VALUES ('coverage-b',printf('%064d',2),'scan','endpoint',
+                    'annotation-b','sqli','hunt-sqli','tested_negative');
+        INSERT INTO attack_attempts
+            (attempt_id,scan_id,skill_name,request_fingerprint,outcome)
+            VALUES ('attempt-a','scan','hunt-xss',printf('%064d',3),'inconclusive');
+        INSERT INTO attack_attempts
+            (attempt_id,scan_id,skill_name,request_fingerprint,outcome)
+            VALUES ('attempt-b','scan','hunt-sqli',printf('%064d',4),'inconclusive');
+    """)
+    case.conn.execute(
+        """INSERT INTO stage_runs
+            (stage_run_id,scan_id,stage,status,started_at,finished_at,error_message)
+            VALUES ('old-report','scan','report','failed',CURRENT_TIMESTAMP,
+                    CURRENT_TIMESTAMP,'old failure')"""
+    )
+    case.conn.execute(
+        """INSERT INTO stage_runs
+            (stage_run_id,scan_id,stage,status,started_at,finished_at)
+            VALUES ('new-report','scan','report','completed',CURRENT_TIMESTAMP,
+                    CURRENT_TIMESTAMP)"""
+    )
+    case.conn.commit()
+
+    result = write_scan_summary(case.path, output_for(case), scan_id="scan")
+
+    assert result["attack"] == {
+        "available": True,
+        "coverage_statuses": {"tested_negative": 1, "unsupported": 1},
+        "coverage_items": 2,
+        "attempt_outcomes": {"inconclusive": 2},
+        "attempts": 2,
+    }
+    markdown = (output_for(case) / "ScanSummary.md").read_text()
+    assert "커버리지 항목: 2" in markdown
+    assert "기록된 HTTP 시도: 2" in markdown
+    assert markdown.count("| report |") == 1
+    assert "| report | completed | 없음 |" in markdown
+
+
 def test_recon_summary_is_read_only_scan_bound_and_reports_tool_errors(tmp_path):
     source = tmp_path / "Recon.db"
     with db.connect(source) as conn:

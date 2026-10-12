@@ -460,7 +460,7 @@ def test_more_than_eight_hypotheses_are_retained(tmp_path):
     assert ensure_coverage_manifest(path, 'scan').total == 12
 
 
-def test_normal_attack_processes_the_whole_endpoint_queue_in_batches_of_eight(tmp_path):
+def test_normal_attack_processes_the_whole_endpoint_queue_in_bounded_batches(tmp_path):
     from aidast.attack.coverage import VULNERABILITY_SKILLS
     from aidast.orchestration.attack import AttackCoordinator
     from test_attack_coverage import UnsupportedCoverageAgent
@@ -478,7 +478,7 @@ def test_normal_attack_processes_the_whole_endpoint_queue_in_batches_of_eight(tm
     policy.write_text('{"policies":[]}')
     result = AttackCoordinator(agent=agent, db_path=path, scope_path=scope, policy_path=policy).run('scan')
     assert result.status == 'COMPLETED'
-    assert [len(call['attack_tasks']) for call in agent.calls] == [8, 4]
+    assert [len(call['attack_tasks']) for call in agent.calls] == [4, 4, 4]
     assert all(task.get('endpoint_id') and task.get('coverage_id')
                for call in agent.calls for task in call['attack_tasks'])
     with sqlite3.connect(path) as conn:
@@ -915,6 +915,71 @@ def test_planning_streams_every_endpoint_through_bounded_model_batches(tmp_path)
     assert [len(batch['endpoints']) for batch in agent.contexts] == [16,4]
     assert result == {'total_endpoints':20,'by_status':{'insufficient_evidence':19,'planned':1}}
     assert progress[-1] == (20,20)
+
+
+def test_planning_retries_transient_structured_invocation_without_losing_batch(
+    tmp_path, monkeypatch,
+):
+    from aidast.agents.main import MainAgentError
+    from aidast.attack.recon_hypotheses import plan_recon_attack
+
+    path = pipeline(tmp_path)
+
+    class TransientPlanner(Planner):
+        def __init__(self):
+            super().__init__()
+            self.attempts = 0
+
+        def _run_structured(self, **kwargs):
+            self.attempts += 1
+            if self.attempts == 1:
+                raise MainAgentError(
+                    "Codex planner exited temporarily",
+                    failure_code="nonzero_exit", exit_code=1,
+                    diagnostic_source="jsonl",
+                )
+            return super()._run_structured(**kwargs)
+
+    monkeypatch.setattr("aidast.attack.recon_hypotheses.time.sleep", lambda _delay: None)
+    retries = []
+    agent = TransientPlanner()
+    result = plan_recon_attack(
+        path, "scan", agent=agent,
+        retry_progress=lambda *args: retries.append(args),
+    )
+
+    assert agent.attempts == 2
+    assert retries == [(0, 2, 1, "nonzero_exit")]
+    assert result["total_endpoints"] == 2
+    assert ensure_coverage_manifest(path, "scan").total == 2
+
+
+def test_planning_does_not_retry_policy_refusal(tmp_path, monkeypatch):
+    from aidast.agents.main import MainAgentError
+    from aidast.attack.recon_hypotheses import plan_recon_attack
+
+    path = pipeline(tmp_path)
+
+    class RefusingPlanner:
+        attempts = 0
+
+        def _run_structured(self, **_kwargs):
+            self.attempts += 1
+            raise MainAgentError(
+                "Codex planner exited",
+                failure_code="nonzero_exit", exit_code=1,
+                diagnostic="cybersecurity safety rejection",
+                diagnostic_source="jsonl",
+            )
+
+    monkeypatch.setattr(
+        "aidast.attack.recon_hypotheses.time.sleep",
+        lambda _delay: pytest.fail("policy refusal must not be retried"),
+    )
+    agent = RefusingPlanner()
+    with pytest.raises(MainAgentError):
+        plan_recon_attack(path, "scan", agent=agent)
+    assert agent.attempts == 1
 
 
 class RepairingPlanner(Planner):

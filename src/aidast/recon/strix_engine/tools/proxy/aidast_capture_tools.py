@@ -7,6 +7,7 @@ inventing sitemap normalization or altering Strix's request contents.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from typing import Any
@@ -26,16 +27,21 @@ def _records(ctx: RunContextWrapper):
         return
     try:
         with path.open(encoding="utf-8") as stream:
-            for line in stream:
+            for line_number, line in enumerate(stream, start=1):
                 try:
                     record = json.loads(line)
                 except (json.JSONDecodeError, TypeError):
                     continue
                 if (
                     isinstance(record, dict)
-                    and record.get("scope_allowed") is True
-                    and record.get("policy_blocked") is not True
+                    # The fail-closed addon records an explicit boolean on
+                    # every exchange.  Older Caido-shaped journals used
+                    # scope_allowed, but native AIDAST MITM captures do not.
+                    and record.get("policy_blocked") is False
                 ):
+                    if not record.get("id"):
+                        digest = hashlib.sha256(line.encode("utf-8")).hexdigest()[:16]
+                        record["id"] = f"capture_{line_number:08x}_{digest}"
                     yield record
     except OSError:
         return

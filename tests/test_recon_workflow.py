@@ -31,6 +31,13 @@ from aidast.recon.models import (
     ReconTaskTarget,
 )
 from aidast.recon.policy import PolicyLimits, TargetPolicy
+from aidast.core.exclusion_guard import rule_digest
+from aidast.scope.exclusions import (
+    CompiledExclusionPolicy,
+    ExclusionExpression,
+    ExclusionPredicate,
+    ScopeExclusion,
+)
 from aidast.scope.models import (
     AssetType,
     CaptureReason,
@@ -370,6 +377,28 @@ class ReconModelTests(unittest.TestCase):
 
 class ReconExecutorWildcardTests(unittest.TestCase):
     def test_discovered_host_gets_narrow_policy_and_dependency_chain(self) -> None:
+        exclusion = ScopeExclusion(
+            key="private_path",
+            label="Private path",
+            source_quote="Do not request /private paths.",
+            target_assets=["*.example.com"],
+            condition=ExclusionExpression(
+                operator="predicate",
+                predicate=ExclusionPredicate(
+                    key="private_prefix",
+                    field="path",
+                    operator="prefix",
+                    value="/private",
+                ),
+            ),
+        )
+        exclusion_guard = CompiledExclusionPolicy(
+            scope_digest="0" * 64,
+            rule_digest=rule_digest([exclusion.model_dump(mode="json")]),
+            evidence_digest="1" * 64,
+            target_asset="*.example.com",
+            rules=[exclusion],
+        )
         wildcard_policy = TargetPolicy(
             scope_id="scope_test",
             policy_id="policy_wildcard",
@@ -377,6 +406,7 @@ class ReconExecutorWildcardTests(unittest.TestCase):
             asset="*.example.com",
             allowed_hosts=["example.com"],
             include_subdomains=True,
+            request_exclusions=exclusion_guard,
         )
         parent = ReconTask(
             task_id="task_parent",
@@ -427,6 +457,26 @@ class ReconExecutorWildcardTests(unittest.TestCase):
         self.assertEqual(tasks[-1].depends_on_task_ids, [tasks[-2].task_id])
         self.assertEqual(child_policy.allowed_hosts, ["api.example.com"])
         self.assertFalse(child_policy.include_subdomains)
+        self.assertEqual(
+            child_policy.request_exclusions.target_asset, "api.example.com"
+        )
+        self.assertEqual(
+            wildcard_policy.request_exclusions.target_asset, "*.example.com"
+        )
+        self.assertEqual(
+            child_policy.check_request_exclusions(
+                "https://api.example.com/private/account", method="GET"
+            )["decision"],
+            "deny",
+        )
+        self.assertEqual(
+            child_policy.check_request_exclusions(
+                "https://api.example.com/public", method="GET"
+            )["decision"],
+            "continue",
+        )
+        # This is the same serialization pass used by OfflineReconReview.
+        TargetPolicy.model_validate(child_policy.model_dump(mode="python"))
 
     def test_all_targets_runs_discovered_hosts_before_explicit_targets(self) -> None:
         executor = ReconExecutor.__new__(ReconExecutor)

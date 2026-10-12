@@ -509,6 +509,10 @@ class NativeAttackMainAgentTests(unittest.TestCase):
                     "fresh scanner-owned synthetic administrator",
                     kwargs["input"],
                 )
+                self.assertIn("remote bug-bounty asset", kwargs["input"])
+                self.assertNotIn(
+                    "approved local training application", kwargs["input"]
+                )
                 self.assertTrue((work / ".agents/skills/aidast-policy/SKILL.md").is_file())
                 self.assertIn("Sensitive data", (work / "TargetPolicy.json").read_text())
                 self.assertEqual((work / "scope.md").read_bytes(), scope.read_bytes())
@@ -524,6 +528,11 @@ class NativeAttackMainAgentTests(unittest.TestCase):
                 self.assertTrue(
                     (work / ".agents/skills/aidast-live-attack/SKILL.md").is_file()
                 )
+                orchestrator_skill = (
+                    work / ".agents/skills/aidast-attack-orchestrator/SKILL.md"
+                ).read_text(encoding="utf-8")
+                self.assertIn("bounded endpoint-hypothesis batch", orchestrator_skill)
+                self.assertNotIn("Eight limits", orchestrator_skill)
                 live_skill = (
                     work / ".agents/skills/aidast-live-attack/SKILL.md"
                 ).read_text(encoding="utf-8")

@@ -1693,21 +1693,23 @@ def _run_recon(
                     timeout_seconds=args.codex_timeout,
                     main_model=models.attack_model,
                 )
-                attack_result = AttackCoordinator(
-                    agent=main_agent,
-                    planning_agent=attack_planning_agent,
-                    db_path=pipeline_path,
-                    scope_path=run_dir / "Scope.md",
-                    policy_path=run_dir / "TargetPolicy.json",
-                ).run(scan_id)
+                with model_call_context(scan_id=scan_id, stage="Attack"):
+                    attack_result = AttackCoordinator(
+                        agent=main_agent,
+                        planning_agent=attack_planning_agent,
+                        db_path=pipeline_path,
+                        scope_path=run_dir / "Scope.md",
+                        policy_path=run_dir / "TargetPolicy.json",
+                    ).run(scan_id)
                 work("attack", "execute", "finished")
                 work("chaining", "execute", "started")
-                chaining_result = ChainingCoordinator(
-                    agent=main_agent,
-                    db_path=pipeline_path,
-                    scope_path=run_dir / "Scope.md",
-                    policy_path=run_dir / "TargetPolicy.json",
-                ).run(scan_id)
+                with model_call_context(scan_id=scan_id, stage="Chaining"):
+                    chaining_result = ChainingCoordinator(
+                        agent=main_agent,
+                        db_path=pipeline_path,
+                        scope_path=run_dir / "Scope.md",
+                        policy_path=run_dir / "TargetPolicy.json",
+                    ).run(scan_id)
                 work("chaining", "execute", "finished")
                 from aidast.validation import build_native_validation_coordinator
 

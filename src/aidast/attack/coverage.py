@@ -777,6 +777,7 @@ def ensure_coverage_manifest(database: Path, scan_id: str) -> CoverageManifestRe
         requeue_redacted_login_differential_coverage(conn, scan_id)
         requeue_unprofiled_historical_response_coverage(conn, scan_id)
         requeue_deterministic_engineio_coverage(conn, scan_id)
+        requeue_durable_remote_read_only_failures(conn, scan_id)
         requeue_orphaned_running_coverage(conn, scan_id)
         refresh_confirmed_coverage(conn, scan_id)
         total = conn.execute(
@@ -1717,6 +1718,107 @@ def requeue_transient_model_failures(
     return reopened
 
 
+def requeue_oversized_policy_refusals(
+    conn: sqlite3.Connection, scan_id: str, *, batch_size: int,
+) -> int:
+    """Reopen evidence-free refusals created by a larger execution batch.
+
+    A scan resumed after lowering its configured batch size should get one
+    chance to retry those tasks in the new, narrower shape. Refusals at the
+    current size stay retryable and therefore retain the existing one-at-a-time
+    isolation path. Request or attempt evidence always prevents reopening.
+    """
+    if not 1 <= batch_size <= 50:
+        raise ValueError("coverage batch size must be between 1 and 50")
+    rows = conn.execute(
+        """SELECT c.*,t.stage_run_id,t.error_message AS task_error,
+                  (SELECT COUNT(*) FROM attack_tasks prior
+                   WHERE prior.stage_run_id=t.stage_run_id) AS prior_batch_size
+           FROM attack_coverage_items c
+           JOIN attack_tasks t ON t.task_id=c.last_task_id
+           WHERE c.scan_id=? AND c.status='error_retryable'
+             AND t.status='cancelled'
+             AND t.error_message LIKE
+                 'Attack model policy refused a multi-task batch%'
+             AND NOT EXISTS (
+                 SELECT 1 FROM attack_attempts a WHERE a.task_id=t.task_id
+             )
+             AND NOT EXISTS (
+                 SELECT 1 FROM attack_http_requests r WHERE r.task_id=t.task_id
+             )""",
+        (scan_id,),
+    ).fetchall()
+    reopened = 0
+    for row in rows:
+        if int(row["prior_batch_size"] or 0) <= batch_size:
+            continue
+        reason = (
+            "evidence-free policy refusal from a larger batch was reopened "
+            f"for the current {batch_size}-task bound"
+        )
+        _event(
+            conn, row, "pending", reason,
+            stage_run_id=row["last_stage_run_id"], task_id=row["last_task_id"],
+        )
+        conn.execute(
+            """UPDATE attack_coverage_items
+               SET status='pending',disposition_reason=?,
+                   attempt_count=MAX(0,attempt_count-1),
+                   last_stage_run_id=NULL,last_task_id=NULL,updated_at=?
+               WHERE coverage_id=?""",
+            (reason, now(), row["coverage_id"]),
+        )
+        reopened += 1
+    return reopened
+
+
+def requeue_durable_remote_read_only_failures(
+    conn: sqlite3.Connection, scan_id: str,
+) -> int:
+    """Recover orchestration failures whose prior HTTP evidence is durable."""
+    rows = conn.execute(
+        """SELECT c.* FROM attack_coverage_items c
+           JOIN attack_tasks latest ON latest.task_id=c.last_task_id
+           WHERE c.scan_id=?
+             AND c.status IN ('error_retryable','error_terminal')
+             AND latest.error_message LIKE
+                 '[evidence] deterministic remote read-only probe could not complete:%'
+             AND EXISTS (
+                 SELECT 1 FROM attack_attempts a
+                 JOIN attack_tasks prior ON prior.task_id=a.task_id
+                 WHERE a.scan_id=c.scan_id AND a.endpoint_id=c.endpoint_id
+                   AND a.skill_name=c.skill_name
+                   AND a.outcome IN ('negative','inconclusive')
+                   AND a.payload_variant LIKE 'deterministic-read-only:%'
+                   AND prior.status='completed'
+                   AND EXISTS (
+                       SELECT 1 FROM attack_http_requests r
+                       WHERE r.task_id=a.task_id
+                         AND r.request_fingerprint=a.request_fingerprint
+                         AND r.status='completed'
+                   )
+             )""",
+        (scan_id,),
+    ).fetchall()
+    for row in rows:
+        reason = (
+            "durable deterministic remote read-only evidence survived a later "
+            "orchestration failure; reopen for evidence adoption"
+        )
+        _event(
+            conn, row, "pending", reason,
+            stage_run_id=row["last_stage_run_id"], task_id=row["last_task_id"],
+        )
+        conn.execute(
+            """UPDATE attack_coverage_items
+               SET status='pending',disposition_reason=?,attempt_count=0,
+                   last_stage_run_id=NULL,last_task_id=NULL,updated_at=?
+               WHERE coverage_id=?""",
+            (reason, now(), row["coverage_id"]),
+        )
+    return len(rows)
+
+
 def requeue_black_box_source_disclosure_coverage(
     conn: sqlite3.Connection, scan_id: str,
 ) -> int:
@@ -2067,6 +2169,9 @@ def claim_coverage_batch(
         raise ValueError("coverage batch size must be between 1 and 50")
     _block_unavailable_authenticated_coverage(
         conn, scan_id=scan_id, stage_run_id=stage_run_id,
+    )
+    requeue_oversized_policy_refusals(
+        conn, scan_id, batch_size=batch_size,
     )
     # A failed mixed batch does not identify which hypothesis triggered the
     # failure.  Replay retryable work one item at a time so a refusal or

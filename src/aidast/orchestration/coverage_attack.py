@@ -127,6 +127,9 @@ class ExhaustiveAttackCoordinator:
             tasks = self._execute_deterministic_engineio(
                 scan_id=scan_id, stage_run_id=stage_run_id, tasks=tasks,
             )
+            tasks = self._execute_deterministic_remote_read_only(
+                scan_id=scan_id, stage_run_id=stage_run_id, tasks=tasks,
+            )
             if not tasks:
                 with closing(sqlite3.connect(self.db_path)) as conn, conn:
                     conn.row_factory = sqlite3.Row
@@ -138,7 +141,10 @@ class ExhaustiveAttackCoordinator:
                     reconcile_lead_queue(
                         conn, scan_id, stage_run_id=stage_run_id,
                     )
-                    finish_stage_run(conn, stage_run_id, status="completed")
+                    finish_stage_run(
+                        conn, stage_run_id, status="completed",
+                        allow_terminal_task_errors=True,
+                    )
                     synchronize_attack_graph(
                         conn, scan_id, stage_run_id=stage_run_id,
                         trigger_kind="deterministic.batch.completed",
@@ -222,8 +228,11 @@ class ExhaustiveAttackCoordinator:
         return self._finish_result(scan_id, stages)
 
     @staticmethod
-    def _with_query(url: str, **values: str) -> str:
-        parsed = urlsplit(url)
+    def _with_query(base_url: str, **values: str) -> str:
+        # ``url`` itself is a common redirect/SSRF query parameter. Keep the
+        # positional argument name distinct so ``**{"url": value}`` remains a
+        # valid bounded probe.
+        parsed = urlsplit(base_url)
         pairs = [
             (name, value) for name, value in parse_qsl(
                 parsed.query, keep_blank_values=True,
@@ -452,6 +461,161 @@ class ExhaustiveAttackCoordinator:
                         else "failed"
                     ),
                     reason,
+                )
+        return remaining
+
+    @staticmethod
+    def _remote_read_only_task(task: dict[str, Any]) -> bool:
+        host = (urlsplit(str(task.get("origin_url") or "")).hostname or "").casefold()
+        return (
+            host not in {"", "127.0.0.1", "::1", "localhost"}
+            and not host.endswith((".test", ".invalid", ".example"))
+            and str(task.get("method") or "").upper() in {"GET", "HEAD", "OPTIONS"}
+            and str(task.get("planned_identity_role") or "unauthenticated")
+            == "unauthenticated"
+            and str(task.get("vuln_class") or "") in {
+                "api_misconfig", "auth_bypass", "business_logic", "clickjacking",
+                "open_redirect", "session", "source_artifacts", "sqli", "ssrf", "xss",
+            }
+        )
+
+    @staticmethod
+    def _read_only_variants(task: dict[str, Any], marker: str) -> tuple[tuple[str, str], ...]:
+        parameter = str(task.get("parameter_name") or "")
+        location = str(task.get("injection_location") or "endpoint")
+        vuln_class = str(task.get("vuln_class") or "")
+        if not parameter or location != "query":
+            return (("baseline", ""),)
+        controls = {
+            "business_logic": (("empty-control", ""), ("synthetic-selection", f"aidast-{marker}")),
+            "open_redirect": (("redirect-control", f"aidast-{marker}"),
+                              ("external-location", f"https://example.invalid/aidast-{marker}")),
+            "sqli": (("syntax-control", f"aidast-{marker}"),
+                     ("single-quote", f"aidast-{marker}'")),
+            "ssrf": (("url-control", f"aidast-{marker}"),
+                     ("reserved-url", f"https://example.invalid/aidast-{marker}")),
+            "xss": (("reflection-control", f"aidast-{marker}"),
+                    ("inert-markup", f"<aidast-{marker}>")),
+        }
+        return controls.get(vuln_class, (("baseline", ""),))
+
+    def _execute_deterministic_remote_read_only(
+        self, *, scan_id: str, stage_run_id: str,
+        tasks: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Run narrow read-only probes for approved remote program assets.
+
+        Native models may decline autonomous execution against a public host
+        even when the dashboard has a verified bug-bounty Scope. Python can
+        still execute the already planned GET/HEAD/OPTIONS contracts through
+        the same policy-enforcing request broker. These probes persist honest
+        inconclusive evidence; they never manufacture a finding from a header,
+        reflection, or response-code heuristic.
+        """
+        remaining: list[dict[str, Any]] = []
+        for task in tasks:
+            if not self._remote_read_only_task(task):
+                remaining.append(task)
+                continue
+            task_id = str(task["task_id"])
+            endpoint_id = str(task["endpoint_id"])
+            skill_name = str(task["skill_name"])
+            with closing(sqlite3.connect(self.db_path)) as conn:
+                prior = conn.execute(
+                    """SELECT a.attempt_id FROM attack_attempts a
+                       JOIN attack_tasks t ON t.task_id=a.task_id
+                       WHERE a.scan_id=? AND a.endpoint_id=? AND a.skill_name=?
+                         AND a.outcome IN ('negative','inconclusive')
+                         AND a.payload_variant LIKE 'deterministic-read-only:%'
+                         AND t.status='completed'
+                         AND EXISTS (
+                             SELECT 1 FROM attack_http_requests r
+                             WHERE r.task_id=a.task_id
+                               AND r.request_fingerprint=a.request_fingerprint
+                               AND r.status='completed'
+                         )
+                       ORDER BY a.created_at DESC LIMIT 1""",
+                    (scan_id, endpoint_id, skill_name),
+                ).fetchone()
+            if prior is not None:
+                transition_attack_task(
+                    self.db_path, scan_id, stage_run_id, task_id, "skipped",
+                    "[evidence] prior deterministic remote read-only evidence "
+                    f"remains durable as {prior[0]}; no duplicate request was sent",
+                )
+                continue
+            method = str(task["method"]).upper()
+            parameter = str(task.get("parameter_name") or "")
+            base_url = (
+                str(task["origin_url"]).rstrip("/")
+                + "/" + str(task["normalized_path"]).lstrip("/")
+            )
+            marker = hashlib.sha256(task_id.encode()).hexdigest()[:12]
+            transition_attack_task(
+                self.db_path, scan_id, stage_run_id, task_id, "running",
+            )
+            attempts = 0
+            try:
+                with tempfile.TemporaryDirectory(prefix="aidast-read-only-") as temporary:
+                    temporary_path = Path(temporary)
+                    for variant, value in self._read_only_variants(task, marker):
+                        url = (
+                            self._with_query(base_url, **{parameter: value})
+                            if parameter and str(task.get("injection_location")) == "query"
+                            else base_url
+                        )
+                        request_path = temporary_path / f"request-{attempts}.json"
+                        request_path.write_text(json.dumps({
+                            "method": method,
+                            "url": url,
+                            "risk_class": "http_probe",
+                        }, ensure_ascii=False), encoding="utf-8")
+                        response = guarded_request(
+                            self.db_path, scan_id=scan_id,
+                            stage_run_id=stage_run_id, task_id=task_id,
+                            policy_path=self.policy_path, payload_path=request_path,
+                        )
+                        signature = hashlib.sha256(json.dumps({
+                            "status": response["status"],
+                            "headers": response["response_headers"],
+                            "body": response["response_body"],
+                        }, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+                        attempt_path = temporary_path / f"attempt-{attempts}.json"
+                        attempt_path.write_text(json.dumps({
+                            "task_id": task_id,
+                            "endpoint_id": endpoint_id,
+                            "skill_name": skill_name,
+                            "request_fingerprint": response["request_fingerprint"],
+                            "method": method,
+                            "url": response["url"],
+                            "identity_role": "unauthenticated",
+                            "payload_variant": f"deterministic-read-only:{variant}",
+                            "response_status": response["status"],
+                            "response_signature": signature,
+                            "outcome": "inconclusive",
+                        }, ensure_ascii=False), encoding="utf-8")
+                        commit_attempt(self.db_path, scan_id, attempt_path)
+                        attempts += 1
+                transition_attack_task(
+                    self.db_path, scan_id, stage_run_id, task_id, "completed",
+                    (
+                        f"[evidence] deterministic remote read-only {task['vuln_class']} "
+                        f"probe completed with {attempts} bounded request(s); response "
+                        "heuristics alone were not treated as a finding"
+                    ),
+                )
+            except Exception as exc:
+                controlled_guard_failure = isinstance(exc, RequestGuardError)
+                bounded_contract_failure = isinstance(exc, (TypeError, ValueError))
+                transition_attack_task(
+                    self.db_path, scan_id, stage_run_id, task_id,
+                    "skipped" if controlled_guard_failure else "failed",
+                    "[evidence] deterministic remote read-only probe could not complete: "
+                    + (
+                        str(exc)[:300]
+                        if controlled_guard_failure or bounded_contract_failure
+                        else f"internal {type(exc).__name__}"
+                    ),
                 )
         return remaining
 
