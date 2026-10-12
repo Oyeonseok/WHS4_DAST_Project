@@ -80,6 +80,88 @@ def test_normal_tags_create_parameter_bound_hypotheses_and_account_for_unknowns(
     assert 'evidence_json' not in ordinary_observation
 
 
+def test_planner_receives_response_structure_without_captured_values(tmp_path):
+    from aidast.attack.recon_hypotheses import plan_recon_attack
+
+    path = pipeline(tmp_path)
+    with sqlite3.connect(path) as conn:
+        endpoint_id = conn.execute(
+            "SELECT endpoint_id FROM endpoints WHERE normalized_path='/search'"
+        ).fetchone()[0]
+        db.insert_http_transaction(
+            conn,
+            endpoint_id=endpoint_id,
+            source="fixture",
+            method="GET",
+            url="https://example.test/search?q=private-query-value",
+            request_headers={
+                "Origin": "https://reader.example",
+                "Authorization": "Bearer private-request-token",
+            },
+            request_body=None,
+            response_status=200,
+            response_headers={
+                "Content-Type": "application/json",
+                "Access-Control-Allow-Origin": "https://reader.example",
+                "Access-Control-Allow-Credentials": "true",
+                "Vary": "Origin",
+                "Content-Security-Policy": "default-src 'self'; script-src 'nonce-private-csp-value'",
+                "Set-Cookie": "session=private-cookie; HttpOnly; Secure",
+                "Location": "https://example.test/next?token=private-location-token&view=private-view",
+            },
+            response_body=json.dumps({
+                "account": {"id": 7, "email": "private@example.test"},
+                "access_token": "private-response-token",
+                "items": [{"name": "private-name"}],
+            }).encode(),
+            content_type="application/json",
+        )
+
+    agent = Planner()
+    plan_recon_attack(path, "scan", agent=agent)
+    search = next(
+        endpoint for call in agent.contexts for endpoint in call["endpoints"]
+        if endpoint["path"] == "/search"
+    )
+    serialized = json.dumps(search, ensure_ascii=False)
+    for secret in (
+        "private-query-value", "private-request-token", "private-cookie",
+        "private-location-token", "private-view", "private@example.test",
+        "private-response-token", "private-name", "private-csp-value",
+    ):
+        assert secret not in serialized
+    profile = search["response_evidence"][0]
+    assert profile["body"]["json_shape"] == {
+        "type": "object",
+        "fields": {
+            "account": {
+                "type": "object",
+                "fields": {"id": "number", "email": "string"},
+            },
+            "access_token": "string",
+            "items": {
+                "type": "array",
+                "item": {
+                    "type": "object",
+                    "fields": {"name": "string"},
+                },
+            },
+        },
+    }
+    controls = profile["security_controls"]
+    assert controls["cors"] == {
+        "vary_origin": True,
+        "allow_origin_class": "request_origin",
+        "allow_credentials": True,
+    }
+    assert controls["content_security_policy"] == {
+        "enforced": True,
+        "report_only": False,
+        "directive_names": ["default-src", "script-src"],
+    }
+    assert controls["redirect_location"] == "https://example.test/next?view="
+
+
 def test_black_box_planning_never_consumes_source_or_benchmark_answers(tmp_path):
     from aidast.attack.recon_hypotheses import plan_recon_attack
 
@@ -222,6 +304,28 @@ def test_grounded_baseline_reviews_observed_successful_api_reads_for_exposure():
     }, hypothesis_skill_catalog())
 
     assert 'api_misconfig' in {item.vuln_class for item in hypotheses}
+
+
+def test_grounded_baseline_reviews_observed_http_authentication_boundary():
+    from aidast.attack.coverage import hypothesis_skill_catalog
+    from aidast.attack.recon_hypotheses import _grounded_baseline_hypotheses
+
+    hypotheses = _grounded_baseline_hypotheses({
+        'path': '/private', 'method': 'GET', 'auth_required': False,
+        'http_statuses': [401], 'parameters': [], 'technology_context': {},
+        'response_header_names': ['www-authenticate'],
+        'response_evidence': [{
+            'status': 401,
+            'security_controls': {
+                'authentication_challenge_schemes': ['bearer'],
+            },
+        }],
+    }, hypothesis_skill_catalog())
+
+    assert {
+        (item.vuln_class, item.required_identity_role)
+        for item in hypotheses
+    } >= {('auth_bypass', 'unauthenticated')}
 
 
 @pytest.mark.parametrize(

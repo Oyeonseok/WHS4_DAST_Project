@@ -465,6 +465,7 @@ class StrixReconExecutor:
                 )
                 captured += count
                 blocked += newly_blocked
+                self._reconcile_passive_declarations(origin_id)
                 for record in records:
                     self._diagnostic(
                         "url_discovered",
@@ -480,3 +481,41 @@ class StrixReconExecutor:
             except OSError:
                 pass
         return captured, blocked, len(endpoint_ids)
+
+    def _reconcile_passive_declarations(self, origin_id: str) -> int:
+        """Apply the native value-free declaration parser to Strix captures."""
+        origin = self.conn.execute(
+            "SELECT base_url FROM origins WHERE origin_id=?", (origin_id,),
+        ).fetchone()
+        if origin is None:
+            return 0
+        base_url = str(origin[0])
+        target = self._asset_for_url(base_url)
+        policy = (
+            self.target_policies.get((target.asset_type.value, target.asset))
+            if target is not None else None
+        )
+        captured = self.conn.execute(
+            """SELECT url,content_type,response_body FROM http_transactions
+               WHERE origin_id=? AND method='GET'
+                 AND response_status BETWEEN 200 AND 299
+                 AND response_body IS NOT NULL ORDER BY captured_at""",
+            (origin_id,),
+        ).fetchall()
+        from aidast.recon.annotations import ObservationRecorder
+        from aidast.recon.tools.passive_declarations import (
+            declarations_from_captured_responses,
+        )
+
+        declarations = declarations_from_captured_responses(
+            captured, base_url=base_url, target_policy=policy, limit=500,
+        )
+        if declarations:
+            ObservationRecorder(
+                self.conn, origin_id=origin_id, scan_id=self.scan_id, agent=None,
+            ).record("passive_reconciliation", declarations)
+        self._diagnostic(
+            "passive_reconciliation", origin=base_url,
+            declaration_count=len(declarations),
+        )
+        return len(declarations)
