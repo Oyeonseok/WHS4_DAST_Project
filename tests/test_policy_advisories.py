@@ -32,7 +32,7 @@ def document(source=None, prepared=None):
 def test_unresolved_reference_is_visible_guidance_without_launch_hold():
     reviewed = require_unresolved_testing_holds(unresolved_source(), analysis())
     assert reviewed.execution_rules.blocking_requirements == []
-    assert reviewed.execution_rules.policy_review_version == 2
+    assert reviewed.execution_rules.policy_review_version == 3
     assert reviewed.execution_rules.advisories[0].source_quote == PRIMARY
     assert reviewed.execution_rules.advisories[0].guidance
     validate_policy_prerequisites(reviewed.execution_rules, ['example.org'])
@@ -134,7 +134,7 @@ def test_legacy_reference_review_reinterprets_and_caches_without_changing_approv
     assert requires_policy_advisory_review(saved)
     assert resolver.cached(saved) is None
     result = resolver.resolve(saved)
-    assert result.execution_rules.policy_review_version == 2
+    assert result.execution_rules.policy_review_version == 3
     assert result.execution_rules.blocking_requirements == []
     assert len(result.execution_rules.advisories) == 2
     assert calls[0].policy_references[0].source_quote == PRIMARY

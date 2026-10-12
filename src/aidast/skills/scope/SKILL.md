@@ -84,7 +84,7 @@ only when the page provides no such facts; explain material gaps or uncertainty 
 `ambiguities`. Ensure each `source_evidence` quote is present verbatim in the
 captured page text. Do not add commentary outside the object.
 
-## Mandatory identification headers
+## Automatically applied identification headers
 
 Always return `required_request_headers` as a list, using `[]` if none are required.
 Interpret the policy meaning, distinguishing mandatory, optional, and forbidden
@@ -94,6 +94,20 @@ headers. Do not restrict names to a known platform or name list. Each entry has
 `source_evidence`. Use only declared simple `{key}` template fields; fixed
 values have no inputs. Never declare credential, routing/framing, hop-by-hop,
 or internal AI-DAST headers as researcher identification requirements.
+
+AI-DAST can automatically insert researcher identification headers. For a policy
+instruction to identify automated scans "whenever feasible", "when possible", or
+"where possible", that capability condition is satisfied. Put the header into
+`required_request_headers`, not merely an advisory. Declare the operator input;
+do not invent its value. This applies to any permitted identification header name.
+
+Good example: "If using automated scanning tools, include your HackerOne username
+in requests whenever feasible using a custom header: X-HackerOne: your_username"
+requires `name: X-HackerOne`, `value_template: "{hackerone_username}"`, and a
+username input with `key: hackerone_username`. Copy the original quote exactly.
+The host requires the username before launch and automatically inserts the header.
+Unrelated optional advice, bare examples, forbidden headers and conditions the
+host cannot satisfy retain their own meaning.
 
 ## Execution restrictions and operator prerequisites
 

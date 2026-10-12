@@ -1438,7 +1438,7 @@ def test_scan_launcher_builds_fixed_argv_and_streams_pre_database_logs(tmp_path:
     resolver.cache_path(document).write_text(json.dumps(dict(
         interpretation_version=EXECUTION_INTERPRETATION_VERSION, approved_digest=resolver.digest(document),
         requirements=dict(required_request_headers=[item.model_dump() for item in scope_analysis.required_request_headers],
-            execution_rules=dict(policy_review_version=2, exclusions=[], request_limits=[dict(maximum=10,period_seconds=1,scope="program",source_quote=rate_quote)])))))
+            execution_rules=dict(policy_review_version=3, exclusions=[], request_limits=[dict(maximum=10,period_seconds=1,scope="program",source_quote=rate_quote)])))))
     manager.catalog.header_resolver = resolver
     manager.launch(request.model_copy(update={"max_rps": 10}))
     argv = captured["argv"]

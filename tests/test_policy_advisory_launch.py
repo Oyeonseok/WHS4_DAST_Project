@@ -56,7 +56,7 @@ def test_catalog_legacy_policy_requires_preparation_then_warning_only_ready_with
     assert ready.execution_requirements_status == 'ready'
     assert ready.header_requirements_status == 'ready'
     assert ready.policy_blockers == ()
-    assert ready.execution_rules.policy_review_version == 2
+    assert ready.execution_rules.policy_review_version == 3
     assert ready.execution_rules.advisories[0].label == 'Policy uncertainty'
     validate_policy_prerequisites(ready.execution_rules, ['*.example.com'])
     assert {path: path.read_bytes() for path in original} == original
@@ -66,6 +66,32 @@ def test_catalog_legacy_policy_requires_preparation_then_warning_only_ready_with
 def test_review_payload_retains_reference_relationship():
     payload = ScopeWorkflowManager._review_payload(legacy_document())
     assert payload['policy_references'][0]['relationship'] == 'supporting'
+
+
+def test_previous_review_reinterprets_feasible_header_and_binds_operator_identity(tmp_path):
+    from aidast.scope.identity_headers import resolve_scope_identity_headers
+    quote = 'If using automated scanning tools, include your HackerOne username in requests whenever feasible using a custom header: X-HackerOne: your_username'
+    document = legacy_document(reference=False, blocker=False)
+    source = document.source.model_copy(update={'text': document.source.text + '\n' + quote})
+    rules = document.analysis.execution_rules.model_copy(update={'policy_review_version': 2})
+    document = document.model_copy(update={'source': source, 'analysis': document.analysis.model_copy(update={'execution_rules': rules})})
+    original = document.model_dump_json()
+    calls = []
+    def interpret(page):
+        calls.append(page)
+        return dict(required_request_headers=[dict(name='X-HackerOne', value_template='{hackerone_username}',
+            inputs=[dict(key='hackerone_username', label='HackerOne username', kind='username')], source_quote=quote)],
+            execution_rules=dict(exclusions=[]))
+    resolver = ScopeExecutionResolver(tmp_path / 'cache', interpreter=interpret)
+    assert resolver.cached(document) is None
+    prepared = resolver.resolve(document)
+    assert len(calls) == 1
+    with pytest.raises(ValueError, match='hackerone_username'):
+        resolve_scope_identity_headers(prepared)
+    assert resolve_scope_identity_headers(prepared, hackerone_username='researcher_1') == {'X-HackerOne': 'researcher_1'}
+    assert resolver.resolve(document) == prepared
+    assert len(calls) == 1
+    assert document.model_dump_json() == original
 
 
 def test_reviewed_hard_blocker_remains_a_launch_error():

@@ -110,7 +110,7 @@ def effective_blocking_requirements(rules: ScopeExecutionRules) -> list[Blocking
     return result
 
 
-EXECUTION_INTERPRETATION_VERSION = "4"
+EXECUTION_INTERPRETATION_VERSION = "5"
 MAX_FRESH_INTERPRETATION_BYTES = 262144
 # Each generated edge reserves a 16k-character quote (including JSON escapes),
 # bounded error/reason and static guidance. Raw model output retains its own cap.
@@ -127,8 +127,9 @@ def execution_interpretation_complete(analysis: ScopeAnalysis) -> bool:
 def requires_policy_advisory_review(document: ScopeDocument) -> bool:
     """Read-only freshness check; preparation performs any required model call."""
     rules = document.analysis.execution_rules
-    return bool(rules and rules.policy_review_version < 2 and
-                (document.source.policy_references or rules.blocking_requirements))
+    return bool(rules and (rules.policy_review_version == 2 or
+                (rules.policy_review_version < 2 and
+                 (document.source.policy_references or rules.blocking_requirements))))
 
 
 def render_execution_advisories(rules: ScopeExecutionRules) -> str:
@@ -200,7 +201,7 @@ class ScopeExecutionResolver:
             if cached.get('interpretation_version') != EXECUTION_INTERPRETATION_VERSION or cached['approved_digest'] != self.digest(document):
                 raise ValueError('stale execution cache')
             requirements = ScopeExecutionInterpretation.model_validate(cached['requirements'])
-            if requirements.execution_rules.policy_review_version != 2:
+            if requirements.execution_rules.policy_review_version != 3:
                 raise ValueError('execution cache lacks policy advisory review')
             return self._validate(document, requirements)
         except (OSError, ValueError, KeyError, TypeError):

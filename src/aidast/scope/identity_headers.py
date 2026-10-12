@@ -10,6 +10,23 @@ from uuid import uuid4
 from aidast.core.http_safety import validate_identity_header_value, validate_identity_headers, validate_platform_username
 from aidast.scope.models import ScopeAnalysis, ScopeDocument, ScopeHeaderRequirements
 
+HEADER_EXTRACTION_INSTRUCTIONS = """
+AI-DAST automatically inserts researcher-identification headers on its automated
+requests. When a captured policy instructs automated scanning tools to include an
+identification header 'whenever feasible', 'when possible', or 'where possible',
+the capability condition is satisfied by this host. Extract that header into
+required_request_headers, not merely an advisory. Preserve the exact source_quote,
+declare operator inputs for its value, and never invent a username or email.
+For example, 'If using automated scanning tools, include your HackerOne username
+in requests whenever feasible using a custom header: X-HackerOne: your_username'
+means name=X-HackerOne, value_template={hackerone_username}, and a username input
+key=hackerone_username. The host requires the value before launch and inserts it.
+Apply the same capability reasoning to any permitted researcher identification
+header name. Pure examples without a request to identify traffic, forbidden
+headers, or conditions this host cannot satisfy do not become header requirements.
+This supported-header rule does not make unrelated optional advice mandatory.
+"""
+
 
 def required_identity_header_names(analysis: ScopeAnalysis) -> tuple[str, ...]:
     if analysis.required_request_headers is None:
@@ -60,7 +77,7 @@ def resolve_scope_identity_headers(analysis: ScopeAnalysis, *, identity_values: 
     return validate_identity_headers(headers)
 
 
-HEADER_INTERPRETATION_VERSION = "1"
+HEADER_INTERPRETATION_VERSION = "2"
 
 
 class ScopeHeaderResolver:
