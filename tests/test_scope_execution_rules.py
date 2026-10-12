@@ -170,6 +170,20 @@ def test_shared_header_policy_input_values_cannot_disagree():
         models.ScopeAnalysis.model_validate(data)
 
 
+def test_shared_header_policy_input_label_is_canonicalized():
+    data = document().analysis.model_dump()
+    quote = 'Send Research-Contact with your testing email.'
+    data.update(required_request_headers=[dict(name='Research-Contact', value_template='{email}',
+        inputs=[dict(key='email', label='Testing email', kind='email')], source_quote=quote)],
+        execution_rules=dict(exclusions=[], required_inputs=[dict(key='email',
+            label='HackerOne email address', kind='email', source_quote=quote)]))
+    data['source_evidence'].append(dict(section='Contact', quote=quote))
+
+    analysis = models.ScopeAnalysis.model_validate(data)
+
+    assert analysis.execution_rules.required_inputs[0].label == 'Testing email'
+
+
 def test_combined_endpoint_resolves_legacy_and_launch_blocks_missing_input(tmp_path):
     import asyncio
     import httpx

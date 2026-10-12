@@ -771,15 +771,36 @@ Reuse compatible input keys; never invent operator values or confirmations.
                 f"{self._max_page_chars}-character prompt budget"
             )
         prompt = self._build_captured_scope_prompt(page)
-        analysis = self._run_structured(
-            prompt=prompt,
-            model_type=ScopeAnalysis,
-            artifact_name="scope-analysis-fallback",
-            operation="captured Scope interpretation",
-            native_skill=("aidast.skills.scope", "aidast-scope"),
-            allow_browser=False,
-            no_timeout=True,
-        )
+        try:
+            analysis = self._run_structured(
+                prompt=prompt,
+                model_type=ScopeAnalysis,
+                artifact_name="scope-analysis-fallback",
+                operation="captured Scope interpretation",
+                native_skill=("aidast.skills.scope", "aidast-scope"),
+                allow_browser=False,
+                no_timeout=True,
+            )
+        except MainAgentError as exc:
+            diagnostics = exc.failure_diagnostics or {}
+            if diagnostics.get("failure_code") != "invalid_result":
+                raise
+            analysis = self._run_structured(
+                prompt=(
+                    prompt
+                    + "\nYour previous object failed the output schema. Return a fully "
+                    "valid ScopeAnalysis. When a required header and a policy "
+                    "prerequisite use the same operator value, reuse the exact same "
+                    "key, label, and kind. Keep every quote and target grounded in the "
+                    "capture.\n"
+                ),
+                model_type=ScopeAnalysis,
+                artifact_name="scope-analysis-schema-retry",
+                operation="captured Scope schema correction",
+                native_skill=("aidast.skills.scope", "aidast-scope"),
+                allow_browser=False,
+                no_timeout=True,
+            )
         try:
             self._verify_grounding(page, analysis)
         except MainAgentError as exc:
@@ -1133,6 +1154,8 @@ lists. Each entry contains name, value_template, inputs (key/label/kind), and an
 exact source_quote also represented in source_evidence. Templates use only
 simple declared {{key}} slots; fixed values need inputs=[]. Exclude credential,
 routing, framing, hop-by-hop and internal AI-DAST headers.
+When one operator value is needed by both a required header and an execution_rules
+required_inputs entry, reuse the exact same key, label, and kind in both places.
 Every in_scope_assets[].asset and its supporting quote must be copied verbatim
 from the ORIGINAL program text, never from a referenced document. Prefer concrete hostnames, URLs, wildcards, CIDRs, or IP addresses.
 If the page only describes a broad asset class, record that ambiguity and do

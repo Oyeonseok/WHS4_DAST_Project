@@ -970,9 +970,13 @@ def _complete_executable_recon_plan(
         }:
             continue
         model_target = proposed.get((target.asset_type, target.asset))
+        has_explicit_start = (
+            (target.asset_type.value, target.asset)
+            in (execution_start_urls or {})
+        )
         if (
             target.asset_type is AssetType.WILDCARD
-            and (target.asset_type.value, target.asset) in (execution_start_urls or {})
+            and has_explicit_start
         ):
             steps = [
                 ReconStep.HTTP_PROBE,
@@ -987,7 +991,11 @@ def _complete_executable_recon_plan(
             # models may still propose them for an exact URL/API target, but
             # preserving those steps violates the executor contract and makes
             # HTTP-only exclusion rules look unenforceable before Recon starts.
-            if target.asset_type in {AssetType.URL, AssetType.API}:
+            # The same applies to DOMAIN/IP targets when the operator supplied
+            # an exact HTTPS start URL.  In that mode the executor is bound to
+            # the reviewed origin and must not run separate DNS/port tooling
+            # that lacks an enforceable HTTP request descriptor.
+            if target.asset_type in {AssetType.URL, AssetType.API} or has_explicit_start:
                 requested.difference_update({
                     ReconStep.DNS_RESOLUTION,
                     ReconStep.HOST_PORT_DISCOVERY,

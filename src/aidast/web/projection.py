@@ -574,16 +574,32 @@ class DashboardProjector:
 
         if stage_name == "Recon":
             source_path = Path(conn.execute("PRAGMA database_list").fetchone()[2])
-            progress_path = source_path.parent / f"mitm_capture_{scan_id}.progress.json"
-            try:
-                capture_progress = json.loads(progress_path.read_text(encoding="utf-8"))
-                if capture_progress.get("version") == 1 and all(
-                    type(capture_progress.get(key)) is int and 0 <= capture_progress[key] <= 1_000_000
-                    for key in ("allowed_requests", "used_before")
-                ):
-                    requests = max(requests, min(scope.budget, capture_progress["allowed_requests"] + capture_progress["used_before"]))
-            except (OSError, ValueError, TypeError, AttributeError):
-                pass
+            progress_paths = (
+                source_path.parent / f"mitm_capture_{scan_id}.progress.json",
+                source_path.parent / f"StrixRecon-{scan_id}" / "mitm_capture.progress.json",
+            )
+            live_capture = False
+            for progress_path in progress_paths:
+                try:
+                    if progress_path.is_symlink():
+                        continue
+                    progress_path.resolve().relative_to(self.result_root)
+                    capture_progress = json.loads(progress_path.read_text(encoding="utf-8"))
+                    if capture_progress.get("version") == 1 and all(
+                        type(capture_progress.get(key)) is int
+                        and 0 <= capture_progress[key] <= 1_000_000
+                        for key in ("allowed_requests", "used_before")
+                    ):
+                        observed = capture_progress["allowed_requests"] + capture_progress["used_before"]
+                        requests = max(
+                            requests,
+                            min(scope.budget, observed) if scope.budget else observed,
+                        )
+                        live_capture = live_capture or observed > 0
+                except (OSError, ValueError, TypeError, AttributeError, json.JSONDecodeError):
+                    continue
+            if live_capture and activity == "Preparing Recon":
+                activity = "Running integrated Recon"
 
         endpoints = 0
         service_endpoints = 0

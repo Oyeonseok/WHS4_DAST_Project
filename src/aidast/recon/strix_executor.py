@@ -27,7 +27,7 @@ from aidast.recon.api_spec_ingestion import (
 from aidast.recon.judgment import merge_and_normalize
 from aidast.recon.models import ReconTask
 from aidast.recon.policy import TargetPolicy
-from aidast.recon.strix_bridge import run_strix_recon
+from aidast.recon.strix_bridge import build_strix_proxy_rules, run_strix_recon
 from aidast.recon.tools.mitm_proxy import ingest_mitm_capture
 from aidast.scope.models import AssetType, ScopeAsset, ScopeDocument
 
@@ -157,19 +157,8 @@ class StrixReconExecutor:
                     diagnostic_logs=self.diagnostic_logs,
                 )
             )
-            self._merge_request_governor_ledger(capture_file)
-            captured, blocked, endpoint_count = self._ingest_capture(capture_file, rules)
-            inventory = ingest_llm_api_inventory(
-                self.conn,
-                scan_id=self.scan_id,
-                inventory_path=self.capture_directory / "openapi_llm_inventory.json",
-                rules=rules,
-            )
-            endpoint_count += int(inventory.get("endpoints", 0))
-            self._diagnostic(
-                "proxy_capture_ingested",
-                count=captured,
-                blocked_count=blocked,
+            captured, blocked, endpoint_count, inventory = self._ingest_strix_artifacts(
+                capture_file, rules,
             )
             if endpoint_count == 0:
                 return self._run_fallback(tasks, "Strix completed without an in-scope endpoint")
@@ -185,7 +174,59 @@ class StrixReconExecutor:
         except StrixAccountingError:
             raise
         except Exception as exc:  # optional runtime failures use the native path
+            # A provider stream can fail after the governed runtime already
+            # collected useful responses.  Preserve those verified partial
+            # observations and charge their request ledger before continuing
+            # with the native executor.  Failure to account forwarded traffic
+            # remains fatal; malformed optional artifacts do not replace the
+            # original recoverable Strix error.
+            capture_file = self.capture_directory / "mitm_capture.jsonl"
+            if capture_file.is_file() and capture_file.stat().st_size:
+                try:
+                    rules = build_strix_proxy_rules(
+                        self.scope_document,
+                        self.targets,
+                        request_headers=self.request_headers,
+                        execution_limits=self._execution_limits(),
+                    )
+                    captured, blocked, endpoints, inventory = self._ingest_strix_artifacts(
+                        capture_file, rules,
+                    )
+                    print(
+                        "중단 전 Strix 정찰 결과를 보존했습니다: "
+                        f"캡처 {captured}건, 차단 {blocked}건, "
+                        f"엔드포인트 {endpoints}개, API 명세 {inventory.get('endpoints', 0)}개",
+                        flush=True,
+                    )
+                except StrixAccountingError:
+                    raise
+                except (OSError, ValueError, TypeError, sqlite3.Error, json.JSONDecodeError) as partial_exc:
+                    print(
+                        "중단된 Strix 부분 결과를 적재하지 못했습니다: "
+                        f"{type(partial_exc).__name__}",
+                        flush=True,
+                    )
             return self._run_fallback(tasks, exc)
+
+    def _ingest_strix_artifacts(
+        self, capture_file: Path, rules: dict[str, object],
+    ) -> tuple[int, int, int, dict[str, object]]:
+        """Persist governed Strix output for both complete and partial runs."""
+        self._merge_request_governor_ledger(capture_file)
+        captured, blocked, endpoint_count = self._ingest_capture(capture_file, rules)
+        inventory = ingest_llm_api_inventory(
+            self.conn,
+            scan_id=self.scan_id,
+            inventory_path=self.capture_directory / "openapi_llm_inventory.json",
+            rules=rules,
+        )
+        endpoint_count += int(inventory.get("endpoints", 0))
+        self._diagnostic(
+            "proxy_capture_ingested",
+            count=captured,
+            blocked_count=blocked,
+        )
+        return captured, blocked, endpoint_count, inventory
 
     def _execution_limits(self) -> dict[str, object]:
         policies = list(self.target_policies.values())

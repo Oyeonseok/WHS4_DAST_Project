@@ -119,6 +119,62 @@ def test_integrated_executor_falls_back_when_strix_runtime_is_blocked(
     fallback.close.assert_called_once()
 
 
+def test_integrated_executor_preserves_partial_capture_before_fallback(
+    tmp_path: Path, capsys,
+) -> None:
+    target = ScopeAsset(
+        asset_type=AssetType.URL,
+        asset="https://example.com/",
+        description="authorized target",
+        eligibility="test",
+        maximum_severity="Critical",
+    )
+    scope = _scope(target)
+    capture_dir = tmp_path / "capture"
+    fallback = MagicMock()
+    fallback.auth_session_files = []
+    fallback.run.return_value = 0
+
+    async def interrupted_run(*_args, **_kwargs):
+        capture_dir.mkdir(parents=True, exist_ok=True)
+        (capture_dir / "mitm_capture.jsonl").write_text(json.dumps({
+            "source": "mitmproxy",
+            "method": "GET",
+            "url": "https://example.com/api/status",
+            "request_headers": {},
+            "request_body": None,
+            "response_status": 200,
+            "response_headers": {"Content-Type": "application/json"},
+            "response_body": '{"ok":true}',
+            "content_type": "application/json",
+            "capture_bodies": True,
+            "policy_blocked": False,
+        }) + "\n", encoding="utf-8")
+        raise RuntimeError("provider stream interrupted")
+
+    executor = StrixReconExecutor(
+        scan_id="scan_partial_strix",
+        scope_document=scope,
+        targets=[target],
+        db_path=tmp_path / "Recon.db",
+        capture_directory=capture_dir,
+        fallback_factory=lambda: fallback,
+    )
+    try:
+        with patch(
+            "aidast.recon.strix_executor.run_strix_recon",
+            side_effect=interrupted_run,
+        ):
+            assert executor.run([]) == 0
+        assert executor.conn.execute(
+            "SELECT normalized_path FROM endpoints"
+        ).fetchone() == ("/api/status",)
+        fallback.run.assert_called_once_with([])
+        assert "중단 전 Strix 정찰 결과를 보존했습니다" in capsys.readouterr().out
+    finally:
+        executor.close()
+
+
 def test_strix_request_ledger_is_merged_into_shared_host_budget(tmp_path: Path) -> None:
     target = ScopeAsset(
         asset_type=AssetType.DOMAIN,
