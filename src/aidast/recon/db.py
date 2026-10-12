@@ -406,15 +406,16 @@ def upsert_endpoint(
     source_tool: str = "",
     is_excluded: bool = False,
     exclude_reason: str | None = None,
+    verification_status: str | None = None,
 ) -> str:
     method = str(method or "GET").upper()
     row = conn.execute(
-        "SELECT endpoint_id, source_tools, is_excluded, exclude_reason FROM endpoints "
+        "SELECT endpoint_id, source_tools, is_excluded, exclude_reason, verification_status FROM endpoints "
         "WHERE origin_id=? AND method=? AND normalized_path=?",
         (origin_id, method, normalized_path),
     ).fetchone()
     if row:
-        endpoint_id, existing_tools, existing_excluded, existing_reason = row
+        endpoint_id, existing_tools, existing_excluded, existing_reason, existing_verification = row
         tools = set(filter(None, (existing_tools or "").split(",")))
         tools.update(filter(None, source_tool.split(",")))
         # A route seen actively must not remain hidden just because an earlier
@@ -427,6 +428,7 @@ def upsert_endpoint(
             merged_excluded, merged_reason = 0, None
         else:
             merged_excluded, merged_reason = 1, existing_reason or exclude_reason
+        merged_verification = _stronger_verification(existing_verification, verification_status)
         conn.execute(
             """UPDATE endpoints SET source_tools=?,
                query_signature=CASE WHEN query_signature='' THEN ? ELSE query_signature END,
@@ -434,20 +436,20 @@ def upsert_endpoint(
                auth_required=CASE WHEN auth_required=1 OR ?=1 THEN 1
                                   WHEN auth_required=0 OR ?=0 THEN 0
                                   ELSE NULL END,
-               is_excluded=?,exclude_reason=?
+               is_excluded=?,exclude_reason=?,verification_status=?
                WHERE endpoint_id=?""",
             (",".join(sorted(tools)), query_signature, content_type,
              int(bool(auth_required)) if auth_required is not None else None,
              int(bool(auth_required)) if auth_required is not None else None,
-             merged_excluded, merged_reason, endpoint_id),
+             merged_excluded, merged_reason, merged_verification, endpoint_id),
         )
     else:
         endpoint_id = new_id("endpoint")
         conn.execute(
             """INSERT INTO endpoints
                (endpoint_id, origin_id, method, path, normalized_path, query_signature, content_type,
-                auth_required, source_tools, is_excluded, exclude_reason)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                auth_required, source_tools, is_excluded, exclude_reason, verification_status)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 endpoint_id,
                 origin_id,
@@ -460,6 +462,7 @@ def upsert_endpoint(
                 source_tool,
                 int(is_excluded),
                 exclude_reason,
+                verification_status,
             ),
         )
     if query_signature:
@@ -471,6 +474,11 @@ def upsert_endpoint(
         )
     conn.commit()
     return endpoint_id
+
+
+def _stronger_verification(existing: str | None, incoming: str | None) -> str | None:
+    rank = {None: -1, "candidate": 0, "observed": 1, "verified": 2}
+    return max((existing, incoming), key=lambda value: rank.get(value, -1))
 
 
 def upsert_parameter(
@@ -549,12 +557,12 @@ def reconcile_observed_endpoints(
             if old_path == target_path:
                 continue
             old = conn.execute(
-                """SELECT endpoint_id,source_tools,content_type,auth_required,query_signature
+                """SELECT endpoint_id,source_tools,content_type,auth_required,query_signature,verification_status
                    FROM endpoints WHERE origin_id=? AND method=? AND normalized_path=?""",
                 (origin_id, method, old_path),
             ).fetchone()
             target = conn.execute(
-                """SELECT endpoint_id,source_tools FROM endpoints
+                """SELECT endpoint_id,source_tools,verification_status FROM endpoints
                    WHERE origin_id=? AND method=? AND normalized_path=?""",
                 (origin_id, method, target_path),
             ).fetchone()
@@ -577,9 +585,11 @@ def reconcile_observed_endpoints(
                    auth_required=CASE WHEN auth_required=1 OR ?=1 THEN 1
                                       WHEN auth_required=0 OR ?=0 THEN 0
                                       ELSE NULL END,
-                   query_signature=CASE WHEN query_signature='' THEN ? ELSE query_signature END
+                   query_signature=CASE WHEN query_signature='' THEN ? ELSE query_signature END,
+                   verification_status=?
                    WHERE endpoint_id=?""",
-                (tools, old[2], old[3], old[3], old[4], target_id),
+                (tools, old[2], old[3], old[3], old[4],
+                 _stronger_verification(target[2], old[5]), target_id),
             )
             for name, location, data_type, role, identifier in conn.execute(
                 """SELECT name,location,data_type,role,is_identifier FROM parameters

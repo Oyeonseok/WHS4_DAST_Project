@@ -12,6 +12,8 @@ import re
 from collections import defaultdict
 from urllib.parse import parse_qsl, unquote, urlsplit
 
+from aidast.recon.verification import result_verification_status
+
 # Katana-style path fingerprinting for values that are unambiguously dynamic.
 # The original path is retained on the endpoint record; this pattern only
 # controls the deduplication key used by the normalized surface.
@@ -229,6 +231,7 @@ def merge_and_normalize(raw_endpoints: list[dict]) -> list[dict]:
     the exclusion decision stays auditable.
     """
     merged: dict[tuple[str, str], dict] = {}
+    verification_rank = {"candidate": 0, "observed": 1, "verified": 2}
     learned = adaptive_path_fingerprints(raw_endpoints, per_method=True)
     for item in raw_endpoints:
         if is_probable_redirect_loop_path(item.get("path", "")):
@@ -241,6 +244,7 @@ def merge_and_normalize(raw_endpoints: list[dict]) -> list[dict]:
         content_type = item.get("content_type")
         evidence = item.get("evidence") if isinstance(item.get("evidence"), dict) else {}
         status = evidence.get("response_status", item.get("response_status"))
+        verification_status = result_verification_status(item)
         if key not in merged:
             merged[key] = {
                 "method": method,
@@ -250,6 +254,7 @@ def merge_and_normalize(raw_endpoints: list[dict]) -> list[dict]:
                 "query_signature": signature,
                 "query_signatures": {signature} if signature else set(),
                 "response_statuses": {status} if type(status) is int else set(),
+                "verification_status": verification_status,
                 "source_tools": {str(item.get("source") or "unknown")},
                 "is_excluded": excluded,
                 "exclude_reason": "static_asset" if excluded else None,
@@ -257,6 +262,8 @@ def merge_and_normalize(raw_endpoints: list[dict]) -> list[dict]:
             }
         else:
             current = merged[key]
+            if verification_rank[verification_status] > verification_rank[current["verification_status"]]:
+                current["verification_status"] = verification_status
             current["source_tools"].add(str(item.get("source") or "unknown"))
             if not current.get("content_type") and content_type:
                 current["content_type"] = content_type
