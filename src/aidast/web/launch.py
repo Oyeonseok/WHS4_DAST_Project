@@ -21,7 +21,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -61,6 +61,7 @@ EXECUTABLE_TYPES = {
     AssetType.IP_ADDRESS,
 }
 _HANDLE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+_DEFAULT_STRIX_MITM_IMAGE = "aidast-strix-mitm:local"
 
 
 def _windows_host() -> bool:
@@ -77,6 +78,7 @@ class ScanLaunchRequest(BaseModel):
     scope_id: str = Field(min_length=1, max_length=160)
     targets: list[str] = Field(min_length=1, max_length=64)
     profile: ProfileId = "safe-recon"
+    recon_engine: Literal["legacy", "strix"] = "legacy"
     max_requests: int = Field(default=500, ge=1, le=2000)
     max_rps: float | None = Field(default=None, gt=0, le=50)
     max_concurrency: int | None = Field(default=None, ge=1, le=20)
@@ -89,6 +91,7 @@ class ScanLaunchRequest(BaseModel):
     validation_model: str | None = Field(default=None, min_length=1, max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:/-]*$")
     report_model: str | None = Field(default=None, min_length=1, max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:/-]*$")
     login_mode: str = "none"
+    allow_authorized_account_registration: bool = False
     start_url: str | None = Field(default=None, max_length=2048)
     policy_values: dict[str, str] = Field(default_factory=dict, max_length=64)
     policy_confirmations: list[str] = Field(default_factory=list, max_length=64)
@@ -173,6 +176,11 @@ class ScanLaunchRequest(BaseModel):
                 raise ValueError("bug-bounty-safe requires exactly one target")
         if self.start_url and len(self.targets) != 1:
             raise ValueError("a specific start URL requires exactly one target")
+        if self.recon_engine == "strix":
+            if self.login_mode != "none":
+                raise ValueError("Strix Recon requires login_mode none until session handoff is connected")
+        elif self.allow_authorized_account_registration:
+            raise ValueError("account registration requires Strix Recon")
         return self
 
 
@@ -426,6 +434,11 @@ class ScanLaunchManager:
             if value is not None and value > getattr(effective, field):
                 raise ValueError(f'{field} exceeds the approved policy cap')
         targets = [target for target in document.analysis.in_scope_assets if target.asset in request.targets]
+        if request.allow_authorized_account_registration and not any(
+            target.asset_type in {AssetType.URL, AssetType.API, AssetType.DOMAIN, AssetType.IP_ADDRESS}
+            and "*" not in target.asset for target in targets
+        ):
+            raise ValueError("account registration requires an exact approved web target")
         starts = normalize_start_urls(
             {(targets[0].asset_type.value, targets[0].asset): request.start_url}
             if request.start_url else {},
@@ -459,6 +472,8 @@ class ScanLaunchManager:
             scope.program_url,
             "--scan-id",
             scan_id,
+            "--recon-engine",
+            request.recon_engine,
         ]
         for target in request.targets:
             argv.extend(("--target", target))
@@ -495,9 +510,12 @@ class ScanLaunchManager:
         if request.max_rps is not None:
             argv.extend(("--max-rps", str(request.max_rps)))
         wordlist = self.project_root / "resources" / "wordlists" / "common.txt"
-        if request.profile != "bug-bounty-safe" and wordlist.is_file():
+        if request.recon_engine == "legacy" and request.profile != "bug-bounty-safe" and wordlist.is_file():
             argv.extend(("--ffuf-wordlist", str(wordlist)))
-        argv.extend(("--ffuf-max-time-seconds", str(request.ffuf_max_time_seconds)))
+        if request.recon_engine == "legacy":
+            argv.extend(("--ffuf-max-time-seconds", str(request.ffuf_max_time_seconds)))
+        elif request.allow_authorized_account_registration:
+            argv.append("--allow-authorized-account-registration")
         if request.max_depth is not None:
             argv.extend(("--max-depth", str(request.max_depth)))
         if request.max_concurrency is not None:
@@ -527,6 +545,8 @@ class ScanLaunchManager:
         env["AIDAST_RESULT_ROOT"] = str(self.result_root)
         env["AIDAST_DASHBOARD_MANUAL_LOGIN"] = "1"
         env["PYTHONUNBUFFERED"] = "1"
+        if request.recon_engine == "strix":
+            env["AIDAST_STRIX_IMAGE"] = env.get("AIDAST_STRIX_IMAGE") or _DEFAULT_STRIX_MITM_IMAGE
         source_root = self.project_root / "src"
         if source_root.is_dir():
             prior = env.get("PYTHONPATH", "")
@@ -583,6 +603,8 @@ class ScanLaunchManager:
         env["AIDAST_RESULT_ROOT"] = str(self.result_root)
         env["AIDAST_DASHBOARD_MANUAL_LOGIN"] = "1"
         env["PYTHONUNBUFFERED"] = "1"
+        if plan.stage == "recon":
+            env["AIDAST_STRIX_IMAGE"] = env.get("AIDAST_STRIX_IMAGE") or _DEFAULT_STRIX_MITM_IMAGE
         source_root = self.project_root / "src"
         if source_root.is_dir():
             prior = env.get("PYTHONPATH", "")

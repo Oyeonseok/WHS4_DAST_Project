@@ -56,6 +56,37 @@ def _captured_submission(ctx: RunContextWrapper, raw_path: str | None) -> dict |
     return None
 
 
+def _unrecovered_page_assets(capture_path: str | None) -> list[str]:
+    """Find first-party page resources still denied by the proxy rate gate."""
+    if not capture_path:
+        return []
+    denied: set[str] = set()
+    recovered: set[str] = set()
+    try:
+        with Path(capture_path).open(encoding="utf-8") as stream:
+            for line in stream:
+                try:
+                    record = json.loads(line)
+                    url = str(record.get("url") or "")
+                    path = urlsplit(url).path.lower()
+                except (json.JSONDecodeError, AttributeError, TypeError, ValueError):
+                    continue
+                if not path.endswith((".js", ".mjs", ".css")):
+                    continue
+                if record.get("block_reason") == "rate_limit":
+                    denied.add(url)
+                elif (
+                    record.get("scope_allowed") is True
+                    and record.get("policy_blocked") is not True
+                    and isinstance(record.get("response_status"), int)
+                    and 200 <= record["response_status"] < 400
+                ):
+                    recovered.add(url)
+    except OSError:
+        return []
+    return sorted(denied - recovered)
+
+
 @function_tool(timeout=30)
 async def finish_recon(
     ctx: RunContextWrapper,
@@ -270,6 +301,18 @@ async def finish_recon(
                 "before Recon can finish."
             ),
             "unassigned_targets": unassigned_targets,
+        }, ensure_ascii=False)
+
+    unrecovered_assets = _unrecovered_page_assets(context.get("aidast_capture_host_path"))
+    if unrecovered_assets:
+        await coordinator.set_status(agent_id, "failed")
+        return json.dumps({
+            "success": True,
+            "recon_completed": False,
+            "recon_blocked": True,
+            "error": "Page JavaScript/CSS remained blocked by the proxy rate limit; Recon coverage is incomplete.",
+            "unrecovered_asset_count": len(unrecovered_assets),
+            "unrecovered_assets": [urlsplit(url).path for url in unrecovered_assets[:20]],
         }, ensure_ascii=False)
 
     failed = [

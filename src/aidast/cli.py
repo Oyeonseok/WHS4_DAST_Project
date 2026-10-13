@@ -271,6 +271,10 @@ def _parser() -> argparse.ArgumentParser:
         "--policy-only", action="store_true",
         help="compile and preview per-target policy without running any recon tool",
     )
+    recon.add_argument(
+        "--recon-engine", choices=("legacy", "strix"), default="legacy",
+        help="select the Recon executor; Strix uses the approved Scope proxy boundary",
+    )
     recon.add_argument("--refresh-exclusions", action="store_true",
                        help="explicitly refresh exclusion classifications from existing captures (requires --policy-only)")
     selection = recon.add_mutually_exclusive_group()
@@ -360,6 +364,7 @@ def _parser() -> argparse.ArgumentParser:
         ),
     )
     _add_session_options(recon)
+    _add_strix_recon_options(recon)
 
     source_import = commands.add_parser(
         "import-recon",
@@ -413,6 +418,10 @@ def _parser() -> argparse.ArgumentParser:
         help="include every executable web target in the approved Scope",
     )
     run.add_argument("--start-url")
+    run.add_argument(
+        "--recon-engine", choices=("legacy", "strix"), default="legacy",
+        help="select the Recon executor for the integrated run",
+    )
     run.add_argument(
         "--profile", choices=EXECUTION_PROFILE_CHOICES, default=None
     )
@@ -477,6 +486,7 @@ def _parser() -> argparse.ArgumentParser:
         help="maximum observations per deferred tagging request (default: 200)",
     )
     _add_session_options(run)
+    _add_strix_recon_options(run)
     run.add_argument(
         "--run-root", type=Path, default=RESULT_ROOT / "Runs",
         help="root for program-grouped Recon handoff artifacts (default: result/Runs)",
@@ -714,6 +724,21 @@ def _parser() -> argparse.ArgumentParser:
 def _default_login_mode() -> None:
     """No override means normal login-capability detection and session reuse."""
     return None
+
+
+def _add_strix_recon_options(command: argparse.ArgumentParser) -> None:
+    command.add_argument(
+        "--allow-lab-account-creation", action="store_true",
+        help="allow one disposable account on an exact loopback target in Strix Recon",
+    )
+    command.add_argument(
+        "--allow-lab-state-changing-discovery", action="store_true",
+        help="allow bounded state-changing endpoint discovery on an exact loopback target",
+    )
+    command.add_argument(
+        "--allow-authorized-account-registration", action="store_true",
+        help="allow one disposable account per exact approved host after read-only discovery",
+    )
 
 
 # 대상 세션과 로그인에 관한 공통 옵션 추가
@@ -1039,6 +1064,50 @@ def _finalize_recon_failure(
             error.add_note(f"Recon cleanup failed: {type(cleanup_error).__name__}")
 
 
+def _validate_strix_recon_options(args: argparse.Namespace) -> None:
+    unsupported = [
+        name for name in (
+            "ffuf_wordlist", "session_bundle", "auth_host",
+            "auth_path",
+        ) if getattr(args, name, None)
+    ]
+    if args.login_mode not in (None, "none"):
+        raise ReconCoordinatorError("Strix Recon manages login in its own browser; omit --login-mode")
+    if unsupported:
+        raise ReconCoordinatorError(
+            "Strix Recon does not yet support these options: "
+            + ", ".join(unsupported)
+        )
+
+
+def _validate_strix_recon_targets(
+    selected_targets: list[ScopeAsset], start_urls: dict[tuple[str, str], str],
+) -> None:
+    executable = {AssetType.URL, AssetType.API, AssetType.DOMAIN,
+                  AssetType.WILDCARD, AssetType.IP_ADDRESS}
+    if not selected_targets or any(asset.asset_type not in executable for asset in selected_targets):
+        raise ReconCoordinatorError("Strix Recon requires executable approved HTTP(S) targets")
+
+    def origin(value: str) -> tuple[str, str | None, int]:
+        parsed = urlsplit(value)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password:
+            raise ValueError("invalid HTTP(S) target URL")
+        return (
+            parsed.scheme, parsed.hostname,
+            parsed.port or (443 if parsed.scheme == "https" else 80),
+        )
+
+    try:
+        target_origins = {origin(asset.asset) for asset in selected_targets
+                          if asset.asset_type in {AssetType.URL, AssetType.API}}
+        start_origins = {origin(value) for key, value in start_urls.items()
+                         if str(key[0]).upper() in {AssetType.URL.value, AssetType.API.value}}
+    except ValueError as exc:
+        raise ReconCoordinatorError("Strix Recon target has an invalid HTTP(S) URL") from exc
+    if not start_origins.issubset(target_origins):
+        raise ReconCoordinatorError("Strix Recon start URL must use a selected target origin")
+
+
 def _run_recon(
     args: argparse.Namespace,
     *,
@@ -1047,6 +1116,15 @@ def _run_recon(
     report_writer: object | None = None,
 ) -> int:
     # Reuse an approved Scope or collect one before planning any Recon work.
+    if getattr(args, "recon_engine", "legacy") == "strix" and not args.execute:
+        raise ReconCoordinatorError("--recon-engine strix requires recon --execute")
+    if getattr(args, "recon_engine", "legacy") == "strix":
+        _validate_strix_recon_options(args)
+    elif any(getattr(args, name, False) for name in (
+        "allow_lab_account_creation", "allow_lab_state_changing_discovery",
+        "allow_authorized_account_registration",
+    )):
+        raise ReconCoordinatorError("Strix account options require --recon-engine strix")
     recon_failures = 0
     auth_hosts = getattr(args, "auth_host", [])
     auth_paths = getattr(args, "auth_path", [])
@@ -1087,6 +1165,12 @@ def _run_recon(
                 ("review", "started"): 89, ("review", "finished"): 94,
                 ("export", "started"): 95, ("export", "finished"): 98,
             }.get((step, state))
+            completed_tools = details.get("completed_tools")
+            if (agent == "recon" and step == "execute" and state == "progress"
+                    and type(completed_tools) is int and completed_tools >= 0):
+                # Strix has no fixed task total. Keep its observed tool work
+                # inside the execution slice and reserve later milestones.
+                progress = min(74, 21 + completed_tools)
             if progress is not None:
                 params["progress"] = progress
         params.update(details)
@@ -1448,6 +1532,17 @@ def _run_recon(
             preparation.require_ready()
         except ValueError as exc:
             raise ReconCoordinatorError(str(exc)) from exc
+        if getattr(args, "recon_engine", "legacy") == "strix":
+            _validate_strix_recon_targets(selected_targets, start_urls)
+            from aidast.recon.strix_bridge import build_strix_proxy_rules
+
+            try:
+                build_strix_proxy_rules(
+                    scope_document, selected_targets,
+                    request_headers=request_headers,
+                )
+            except ValueError as exc:
+                raise ReconCoordinatorError(str(exc)) from exc
         target_sessions = None
         work("recon", "session", "started")
         if args.execute and (
@@ -1496,34 +1591,55 @@ def _run_recon(
             run_dir = None
             db_path = args.db_path
             surface_path = args.surface_path
-        executor = ReconExecutor(
-            scan_id=scan_id,
-            scope_type="approved_scope",
-            scope_value=scope_document.scope_id,
-            db_path=db_path,
-            ffuf_wordlist=args.ffuf_wordlist,
-            recon_model=models.recon_model,
-            ffuf_max_time_seconds=args.ffuf_max_time_seconds,
-            target_policies=policies,
-            require_policy_enforcement=True,
-            execution_start_urls=start_urls,
-            annotation_agent=main_agent,
-            target_sessions=target_sessions,
-            request_headers=request_headers,
-            auth_bootstrap=(
-                {"hosts": args.auth_host, "paths": args.auth_path}
-                if args.auth_host or args.auth_path else None
-            ),
-            interactive_login=args.login_mode == "runtime-browser",
-            automatic_login=args.login_mode is None,
-            diagnostic_path=(
-                RESULT_ROOT / "logs" / scan_id / "recon.jsonl"
-                if args.diagnostic_logs else None
-            ),
-            prioritize_discovered_assets_first=args.all_targets,
-            asset_discovery_batch_size=args.asset_discovery_batch_size,
-            candidate_db_path=program_dir / "AssetDiscovery.db",
-        )
+        if getattr(args, "recon_engine", "legacy") == "strix":
+            from aidast.recon.strix_integration import StrixReconExecutor
+
+            executor = StrixReconExecutor(
+                scan_id=scan_id, scope_document=scope_document,
+                selected_targets=selected_targets,
+                target_policies=list(policies.values()),
+                start_urls=start_urls, request_headers=request_headers,
+                db_path=db_path, surface_path=surface_path,
+                capture_directory=RESULT_ROOT / "logs" / scan_id / "recon-capture",
+                diagnostic_logs=args.diagnostic_logs,
+                recon_model=args.recon_model,
+                progress_callback=lambda completed_tools, tool_activity: work(
+                    "recon", "execute", "progress", completed_tools=completed_tools,
+                    tool_activity=tool_activity,
+                ),
+                allow_lab_account_creation=args.allow_lab_account_creation,
+                allow_lab_state_changing_discovery=args.allow_lab_state_changing_discovery,
+                allow_authorized_account_registration=args.allow_authorized_account_registration,
+            )
+        else:
+            executor = ReconExecutor(
+                scan_id=scan_id,
+                scope_type="approved_scope",
+                scope_value=scope_document.scope_id,
+                db_path=db_path,
+                ffuf_wordlist=args.ffuf_wordlist,
+                recon_model=models.recon_model,
+                ffuf_max_time_seconds=args.ffuf_max_time_seconds,
+                target_policies=policies,
+                require_policy_enforcement=True,
+                execution_start_urls=start_urls,
+                annotation_agent=main_agent,
+                target_sessions=target_sessions,
+                request_headers=request_headers,
+                auth_bootstrap=(
+                    {"hosts": args.auth_host, "paths": args.auth_path}
+                    if args.auth_host or args.auth_path else None
+                ),
+                interactive_login=args.login_mode == "runtime-browser",
+                automatic_login=args.login_mode is None,
+                diagnostic_path=(
+                    RESULT_ROOT / "logs" / scan_id / "recon.jsonl"
+                    if args.diagnostic_logs else None
+                ),
+                prioritize_discovered_assets_first=args.all_targets,
+                asset_discovery_batch_size=args.asset_discovery_batch_size,
+                candidate_db_path=program_dir / "AssetDiscovery.db",
+            )
         if args.diagnostic_logs:
             print(
                 "Recon 진단 로그: "

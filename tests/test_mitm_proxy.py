@@ -165,16 +165,16 @@ class MitmAddonBudgetTests(unittest.TestCase):
             auth_path.chmod(0o600)
             addon = self._addon(auth_path)
             tool = self._flow("/api/me", headers={"X-AIDAST-Source": "ffuf"})
-            addon.request(tool)
+            asyncio.run(addon.request(tool))
             self.assertEqual(tool.request.headers["Authorization"], "Bearer private")
 
             ordinary = self._flow("/api/other")
-            addon.request(ordinary)
+            asyncio.run(addon.request(ordinary))
             self.assertNotIn("Authorization", ordinary.request.headers)
 
             outside = self._flow("/api/outside", headers={"X-AIDAST-Source": "katana"})
             outside.request.pretty_url = "https://outside.example/api/outside"
-            addon.request(outside)
+            asyncio.run(addon.request(outside))
             self.assertNotIn("Authorization", outside.request.headers)
 
             self.assertTrue(update_mitmproxy_auth(
@@ -182,7 +182,7 @@ class MitmAddonBudgetTests(unittest.TestCase):
                 {"Authorization": "Bearer refreshed"},
             ))
             refreshed = self._flow("/api/me", headers={"X-AIDAST-Source": "katana"})
-            addon.request(refreshed)
+            asyncio.run(addon.request(refreshed))
             self.assertEqual(refreshed.request.headers["Authorization"], "Bearer refreshed")
 
     def test_tool_auth_fails_closed_when_handoff_file_is_invalid(self):
@@ -192,12 +192,12 @@ class MitmAddonBudgetTests(unittest.TestCase):
             auth_path.chmod(0o600)
             addon = self._addon(auth_path)
             tool = self._flow("/api/me", headers={"X-AIDAST-Source": "katana"})
-            addon.request(tool)
+            asyncio.run(addon.request(tool))
             self.assertEqual(tool.response.status_code, 403)
             self.assertNotIn("Authorization", tool.request.headers)
 
             browser = self._flow("/api/me")
-            addon.request(browser)
+            asyncio.run(addon.request(browser))
             self.assertIsNone(browser.response)
 
     def test_candidate_probe_marker_is_captured_but_not_forwarded(self):

@@ -536,7 +536,10 @@ def _lifecycle_tool_completed(tool_name: str, output: Any) -> bool:
         parsed = json.loads(output)
     except (TypeError, ValueError):
         return False
-    return bool(isinstance(parsed, dict) and parsed.get("success") and parsed.get(completion_key))
+    return bool(
+        isinstance(parsed, dict) and parsed.get("success")
+        and (parsed.get(completion_key) or (tool_name == "finish_recon" and parsed.get("recon_blocked")))
+    )
 
 
 def _wait_tool_parked(tool_name: str, output: Any) -> bool:

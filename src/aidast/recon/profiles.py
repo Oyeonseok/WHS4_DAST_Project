@@ -59,12 +59,19 @@ _RATE_PATTERN = re.compile(
 
 
 def grounded_scope_request_rate(analysis: ScopeAnalysis) -> float | None:
-    """Return the lowest explicit request-rate ceiling quoted from the Scope."""
+    """Use the strictest rate when structured limits and quoted evidence differ."""
+    rules = analysis.execution_rules
     rates = [
+        limit.maximum / limit.period_seconds
+        for limit in rules.request_limits
+        if limit.period_seconds is not None
+    ] if rules else []
+    quoted_rates = [
         float(match.group("rate"))
         for evidence in analysis.source_evidence
         for match in _RATE_PATTERN.finditer(evidence.quote)
     ]
+    rates.extend(quoted_rates)
     return min(rates) if rates else None
 
 

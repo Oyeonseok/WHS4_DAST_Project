@@ -147,6 +147,7 @@ def ingest_mitm_capture(
     origin_id: str | None = None,
     origin_resolver: Callable[[dict], str | None] | None = None,
     preserve_capture: bool = False,
+    require_origin: bool = False,
 ) -> tuple[int, int]:
     if not jsonl_path.is_file():
         return 0, 0
@@ -170,6 +171,9 @@ def ingest_mitm_capture(
             record_origin_id = origin_id or (
                 origin_resolver(record) if origin_resolver is not None else None
             )
+            if require_origin and record_origin_id is None:
+                blocked += 1
+                continue
             capture_bodies = record.get("capture_bodies", False) is True
             request_body = record.get("request_body") if capture_bodies else None
             response_body = record.get("response_body") if capture_bodies else None

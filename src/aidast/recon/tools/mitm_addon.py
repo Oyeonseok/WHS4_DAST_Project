@@ -6,17 +6,18 @@ The addon has two responsibilities only:
 * append every in-scope request/response to a JSONL capture for host-side
   indexing and inspection.
 
-There is intentionally no request-count budget, priority queue, deduplication,
-or static-resource suppression here. The capture remains lossless; endpoint
-normalization is a separate downstream projection.
+The proxy enforces a request-count ceiling and optional rate/concurrency
+ceilings. Endpoint normalization is a separate downstream projection.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
 import runpy
+import time
 from fnmatch import fnmatchcase
 from datetime import datetime, timezone
 from html.parser import HTMLParser
@@ -167,7 +168,7 @@ def _extract_forms(html_text: str, page_url: str) -> list[dict]:
 
 
 class ScopeAndCaptureAddon:
-    """Fail-closed Scope gate and uncapped request/response recorder."""
+    """Fail-closed Scope gate and request/response recorder."""
 
     def __init__(self) -> None:
         self.rules: dict = {}
@@ -176,9 +177,10 @@ class ScopeAndCaptureAddon:
         self.out_path: Path | None = None
         self.auth_path: Path | None = None
         self.enforcement_required = True
-        # Metrics only; these values never reject an otherwise in-scope request.
         self.request_count = 0
         self.blocked_request_count = 0
+        self.inflight_count = 0
+        self.next_request_at = 0.0
 
     def load(self, loader) -> None:
         loader.add_option(
@@ -210,6 +212,9 @@ class ScopeAndCaptureAddon:
         self.scope_loaded = False
         self.rules = {}
         self.allowed_hosts = set()
+        self.request_count = 0
+        self.inflight_count = 0
+        self.next_request_at = 0.0
         try:
             if not ctx.options.scope_file:
                 raise ValueError("scope_file is missing")
@@ -221,12 +226,12 @@ class ScopeAndCaptureAddon:
             self.scope_loaded = True
             ctx.log.info(
                 f"[scope] loaded {len(self.allowed_hosts)} approved host pattern(s); "
-                "request-count limit disabled"
+                f"request-count limit {rules.get('max_requests', 'none')}"
             )
         except (OSError, ValueError, TypeError) as exc:
             ctx.log.warn(f"[scope] invalid or missing Scope rules: {type(exc).__name__}")
 
-    def request(self, flow: http.HTTPFlow) -> None:
+    async def request(self, flow: http.HTTPFlow) -> None:
         if not self.scope_loaded:
             if self.enforcement_required:
                 self._block(flow, "scope_unavailable")
@@ -301,6 +306,28 @@ class ScopeAndCaptureAddon:
         if not allowed:
             self._block(flow, "outside_approved_scope")
             return
+        # Browser page loads arrive in bursts. Pace approved requests instead
+        # of returning synthetic 403 responses for their JS/CSS dependencies.
+        active_rules = self.rules
+        deadline = time.monotonic() + active_rules.get("timeout_seconds", 20)
+        while True:
+            if not self.scope_loaded or self.rules is not active_rules:
+                self._block(flow, "scope_unavailable")
+                return
+            if (active_rules.get("max_requests") is not None
+                    and self.request_count >= active_rules["max_requests"]):
+                self._block(flow, "request_limit")
+                return
+            now = time.monotonic()
+            rate_wait = max(0.0, self.next_request_at - now)
+            concurrency_wait = 0.01 if self.inflight_count >= active_rules.get("max_concurrency", 20) else 0.0
+            wait = max(rate_wait, concurrency_wait)
+            if not wait:
+                break
+            if now + wait >= deadline:
+                self._block(flow, "admission_timeout")
+                return
+            await asyncio.sleep(min(wait, deadline - now))
 
         # Platform identity headers are sent only after the exact target rule
         # has passed. In particular, they must not leak to external login or
@@ -318,6 +345,10 @@ class ScopeAndCaptureAddon:
                 flow.request.headers[header_name] = header_value
 
         self.request_count += 1
+        self.inflight_count += 1
+        flow.metadata["_aidast_inflight"] = True
+        if "max_rps" in active_rules:
+            self.next_request_at = time.monotonic() + 1 / active_rules["max_rps"]
         flow.metadata["aidast_scope_allowed"] = True
         flow.metadata["aidast_static_resource"] = self._is_static(path, flow.request.headers)
         flow.metadata["aidast_duplicate"] = False
@@ -325,6 +356,8 @@ class ScopeAndCaptureAddon:
         flow.metadata["aidast_traffic_class"] = source
 
     def response(self, flow: http.HTTPFlow) -> None:
+        if flow.metadata.pop("_aidast_inflight", False):
+            self.inflight_count -= 1
         if self.out_path is None:
             return
         scope_allowed = bool(flow.metadata.get("aidast_scope_allowed"))

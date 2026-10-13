@@ -153,6 +153,37 @@ uv tool install --force --editable .
 
 프로젝트 `.venv`의 `aidast`만 사용하는 경우에는 첫 번째 명령으로 충분합니다.
 
+Strix Recon을 사용한다면 추가 의존성을 설치합니다. `aidast login`으로 Codex CLI에
+ChatGPT 로그인이 되어 있으면 Recon에서도 같은 로그인 세션을 사용합니다. WebUI의
+Recon model 또는 CLI의 `--recon-model`에 `gpt-*` 모델을 선택하고 API 키가
+설정되지 않은 경우 자동으로 ChatGPT 경로로 전달합니다. 모델을 명시하지 않은
+CLI 실행은 `STRIX_LLM` 설정을 사용합니다. 인증 토큰 갱신은 Codex CLI가
+처리하며 AI DAST는 Codex의 refresh token을 별도로 저장하지 않습니다.
+
+```bash
+uv sync --locked --extra recon-engine
+```
+
+CLI에서 내장 Strix Recon을 실행하려면
+`aidast recon "<PROGRAM_URL>" --all-targets --execute --recon-engine strix`를
+사용합니다. 이 실행기는 승인된 Scope로 만든 MITM 경계를 사용하며, 탐색 도구와 순서는
+Strix 에이전트가 선택합니다. `--allow-authorized-account-registration`은 승인된
+정확한 호스트에서 일회용 계정 등록을 허용합니다. 로컬 실습 대상에서는
+`--allow-lab-account-creation` 또는 `--allow-lab-state-changing-discovery`를
+명시할 수 있습니다. 이 옵션을 생략하면 폼 제출과 상태 변경을 지시하지 않습니다.
+`--profile`, `--max-rps`, `--max-requests` 등은 후속 단계의 TargetPolicy에
+기록되며 Strix Recon의 프록시 제한으로 전달되지 않습니다.
+
+Strix 전용 로그인을 사용하려면
+`.venv/bin/python -m aidast.recon.strix_engine.interface.main auth login chatgpt`를
+실행하고 Recon model에 `chatgpt/<지원되는-모델>`을 지정할 수도 있습니다.
+API 모델을 사용한다면 대시보드를 시작하는 환경에 해당 provider의 인증 정보를
+설정해야 합니다.
+대시보드에서 Strix Recon을 시작하거나 Recon 단계를 재개하면
+`aidast-strix-mitm:local` 이미지를 기본으로 사용합니다. 이 이미지는 먼저
+`src/aidast/recon/strix_engine/containers/Dockerfile`로 빌드해야 합니다.
+다른 이미지를 쓰려면 대시보드를 시작할 때 `AIDAST_STRIX_IMAGE`를 지정하세요.
+
 ### 설치 확인과 로그인
 
 설치를 확인하고 Codex에 로그인합니다.

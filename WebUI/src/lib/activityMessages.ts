@@ -56,6 +56,26 @@ export function agentWorkLabel(language: Language, params: Record<string, string
   const name = language === 'ko' ? agentNames[agent] : agentNamesEn[agent];
   const description = (language === 'ko' ? agentStepsKo : agentStepsEn)[`${agent}:${params.step}`];
   if (!description) return language === 'ko' ? `${name} 작업 상태 변경` : `${name} work changed`;
+  if (agent === 'recon' && params.step === 'execute' && params.state === 'progress'
+      && Number.isInteger(params.completed_tools) && Number(params.completed_tools) > 0) {
+    const activities: Record<string, [string, string]> = {
+      capture_list: ['캡처된 HTTP 요청 목록 확인', 'reviewing captured HTTP requests'],
+      capture_review: ['캡처된 HTTP 응답 검토', 'reviewing a captured HTTP response'],
+      sitemap_review: ['사이트맵 경로 확인', 'reviewing sitemap paths'],
+      agent_assignment: ['정찰 하위 작업 배정', 'assigning a recon task'],
+      agent_wait: ['정찰 하위 작업 결과 대기', 'waiting for recon task results'],
+      agent_review: ['정찰 하위 작업 상태 확인', 'checking recon task status'],
+      reference_review: ['정찰 참고 자료 확인', 'reviewing recon guidance'],
+      recon_summary: ['정찰 결과 정리', 'summarizing recon results'],
+      browser: ['브라우저 정찰', 'running browser recon'],
+    };
+    const activity = activities[String(params.tool_activity)];
+    const task = activity?.[language === 'ko' ? 0 : 1]
+      ?? (language === 'ko' ? '정찰 도구 작업' : 'running a recon tool');
+    return language === 'ko'
+      ? `${name} · ${task} · 도구 작업 누적 ${params.completed_tools}건`
+      : `${name} · ${task} · ${params.completed_tools} tool calls completed`;
+  }
   if (agent === 'attack' && params.step === 'planning'
       && Number.isInteger(params.processed) && Number.isInteger(params.endpoint_total)
       && Number(params.endpoint_total) > 0) {

@@ -48,6 +48,20 @@ def _matching_rule(
         return None
     if method not in rules.get("allowed_methods", []):
         return None
+    for excluded_rule in rules.get("excluded_target_rules", []):
+        if not fnmatchcase(host, str(excluded_rule.get("host_pattern", "")).lower()):
+            continue
+        if scheme not in excluded_rule.get("schemes", []) or method not in excluded_rule.get("methods", []):
+            continue
+        excluded_ports = excluded_rule.get("ports", [])
+        if "*" not in excluded_ports and port not in excluded_ports:
+            continue
+        if any(
+            path == str(prefix).rstrip("/") or prefix == "/"
+            or path.startswith(str(prefix).rstrip("/") + "/")
+            for prefix in excluded_rule.get("paths", [])
+        ):
+            return None
     for rule in rules.get("target_rules", []):
         if not fnmatchcase(host, str(rule.get("host_pattern", "")).lower()):
             continue
