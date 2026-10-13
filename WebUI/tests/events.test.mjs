@@ -191,19 +191,6 @@ test('AI tagging shows observation and batch progress in both languages', () => 
   assert.doesNotMatch(localizeActivityMessage('ko', recovered), /undefined|배치/);
 });
 
-test('Strix Recon displays observed tool progress in both languages', () => {
-  const log = { message: 'Agent work', message_code: 'agent.work', message_params: {
-    agent: 'recon', step: 'execute', state: 'progress', progress: 26, completed_tools: 5,
-    tool_activity: 'capture_review',
-  } };
-  const parsed = parseEvent(event(8, { payload: { stage: 'Recon', level: 'info', ...log } }), DEMO_SCAN);
-  assert.ok(parsed);
-  assert.match(localizeActivityMessage('ko', log), /캡처된 HTTP 응답 검토 · 도구 작업 누적 5건/);
-  assert.match(localizeActivityMessage('en', log), /5 tool calls completed/);
-  assert.doesNotMatch(localizeActivityMessage('ko', log), /DNS·HTTP·브라우저/);
-  assert.match(localizeActivityMessage('ko', { ...log, message_params: { ...log.message_params, tool_activity: 'unknown' } }), /정찰 도구 작업/);
-});
-
 test('synthetic scan activity follows the selected display language', () => {
   const event = demoSnapshot().logs[0];
   assert.equal(localizeActivityMessage('en', event), 'Demo Scope and approval hashes match. Only synthetic lab data is used.');

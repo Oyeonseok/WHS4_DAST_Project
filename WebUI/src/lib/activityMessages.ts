@@ -56,26 +56,6 @@ export function agentWorkLabel(language: Language, params: Record<string, string
   const name = language === 'ko' ? agentNames[agent] : agentNamesEn[agent];
   const description = (language === 'ko' ? agentStepsKo : agentStepsEn)[`${agent}:${params.step}`];
   if (!description) return language === 'ko' ? `${name} 작업 상태 변경` : `${name} work changed`;
-  if (agent === 'recon' && params.step === 'execute' && params.state === 'progress'
-      && Number.isInteger(params.completed_tools) && Number(params.completed_tools) > 0) {
-    const activities: Record<string, [string, string]> = {
-      capture_list: ['캡처된 HTTP 요청 목록 확인', 'reviewing captured HTTP requests'],
-      capture_review: ['캡처된 HTTP 응답 검토', 'reviewing a captured HTTP response'],
-      sitemap_review: ['사이트맵 경로 확인', 'reviewing sitemap paths'],
-      agent_assignment: ['정찰 하위 작업 배정', 'assigning a recon task'],
-      agent_wait: ['정찰 하위 작업 결과 대기', 'waiting for recon task results'],
-      agent_review: ['정찰 하위 작업 상태 확인', 'checking recon task status'],
-      reference_review: ['정찰 참고 자료 확인', 'reviewing recon guidance'],
-      recon_summary: ['정찰 결과 정리', 'summarizing recon results'],
-      browser: ['브라우저 정찰', 'running browser recon'],
-    };
-    const activity = activities[String(params.tool_activity)];
-    const task = activity?.[language === 'ko' ? 0 : 1]
-      ?? (language === 'ko' ? '정찰 도구 작업' : 'running a recon tool');
-    return language === 'ko'
-      ? `${name} · ${task} · 도구 작업 누적 ${params.completed_tools}건`
-      : `${name} · ${task} · ${params.completed_tools} tool calls completed`;
-  }
   if (agent === 'attack' && params.step === 'planning'
       && Number.isInteger(params.processed) && Number.isInteger(params.endpoint_total)
       && Number(params.endpoint_total) > 0) {
@@ -226,6 +206,7 @@ const koreanMessages: Record<string, (params: Record<string, string | number>) =
   'recon.activity': params => reconActivityLabel(params),
   'scope.started': () => '스코프 수집을 시작했습니다.',
   'scope.interrupted': () => '대시보드 재시작으로 스코프 수집이 중단되었습니다.',
+  'scope.storage_migration_failed': () => '기존 스코프 수집 파일을 새 저장 위치로 옮기지 못했습니다.',
   'scope.already_approved': () => '검증된 승인 스코프가 이미 있습니다.',
   'scope.browser_ready': () => '프로그램 페이지에 자동 접근하지 못했습니다. 열린 브라우저에서 로그인이나 접근 확인을 마친 뒤 계속을 누르세요.',
   'scope.browser_confirmed': () => '브라우저 접근 확인을 받았습니다. 등록된 프로그램 페이지로 이동해 캡처합니다.',
@@ -394,6 +375,7 @@ const englishMessages: Record<string, (params: Record<string, string | number>) 
   'recon.activity': params => reconActivityLabelEn(params),
   'scope.started': () => 'Scope collection started.',
   'scope.interrupted': () => 'Scope collection was interrupted by a dashboard restart.',
+  'scope.storage_migration_failed': () => 'Could not move a previous Scope collection file to the new storage location.',
   'scope.already_approved': () => 'A verified approved Scope already exists.',
   'scope.browser_ready': () => 'The program page was not accessible automatically. Complete login or access confirmation in the browser, then select Continue.',
   'scope.browser_confirmed': () => 'Browser access confirmed. Navigating to the registered program page for capture.',

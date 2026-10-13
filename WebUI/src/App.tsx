@@ -348,6 +348,7 @@ export default function App() {
   const [scopeId, setScopeId] = useState('');
   const [selectedTargets, setSelectedTargets] = useState<string[]>([]);
   const [scanProfile, setScanProfile] = useState<ExecutionProfileId>('bug-bounty-safe');
+  const [reconEngine, setReconEngine] = useState<'integrated' | 'native'>('integrated');
   const [reconModel, setReconModel] = useState('gpt-6.1-sol');
   const [attackModel, setAttackModel] = useState('gpt-6.1-sol');
   const [validationModel, setValidationModel] = useState('gpt-6-sol');
@@ -355,8 +356,10 @@ export default function App() {
   const [maxRequests, setMaxRequests] = useState(300);
   const [maxRps, setMaxRps] = useState(0.2);
   const [maxConcurrency, setMaxConcurrency] = useState(1);
+  const [timeoutSeconds, setTimeoutSeconds] = useState(15);
+  const [maxDepth, setMaxDepth] = useState(2);
+  const [ffufMaxTimeSeconds, setFfufMaxTimeSeconds] = useState(60);
   const [startUrl, setStartUrl] = useState('');
-  const [allowAccountRegistration, setAllowAccountRegistration] = useState(false);
   const [tagBatchSize, setTagBatchSize] = useState(25);
   const [policyValues, setPolicyValues] = useState<Record<string, string>>({});
   const [identityValues, setIdentityValues] = useState<Record<string, string>>({});
@@ -378,6 +381,7 @@ export default function App() {
     }
     return scope;
   }));
+  const [loginMode, setLoginMode] = useState<'none' | 'runtime-browser'>('none');
   const [authorizationConfirmed, setAuthorizationConfirmed] = useState(false);
   const [launching, setLaunching] = useState(false);
   const [launchError, setLaunchError] = useState('');
@@ -884,15 +888,10 @@ export default function App() {
     return () => abort.abort();
   }, [modal, catalogScopeId]);
   const selectedScope = scopes.find(item => item.scope_id === scopeId);
-  const canRegisterAccount = selectedScope?.targets.some(target =>
-    selectedTargets.includes(target.asset)
-    && ['URL', 'API', 'DOMAIN', 'IP_ADDRESS'].includes(target.asset_type)
-    && !target.asset.includes('*')) ?? false;
   useEffect(() => {
     setIdentityValues({});
     setPolicyValues({});
     setAuthorizationConfirmed(false);
-    setAllowAccountRegistration(false);
   }, [scopeId]);
   useEffect(() => {
     if (demo || modal !== 'new' || !selectedScope || selectedScope.execution_requirements.execution_requirements_status === 'ready') return;
@@ -909,12 +908,11 @@ export default function App() {
   }, [demo, modal, selectedScope?.scope_id, selectedScope?.execution_requirements.execution_requirements_status, resolveHeaderRequirements]);
   useEffect(() => {
     setAuthorizationConfirmed(false);
-    setAllowAccountRegistration(false);
   }, [selectedTargets, selectedScope?.execution_requirements]);
   useEffect(() => {
     exclusionGeneration.current += 1;
     setExclusionPreparation(null);
-  }, [scopeId, selectedTargets, startUrl, identityValues, policyValues, scanProfile, modal]);
+  }, [scopeId, selectedTargets, startUrl, identityValues, policyValues, loginMode, scanProfile, modal]);
   const policyConfirmations = selectedScope
     ? policyConfirmationKeys(selectedScope.execution_requirements, selectedTargets, authorizationConfirmed)
     : [];
@@ -929,7 +927,10 @@ export default function App() {
     setMaxRequests(selectedLimits.max_requests);
     setMaxRps(selectedLimits.requests_per_second);
     setMaxConcurrency(selectedLimits.concurrency);
-  }, [selectedScope?.scope_id, scanProfile, selectedLimits?.max_requests, selectedLimits?.requests_per_second, selectedLimits?.concurrency]);
+    setTimeoutSeconds(selectedLimits.timeout_seconds);
+    setMaxDepth(selectedLimits.max_depth);
+    setFfufMaxTimeSeconds(scanProfile === 'bug-bounty-safe' ? 60 : 150);
+  }, [selectedScope?.scope_id, scanProfile, selectedLimits?.max_requests, selectedLimits?.requests_per_second, selectedLimits?.concurrency, selectedLimits?.timeout_seconds, selectedLimits?.max_depth]);
   const registerProgram = async () => {
     if (!scopeProgramUrl.trim()) return;
     const urlError = programRegistrationUrlError(scopeProgramUrl);
@@ -1045,10 +1046,8 @@ export default function App() {
       const response = await fetch(new URL(`/api/v1/scopes/${encodeURIComponent(selectedScope.scope_id)}/exclusion-preparation`, base), {
         method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({...approvedScopeSelection(selectedScope.scope_id, selectedTargets), profile:scanProfile,
-          recon_engine:'strix',
-          max_requests:maxRequests, max_rps:maxRps, max_concurrency:maxConcurrency,
-          login_mode:'none', allow_authorized_account_registration:allowAccountRegistration && canRegisterAccount,
-          start_url:startUrl.trim() || null, authorization_confirmed:true, refresh:true,
+          max_requests:maxRequests, max_rps:maxRps, max_concurrency:maxConcurrency, timeout_seconds:timeoutSeconds, max_depth:maxDepth,
+          login_mode:loginMode, start_url:startUrl.trim() || null, authorization_confirmed:true, refresh:true,
           identity_values:headerIdentityValues(selectedScope.execution_requirements,identityValues),
           ...policyLaunchValues(selectedScope.execution_requirements,selectedTargets,policyValues,policyConfirmations)}),
       });
@@ -1067,13 +1066,13 @@ export default function App() {
         method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           ...approvedScopeSelection(selectedScope.scope_id, selectedTargets), profile: scanProfile,
-          recon_engine: 'strix',
+          recon_engine: reconEngine === 'native' || loginMode === 'runtime-browser' ? 'legacy' : 'strix',
           recon_model: reconModel, attack_model: attackModel,
           validation_model: validationModel, report_model: reportModel,
           max_requests: maxRequests, max_rps: maxRps, max_concurrency: maxConcurrency,
-          tag_batch_size: tagBatchSize,
-          login_mode: 'none', allow_authorized_account_registration: allowAccountRegistration && canRegisterAccount,
-          start_url: startUrl.trim() || null, authorization_confirmed: true,
+          timeout_seconds: timeoutSeconds, max_depth: maxDepth, tag_batch_size: tagBatchSize,
+          ffuf_max_time_seconds: ffufMaxTimeSeconds,
+          login_mode: loginMode, start_url: startUrl.trim() || null, authorization_confirmed: true,
           identity_values: headerIdentityValues(selectedScope.execution_requirements, identityValues),
           ...policyLaunchValues(selectedScope.execution_requirements, selectedTargets, policyValues, policyConfirmations),
         }),
@@ -1193,7 +1192,7 @@ export default function App() {
     setSelectedTargets([]);
     setIdentityValues({});
     setPolicyValues({});
-    setAllowAccountRegistration(false);
+    setReconEngine('integrated');
     setReconModel('gpt-6.1-sol');
     setAttackModel('gpt-6.1-sol');
     setValidationModel('gpt-6-sol');
@@ -1211,7 +1210,7 @@ export default function App() {
     setSelectedTargets(approved ? source.targets.filter(target => approved.targets.some(item => item.asset === target)) : []);
     setIdentityValues({});
     setPolicyValues({});
-    setAllowAccountRegistration(false);
+    setReconEngine('integrated');
     setReconModel('gpt-6.1-sol');
     setAttackModel('gpt-6.1-sol');
     setValidationModel('gpt-6-sol');
@@ -1376,7 +1375,6 @@ export default function App() {
     setSelectedTargets([]);
     setIdentityValues({});
     setPolicyValues({});
-    setAllowAccountRegistration(false);
     setAuthorizationConfirmed(false);
     setLaunchError('');
     go('Scans');
@@ -1404,6 +1402,9 @@ export default function App() {
     && maxRequests >= 1 && maxRequests <= selectedLimits.max_requests
     && maxRps > 0 && maxRps <= selectedLimits.requests_per_second
     && maxConcurrency >= 1 && maxConcurrency <= selectedLimits.concurrency
+    && timeoutSeconds >= 1 && timeoutSeconds <= selectedLimits.timeout_seconds
+    && maxDepth >= 0 && maxDepth <= selectedLimits.max_depth
+    && Number.isInteger(ffufMaxTimeSeconds) && ffufMaxTimeSeconds >= 0 && ffufMaxTimeSeconds <= 86400
     && isValidTagBatchSize(tagBatchSize);
   const modelsValid = [reconModel, attackModel, validationModel, reportModel].every(
     model => modelNamePattern.test(model) && !model.includes('://'),
@@ -1438,7 +1439,7 @@ export default function App() {
     <div className="notice"><Icon name="lock"/><div><strong>{tr('Approved Scope only')}</strong><p>{tr('The backend re-verifies approval integrity and the Python orchestrator enforces TargetPolicy and request budgets.')}</p></div></div>
     <div className="notice"><Icon name="search"/><div><strong>{tk('블랙박스 실행', 'Black-box execution')}</strong><p>{tk('실행 에이전트는 대상의 HTTP 응답, DOM, 브라우저 트래픽, 공개 클라이언트 자산만 사용합니다. 공개 정답 목록과 소스 기준 목록은 실행 입력으로 사용되지 않습니다.', 'Runtime agents use only target HTTP responses, DOM, browser traffic, and public client assets. Public answer catalogs and source baselines are never used as execution input.')}</p></div></div>
     {demo ? <p className="form-error">{tr('Switch to the live local dashboard to start a scan.')}</p> : <>
-      {repeatSource && <div className="notice" role="status"><Icon name="scope"/><div><strong>{tk("정찰부터 새 스캔", "New scan from recon")}</strong><p>{tk(`기존 스캔 ${repeatSource.scanId}의 결과는 유지됩니다. 새 스캔 ID를 만들고 Scope·대상·실행 제한을 확인한 뒤 정찰부터 다시 시작합니다. 이전 실행 설정은 저장되지 않아 현재 승인된 Scope와 프로필 기본값을 사용합니다.`, `Results for scan ${repeatSource.scanId} are kept. A new scan ID is created. Review the Scope, targets, and limits before starting again from recon. Previous run settings were not saved, so the current approved Scope and profile defaults are used.`)}</p></div></div>}
+      {repeatSource && <div className="notice" role="status"><Icon name="scope"/><div><strong>{tk("정찰부터 새 스캔", "New scan from recon")}</strong><p>{tk(`기존 스캔 ${repeatSource.scanId}의 결과는 유지됩니다. 새 스캔 ID를 만들고 Scope·대상·실행 제한·로그인 방식을 확인한 뒤 정찰부터 다시 시작합니다. 이전 실행 설정은 저장되지 않아 현재 승인된 Scope와 프로필 기본값을 사용합니다.`, `Results for scan ${repeatSource.scanId} are kept. A new scan ID is created. Review the Scope, targets, limits, and login method before starting again from recon. Previous run settings were not saved, so the current approved Scope and profile defaults are used.`)}</p></div></div>}
       {repeatSource && !scopes.some(scope => scope.scope_id === repeatSource.scopeId) && <p className="form-error" role="alert">{tk("기존 스캔의 승인된 Scope를 찾을 수 없습니다. 새로 승인된 Scope를 직접 선택하고 대상을 확인하세요.", "The approved Scope for the previous scan is unavailable. Select a newly approved Scope and check the targets.")}</p>}
       {repeatSource && selectedScope?.scope_id === repeatSource.scopeId && repeatSource.targets.some(target => !selectedScope.targets.some(item => item.asset === target)) && <p className="form-error" role="alert">{tk("이전 스캔의 일부 대상은 현재 승인된 Scope에 없어 선택하지 않았습니다. 대상 목록을 확인하세요.", "Some targets from the previous scan are outside the currently approved Scope and were not selected. Check the target list.")}</p>}
       <label className="form-field"><span>{tr('Verified Scope')}</span><select aria-label={tr('Approved program')} value={scopeId} onChange={event => { setScopeId(event.target.value); setSelectedTargets([]); setStartUrl(''); setIdentityValues({}); setAuthorizationConfirmed(false); }}><option value="">{tr('Select a recent approved scope')}</option>{scopes.map(scope => <option key={scope.scope_id} value={scope.scope_id}>{scope.program_name} · {scope.platform}</option>)}</select></label>
@@ -1456,16 +1457,21 @@ export default function App() {
         {!modelsValid && <p className="form-error" role="alert">{tr('Enter valid model IDs before starting the scan.')}</p>}
         <fieldset className="target-fieldset"><legend>{tr('Targets')} <small>{selectedTargets.length}{tr('selected')}</small></legend><div className="target-actions">{scanProfile !== 'bug-bounty-safe' && <button type="button" className="text-button" onClick={() => { setSelectedTargets(selectedScope.targets.map(item => item.asset)); setStartUrl(''); }}>{tr('Select all')}</button>}<button type="button" className="text-button" onClick={() => { setSelectedTargets([]); setStartUrl(''); }}>{tr('Clear')}</button></div><div className="target-list">{selectedScope.targets.map(target => <label key={`${target.asset_type}:${target.asset}`}><input type="checkbox" checked={selectedTargets.includes(target.asset)} onChange={() => { setSelectedTargets(current => scanProfile === 'bug-bounty-safe' ? (current.includes(target.asset) ? [] : [target.asset]) : (current.includes(target.asset) ? current.filter(item => item !== target.asset) : [...current, target.asset])); setStartUrl(''); }}/><span><strong>{target.asset}</strong><small>{target.asset_type} · {tk("최대", "maximum")} {tr(target.maximum_severity || 'program policy')}</small></span></label>)}</div></fieldset>
         {selectedTargets.length > 0 && selectedLimits && <section className="execution-requirements"><div className="execution-requirements-heading"><div><h3>{tr('Execution requirements')}</h3></div><div className="stage-badges"><Badge>{tr('Recon')}</Badge><Badge>{tr('Attack')}</Badge><Badge>{tr('Validation')}</Badge></div></div><div className="requirements-summary"><div><span>{tr('Policy request-rate ceiling')}</span><strong>{selectedScope.execution_requirements.scope_max_requests_per_second ? `${selectedScope.execution_requirements.scope_max_requests_per_second} ${tr('requests per second unit')}` : tr('Not specified by policy')}</strong></div><div><span>{tr('Required request header')}</span><strong className="mono">{headerRequirementsReady ? (selectedScope.execution_requirements.required_headers.length ? selectedScope.execution_requirements.required_headers.map(header => <span key={header.name} title={header.source_quote}>{header.name}: {header.value_template}<br/></span>) : tr('None')) : tk('확인 중', 'Pending')}</strong></div></div></section>}
-        <div className="form-grid"><label className="form-field"><span>{tr('Execution profile')}</span><select value={scanProfile} onChange={event => { setScanProfile(event.target.value as ExecutionProfileId); setSelectedTargets([]); setStartUrl(''); }}><option value="bug-bounty-safe">{tk('버그바운티 안전', 'Bug bounty safe')}</option><option value="safe-recon">{tr('Safe recon')}</option><option value="focused-discovery">{tr('Focused discovery')}</option></select></label><label className="form-field"><span>{tk('공유 스캔 요청 예산', 'Shared scan request budget')} <small>≤ {selectedLimits?.max_requests.toLocaleString()}</small></span><input type="number" min="1" max={selectedLimits?.max_requests} value={maxRequests} onChange={event => setMaxRequests(Number(event.target.value))}/></label></div>
+        <div className="form-grid"><label className="form-field"><span>{tr('Execution profile')}</span><select value={scanProfile} onChange={event => { setScanProfile(event.target.value as ExecutionProfileId); setSelectedTargets([]); setStartUrl(''); }}><option value="bug-bounty-safe">{tk('버그바운티 안전', 'Bug bounty safe')}</option><option value="safe-recon">{tr('Safe recon')}</option><option value="focused-discovery">{tr('Focused discovery')}</option></select></label><label className="form-field"><span>{tk('정찰 엔진', 'Recon engine')}</span><select value={reconEngine} onChange={event => setReconEngine(event.target.value as 'integrated' | 'native')}><option value="integrated">{tk('Strix 정찰', 'Strix recon')}</option><option value="native">{tk('기본 정찰 엔진', 'Native recon engine')}</option></select><small>{tk('Strix 실행이 실패하면 정찰 단계가 실패합니다. 기본 엔진으로 자동 전환되지 않습니다.', 'If Strix fails, Recon fails; there is no automatic native fallback.')}</small></label></div>
+        <label className="form-field"><span>{tk('공유 스캔 요청 예산', 'Shared scan request budget')} <small>≤ {selectedLimits?.max_requests.toLocaleString()}</small></span><input type="number" min="1" max={selectedLimits?.max_requests} value={maxRequests} onChange={event => setMaxRequests(Number(event.target.value))}/></label>
         {scanProfile === 'bug-bounty-safe' && <div className="notice"><Icon name="scope"/><div><strong>{tk('실제 버그바운티 프로그램용 보수적 실행', 'Conservative execution for a real bug bounty program')}</strong><p>{tk('한 번에 승인된 자산 하나만 실행하며 일반 워드리스트 경로 대입은 사용하지 않습니다. 와일드카드는 아래에 정확한 HTTPS 시작 URL이 필요합니다.', 'Run one approved asset at a time without generic wordlist path guessing. Wildcards require an exact HTTPS start URL below.')}</p></div></div>}
-        <label className="confirm-field"><input type="checkbox" disabled={!canRegisterAccount} checked={allowAccountRegistration && canRegisterAccount} onChange={event => setAllowAccountRegistration(event.target.checked)}/><span>{tk('Recon에서 일회용 계정 자동 등록·로그인 허용', 'Allow disposable account signup and login during recon')}<small>{tk('먼저 읽기 전용으로 탐색한 뒤, 승인된 정확한 호스트에서 자체 가입 화면이 확인될 때만 시도합니다. 와일드카드로 발견된 호스트에는 등록하지 않습니다.', 'After read-only discovery, Strix may register one disposable account on an exact approved host with a clear self-service signup. It will not register on wildcard-discovered hosts.')}</small></span></label>
         {selectedTargets.length === 1 && <label className="form-field"><span>{tk('정확한 시작 URL', 'Exact start URL')} <small>{selectedScope.targets.find(item => item.asset === selectedTargets[0])?.asset_type === 'WILDCARD' && scanProfile === 'bug-bounty-safe' ? tk('필수', 'required') : tk('선택', 'optional')}</small></span><input type="url" placeholder="https://approved.example/path" value={startUrl} onChange={event => setStartUrl(event.target.value)} aria-invalid={!validStartUrl(startUrl, scanProfile === 'bug-bounty-safe')}/><small>{scanProfile === 'bug-bounty-safe' ? tk('승인된 자산 안의 HTTPS URL만 입력하세요.', 'Enter only an HTTPS URL inside the approved asset.') : tk('승인된 자산 안의 HTTP(S) URL만 입력하세요.', 'Enter only an HTTP(S) URL inside the approved asset.')}</small></label>}
         {!startUrlReady && <p className="form-error" role="alert">{scanProfile === 'bug-bounty-safe' ? tk('시작 URL은 쿼리·프래그먼트·자격 증명이 없는 HTTPS URL이어야 하며 대상 하나를 선택해야 합니다.', 'The start URL must be an HTTPS URL without a query, fragment, or embedded credentials and requires one selected target.') : tk('시작 URL은 쿼리·프래그먼트·자격 증명이 없는 HTTP(S) URL이어야 하며 대상 하나를 선택해야 합니다.', 'The start URL must be an HTTP(S) URL without a query, fragment, or embedded credentials and requires one selected target.')}</p>}
         {scanProfile === 'bug-bounty-safe' && selectedTargets.length === 1 && selectedScope.targets.find(item => item.asset === selectedTargets[0])?.asset_type === 'WILDCARD' && !startUrl.trim() && <p className="form-error" role="alert">{tk('와일드카드 대상에는 정확한 HTTPS 시작 URL이 필요합니다.', 'An exact HTTPS start URL is required for a wildcard target.')}</p>}
         <div className="form-grid"><label className="form-field"><span>{tr('Requests per second')} <small>≤ {selectedLimits?.requests_per_second}</small></span><input type="number" min="0.1" step="0.1" max={selectedLimits?.requests_per_second} value={maxRps} onChange={event => setMaxRps(Number(event.target.value))}/></label><label className="form-field"><span>{tr('Concurrency')} <small>≤ {selectedLimits?.concurrency}</small></span><input type="number" min="1" max={selectedLimits?.concurrency} value={maxConcurrency} onChange={event => setMaxConcurrency(Number(event.target.value))}/></label></div>
         <div className="scan-rate-summary" aria-live="polite"><span>{tk('이번 스캔의 공유 요청 속도 상한', 'This scan shared request-rate cap')}</span><strong>{maxRps > 0 ? `${maxRps} ${tr('requests per second unit')}` : tr('Enter a valid request rate')}</strong>{requestInterval !== null && <small>{language === 'ko' ? `평균 ${requestInterval}초에 1회 요청` : `Average one request every ${requestInterval} seconds`}</small>}</div>
-        <label className="form-field"><span>{tr('Tag batch size')} <small>1–200</small></span><input type="number" min="1" max="200" step="1" value={tagBatchSize} onChange={event => setTagBatchSize(Number(event.target.value))} aria-describedby="tag-batch-size-hint"/><small id="tag-batch-size-hint">{tr('Observations per model call · 25 recommended (300-second model timeout)')}</small></label>
+        <div className="form-grid"><label className="form-field"><span>{tr('Timeout seconds')} <small>≤ {selectedLimits?.timeout_seconds}</small></span><input type="number" min="1" max={selectedLimits?.timeout_seconds} value={timeoutSeconds} onChange={event => setTimeoutSeconds(Number(event.target.value))}/></label><label className="form-field"><span>{tr('Maximum depth')} <small>≤ {selectedLimits?.max_depth}</small></span><input type="number" min="0" max={selectedLimits?.max_depth} value={maxDepth} onChange={event => setMaxDepth(Number(event.target.value))}/></label></div>
+        <label className="form-field"><span>{tk('추가 경로 탐색 전체 시간 (초)', 'Total additional path discovery time (seconds)')} <small>{scanProfile === 'bug-bounty-safe' ? tk('일반 워드리스트 탐색 비활성', 'Generic wordlist discovery disabled') : tk('모든 루트가 공유 · 0 = 시간 제한 없음', 'Shared by all roots · 0 = no time limit')}</small></span><input type="number" min="0" max={scanProfile === 'bug-bounty-safe' ? 60 : 86400} value={ffufMaxTimeSeconds} disabled={scanProfile === 'bug-bounty-safe'} onChange={event => setFfufMaxTimeSeconds(Number(event.target.value))}/></label>
+        <div className="form-grid"><label className="form-field"><span>{tr('Tag batch size')} <small>1–200</small></span><input type="number" min="1" max="200" step="1" value={tagBatchSize} onChange={event => setTagBatchSize(Number(event.target.value))} aria-describedby="tag-batch-size-hint"/><small id="tag-batch-size-hint">{tr('Observations per model call · 25 recommended (300-second model timeout)')}</small></label><label className="form-field"><span>{tr('Login behavior')}</span><select value={loginMode} onChange={event => setLoginMode(event.target.value as 'none' | 'runtime-browser')}><option value="none">{tr('No login prompt')}</option><option value="runtime-browser">{tr('Open runtime browser')}</option></select></label></div>
         {!!selectedScope.execution_requirements.execution_rules?.exclusions?.length && <div><ScopeExclusionStatus count={selectedScope.execution_requirements.execution_rules.exclusions.length} preparation={exclusionPreparation}/><button className="secondary-button" disabled={!canLaunch || preparingExclusions} onClick={() => void prepareExclusions()}>{tk(preparingExclusions ? '확인 중…' : '저장된 증거로 제외 조건 확인', preparingExclusions ? 'Checking…' : 'Check exclusions from saved evidence')}</button></div>}
+        {loginMode === 'runtime-browser' && <p className="requirements-note">{tk('스캔 중 열린 브라우저에서 5분 안에 로그인을 완료하세요. 인증 토큰과 로그인 화면 종료가 확인되면 자동으로 진행합니다. 토큰을 사용하지 않는 사이트는 자동 확인에 실패할 수 있습니다.', 'Complete login in the opened browser within five minutes. The scan continues when an authentication token is detected and the login form closes. Sites without a token may not be confirmed automatically.')}</p>}
+        {loginMode === 'runtime-browser' && reconEngine === 'integrated' && <p className="requirements-note">{tk('사람이 로그인하는 실행에서는 같은 브라우저 세션을 유지하기 위해 기본 정찰 엔진으로 자동 전환합니다.', 'Operator login automatically uses native Recon so the same browser session is preserved.')}</p>}
+        <p className="requirements-note">{tk('요청 예산은 모든 대상과 정찰·공격·검증 단계가 공유합니다.', 'The request budget is shared across all targets and Recon, Attack, and Validation.')}</p>
         {applicablePolicyRequirements(selectedScope.execution_requirements.policy_blockers, selectedTargets).map((blocker, index) => <div className="form-error" role="alert" key={index}><strong>{blocker.label}</strong><p>{blocker.reason}</p></div>)}
         <ScopePolicyAdvisories advisories={selectedScope.execution_requirements.execution_rules?.advisories} selectedAssets={selectedTargets} language={language}/>
         {headerRequirementsReady && applicablePolicyRequirements(selectedScope.execution_requirements.policy_inputs, selectedTargets).map(input => <label className="form-field" key={`policy-${input.key}`}><span>{input.label}</span><input type={input.kind === 'email' ? 'email' : 'text'} value={policyValues[input.key] ?? ''} onChange={event => setPolicyValues(current => ({...current, [input.key]: event.target.value}))} maxLength={input.kind === 'username' ? 64 : 256} autoComplete="off" required aria-invalid={!!policyValues[input.key] && !validPolicyInput(input, policyValues[input.key])}/>{!!input.allowed_email_domains?.length && <small>{input.allowed_email_domains.join(', ')}</small>}</label>)}
