@@ -190,7 +190,10 @@ def generate_scan_reports(
         raise
     with closing(sqlite3.connect(pipeline_db)) as conn:
         finish_stage_run(conn, stage_run_id,
-                         status="failed" if results.errors else "completed" if cases else "skipped",
+                         # ScanSummary is the report artifact for a clean scan
+                         # with zero confirmed cases. Publishing it completes
+                         # the stage even though no per-finding draft exists.
+                         status="failed" if results.errors else "completed",
                          error_message=f"{len(results.errors)} report drafts failed" if results.errors else None)
     results.summary = write_scan_summary(pipeline_db, output_root, scan_id=scan_id,
                                         report_results=results, errors=results.errors)

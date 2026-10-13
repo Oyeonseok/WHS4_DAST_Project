@@ -15,7 +15,10 @@ ATTACK_ELIGIBLE_ENDPOINT_SQL = """(
     AND instr(e.normalized_path,'{{')=0
     AND instr(e.normalized_path,'}}')=0
     AND (
-        COALESCE(e.is_excluded,0)=0
+        (
+            COALESCE(e.is_excluded,0)=0
+            AND e.verification_status IN ('observed','verified')
+        )
         OR (
             e.verification_status='candidate'
             AND e.exclude_reason='unverified_candidate'

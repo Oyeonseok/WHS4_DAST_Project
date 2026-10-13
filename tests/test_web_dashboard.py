@@ -440,6 +440,25 @@ def test_projection_reads_live_recon_request_budget_counter(tmp_path: Path) -> N
     assert 0 <= snapshot["progress"] <= 100
 
 
+def test_projection_reads_integrated_recon_progress_from_strix_run(tmp_path: Path) -> None:
+    database = _fixture(tmp_path)
+    with sqlite3.connect(database) as conn:
+        conn.execute("UPDATE scans SET status='running' WHERE scan_id=?", (SCAN_ID,))
+        conn.execute("UPDATE stage_runs SET status='running' WHERE scan_id=?", (SCAN_ID,))
+    progress = database.parent / f"StrixRecon-{SCAN_ID}" / "mitm_capture.progress.json"
+    progress.parent.mkdir()
+    progress.write_text(
+        json.dumps({"version": 1, "allowed_requests": 11, "used_before": 4,
+                    "blocked_requests": 3, "updated_at": "2026-09-20T01:00:00Z"}),
+        encoding="utf-8",
+    )
+
+    snapshot = DashboardProjector(tmp_path).snapshot(SCAN_ID)
+
+    assert snapshot["requests"] == 15
+    assert snapshot["activity"] == "Running integrated Recon"
+
+
 def test_failed_stage_overrides_completed_scan_in_snapshot_and_list(tmp_path: Path) -> None:
     database = _fixture(tmp_path)
     with sqlite3.connect(database) as conn:

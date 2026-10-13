@@ -374,6 +374,88 @@ class ScopeCoordinatorTests(unittest.TestCase):
             self.assertTrue(main_agent.fallback_interpreted)
             self.assertTrue((output / "Scope.md").is_file())
 
+    def test_uses_deterministic_browser_when_native_capture_reason_is_unknown(self) -> None:
+        class UnknownMainAgent(FakeMainAgent):
+            fallback_interpreted = False
+
+            def collect_scope(
+                self, program_url: str
+            ) -> tuple[ProgramPage, ScopeAnalysis]:
+                return (
+                    sample_page().model_copy(
+                        update={
+                            "capture_status": CaptureStatus.BLOCKED,
+                            "capture_reason": CaptureReason.UNKNOWN,
+                            "text": "Temporary browser capture failure",
+                        }
+                    ),
+                    sample_analysis(),
+                )
+
+            def interpret_captured_scope(self, page: ProgramPage) -> ScopeAnalysis:
+                self.fallback_interpreted = True
+                return sample_analysis()
+
+        class CompleteFallbackReader:
+            def read(self, url: str) -> ProgramPage:
+                return sample_page()
+
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            output = Path(temporary_dir) / "Scope"
+            main_agent = UnknownMainAgent()
+            document = ScopeCoordinator(output).collect(
+                "https://bugcrowd.com/example",
+                main_agent=main_agent,
+                fallback_reader=CompleteFallbackReader(),
+                approved_by="reviewer",
+                review=lambda _: True,
+            )
+
+            self.assertIsNotNone(document)
+            self.assertTrue(main_agent.fallback_interpreted)
+            self.assertTrue((output / "Scope.md").is_file())
+
+    def test_uses_deterministic_browser_for_public_access_denied_capture(self) -> None:
+        class AccessDeniedMainAgent(FakeMainAgent):
+            fallback_interpreted = False
+
+            def collect_scope(
+                self, program_url: str
+            ) -> tuple[ProgramPage, ScopeAnalysis]:
+                return (
+                    sample_page().model_copy(
+                        update={
+                            "capture_status": CaptureStatus.BLOCKED,
+                            "capture_reason": CaptureReason.ACCESS_DENIED,
+                            "text": "Transient public renderer access denial",
+                        }
+                    ),
+                    sample_analysis(),
+                )
+
+            def interpret_captured_scope(self, page: ProgramPage) -> ScopeAnalysis:
+                self.fallback_interpreted = True
+                return sample_analysis()
+
+        class CompleteFallbackReader:
+            def read(self, url: str) -> ProgramPage:
+                return sample_page()
+
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            output = Path(temporary_dir) / "Scope"
+            main_agent = AccessDeniedMainAgent()
+            document = ScopeCoordinator(output).collect(
+                "https://bugcrowd.com/example",
+                main_agent=main_agent,
+                fallback_reader=CompleteFallbackReader(),
+                approved_by="reviewer",
+                review=lambda _: True,
+            )
+
+            self.assertIsNotNone(document)
+            self.assertTrue(main_agent.fallback_interpreted)
+            self.assertTrue((output / "Scope.md").is_file())
+
     def test_does_not_fallback_for_authentication_required(self) -> None:
         class AuthRequiredMainAgent(FakeMainAgent):
             def collect_scope(
@@ -407,6 +489,26 @@ class ScopeCoordinatorTests(unittest.TestCase):
 
 
 class CodexMainAgentTests(unittest.TestCase):
+    def test_scope_interpretation_retries_invalid_structured_output(self) -> None:
+        agent = CodexMainAgent()
+        invalid = MainAgentError(
+            "invalid scope analysis",
+            failure_code="invalid_result",
+            requested_model="gpt-6-sol",
+        )
+        agent._run_structured = MagicMock(
+            side_effect=[invalid, sample_analysis()]
+        )
+
+        result = agent.interpret_captured_scope(sample_page())
+
+        self.assertEqual(result.program_name, sample_analysis().program_name)
+        self.assertEqual(agent._run_structured.call_count, 2)
+        self.assertEqual(
+            agent._run_structured.call_args.kwargs["artifact_name"],
+            "scope-analysis-schema-retry",
+        )
+
     def test_scope_interpretation_has_no_model_timeout(self) -> None:
         from aidast.agents import main as main_module, native_pipeline as native_module
 
@@ -1226,6 +1328,14 @@ class ScopePathTests(unittest.TestCase):
                 "yeswehack",
                 "decathlon",
             ),
+            "https://app.intigriti.com/programs/digi/digi-vdp/detail": (
+                "app-intigriti-com",
+                "digi-digi-vdp",
+            ),
+            "https://app.intigriti.com/researcher/programs/dpgm/devolkskrant/detail": (
+                "app-intigriti-com",
+                "dpgm-devolkskrant",
+            ),
         }
         for url, expected in cases.items():
             with self.subTest(url=url):
@@ -1235,6 +1345,16 @@ class ScopePathTests(unittest.TestCase):
     def test_rejects_non_https_program_url(self) -> None:
         with self.assertRaisesRegex(ScopePathError, "absolute HTTPS URL"):
             identify_program("http://127.0.0.1:3000/")
+
+    def test_intigriti_programs_do_not_share_the_detail_identity(self) -> None:
+        first = identify_program(
+            "https://app.intigriti.com/programs/digi/digi-vdp/detail"
+        )
+        second = identify_program(
+            "https://app.intigriti.com/researcher/programs/dpgm/devolkskrant/detail"
+        )
+
+        self.assertNotEqual(first, second)
 
 
 if __name__ == "__main__":

@@ -149,9 +149,29 @@ class PipelineMaterializationTests(unittest.TestCase):
             trusted = db.upsert_endpoint(connection, origin_id=origin, method="POST", path="/login",
                 normalized_path="/login", source_tool="adaptive_js", is_excluded=True,
                 exclude_reason="unverified_candidate", verification_status="candidate")
+            connection.execute(
+                """INSERT INTO endpoint_observations
+                   (observation_id,endpoint_id,source_tool,discovery_kind,
+                    observed_url,association_method,observed_at)
+                   VALUES (?,?,?,?,?,?,?)""",
+                (db.new_id("observation"), trusted, "adaptive_js", "js_http_call",
+                 "https://example.test/login", "document_declaration", db.now()),
+            )
+            sitemap = db.upsert_endpoint(connection, origin_id=origin, method="GET", path="/news",
+                normalized_path="/news", source_tool="passive_declaration", is_excluded=True,
+                exclude_reason="unverified_candidate", verification_status="candidate")
+            connection.execute(
+                """INSERT INTO endpoint_observations
+                   (observation_id,endpoint_id,source_tool,discovery_kind,
+                    observed_url,association_method,observed_at)
+                   VALUES (?,?,?,?,?,?,?)""",
+                (db.new_id("observation"), sitemap, "passive_declaration", "sitemap_declaration",
+                 "https://example.test/news", "document_declaration", db.now()),
+            )
             untrusted = db.upsert_endpoint(connection, origin_id=origin, method="POST", path="/guess",
                 normalized_path="/guess", source_tool="ai_pattern", is_excluded=True,
                 exclude_reason="unverified_candidate", verification_status="candidate")
+            connection.commit()
         manifest = HandoffManifest.model_validate_json(self.handoff_path.read_text())
         self.handoff_path.write_text(manifest.model_copy(update={"artifacts": [hash_artifact(
             self.recon_path, root=self.root, role="database",
@@ -163,6 +183,7 @@ class PipelineMaterializationTests(unittest.TestCase):
         with sqlite3.connect(pipeline) as connection:
             rows = dict(connection.execute("SELECT endpoint_id,is_excluded FROM endpoints"))
             self.assertEqual(rows[trusted], 0)
+            self.assertEqual(rows[sitemap], 1)
             self.assertEqual(rows[untrusted], 1)
             self.assertEqual(connection.execute(
                 "SELECT verification_status,exclude_reason FROM endpoints WHERE endpoint_id=?", (trusted,)

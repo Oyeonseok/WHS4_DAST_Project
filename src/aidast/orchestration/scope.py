@@ -101,36 +101,37 @@ class ScopeCoordinator:
                 f"scope output already exists: {self.output_dir}; "
                 "move or remove it before collecting a new scope"
             )
+        needs_interpretation = primary_reader is not None
         if primary_reader is not None:
             report("page_read_started")
             page = primary_reader.read(program_url)
-            self._require_complete_capture(page)
             report("page_read_completed", characters=len(page.text))
-            report("analysis_started")
-            analysis = main_agent.interpret_captured_scope(page)
-            report("analysis_completed", in_scope=len(analysis.in_scope_assets), out_of_scope=len(analysis.out_of_scope_assets))
+            analysis = None
         else:
             report("collection_started")
             page, analysis = main_agent.collect_scope(program_url)
             report("collection_completed", characters=len(page.text), in_scope=len(analysis.in_scope_assets), out_of_scope=len(analysis.out_of_scope_assets))
         if (
-            page.capture_reason is CaptureReason.JAVASCRIPT_RENDER_INCOMPLETE
+            page.capture_status is not CaptureStatus.COMPLETE
+            and page.capture_reason in {
+                CaptureReason.JAVASCRIPT_RENDER_INCOMPLETE,
+                CaptureReason.CONTENT_INCOMPLETE,
+                CaptureReason.ACCESS_DENIED,
+                CaptureReason.UNKNOWN,
+            }
             and fallback_reader is not None
         ):
             fallback_page = fallback_reader.read(program_url)
-            if (
-                fallback_page.capture_status is CaptureStatus.COMPLETE
-                or (
-                    page.capture_status is CaptureStatus.BLOCKED
-                    and fallback_page.capture_status is CaptureStatus.PARTIAL
-                )
-            ):
+            if fallback_page.capture_status is CaptureStatus.COMPLETE:
                 page = fallback_page
+                needs_interpretation = True
                 report("page_read_completed", characters=len(page.text))
-                report("analysis_started")
-                analysis = main_agent.interpret_captured_scope(page)
-                report("analysis_completed", in_scope=len(analysis.in_scope_assets), out_of_scope=len(analysis.out_of_scope_assets))
         self._require_complete_capture(page)
+        if needs_interpretation:
+            report("analysis_started")
+            analysis = main_agent.interpret_captured_scope(page)
+            report("analysis_completed", in_scope=len(analysis.in_scope_assets), out_of_scope=len(analysis.out_of_scope_assets))
+        assert analysis is not None
         primary_analysis = analysis
         candidate_count = sum(len(view.observed_links) for view in page.primary_views) + len(page.observed_links)
         if candidate_count:

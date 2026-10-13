@@ -228,6 +228,10 @@ class ScopeAndCaptureAddon:
                 f"[scope] loaded {len(self.allowed_hosts)} approved host pattern(s); "
                 f"request-count limit {rules.get('max_requests', 'none')}"
             )
+            ctx.log.info(
+                "AIDAST_SCOPE_PROXY_READY "
+                f"allowed_host_patterns={len(self.allowed_hosts)}"
+            )
         except (OSError, ValueError, TypeError) as exc:
             ctx.log.warn(f"[scope] invalid or missing Scope rules: {type(exc).__name__}")
 

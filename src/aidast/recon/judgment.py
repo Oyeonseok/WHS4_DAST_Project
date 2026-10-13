@@ -175,7 +175,11 @@ def is_static_asset(path: str) -> bool:
         candidate = urlsplit(str(path or "")).path
     except ValueError:
         candidate = str(path or "").split("?", 1)[0]
-    return candidate.lower().endswith(STATIC_EXTENSIONS)
+    folded = candidate.lower()
+    return (
+        folded.endswith(STATIC_EXTENSIONS)
+        or folded.rsplit("/", 1)[-1] in {"robots.txt", "sitemap.xml"}
+    )
 
 
 def resource_type(path: str) -> str | None:

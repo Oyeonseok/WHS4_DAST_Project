@@ -17,7 +17,7 @@ from .tools.passive_declarations import MAX_DECLARATIONS, _candidate, _unique
 
 _SAFE_PATH = re.compile(r"/(?:[A-Za-z0-9._~!$&'()*+,;=:@%-]+/?){0,31}\Z")
 _STATIC_SUFFIX = re.compile(
-    r"\.(?:js|mjs|css|map|png|jpe?g|gif|svg|ico|woff2?|ttf|eot|mp4|webm|pdf)$", re.I,
+    r"\.(?:js|mjs|css|map|png|jpe?g|gif|webp|avif|svg|ico|webmanifest|woff2?|ttf|eot|mp4|webm|pdf)$", re.I,
 )
 
 

@@ -27,8 +27,17 @@ from aidast.core.model_calls import (
 from aidast.orchestration.scope import CoordinatorError, ScopeCoordinator
 from aidast.scope.models import ScopeDocument
 from aidast.scope.execution_rules import DEFAULT_SCOPE_MODEL
-from aidast.scope.paths import identify_program, scope_archive_directories, scope_revision_directory
-from aidast.scope.reader import PlaywrightProgramPageReader, RuntimeBrowserProgramPageReader
+from aidast.scope.paths import (
+    identify_program,
+    scope_archive_directories,
+    scope_revision_directory,
+    validate_scope_artifact_directory,
+)
+from aidast.scope.reader import (
+    PlaywrightProgramPageReader,
+    RuntimeBrowserProgramPageReader,
+    _same_program_url,
+)
 
 from .programs import ProgramRegistry
 from .scope_process import ScopeProcessController
@@ -170,6 +179,7 @@ class ScopeWorkflowManager:
                 conn.execute("ALTER TABLE scope_jobs ADD COLUMN output_path TEXT")
             if "model" not in job_columns:
                 conn.execute("ALTER TABLE scope_jobs ADD COLUMN model TEXT")
+            self._migrate_legacy_program_paths(conn)
             interrupted = conn.execute(
                 "SELECT job_id,status FROM scope_jobs WHERE status IN ('collecting','awaiting_browser','paused','cancelling')"
             ).fetchall()
@@ -198,6 +208,85 @@ class ScopeWorkflowManager:
             threading.Thread(
                 target=self._monitor_process, args=(job_id, None), daemon=True
             ).start()
+
+    def _migrate_legacy_program_paths(self, conn: sqlite3.Connection) -> None:
+        """Copy approved archives out of legacy shared platform directories.
+
+        Older Intigriti identities used the final ``detail`` URL segment, so
+        unrelated programs shared a canonical directory. Each approved job
+        still has an integrity-bound output_path. Copy that exact archive into
+        its new program-specific path and update only the owning job row. The
+        legacy data remains in place for audit and rollback.
+        """
+        programs = {
+            str(item["program_key"]): item for item in self.registry.records()
+        }
+        root = self.result_root / "Scope"
+        rows = conn.execute(
+            """SELECT job_id,program_key,status,output_path FROM scope_jobs
+               WHERE output_path IS NOT NULL AND status='approved'"""
+        ).fetchall()
+        for job_id, program_key, _status, output_path in rows:
+            program = programs.get(str(program_key))
+            if program is None:
+                continue
+            canonical = scope_revision_directory(str(program["program_url"]), root)
+            source = Path(str(output_path))
+            is_revision = source.parent.name == "revisions"
+            destination = (
+                scope_revision_directory(
+                    str(program["program_url"]), root, str(job_id)
+                )
+                if is_revision else canonical
+            )
+            if source == destination:
+                continue
+            try:
+                source = validate_scope_artifact_directory(source, root)
+                document, _ = ScopeCoordinator(source).load_approved_scope()
+                ScopeCoordinator(source).verify_approval()
+                if not _same_program_url(
+                    str(document.source.requested_url),
+                    str(program["program_url"]),
+                ):
+                    continue
+                if destination.exists():
+                    existing, _ = ScopeCoordinator(destination).load_approved_scope()
+                    ScopeCoordinator(destination).verify_approval()
+                    if existing.scope_id != document.scope_id:
+                        raise ValueError(
+                            "program-specific Scope migration destination conflicts"
+                        )
+                else:
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copytree(
+                        source,
+                        destination,
+                        ignore=shutil.ignore_patterns("revisions"),
+                    )
+                    copied, _ = ScopeCoordinator(destination).load_approved_scope()
+                    ScopeCoordinator(destination).verify_approval()
+                    if copied.scope_id != document.scope_id:
+                        raise ValueError("migrated Scope archive changed identity")
+            except (CoordinatorError, OSError, ValueError):
+                message = (
+                    "승인된 Scope의 기존 저장 경로를 프로그램별 경로로 "
+                    "이전하지 못했습니다. 원본은 보존되었습니다."
+                )
+                conn.execute(
+                    """UPDATE scope_jobs SET status='failed',error=?,updated_at=?
+                       WHERE job_id=?""",
+                    (message, _now(), job_id),
+                )
+                self._append_event(
+                    conn, str(job_id), "error", message,
+                    message_code="scope.storage_migration_failed",
+                )
+                continue
+            conn.execute(
+                "UPDATE scope_jobs SET output_path=?,updated_at=? WHERE job_id=?",
+                (str(destination), _now(), job_id),
+            )
 
     def statuses(self) -> dict[str, dict[str, Any]]:
         with self._lock, closing(sqlite3.connect(self.database)) as conn:

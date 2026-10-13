@@ -983,9 +983,13 @@ def _complete_executable_recon_plan(
         }:
             continue
         model_target = proposed.get((target.asset_type, target.asset))
+        has_explicit_start = (
+            (target.asset_type.value, target.asset)
+            in (execution_start_urls or {})
+        )
         if (
             target.asset_type is AssetType.WILDCARD
-            and (target.asset_type.value, target.asset) in (execution_start_urls or {})
+            and has_explicit_start
         ):
             steps = [
                 ReconStep.HTTP_PROBE,
@@ -1000,7 +1004,11 @@ def _complete_executable_recon_plan(
             # models may still propose them for an exact URL/API target, but
             # preserving those steps violates the executor contract and makes
             # HTTP-only exclusion rules look unenforceable before Recon starts.
-            if target.asset_type in {AssetType.URL, AssetType.API}:
+            # The same applies to DOMAIN/IP targets when the operator supplied
+            # an exact HTTPS start URL.  In that mode the executor is bound to
+            # the reviewed origin and must not run separate DNS/port tooling
+            # that lacks an enforceable HTTP request descriptor.
+            if target.asset_type in {AssetType.URL, AssetType.API} or has_explicit_start:
                 requested.difference_update({
                     ReconStep.DNS_RESOLUTION,
                     ReconStep.HOST_PORT_DISCOVERY,
@@ -1482,7 +1490,11 @@ def _run_recon(
             scope_markdown=scope_markdown,
         )
         if args.profile == "bug-bounty-safe":
-            policies = _bind_exact_start_urls(policies, start_urls)
+            policies = _bind_exact_start_urls(
+                policies,
+                start_urls,
+                scope_markdown=scope_markdown,
+            )
         policies = _apply_policy_caps(
             policies,
             profile=args.profile,
@@ -1776,21 +1788,23 @@ def _run_recon(
                     timeout_seconds=args.codex_timeout,
                     main_model=models.attack_model,
                 )
-                attack_result = AttackCoordinator(
-                    agent=main_agent,
-                    planning_agent=attack_planning_agent,
-                    db_path=pipeline_path,
-                    scope_path=run_dir / "Scope.md",
-                    policy_path=run_dir / "TargetPolicy.json",
-                ).run(scan_id)
+                with model_call_context(scan_id=scan_id, stage="Attack"):
+                    attack_result = AttackCoordinator(
+                        agent=main_agent,
+                        planning_agent=attack_planning_agent,
+                        db_path=pipeline_path,
+                        scope_path=run_dir / "Scope.md",
+                        policy_path=run_dir / "TargetPolicy.json",
+                    ).run(scan_id)
                 work("attack", "execute", "finished")
                 work("chaining", "execute", "started")
-                chaining_result = ChainingCoordinator(
-                    agent=main_agent,
-                    db_path=pipeline_path,
-                    scope_path=run_dir / "Scope.md",
-                    policy_path=run_dir / "TargetPolicy.json",
-                ).run(scan_id)
+                with model_call_context(scan_id=scan_id, stage="Chaining"):
+                    chaining_result = ChainingCoordinator(
+                        agent=main_agent,
+                        db_path=pipeline_path,
+                        scope_path=run_dir / "Scope.md",
+                        policy_path=run_dir / "TargetPolicy.json",
+                    ).run(scan_id)
                 work("chaining", "execute", "finished")
                 from aidast.validation import build_native_validation_coordinator
 
@@ -2041,6 +2055,8 @@ def _apply_scope_host_exclusions(
 def _bind_exact_start_urls(
     policies: dict[tuple[str, str], TargetPolicy],
     start_urls: dict[tuple[str, str], str],
+    *,
+    scope_markdown: str,
 ) -> dict[tuple[str, str], TargetPolicy]:
     """Narrow selected policies to the operator-approved concrete URL."""
     result: dict[tuple[str, str], TargetPolicy] = {}
@@ -2073,6 +2089,7 @@ def _bind_exact_start_urls(
                 narrowed,
                 asset_type=narrowed.asset_type,
                 asset=narrowed.asset,
+                scope_markdown=scope_markdown,
             )
         except ValueError as exc:
             raise ReconCoordinatorError(

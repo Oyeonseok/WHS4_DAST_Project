@@ -45,6 +45,22 @@ def identify_program(program_url: str) -> ProgramScopePath:
                 "YesWeHack program URL must contain /programs/<program>"
             )
         program = segments[1]
+    elif host == "app.intigriti.com":
+        platform = "app-intigriti-com"
+        # Both public and authenticated Intigriti links end in ``/detail``.
+        # Using that last segment made every registered Intigriti program
+        # share one Scope directory. Bind storage to the organisation and
+        # program slugs instead.
+        offset = 1 if segments and segments[0].casefold() == "researcher" else 0
+        if (
+            len(segments) < offset + 3
+            or segments[offset].casefold() != "programs"
+        ):
+            raise ScopePathError(
+                "Intigriti program URL must contain /programs/<owner>/<program>"
+            )
+        owner = segments[offset + 1]
+        program = f"{owner}-{segments[offset + 2]}"
     else:
         platform = _slug(host.replace(".", "-"), "platform hostname")
         program = _segment_at(segments, -1, "program path")

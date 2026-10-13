@@ -104,9 +104,46 @@ def _snapshot(database: Path, scan_id: str) -> dict:
                     AND current_status='CONFIRMED' AND processing_phase='completed'
                     AND decision_stage_run_id=latest_stage_run_id""", (scan_id,),
             ).fetchone()[0]
+        attack = {
+            "available": (
+                "attack_coverage_items" in tables
+                or "attack_endpoint_reviews" in tables
+            ),
+            "review_statuses": {},
+            "endpoint_reviews": 0,
+            "coverage_statuses": {},
+            "coverage_items": 0,
+            "attempt_outcomes": {},
+            "attempts": 0,
+        }
+        if "attack_endpoint_reviews" in tables:
+            attack["review_statuses"] = _counts(
+                conn,
+                """SELECT status,count(*) FROM attack_endpoint_reviews
+                    WHERE scan_id=? GROUP BY status""",
+                scan_id,
+            )
+            attack["endpoint_reviews"] = sum(attack["review_statuses"].values())
+        if "attack_coverage_items" in tables:
+            attack["coverage_statuses"] = _counts(
+                conn,
+                """SELECT status,count(*) FROM attack_coverage_items
+                    WHERE scan_id=? GROUP BY status""",
+                scan_id,
+            )
+            attack["coverage_items"] = sum(attack["coverage_statuses"].values())
+        if "attack_attempts" in tables:
+            attack["attempt_outcomes"] = _counts(
+                conn,
+                """SELECT outcome,count(*) FROM attack_attempts
+                    WHERE scan_id=? GROUP BY outcome""",
+                scan_id,
+            )
+            attack["attempts"] = sum(attack["attempt_outcomes"].values())
         return {"scan": scan, "inventory": inventory, "stages": stages,
                 "tools": {"statuses": tool_statuses, "errors": tool_errors},
-                "validation": validation, "recon_quality": quality}
+                "validation": validation, "attack": attack,
+                "recon_quality": quality}
 
 
 def _replace_artifact(path: Path, text: str) -> None:
@@ -195,9 +232,28 @@ def write_scan_summary(
         markdown.extend(["", "## 정찰 품질", ""])
         markdown.extend(f"- {name}: {_markdown_text(value)}"
                         for name, value in summary["recon_quality"].items())
+    if summary["attack"]["available"]:
+        markdown.extend([
+            "", "## 공격 실행 결과", "",
+            f"- 검토한 엔드포인트: {summary['attack']['endpoint_reviews']}",
+            f"- 커버리지 항목: {summary['attack']['coverage_items']}",
+            f"- 기록된 HTTP 시도: {summary['attack']['attempts']}",
+        ])
+        markdown.extend(
+            f"- 엔드포인트 검토 상태 {_markdown_text(status)}: {count}"
+            for status, count in summary["attack"]["review_statuses"].items()
+        )
+        markdown.extend(
+            f"- 커버리지 상태 {_markdown_text(status)}: {count}"
+            for status, count in summary["attack"]["coverage_statuses"].items()
+        )
+        markdown.extend(
+            f"- 시도 결과 {_markdown_text(outcome)}: {count}"
+            for outcome, count in summary["attack"]["attempt_outcomes"].items()
+        )
     markdown.extend(["", "## 단계 상태", "", "| 단계 | 상태 | 오류 기록 |", "| --- | --- | --- |"])
     markdown.extend(f"| {_markdown_text(item['stage'])} | {_markdown_text(item['status'])} | "
-                    f"{'있음' if item['error_present'] else '없음'} |" for item in summary["stages"])
+                    f"{'있음' if item['error_present'] else '없음'} |" for item in latest_stages)
     markdown.extend(["", "## 오류 및 미완료 작업", "",
                      f"- 도구 오류 그룹: {len(summary['tools']['errors'])}",
                      f"- 보고서 또는 실행 오류: {len(issue_rows)}"])

@@ -391,6 +391,35 @@ def _scope_prohibited_activity_body(scope_markdown: str) -> str:
     return match.group("body") if match is not None else ""
 
 
+def _scope_explicitly_prohibits_http_method(body: str, method: str) -> bool:
+    """Recognize an HTTP verb prohibition without matching ordinary words.
+
+    A bare word-boundary check treats policy phrases such as
+    ``post-exploitation`` as a ban on the HTTP POST method.  Require either
+    HTTP/request/method context on the same line or a direct prohibition
+    phrase attached to the verb.
+    """
+    verb = re.escape(method)
+    for line in body.splitlines():
+        if re.search(rf"(?<![A-Za-z]){verb}(?![A-Za-z])", line, re.IGNORECASE) is None:
+            continue
+        if re.search(
+            r"(?<![A-Za-z])(?:http|requests?|methods?|verbs?)(?![A-Za-z])",
+            line,
+            re.IGNORECASE,
+        ):
+            return True
+        if re.search(
+            rf"(?<![A-Za-z]){verb}(?![A-Za-z])\s+"
+            r"(?:is|are|must\s+be)\s+"
+            r"(?:not\s+allowed|prohibited|forbidden|disallowed)",
+            line,
+            re.IGNORECASE,
+        ):
+            return True
+    return False
+
+
 def _valid_host_pattern(host: str) -> bool:
     value = host.lower().rstrip(".")
     if value.startswith("*."):
@@ -652,6 +681,12 @@ def validate_policy_for_target(
         if re.search(
             r"security (?:test|testing|assessment)|penetration test|"
             r"vulnerability (?:test|testing|assessment|validation)|"
+            r"automated (?:web (?:resource )?|api )?scann(?:ing|er)|"
+            r"(?:find|finding) security vulnerabilities?|"
+            r"test explicitly listed assets?|"
+            r"you may test (?:the )?assets? listed as in scope|"
+            r"demonstrate (?:authentication|authorization|isolation|"
+            r"documented-protection|business-logic).{0,200} failures?|"
             r"보안 (?:테스트|검증)|취약점 (?:테스트|검증)|능동",
             quote,
             re.IGNORECASE,
@@ -661,11 +696,7 @@ def validate_policy_for_target(
             )
         prohibited = _scope_prohibited_activity_body(scope_markdown)
         for method in mutation_methods:
-            if re.search(
-                rf"(?<![A-Za-z]){re.escape(method)}(?![A-Za-z])",
-                prohibited,
-                re.IGNORECASE,
-            ):
+            if _scope_explicitly_prohibits_http_method(prohibited, method):
                 raise ValueError(
                     f"Attack method {method} conflicts with Scope prohibited activities"
                 )

@@ -274,6 +274,47 @@ class ScopeAnalysis(StrictModel):
     ambiguities: list[str]
     source_evidence: Annotated[list[SourceEvidence], Field(min_length=1)]
 
+    @model_validator(mode="before")
+    @classmethod
+    def canonicalize_shared_input_labels(cls, value):
+        """Use one UI label when a value feeds both policy and header controls."""
+        if not isinstance(value, dict):
+            return value
+        headers = value.get("required_request_headers")
+        rules = value.get("execution_rules")
+        if not isinstance(headers, list) or not isinstance(rules, dict):
+            return value
+        canonical: dict[str, dict] = {}
+        for header in headers:
+            if not isinstance(header, dict) or not isinstance(header.get("inputs"), list):
+                continue
+            for item in header["inputs"]:
+                if isinstance(item, dict) and isinstance(item.get("key"), str):
+                    canonical.setdefault(item["key"], item)
+        required = rules.get("required_inputs")
+        if not isinstance(required, list):
+            return value
+        changed = False
+        normalized = []
+        for item in required:
+            replacement = item
+            if isinstance(item, dict) and isinstance(item.get("key"), str):
+                shared = canonical.get(item["key"])
+                if (
+                    shared is not None
+                    and item.get("kind") == shared.get("kind")
+                    and item.get("label") != shared.get("label")
+                ):
+                    replacement = {**item, "label": shared.get("label")}
+                    changed = True
+            normalized.append(replacement)
+        if not changed:
+            return value
+        return {
+            **value,
+            "execution_rules": {**rules, "required_inputs": normalized},
+        }
+
     @field_validator(
         "allowed_activities",
         "prohibited_activities",

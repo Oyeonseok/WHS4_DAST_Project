@@ -826,6 +826,25 @@ async def run_strix_recon(
         capture_file = capture_directory / "mitm_capture.jsonl"
         addon_path = project_root / "src" / "aidast" / "recon" / "tools" / "mitm_addon.py"
         safety_path = project_root / "src" / "aidast" / "core" / "http_safety.py"
+        proxy_dependency_paths = {
+            "core/request_governor.py": (
+                project_root / "src" / "aidast" / "core" / "request_governor.py"
+            ),
+            "core/capture_receipt.py": (
+                project_root / "src" / "aidast" / "core" / "capture_receipt.py"
+            ),
+            "core/exclusion_guard.py": (
+                project_root / "src" / "aidast" / "core" / "exclusion_guard.py"
+            ),
+            "recon/tools/request_identity.py": (
+                project_root
+                / "src"
+                / "aidast"
+                / "recon"
+                / "tools"
+                / "request_identity.py"
+            ),
+        }
         rules = build_strix_proxy_rules(
             scope, targets, request_headers=request_headers, read_only=read_only,
             max_requests=max_requests, target_policies=target_policies,
@@ -871,6 +890,10 @@ async def run_strix_recon(
             proxy_scope_rules=rules,
             proxy_addon_source=addon_path.read_text(encoding="utf-8"),
             proxy_safety_source=safety_path.read_text(encoding="utf-8"),
+            proxy_dependency_sources={
+                relative_path: path.read_text(encoding="utf-8")
+                for relative_path, path in proxy_dependency_paths.items()
+            },
             proxy_capture_path="/workspace/aidast-capture/mitm_capture.jsonl",
             proxy_capture_host_path=str(capture_file),
             event_sink=_safe_agent_event_sink(

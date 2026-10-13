@@ -175,6 +175,75 @@ def test_legacy_job_migration_keeps_null_canonical_fallback(tmp_path):
     manager.decide(program_id, YES)
     assert (tmp_path/'Scope'/'bugcrowd'/'example'/'Approval.json').is_file()
 
+
+def test_legacy_intigriti_detail_archives_migrate_to_distinct_program_paths(tmp_path):
+    urls = [
+        'https://app.intigriti.com/programs/digi/digi-vdp/detail',
+        'https://app.intigriti.com/researcher/programs/dpgm/devolkskrant/detail',
+    ]
+    registry = ProgramRegistry(tmp_path)
+    programs = [registry.register(ProgramRegistrationRequest(
+        program_url=url, visibility='public')) for url in urls]
+    assert {item['program'] for item in registry.list()} == {
+        'Digi Vdp', 'Devolkskrant',
+    }
+    manager = ScopeWorkflowManager(
+        tmp_path, registry, agent_factory=FakeMainAgent, worker_mode=True,
+    )
+    scope_ids = []
+    for index, (url, registered) in enumerate(zip(urls, programs, strict=True), start=1):
+        job_id = 'scopejob_' + str(index) * 32
+        legacy = (
+            tmp_path / 'Scope' / 'app-intigriti-com' / 'detail'
+            / 'revisions' / job_id
+        )
+
+        class ProgramAgent(FakeMainAgent):
+            def collect_scope(self, _url):
+                page = sample_page().model_copy(update={
+                    'requested_url': HttpUrl(url),
+                    'final_url': HttpUrl(url),
+                })
+                return page, sample_analysis().model_copy(update={
+                    'program_name': f'Program {index}',
+                })
+
+        document = ScopeCoordinator(legacy).collect(
+            url, main_agent=ProgramAgent(), approved_by='legacy-reviewer',
+            review=lambda _path: True,
+        )
+        scope_ids.append(document.scope_id)
+        with sqlite3.connect(manager.database) as conn:
+            conn.execute(
+                """INSERT INTO scope_jobs
+                   (job_id,program_key,status,login_mode,draft_path,error,
+                    created_at,updated_at,paused_from,output_path,model)
+                   VALUES (?,?,'approved','headless',NULL,NULL,'old','old',
+                           NULL,?,NULL)""",
+                (job_id, registry.get(registered['id'])['program_key'], str(legacy)),
+            )
+
+    migrated = ScopeWorkflowManager(
+        tmp_path, registry, agent_factory=FakeMainAgent, worker_mode=True,
+    )
+
+    expected = [
+        tmp_path / 'Scope' / 'app-intigriti-com' / 'digi-digi-vdp'
+        / 'revisions' / ('scopejob_' + '1' * 32),
+        tmp_path / 'Scope' / 'app-intigriti-com' / 'dpgm-devolkskrant'
+        / 'revisions' / ('scopejob_' + '2' * 32),
+    ]
+    assert all(path.is_dir() for path in expected)
+    assert [
+        migrated.approved_scope(program['id'])['scope']['scope_id']
+        for program in programs
+    ] == scope_ids
+    catalog = ApprovedScopeCatalog(tmp_path).list()
+    assert {item.program_id for item in catalog} == {
+        'app-intigriti-com-digi-digi-vdp',
+        'app-intigriti-com-dpgm-devolkskrant',
+    }
+
 def test_catalog_ignores_symlink_revision_nonjob_revision_and_unapproved_archive(setup):
     root, _, program_id, canonical, old, manager = setup
     start(manager, program_id)

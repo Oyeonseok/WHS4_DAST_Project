@@ -78,6 +78,38 @@ def test_query_shape_omits_values_and_marks_repeated_keys() -> None:
     assert query_signature("/search?q=secret&tag=a&tag=b") == "q&tag[]"
 
 
+def test_modern_image_formats_are_excluded_from_service_surface() -> None:
+    rows = [
+        {"method": "GET", "path": f"/img/partner.{extension}", "source": "browser",
+         "evidence": {"response_status": 200}}
+        for extension in ("webp", "avif")
+    ]
+
+    surface = judgment.merge_and_normalize(rows)
+
+    assert all(row["is_excluded"] for row in surface)
+    assert {row["exclude_reason"] for row in surface} == {"static_asset"}
+
+
+def test_public_discovery_metadata_is_inventory_not_service_surface() -> None:
+    rows = [
+        {"method": "GET", "path": path, "source": "browser",
+         "evidence": {"response_status": 200}}
+        for path in ("/robots.txt", "/sitemap.xml", "/manifest.webmanifest")
+    ]
+    rows.append({
+        "method": "GET", "path": "/api/export.xml", "source": "browser",
+        "evidence": {"response_status": 200},
+    })
+
+    surface = {row["path"]: row for row in judgment.merge_and_normalize(rows)}
+
+    assert all(surface[path]["exclude_reason"] == "static_asset" for path in (
+        "/robots.txt", "/sitemap.xml", "/manifest.webmanifest",
+    ))
+    assert not surface["/api/export.xml"]["is_excluded"]
+
+
 def test_redirect_loop_does_not_enter_discovery_seeds() -> None:
     rows = [
         {"method": "GET", "path": "/login/login/login", "source": "katana"},
