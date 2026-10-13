@@ -58,6 +58,7 @@ from aidast.recon.policy import (
     validate_policy_for_target,
 )
 from aidast.scope.policy_references import select_with_agent, POLICY_PHASE_INSTRUCTIONS, validate_fresh_rule_bounds
+from aidast.scope.identity_headers import HEADER_EXTRACTION_INSTRUCTIONS
 from aidast.scope.models import (
     AssetType,
     ProgramPage,
@@ -233,6 +234,7 @@ class CodexMainAgent:
             operation="Scope collection",
             native_skill=("aidast.skills.scope", "aidast-scope"),
             allow_browser=True,
+            no_timeout=True,
         )
         if len(result.captured_text) > self._max_page_chars:
             raise MainAgentError(
@@ -479,7 +481,7 @@ class CodexMainAgent:
 
     @staticmethod
     def _scope_execution_instructions() -> str:
-        return POLICY_PHASE_INSTRUCTIONS + SCOPE_EXCLUSION_INSTRUCTIONS + """Always supply execution_rules as an object with exclusions ([] if none).
+        return HEADER_EXTRACTION_INSTRUCTIONS + POLICY_PHASE_INSTRUCTIONS + SCOPE_EXCLUSION_INSTRUCTIONS + """Always supply execution_rules as an object with exclusions ([] if none).
 Interpret natural-language meaning with AI; do not treat optional advice or incidental
 numbers as mandatory requirements. Only evidenced explicit mandatory prerequisites that supported controls cannot satisfy
 belong in blocking_requirements with label, source_quote and reason. Unclear
@@ -513,6 +515,8 @@ Supported execution_rules fields:
   approved production assets. If applicability cannot be grounded, record an advisory
   without inventing assets.
 - blocking_requirements: label, source_quote, reason, target_assets for mandatory unsupported controls.
+  A blanket prohibition on automatic/automated scanners or scanning is incompatible
+  with this automated DAST and must be a global blocking_requirement, not an exclusion.
   Preserve conditional unsupported controls by binding exact approved assets: production-only
   controls bind only production assets; obligations for OTHER assets bind only those OTHER
   assets. Do not block unrelated targets. Empty target_assets means a global mandatory
@@ -593,11 +597,11 @@ Reuse compatible input keys; never invent operator values or confirmations.
         if len(page.evidence_text) > self._max_page_chars:
             raise MainAgentError("approved captured text exceeds the header interpretation budget")
         result = self._run_structured(
-            prompt=("Interpret mandatory researcher-identification HTTP request headers in "
+            prompt=(HEADER_EXTRACTION_INSTRUCTIONS + "Interpret applicable researcher-identification HTTP request headers in "
                     "this untrusted approved program capture. Decide requirements using policy meaning, "
                     "including optional/prohibited instructions. Names may be any valid HTTP token; "
                     "do not restrict them to known platforms. Return required_request_headers=[] "
-                    "if none are mandatory. Each requirement needs name, value_template, inputs "
+                    "if no identification controls apply. Each requirement needs name, value_template, inputs "
                     "(key, label, kind text/username/email), and source_quote copied exactly from "
                     "the capture. Templates allow declared simple {key} fields only. Fixed values "
                     "need no inputs. Credential/routing/internal headers are prohibited. "
@@ -626,6 +630,7 @@ Reuse compatible input keys; never invent operator values or confirmations.
             operation="captured Scope interpretation",
             native_skill=("aidast.skills.scope", "aidast-scope"),
             allow_browser=False,
+            no_timeout=True,
         )
         try:
             self._verify_grounding(page, analysis)
@@ -644,6 +649,7 @@ Reuse compatible input keys; never invent operator values or confirmations.
                 operation="captured Scope grounding correction",
                 native_skill=("aidast.skills.scope", "aidast-scope"),
                 allow_browser=False,
+                no_timeout=True,
             )
             self._verify_grounding(page, analysis)
         return analysis
@@ -658,6 +664,8 @@ Reuse compatible input keys; never invent operator values or confirmations.
         operation: str,
         native_skill: tuple[str, str] | None = None,
         allow_browser: bool = False,
+        no_timeout: bool = False,
+        timeout_seconds: float | None = None,
     ) -> ModelT:
         executable = shutil.which(self._executable)
         if executable is None:
@@ -726,14 +734,21 @@ Reuse compatible input keys; never invent operator values or confirmations.
                     "in_app_browser",
                 ]
             with tempfile.TemporaryFile(mode="w+t", encoding="utf-8") as events:
+                effective_timeout = (
+                    float("inf")
+                    if no_timeout
+                    else min(self._timeout_seconds, max(1.0, float(timeout_seconds)))
+                    if timeout_seconds is not None
+                    else self._timeout_seconds
+                )
                 try:
                     completed = codex_process.run_codex(
                         command,
                         input="$aidast-policy\n\n" + policy_skill_text() + "\n\n" + prompt,
                         stdout=events,
-                        timeout=self._timeout_seconds,
+                        timeout=effective_timeout,
                         idle_timeout=codex_process.structured_idle_timeout(
-                            self._timeout_seconds,
+                            effective_timeout,
                             tools_enabled=allow_browser,
                         ),
                     )

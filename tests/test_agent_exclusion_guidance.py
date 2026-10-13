@@ -32,7 +32,7 @@ def reviewed_document(*, field='semantic', bound=None, direct=False):
         data['source_evidence'].append(dict(section='Scope', quote=bound))
         doc = doc.model_copy(update={'source': source, 'analysis': type(doc.analysis).model_validate(data)})
         rule = rule.model_copy(update={'target_assets': [bound]})
-    rules = doc.analysis.execution_rules.model_copy(update={'exclusions': [rule], 'policy_review_version': 2})
+    rules = doc.analysis.execution_rules.model_copy(update={'exclusions': [rule], 'policy_review_version': 3})
     return doc.model_copy(update={'analysis': doc.analysis.model_copy(update={'execution_rules': rules})})
 
 

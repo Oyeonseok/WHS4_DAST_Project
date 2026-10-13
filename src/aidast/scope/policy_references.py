@@ -60,6 +60,7 @@ def select_with_agent(agent, page_text: str, candidates: list[ObservedPolicyLink
             + json.dumps({'text': page_text, 'candidates': [i.model_dump() for i in candidates]}, ensure_ascii=False)),
         model_type=PolicyReferenceSelection, artifact_name='scope-policy-selection',
         operation='Scope referenced-policy selection', allow_browser=False,
+        no_timeout=True,
     )
     return validate_selection(result, page_text, candidates)
 
@@ -187,5 +188,5 @@ def require_unresolved_testing_holds(page: ProgramPage, analysis: ScopeAnalysis)
                         'Avoid an individual operation when its authorization or policy applicability is unclear; '
                         'record the uncertainty and consult the referenced policy when available.',
         })
-    data['execution_rules']['policy_review_version'] = 2
+    data['execution_rules']['policy_review_version'] = 3
     return ScopeAnalysis.model_validate(data)
