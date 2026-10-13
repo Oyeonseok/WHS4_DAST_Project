@@ -272,8 +272,9 @@ def _parser() -> argparse.ArgumentParser:
         help="compile and preview per-target policy without running any recon tool",
     )
     recon.add_argument(
-        "--recon-engine", choices=("legacy", "strix"), default="legacy",
-        help="select the Recon executor; Strix uses the approved Scope proxy boundary",
+        "--recon-engine", choices=("strix",), default="strix",
+        help="select the Recon executor; Strix uses the approved Scope proxy boundary "
+             "(the legacy ReconExecutor path is retired and no longer selectable)",
     )
     recon.add_argument("--refresh-exclusions", action="store_true",
                        help="explicitly refresh exclusion classifications from existing captures (requires --policy-only)")
@@ -419,8 +420,9 @@ def _parser() -> argparse.ArgumentParser:
     )
     run.add_argument("--start-url")
     run.add_argument(
-        "--recon-engine", choices=("legacy", "strix"), default="legacy",
-        help="select the Recon executor for the integrated run",
+        "--recon-engine", choices=("strix",), default="strix",
+        help="select the Recon executor for the integrated run "
+             "(the legacy ReconExecutor path is retired and no longer selectable)",
     )
     run.add_argument(
         "--profile", choices=EXECUTION_PROFILE_CHOICES, default=None

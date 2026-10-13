@@ -78,7 +78,7 @@ class ScanLaunchRequest(BaseModel):
     scope_id: str = Field(min_length=1, max_length=160)
     targets: list[str] = Field(min_length=1, max_length=64)
     profile: ProfileId = "safe-recon"
-    recon_engine: Literal["legacy", "strix"] = "legacy"
+    recon_engine: Literal["strix"] = "strix"
     max_requests: int = Field(default=500, ge=1, le=2000)
     max_rps: float | None = Field(default=None, gt=0, le=50)
     max_concurrency: int | None = Field(default=None, ge=1, le=20)
