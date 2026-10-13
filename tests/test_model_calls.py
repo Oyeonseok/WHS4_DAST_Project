@@ -204,6 +204,27 @@ class ModelCallLogTests(unittest.TestCase):
         self.assertIsNone(events[0]["requested_model"])
         self.assertNotIn("private exception text", self.database.read_bytes().decode("utf-8", errors="ignore"))
 
+    def test_attack_planning_operation_has_specific_telemetry_code(self) -> None:
+        class Agent:
+            _main_model = "gpt-6.1-sol"
+
+            @logged_model_call("structured", model_attribute="_main_model")
+            def run(self, *, operation: str, prompt: str) -> dict:
+                return {"endpoints": []}
+
+        with (
+            using_model_call_sink(SQLiteModelCallSink(self.root)),
+            model_call_context(scan_id="scan-attack", stage="Attack"),
+        ):
+            Agent().run(
+                operation="plan endpoint Attack hypotheses", prompt="bounded",
+            )
+        events, _ = read_model_call_events(self.root)
+        completed = next(item for item in events if item["state"] == "success")
+        self.assertEqual(completed["operation_code"], "attack_hypotheses")
+        self.assertEqual(completed["scan_id"], "scan-attack")
+        self.assertEqual(completed["stage"], "Attack")
+
     def test_structured_adapters_preserve_deadline_reason_as_error_cause(self) -> None:
         from aidast.agents.main import CodexMainAgent, MainAgentError
         from aidast.agents.native_pipeline import (

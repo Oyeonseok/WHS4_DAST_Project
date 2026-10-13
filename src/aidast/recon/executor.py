@@ -617,15 +617,27 @@ class ReconExecutor:
             return
         self._scheduled_hosts.add(scheduled_key)
         self._discovered_parent[hostname] = (parent.scope_id, parent.target.asset)
-        child_policy = wildcard_policy.model_copy(
-            update={
-                "asset_type": AssetType.DOMAIN,
-                "asset": hostname,
-                "allowed_hosts": [hostname],
-                "include_subdomains": False,
-                "policy_id": f"{wildcard_policy.policy_id}:host:{hostname}",
-            }
+        policy_data = wildcard_policy.model_dump(mode="python")
+        if wildcard_policy.request_exclusions is not None:
+            # The compiled rules and their digest remain the approved Scope
+            # snapshot.  Only the guard's execution binding follows the
+            # discovered child policy.  Rule target_assets still describe the
+            # original Scope and are evaluated against this exact child host.
+            policy_data["request_exclusions"] = (
+                wildcard_policy.request_exclusions.model_copy(
+                    update={"target_asset": hostname}
+                )
+            )
+        policy_data.update(
+            asset_type=AssetType.DOMAIN,
+            asset=hostname,
+            allowed_hosts=[hostname],
+            include_subdomains=False,
+            policy_id=f"{wildcard_policy.policy_id}:host:{hostname}",
         )
+        # Validate now instead of allowing model_copy to carry an inconsistent
+        # parent guard until OfflineReconReview serializes the policy later.
+        child_policy = TargetPolicy.model_validate(policy_data)
         self.target_policies[(AssetType.DOMAIN.value, hostname)] = child_policy
         previous = parent.task_id
         for sequence, step in enumerate(

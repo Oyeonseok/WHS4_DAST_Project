@@ -197,7 +197,9 @@ def test_resume_cli_refreshes_stale_partial_scan_summary_and_model_choices(tmp_p
     assert summary["errors"] == []
     assert any(stage["stage"] == "attack" and stage["status"] == "failed" for stage in summary["stages"])
     assert summary["latest_stages"][-1]["stage"] == "report"
-    assert summary["latest_stages"][-1]["status"] == "skipped"
+    # A successfully published zero-finding ScanSummary is still a completed
+    # report stage; the summary explains that this is not proof of absence.
+    assert summary["latest_stages"][-1]["status"] == "completed"
     assert "InterruptedRun" not in summary["markdown"]
 
 

@@ -227,12 +227,16 @@ def selected_startup_operations(
         if url is None and target.asset_type in {AssetType.URL,AssetType.API}:
             url=default_start_url_for_target(target.asset_type, target.asset)
         if plan is None:
-            if target.asset_type is AssetType.WILDCARD and url:
+            # A dashboard-supplied start URL has already been checked against
+            # the selected Scope asset.  It therefore gives DOMAIN and IP
+            # targets the same complete, enforceable GET descriptor as URL,
+            # API and narrowed wildcard targets.  Without an explicit URL a
+            # DOMAIN/IP target still remains pending until the offline plan
+            # identifies its startup capabilities.
+            if url:
                 operations=[StartupOperation('HTTP_PROBE',url)]
             elif target.asset_type is AssetType.WILDCARD:
                 operations=[StartupOperation('ASSET_DISCOVERY')]
-            elif target.asset_type in {AssetType.URL,AssetType.API} and url:
-                operations=[StartupOperation('HTTP_PROBE',url)]
             else:
                 operations=[StartupOperation('UNKNOWN_STARTUP')]
         elif key not in planned:

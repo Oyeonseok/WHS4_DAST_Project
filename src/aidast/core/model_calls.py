@@ -55,6 +55,7 @@ _OPERATIONS = {
     "impact development planning": "impact_planning",
     "ffuf root selection": "ffuf_root_selection",
     "endpoint annotation": "endpoint_annotation",
+    "plan endpoint Attack hypotheses": "attack_hypotheses",
 }
 _OPERATION_CODES = frozenset(_OPERATIONS.values()) | {
     "structured_other", "attack_orchestrator", "chaining_orchestrator",

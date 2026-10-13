@@ -475,6 +475,29 @@ def test_unknown_domain_or_ip_startup_is_pending_not_a_hypothetical_get(tmp_path
         prepared.require_ready()
 
 
+@pytest.mark.parametrize('kind,asset,start_url',[
+    ('DOMAIN','example.com','https://example.com/'),
+    ('IP_ADDRESS','127.0.0.1','https://127.0.0.1/'),
+])
+def test_explicit_domain_or_ip_start_url_is_a_complete_http_probe(
+    tmp_path, kind, asset, start_url,
+):
+    doc=retarget_document(kind,asset)
+    target=doc.analysis.in_scope_assets[0]
+    starts={(target.asset_type.value,target.asset):start_url}
+
+    operations=api().selected_startup_operations([target],start_urls=starts)
+
+    assert operations[asset] == [api().StartupOperation('HTTP_PROBE',start_url)]
+    prepared=api().prepare_exclusions(
+        document=doc,analysis=doc.analysis,targets=[target],result_root=tmp_path,
+        database_paths=[],cache_only=True,start_urls=starts,
+    )
+    prepared.require_ready()
+    assert prepared.diagnostics[0]['decision']=='continue'
+    assert prepared.diagnostics[0]['url']==start_url
+
+
 def test_empty_startup_diagnostics_cannot_prove_readiness():
     with pytest.raises(ValueError,match='startup'):
         api().ExclusionPreparation({},[]).require_ready()

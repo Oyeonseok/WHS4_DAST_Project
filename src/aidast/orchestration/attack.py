@@ -91,6 +91,9 @@ class AttackCoordinator:
                 batch_size=8,
                 progress=lambda processed, total: self._planning_progress(scan_id, processed, total),
                 stage_run_id=planning_stage,
+                retry_progress=lambda processed, total, retry, reason: self._planning_progress(
+                    scan_id, processed, total, transport_retry=retry,
+                    transport_reason=reason),
                 repair_progress=lambda processed, total, attempt, issues: self._planning_progress(
                     scan_id, processed, total, repair_attempt=attempt, issue_count=issues))
             manifest = ensure_coverage_manifest(self._db_path, scan_id)
@@ -107,9 +110,15 @@ class AttackCoordinator:
                 db_path=str(self._db_path), stage_run_id=planning_stage,
                 summary='Every endpoint was reviewed; no evidence-grounded executable hypothesis was identified.')
         try:
+            # Keep one execution batch narrow enough for a real-program
+            # assessment while still amortizing the native model startup.
+            execution_batch_size = 4
             result = ExhaustiveAttackCoordinator(agent=self._agent, db_path=self._db_path,
-                scope_path=self._scope_path, policy_path=self._policy_path, batch_size=8,
-                max_batches=min(1000, max(100, ((manifest.total + 7) // 8) * 3))).run(scan_id)
+                scope_path=self._scope_path, policy_path=self._policy_path,
+                batch_size=execution_batch_size,
+                max_batches=min(1000, max(100,
+                    ((manifest.total + execution_batch_size - 1)
+                     // execution_batch_size) * 3))).run(scan_id)
         except BaseException as exc:
             with closing(sqlite3.connect(self._db_path)) as conn, conn:
                 latest = conn.execute("SELECT stage_run_id,status FROM stage_runs WHERE scan_id=? AND stage='attack' ORDER BY rowid DESC LIMIT 1", (scan_id,)).fetchone()
@@ -256,7 +265,11 @@ class AttackCoordinator:
             return
 
     @staticmethod
-    def _planning_progress(scan_id: str, processed: int, total: int, *, repair_attempt: int | None = None, issue_count: int = 0) -> None:
+    def _planning_progress(
+        scan_id: str, processed: int, total: int, *,
+        repair_attempt: int | None = None, issue_count: int = 0,
+        transport_retry: int | None = None, transport_reason: str = "",
+    ) -> None:
         root = os.environ.get('AIDAST_RESULT_ROOT')
         if not root:
             return
@@ -267,7 +280,11 @@ class AttackCoordinator:
                 'message_params': {'agent': 'attack', 'step': 'planning', 'state': 'progress',
                                    'processed': processed, 'endpoint_total': total,
                                    **({'repair_attempt': repair_attempt, 'repair_limit': 2,
-                                       'validation_issue_count': issue_count} if repair_attempt is not None else {})}})
+                                       'validation_issue_count': issue_count} if repair_attempt is not None else {}),
+                                   **({'transport_retry': transport_retry,
+                                       'transport_retry_limit': 2,
+                                       'transport_reason': transport_reason}
+                                      if transport_retry is not None else {})}})
 
     def run_selected_skills(self, scan_id: str) -> AttackStageResult:
         """Legacy explicit Skill-batch entrypoint; normal scans use endpoint coverage."""

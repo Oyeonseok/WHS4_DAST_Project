@@ -10,7 +10,7 @@ from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import unquote, urlsplit, urlunsplit
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -57,6 +57,19 @@ class ProgramRegistry:
                     created_at TEXT NOT NULL
                 )"""
             )
+            # Refresh derived identity columns after platform-specific path
+            # parsing changes. The URL hash remains the stable public key.
+            rows = conn.execute(
+                "SELECT program_key,program_url FROM registered_programs"
+            ).fetchall()
+            for program_key, program_url in rows:
+                path = identify_program(str(program_url))
+                conn.execute(
+                    """UPDATE registered_programs SET platform=?,program_slug=?
+                       WHERE program_key=?""",
+                    (path.platform, path.program, program_key),
+                )
+            conn.commit()
 
     def register(self, request: ProgramRegistrationRequest) -> dict[str, Any]:
         path = identify_program(request.program_url)
@@ -67,6 +80,7 @@ class ProgramRegistry:
                 """INSERT INTO registered_programs
                 (program_key,program_url,platform,program_slug,visibility,created_at)
                 VALUES (?,?,?,?,?,?) ON CONFLICT(program_key) DO UPDATE SET
+                platform=excluded.platform,program_slug=excluded.program_slug,
                 visibility=excluded.visibility""",
                 (
                     key,
@@ -81,6 +95,16 @@ class ProgramRegistry:
                 "SELECT * FROM registered_programs WHERE program_key=?", (key,)
             ).fetchone()
         return self._public(row)
+
+    def records(self) -> list[dict[str, Any]]:
+        """Return trusted local records for cooperating dashboard services."""
+        with self._lock, closing(sqlite3.connect(self.database)) as conn:
+            conn.row_factory = sqlite3.Row
+            return [
+                dict(row) for row in conn.execute(
+                    "SELECT * FROM registered_programs ORDER BY created_at"
+                )
+            ]
 
     def list(self, statuses: dict[str, dict[str, Any]] | None = None) -> list[dict[str, Any]]:
         with self._lock, closing(sqlite3.connect(self.database)) as conn:
@@ -126,10 +150,24 @@ class ProgramRegistry:
             values = dict(row)
         private = values["visibility"] == "private"
         slug = str(values["program_slug"])
+        display_slug = slug
+        if values["platform"] == "app-intigriti-com":
+            segments = [
+                unquote(segment) for segment in
+                urlsplit(str(values["program_url"])).path.split("/") if segment
+            ]
+            offset = (
+                1 if segments and segments[0].casefold() == "researcher" else 0
+            )
+            if len(segments) >= offset + 3:
+                display_slug = segments[offset + 2]
         result = {
             "id": f"registered-{values['program_key'][:12]}",
             "platform": str(values["platform"]),
-            "program": "Private program" if private else slug.replace("-", " ").title(),
+            "program": (
+                "Private program" if private
+                else display_slug.replace("-", " ").title()
+            ),
             "visibility": values["visibility"],
             "scope_status": "scope_required",
             "created_at": values["created_at"],

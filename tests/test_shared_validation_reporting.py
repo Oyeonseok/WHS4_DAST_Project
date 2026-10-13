@@ -397,7 +397,7 @@ class SharedValidationReportingTests(unittest.TestCase):
         self.assertTrue((output_root / "ScanSummary.json").is_file())
         self.assertTrue((output_root / "ScanSummary.md").is_file())
         self.assertFalse((output_root / "Report.md").exists())
-        self.assertEqual(self.conn.execute("SELECT status FROM stage_runs WHERE stage='report'").fetchone()[0], "skipped")
+        self.assertEqual(self.conn.execute("SELECT status FROM stage_runs WHERE stage='report'").fetchone()[0], "completed")
 
     def test_auto_reports_use_selected_report_model(self):
         evidence = self.complete()

@@ -80,6 +80,88 @@ def test_normal_tags_create_parameter_bound_hypotheses_and_account_for_unknowns(
     assert 'evidence_json' not in ordinary_observation
 
 
+def test_planner_receives_response_structure_without_captured_values(tmp_path):
+    from aidast.attack.recon_hypotheses import plan_recon_attack
+
+    path = pipeline(tmp_path)
+    with sqlite3.connect(path) as conn:
+        endpoint_id = conn.execute(
+            "SELECT endpoint_id FROM endpoints WHERE normalized_path='/search'"
+        ).fetchone()[0]
+        db.insert_http_transaction(
+            conn,
+            endpoint_id=endpoint_id,
+            source="fixture",
+            method="GET",
+            url="https://example.test/search?q=private-query-value",
+            request_headers={
+                "Origin": "https://reader.example",
+                "Authorization": "Bearer private-request-token",
+            },
+            request_body=None,
+            response_status=200,
+            response_headers={
+                "Content-Type": "application/json",
+                "Access-Control-Allow-Origin": "https://reader.example",
+                "Access-Control-Allow-Credentials": "true",
+                "Vary": "Origin",
+                "Content-Security-Policy": "default-src 'self'; script-src 'nonce-private-csp-value'",
+                "Set-Cookie": "session=private-cookie; HttpOnly; Secure",
+                "Location": "https://example.test/next?token=private-location-token&view=private-view",
+            },
+            response_body=json.dumps({
+                "account": {"id": 7, "email": "private@example.test"},
+                "access_token": "private-response-token",
+                "items": [{"name": "private-name"}],
+            }).encode(),
+            content_type="application/json",
+        )
+
+    agent = Planner()
+    plan_recon_attack(path, "scan", agent=agent)
+    search = next(
+        endpoint for call in agent.contexts for endpoint in call["endpoints"]
+        if endpoint["path"] == "/search"
+    )
+    serialized = json.dumps(search, ensure_ascii=False)
+    for secret in (
+        "private-query-value", "private-request-token", "private-cookie",
+        "private-location-token", "private-view", "private@example.test",
+        "private-response-token", "private-name", "private-csp-value",
+    ):
+        assert secret not in serialized
+    profile = search["response_evidence"][0]
+    assert profile["body"]["json_shape"] == {
+        "type": "object",
+        "fields": {
+            "account": {
+                "type": "object",
+                "fields": {"id": "number", "email": "string"},
+            },
+            "access_token": "string",
+            "items": {
+                "type": "array",
+                "item": {
+                    "type": "object",
+                    "fields": {"name": "string"},
+                },
+            },
+        },
+    }
+    controls = profile["security_controls"]
+    assert controls["cors"] == {
+        "vary_origin": True,
+        "allow_origin_class": "request_origin",
+        "allow_credentials": True,
+    }
+    assert controls["content_security_policy"] == {
+        "enforced": True,
+        "report_only": False,
+        "directive_names": ["default-src", "script-src"],
+    }
+    assert controls["redirect_location"] == "https://example.test/next?view="
+
+
 def test_black_box_planning_never_consumes_source_or_benchmark_answers(tmp_path):
     from aidast.attack.recon_hypotheses import plan_recon_attack
 
@@ -224,6 +306,28 @@ def test_grounded_baseline_reviews_observed_successful_api_reads_for_exposure():
     assert 'api_misconfig' in {item.vuln_class for item in hypotheses}
 
 
+def test_grounded_baseline_reviews_observed_http_authentication_boundary():
+    from aidast.attack.coverage import hypothesis_skill_catalog
+    from aidast.attack.recon_hypotheses import _grounded_baseline_hypotheses
+
+    hypotheses = _grounded_baseline_hypotheses({
+        'path': '/private', 'method': 'GET', 'auth_required': False,
+        'http_statuses': [401], 'parameters': [], 'technology_context': {},
+        'response_header_names': ['www-authenticate'],
+        'response_evidence': [{
+            'status': 401,
+            'security_controls': {
+                'authentication_challenge_schemes': ['bearer'],
+            },
+        }],
+    }, hypothesis_skill_catalog())
+
+    assert {
+        (item.vuln_class, item.required_identity_role)
+        for item in hypotheses
+    } >= {('auth_bypass', 'unauthenticated')}
+
+
 @pytest.mark.parametrize(
     ('path', 'method', 'expected'),
     [
@@ -331,11 +435,25 @@ def test_attack_plans_exact_public_client_declarations_but_not_inferred_crud(tmp
                 'verification_status': 'candidate', 'traffic_class': 'passive',
             },
             {
+                'method': 'GET', 'path': '/marketing-only',
+                'url': 'https://example.test/marketing-only',
+                'source': 'passive_declaration',
+                'discovery_kind': 'sitemap_declaration',
+                'verification_status': 'candidate', 'traffic_class': 'passive',
+            },
+            {
                 'method': 'GET', 'path': '/%7B%7Bhref%7D%7D',
                 'url': 'https://example.test/%7B%7Bhref%7D%7D',
                 'source': 'playwright_http', 'discovery_kind': 'http_request',
             },
         ])
+        # Recon may retain a sitemap candidate as ordinary inventory after a
+        # duplicate UI declaration clears its exclusion bit. Candidate status
+        # still means Attack has no network or first-party API-call evidence.
+        conn.execute(
+            "UPDATE endpoints SET is_excluded=0 "
+            "WHERE normalized_path='/marketing-only'"
+        )
 
     agent = Planner()
     result = plan_recon_attack(path, 'scan', agent=agent)
@@ -348,6 +466,7 @@ def test_attack_plans_exact_public_client_declarations_but_not_inferred_crud(tmp
     }
     assert '/rest/chat' in planned_paths
     assert '/api/Guesses/{id}' not in planned_paths
+    assert '/marketing-only' not in planned_paths
     assert '/%7B%7Bhref%7D%7D' not in planned_paths
     assert result['total_endpoints'] == 3
     assert manifest.by_vulnerability['llm_ai'] == 1
@@ -460,7 +579,7 @@ def test_more_than_eight_hypotheses_are_retained(tmp_path):
     assert ensure_coverage_manifest(path, 'scan').total == 12
 
 
-def test_normal_attack_processes_the_whole_endpoint_queue_in_batches_of_eight(tmp_path):
+def test_normal_attack_processes_the_whole_endpoint_queue_in_bounded_batches(tmp_path):
     from aidast.attack.coverage import VULNERABILITY_SKILLS
     from aidast.orchestration.attack import AttackCoordinator
     from test_attack_coverage import UnsupportedCoverageAgent
@@ -478,7 +597,7 @@ def test_normal_attack_processes_the_whole_endpoint_queue_in_batches_of_eight(tm
     policy.write_text('{"policies":[]}')
     result = AttackCoordinator(agent=agent, db_path=path, scope_path=scope, policy_path=policy).run('scan')
     assert result.status == 'COMPLETED'
-    assert [len(call['attack_tasks']) for call in agent.calls] == [8, 4]
+    assert [len(call['attack_tasks']) for call in agent.calls] == [4, 4, 4]
     assert all(task.get('endpoint_id') and task.get('coverage_id')
                for call in agent.calls for task in call['attack_tasks'])
     with sqlite3.connect(path) as conn:
@@ -915,6 +1034,71 @@ def test_planning_streams_every_endpoint_through_bounded_model_batches(tmp_path)
     assert [len(batch['endpoints']) for batch in agent.contexts] == [16,4]
     assert result == {'total_endpoints':20,'by_status':{'insufficient_evidence':19,'planned':1}}
     assert progress[-1] == (20,20)
+
+
+def test_planning_retries_transient_structured_invocation_without_losing_batch(
+    tmp_path, monkeypatch,
+):
+    from aidast.agents.main import MainAgentError
+    from aidast.attack.recon_hypotheses import plan_recon_attack
+
+    path = pipeline(tmp_path)
+
+    class TransientPlanner(Planner):
+        def __init__(self):
+            super().__init__()
+            self.attempts = 0
+
+        def _run_structured(self, **kwargs):
+            self.attempts += 1
+            if self.attempts == 1:
+                raise MainAgentError(
+                    "Codex planner exited temporarily",
+                    failure_code="nonzero_exit", exit_code=1,
+                    diagnostic_source="jsonl",
+                )
+            return super()._run_structured(**kwargs)
+
+    monkeypatch.setattr("aidast.attack.recon_hypotheses.time.sleep", lambda _delay: None)
+    retries = []
+    agent = TransientPlanner()
+    result = plan_recon_attack(
+        path, "scan", agent=agent,
+        retry_progress=lambda *args: retries.append(args),
+    )
+
+    assert agent.attempts == 2
+    assert retries == [(0, 2, 1, "nonzero_exit")]
+    assert result["total_endpoints"] == 2
+    assert ensure_coverage_manifest(path, "scan").total == 2
+
+
+def test_planning_does_not_retry_policy_refusal(tmp_path, monkeypatch):
+    from aidast.agents.main import MainAgentError
+    from aidast.attack.recon_hypotheses import plan_recon_attack
+
+    path = pipeline(tmp_path)
+
+    class RefusingPlanner:
+        attempts = 0
+
+        def _run_structured(self, **_kwargs):
+            self.attempts += 1
+            raise MainAgentError(
+                "Codex planner exited",
+                failure_code="nonzero_exit", exit_code=1,
+                diagnostic="cybersecurity safety rejection",
+                diagnostic_source="jsonl",
+            )
+
+    monkeypatch.setattr(
+        "aidast.attack.recon_hypotheses.time.sleep",
+        lambda _delay: pytest.fail("policy refusal must not be retried"),
+    )
+    agent = RefusingPlanner()
+    with pytest.raises(MainAgentError):
+        plan_recon_attack(path, "scan", agent=agent)
+    assert agent.attempts == 1
 
 
 class RepairingPlanner(Planner):

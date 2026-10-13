@@ -87,7 +87,78 @@ def test_strix_capture_is_canonicalized_and_persisted_for_attack(tmp_path: Path)
         executor.close()
 
 
-def test_integrated_executor_falls_back_when_strix_runtime_is_blocked(tmp_path: Path) -> None:
+def test_strix_capture_reconciles_value_free_form_declarations(tmp_path: Path) -> None:
+    target = ScopeAsset(
+        asset_type=AssetType.URL,
+        asset="https://example.test/",
+        description="authorized form target",
+        eligibility="test",
+        maximum_severity="Critical",
+    )
+    scope = _scope(target)
+    capture_dir = tmp_path / "capture"
+
+    async def fake_run(*_args, **_kwargs):
+        capture_dir.mkdir(parents=True, exist_ok=True)
+        capture = capture_dir / "mitm_capture.jsonl"
+        capture.write_text(json.dumps({
+            "source": "mitmproxy",
+            "method": "GET",
+            "url": "https://example.test/",
+            "request_headers": {},
+            "request_body": None,
+            "response_status": 200,
+            "response_headers": {"Content-Type": "text/html"},
+            "response_body": (
+                '<form action="/session" method="post">'
+                '<input name="username" value="private-user">'
+                '<input name="password" type="password" value="private-password">'
+                '</form>'
+            ),
+            "content_type": "text/html",
+            "capture_bodies": True,
+            "policy_blocked": False,
+        }) + "\n", encoding="utf-8")
+        return object(), capture, build_strix_proxy_rules(
+            scope, [target],
+            execution_limits={"max_requests": 25, "budget_total": 25},
+        )
+
+    executor = StrixReconExecutor(
+        scan_id="scan_strix_form",
+        scope_document=scope,
+        targets=[target],
+        db_path=tmp_path / "Recon.db",
+        capture_directory=capture_dir,
+    )
+    try:
+        with patch("aidast.recon.strix_executor.run_strix_recon", side_effect=fake_run):
+            assert executor.run([]) == 0
+        endpoint = executor.conn.execute(
+            """SELECT endpoint_id,method,normalized_path,is_excluded,exclude_reason
+               FROM endpoints WHERE normalized_path='/session'"""
+        ).fetchone()
+        assert endpoint[1:] == (
+            "POST", "/session", 1, "unverified_candidate",
+        )
+        assert executor.conn.execute(
+            "SELECT name,location FROM parameters WHERE endpoint_id=? ORDER BY name",
+            (endpoint[0],),
+        ).fetchall() == [("password", "form"), ("username", "form")]
+        observation = executor.conn.execute(
+            """SELECT discovery_kind,evidence_json FROM endpoint_observations
+               WHERE endpoint_id=?""", (endpoint[0],),
+        ).fetchone()
+        assert observation[0] == "form_action"
+        assert "private-user" not in (observation[1] or "")
+        assert "private-password" not in (observation[1] or "")
+    finally:
+        executor.close()
+
+
+def test_integrated_executor_falls_back_when_strix_runtime_is_blocked(
+    tmp_path: Path, capsys,
+) -> None:
     target = ScopeAsset(
         asset_type=AssetType.DOMAIN,
         asset="example.com",
@@ -112,8 +183,65 @@ def test_integrated_executor_falls_back_when_strix_runtime_is_blocked(tmp_path: 
     ):
         assert executor.run([]) == 0
     fallback.run.assert_called_once_with([])
+    assert "RuntimeError: docker unavailable" in capsys.readouterr().out
     executor.close()
     fallback.close.assert_called_once()
+
+
+def test_integrated_executor_preserves_partial_capture_before_fallback(
+    tmp_path: Path, capsys,
+) -> None:
+    target = ScopeAsset(
+        asset_type=AssetType.URL,
+        asset="https://example.com/",
+        description="authorized target",
+        eligibility="test",
+        maximum_severity="Critical",
+    )
+    scope = _scope(target)
+    capture_dir = tmp_path / "capture"
+    fallback = MagicMock()
+    fallback.auth_session_files = []
+    fallback.run.return_value = 0
+
+    async def interrupted_run(*_args, **_kwargs):
+        capture_dir.mkdir(parents=True, exist_ok=True)
+        (capture_dir / "mitm_capture.jsonl").write_text(json.dumps({
+            "source": "mitmproxy",
+            "method": "GET",
+            "url": "https://example.com/api/status",
+            "request_headers": {},
+            "request_body": None,
+            "response_status": 200,
+            "response_headers": {"Content-Type": "application/json"},
+            "response_body": '{"ok":true}',
+            "content_type": "application/json",
+            "capture_bodies": True,
+            "policy_blocked": False,
+        }) + "\n", encoding="utf-8")
+        raise RuntimeError("provider stream interrupted")
+
+    executor = StrixReconExecutor(
+        scan_id="scan_partial_strix",
+        scope_document=scope,
+        targets=[target],
+        db_path=tmp_path / "Recon.db",
+        capture_directory=capture_dir,
+        fallback_factory=lambda: fallback,
+    )
+    try:
+        with patch(
+            "aidast.recon.strix_executor.run_strix_recon",
+            side_effect=interrupted_run,
+        ):
+            assert executor.run([]) == 0
+        assert executor.conn.execute(
+            "SELECT normalized_path FROM endpoints"
+        ).fetchone() == ("/api/status",)
+        fallback.run.assert_called_once_with([])
+        assert "중단 전 Strix 정찰 결과를 보존했습니다" in capsys.readouterr().out
+    finally:
+        executor.close()
 
 
 def test_strix_request_ledger_is_merged_into_shared_host_budget(tmp_path: Path) -> None:

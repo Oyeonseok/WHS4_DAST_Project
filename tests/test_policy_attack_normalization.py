@@ -107,6 +107,35 @@ def test_grounded_active_mutation_methods_are_preserved(agent_type, method):
 
 
 @pytest.mark.parametrize("agent_type", [CodexMainAgent, NativeCodexMainAgent])
+@pytest.mark.parametrize("authorization", [
+    "Automated scanning against web resources and APIs is permitted.",
+    "Researchers are invited to find security vulnerabilities on listed assets.",
+    "Test explicitly listed assets, using only researcher-created data.",
+    "You may test the assets listed as In Scope on this page.",
+    "Demonstrate authentication, authorization, isolation, documented-protection and business-logic failures within the policy's testing boundaries and stopping rules.",
+])
+def test_public_bounty_scanning_language_authorizes_active_policy(
+    agent_type, authorization,
+):
+    scope = (
+        f"## Allowed activities\n\n- {authorization}\n\n"
+        "## Prohibited activities\n\n- Denial-of-service testing is prohibited.\n"
+    )
+
+    policy = compile_policy(
+        agent_type,
+        scope=scope,
+        attack_authorization_mode="active_non_destructive",
+        attack_allowed_methods=["GET", "POST"],
+        attack_authorization_evidence=authorization,
+    )
+
+    assert policy.attack_authorization_mode == "active_non_destructive"
+    assert policy.attack_authorization_evidence == authorization
+    assert policy.attack_allowed_methods == ["GET", "POST"]
+
+
+@pytest.mark.parametrize("agent_type", [CodexMainAgent, NativeCodexMainAgent])
 @pytest.mark.parametrize("evidence", [None, "Unlisted security testing permission."])
 def test_mutation_methods_still_require_grounded_active_evidence(agent_type, evidence):
     with pytest.raises(RuntimeError, match="active Attack authorization evidence"):
@@ -132,3 +161,16 @@ def test_scope_prohibition_still_rejects_active_mutation_methods(agent_type):
             attack_allowed_methods=["GET", "POST"],
             attack_authorization_evidence=AUTHORIZATION,
         )
+
+
+@pytest.mark.parametrize("agent_type", [CodexMainAgent, NativeCodexMainAgent])
+def test_post_exploitation_text_is_not_an_http_post_prohibition(agent_type):
+    policy = compile_policy(
+        agent_type,
+        scope=SCOPE + "- Post-exploitation of vulnerabilities is prohibited.\n",
+        attack_authorization_mode="active_non_destructive",
+        attack_allowed_methods=["GET", "POST"],
+        attack_authorization_evidence=AUTHORIZATION,
+    )
+
+    assert policy.attack_allowed_methods == ["GET", "POST"]

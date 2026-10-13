@@ -52,6 +52,13 @@ _EXTRA_FILE_ARCHIVE = f"{_WORKSPACE_ROOT}/{_EXTRA_FILE_ARCHIVE_REL}"
 _EXTRA_FILE_EXTRACT_TIMEOUT_S = 120
 _EXTRA_FILE_MODE = 0o644
 
+_MITM_DEPENDENCY_PATHS = frozenset({
+    "core/request_governor.py",
+    "core/capture_receipt.py",
+    "core/exclusion_guard.py",
+    "recon/tools/request_identity.py",
+})
+
 
 def _host_identity_env() -> dict[str, str]:
     # Read the platform through a local so it is not narrowed to whichever OS is
@@ -270,6 +277,7 @@ async def create_or_reuse(
     proxy_scope_rules: dict[str, Any] | None = None,
     proxy_addon_source: str | None = None,
     proxy_safety_source: str | None = None,
+    proxy_dependency_sources: dict[str, str] | None = None,
     proxy_capture_path: str = "/workspace/.aidast/mitm_capture.jsonl",
 ) -> dict[str, Any]:
     """Return the existing session bundle for ``scan_id`` or create a new one.
@@ -300,6 +308,18 @@ async def create_or_reuse(
         raise ValueError(
             "MITM proxy mode requires approved Scope rules, the Scope addon, and its validator"
         )
+    if proxy_backend == "mitmproxy" and (
+        not isinstance(proxy_dependency_sources, dict)
+        or set(proxy_dependency_sources) != _MITM_DEPENDENCY_PATHS
+        or not all(
+            isinstance(value, str) and value
+            for value in proxy_dependency_sources.values()
+        )
+    ):
+        raise ValueError(
+            "MITM proxy mode requires the complete dependency-free proxy runtime"
+        )
+    dependency_sources = proxy_dependency_sources or {}
 
     backend_name = load_settings().runtime.backend
     backend = get_backend(backend_name)
@@ -320,6 +340,10 @@ async def create_or_reuse(
             "/workspace/.aidast/recon/tools/mitm_addon.py",
             "/workspace/.aidast/core/http_safety.py",
             "/workspace/.aidast/ScopeRules.json",
+            *(
+                f"/workspace/.aidast/{relative_path}"
+                for relative_path in _MITM_DEPENDENCY_PATHS
+            ),
         }
         collisions = reserved_paths.intersection(
             str(item.get("workspace_path") or "") for item in staged_files
@@ -343,6 +367,13 @@ async def create_or_reuse(
                 "content": json.dumps(proxy_scope_rules, ensure_ascii=False),
             },
         ])
+        staged_files.extend(
+            {
+                "workspace_path": f"/workspace/.aidast/{relative_path}",
+                "content": dependency_sources[relative_path],
+            }
+            for relative_path in sorted(_MITM_DEPENDENCY_PATHS)
+        )
     extra_file_archive = build_extra_file_archive(staged_files, local_sources) if staged_files else None
 
     # Both proxy modes retain Strix's standard proxy port. MITM startup below
@@ -383,35 +414,40 @@ async def create_or_reuse(
         bind_mounts=bind_mounts,
     )
 
-    if extra_file_archive is not None:
-        report("Placing workspace files")
-        try:
+    caido_client = None
+    try:
+        if extra_file_archive is not None:
+            report("Placing workspace files")
             await stage_extra_files(session, extra_file_archive)
-        except BaseException:
-            await _discard_session(client, session)
-            raise
 
-    report("Setting up the proxy")
-    if proxy_backend == "caido":
-        caido_endpoint = await session.resolve_exposed_port(_CONTAINER_CAIDO_PORT)
-        scheme = "https" if caido_endpoint.tls else "http"
-        host_caido_url = f"{scheme}://{caido_endpoint.host}:{caido_endpoint.port}"
-        logger.debug("Caido host endpoint resolved: %s", host_caido_url)
-        caido_client = CaidoBootstrapHandle(
-            asyncio.create_task(
-                bootstrap_caido(
-                    session,
-                    host_url=host_caido_url,
-                    container_url=container_proxy_url,
-                ),
-                name=f"caido-bootstrap-{scan_id}",
+        report("Setting up the proxy")
+        if proxy_backend == "caido":
+            caido_endpoint = await session.resolve_exposed_port(_CONTAINER_CAIDO_PORT)
+            scheme = "https" if caido_endpoint.tls else "http"
+            host_caido_url = f"{scheme}://{caido_endpoint.host}:{caido_endpoint.port}"
+            logger.debug("Caido host endpoint resolved: %s", host_caido_url)
+            caido_client = CaidoBootstrapHandle(
+                asyncio.create_task(
+                    bootstrap_caido(
+                        session,
+                        host_url=host_caido_url,
+                        container_url=container_proxy_url,
+                    ),
+                    name=f"caido-bootstrap-{scan_id}",
+                )
             )
-        )
-        mitm_capture_path = None
-    else:
-        await _start_scope_mitmproxy(session, capture_path=proxy_capture_path)
-        caido_client = None
-        mitm_capture_path = proxy_capture_path
+            mitm_capture_path = None
+        else:
+            await _start_scope_mitmproxy(session, capture_path=proxy_capture_path)
+            mitm_capture_path = proxy_capture_path
+    except BaseException:
+        if caido_client is not None:
+            try:
+                await caido_client.aclose()
+            except Exception:  # noqa: BLE001
+                logger.debug("Closing a half-started Caido client failed", exc_info=True)
+        await _discard_session(client, session)
+        raise
 
     bundle = {
         "client": client,
@@ -456,17 +492,19 @@ async def _start_scope_mitmproxy(
         ">/workspace/.aidast/mitmproxy.log 2>&1 </dev/null & mitm_pid=$!; "
         "for attempt in $(seq 1 40); do "
         f"if kill -0 \"$mitm_pid\" 2>/dev/null && python3 -c 'import socket; s=socket.create_connection((\"127.0.0.1\",{_CONTAINER_MITM_PORT}),timeout=.25); s.close()' "
-        ">/dev/null 2>&1 && grep -q 'approved host pattern' /workspace/.aidast/mitmproxy.log "
+        ">/dev/null 2>&1 && grep -q 'AIDAST_SCOPE_PROXY_READY' /workspace/.aidast/mitmproxy.log "
         "&& ! grep -Eqi 'unable to bind|address already in use' /workspace/.aidast/mitmproxy.log; "
         "then exit 0; fi; sleep .25; done; "
         "cat /workspace/.aidast/mitmproxy.log; exit 1"
     )
     result = await session.exec("sh", "-lc", command, timeout=20)
     if not result.ok():
-        stderr = result.stderr.decode("utf-8", errors="replace").strip()[:1000]
+        stderr = result.stderr.decode("utf-8", errors="replace").strip()
+        stdout = result.stdout.decode("utf-8", errors="replace").strip()
+        detail = (stderr or stdout or "sandbox command returned no diagnostics")[:1000]
         raise RuntimeError(
             "Scope-enforcing MITM proxy could not start in Strix sandbox; "
-            f"verify the rebuilt image contains mitmproxy. {stderr}"
+            f"verify the rebuilt image contains mitmproxy. {detail}"
         )
     env_check = await session.exec(
         "sh", "-lc", 'printf "%s|%s" "$HTTP_PROXY" "$http_proxy"', timeout=10
@@ -486,6 +524,13 @@ async def _discard_session(client: Any, session: Any) -> None:
         await client.delete(session)
     except Exception:  # noqa: BLE001
         logger.warning("Discarding a half-started sandbox session failed", exc_info=True)
+    finally:
+        docker_client = getattr(client, "docker_client", None)
+        if docker_client is not None:
+            try:
+                docker_client.close()
+            except Exception:  # noqa: BLE001
+                logger.debug("Closing a half-started Docker client failed", exc_info=True)
 
 
 async def cleanup(scan_id: str) -> None:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -19,6 +20,8 @@ from aidast.attack.coverage import (
     requeue_unprofiled_historical_response_coverage,
     requeue_interrupted_coverage,
     requeue_owned_object_coverage,
+    requeue_durable_remote_read_only_failures,
+    requeue_oversized_policy_refusals,
     requeue_orphaned_running_coverage,
     requeue_black_box_source_disclosure_coverage,
     requeue_transient_model_failures,
@@ -502,6 +505,190 @@ def test_task_level_capacity_failure_reopens_without_evidence_attempt(
             "SELECT status,attempt_count FROM attack_coverage_items WHERE coverage_id=?",
             (row["coverage_id"],),
         ).fetchone()) == ("pending", 0)
+
+
+def test_smaller_execution_bound_reopens_evidence_free_policy_refusal(
+    tmp_path: Path,
+) -> None:
+    imported = imported_pipeline(tmp_path)
+    ensure_coverage_manifest(imported.pipeline_database, imported.scan_id)
+    with sqlite3.connect(imported.pipeline_database) as conn, conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT * FROM attack_coverage_items ORDER BY coverage_id"
+        ).fetchall()
+        assert len(rows) == 4
+        stage = start_stage_run(conn, scan_id=imported.scan_id, stage="attack")
+        for row in rows:
+            task = create_task(
+                conn, stage_run_id=stage, skill_name=row["skill_name"],
+                endpoint_id=row["endpoint_id"],
+                payload={"coverage_id": row["coverage_id"]},
+            )
+            conn.execute(
+                """UPDATE attack_tasks
+                   SET status='cancelled',finished_at=CURRENT_TIMESTAMP,
+                       error_message=? WHERE task_id=?""",
+                (
+                    "Attack model policy refused a multi-task batch before producing "
+                    "HTTP evidence; retry each task independently.",
+                    task,
+                ),
+            )
+            conn.execute(
+                """UPDATE attack_coverage_items
+                   SET status='error_retryable',attempt_count=1,
+                       disposition_reason='batch ended without terminal coverage evidence',
+                       last_stage_run_id=?,last_task_id=? WHERE coverage_id=?""",
+                (stage, task, row["coverage_id"]),
+            )
+
+        assert requeue_oversized_policy_refusals(
+            conn, imported.scan_id, batch_size=2,
+        ) == 4
+        assert conn.execute(
+            """SELECT COUNT(*) FROM attack_coverage_items
+               WHERE status='pending' AND attempt_count=0
+                 AND last_stage_run_id IS NULL AND last_task_id IS NULL"""
+        ).fetchone()[0] == 4
+
+
+def test_remote_read_only_url_parameter_uses_brokered_control_and_probe(tmp_path: Path) -> None:
+    imported = imported_pipeline(tmp_path)
+    coordinator = ExhaustiveAttackCoordinator(
+        agent=UnsupportedCoverageAgent(), db_path=imported.pipeline_database,
+        scope_path=imported.recon_database.parent / "Scope.md",
+        policy_path=imported.recon_database.parent / "TargetPolicy.json",
+    )
+    task = {
+        "task_id": "task_remote_redirect",
+        "endpoint_id": "endpoint_remote",
+        "skill_name": "hunt-open-redirect",
+        "vuln_class": "open_redirect",
+        "method": "GET",
+        "origin_url": "https://program.example.net",
+        "normalized_path": "/search",
+        "injection_location": "query",
+        "parameter_name": "url",
+        "planned_identity_role": "unauthenticated",
+    }
+    requests: list[dict] = []
+    attempts: list[dict] = []
+
+    def request_result(*args, payload_path: Path, **kwargs):
+        payload = json.loads(payload_path.read_text())
+        requests.append(payload)
+        return {
+            "request_fingerprint": str(len(requests)) * 64,
+            "status": 200,
+            "url": payload["url"],
+            "response_headers": {"content-type": "text/html"},
+            "response_body": "bounded response",
+        }
+
+    def record_attempt(db_path, scan_id, payload_path: Path):
+        attempts.append(json.loads(payload_path.read_text()))
+        return {"committed": True}
+
+    with (
+        patch(
+            "aidast.orchestration.coverage_attack.guarded_request",
+            side_effect=request_result,
+        ),
+        patch(
+            "aidast.orchestration.coverage_attack.commit_attempt",
+            side_effect=record_attempt,
+        ),
+        patch("aidast.orchestration.coverage_attack.transition_attack_task"),
+    ):
+        remaining = coordinator._execute_deterministic_remote_read_only(
+            scan_id=imported.scan_id, stage_run_id="stage_remote",
+            tasks=[task],
+        )
+
+    assert remaining == []
+    assert len(requests) == len(attempts) == 2
+    assert all(item["method"] == "GET" for item in requests)
+    assert all(item["risk_class"] == "http_probe" for item in requests)
+    assert requests[0]["url"] != requests[1]["url"]
+    assert {item["outcome"] for item in attempts} == {"inconclusive"}
+
+
+def test_durable_remote_evidence_reopens_later_internal_failure(tmp_path: Path) -> None:
+    imported = imported_pipeline(tmp_path)
+    ensure_coverage_manifest(imported.pipeline_database, imported.scan_id)
+    with sqlite3.connect(imported.pipeline_database) as conn, conn:
+        conn.row_factory = sqlite3.Row
+        coverage = conn.execute(
+            "SELECT * FROM attack_coverage_items ORDER BY coverage_id LIMIT 1"
+        ).fetchone()
+        prior_stage = start_stage_run(conn, scan_id=imported.scan_id, stage="attack")
+        prior_task = create_task(
+            conn, stage_run_id=prior_stage, skill_name=coverage["skill_name"],
+            endpoint_id=coverage["endpoint_id"], payload={},
+        )
+        conn.execute(
+            "UPDATE attack_tasks SET status='completed',finished_at=CURRENT_TIMESTAMP "
+            "WHERE task_id=?", (prior_task,),
+        )
+        conn.execute(
+            "UPDATE stage_runs SET status='completed',finished_at=CURRENT_TIMESTAMP "
+            "WHERE stage_run_id=?", (prior_stage,),
+        )
+        fingerprint = "9" * 64
+        conn.execute(
+            """INSERT INTO attack_http_requests
+               (request_id,scan_id,stage_run_id,task_id,policy_id,policy_sha256,
+                method,url,request_fingerprint,status,response_status,response_bytes,
+                scheduled_at)
+               VALUES ('durable-remote-http',?,?,?,?,?,'GET',?,?,'completed',200,1,0)""",
+            (
+                imported.scan_id, prior_stage, prior_task, "policy", "8" * 64,
+                "https://lab.example/probe", fingerprint,
+            ),
+        )
+        conn.execute(
+            """INSERT INTO attack_attempts
+               (attempt_id,scan_id,task_id,skill_name,endpoint_id,
+                request_fingerprint,payload_variant,outcome)
+               VALUES ('durable-remote-attempt',?,?,?,?,?,
+                       'deterministic-read-only:baseline','inconclusive')""",
+            (
+                imported.scan_id, prior_task, coverage["skill_name"],
+                coverage["endpoint_id"], fingerprint,
+            ),
+        )
+        failed_stage = start_stage_run(conn, scan_id=imported.scan_id, stage="attack")
+        failed_task = create_task(
+            conn, stage_run_id=failed_stage, skill_name=coverage["skill_name"],
+            endpoint_id=coverage["endpoint_id"], payload={},
+        )
+        conn.execute(
+            """UPDATE attack_tasks SET status='failed',finished_at=CURRENT_TIMESTAMP,
+                      error_message='[evidence] deterministic remote read-only probe could not complete: duplicate'
+               WHERE task_id=?""",
+            (failed_task,),
+        )
+        conn.execute(
+            "UPDATE stage_runs SET status='failed',finished_at=CURRENT_TIMESTAMP "
+            "WHERE stage_run_id=?", (failed_stage,),
+        )
+        conn.execute(
+            """UPDATE attack_coverage_items
+               SET status='error_terminal',attempt_count=3,last_stage_run_id=?,last_task_id=?
+               WHERE coverage_id=?""",
+            (failed_stage, failed_task, coverage["coverage_id"]),
+        )
+
+        assert requeue_durable_remote_read_only_failures(
+            conn, imported.scan_id,
+        ) == 1
+        repaired = conn.execute(
+            """SELECT status,attempt_count,last_stage_run_id,last_task_id
+               FROM attack_coverage_items WHERE coverage_id=?""",
+            (coverage["coverage_id"],),
+        ).fetchone()
+        assert tuple(repaired) == ("pending", 0, None, None)
 
 
 def test_captured_public_security_declaration_is_scheduled_first(tmp_path: Path) -> None:
