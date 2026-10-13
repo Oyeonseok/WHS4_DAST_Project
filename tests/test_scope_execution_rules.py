@@ -96,6 +96,62 @@ def test_global_automatic_scanner_ban_is_an_effective_launch_blocker():
     assert [item.label for item in requirements.policy_blockers] == ['Automatic scanners']
 
 
+def test_resolver_recovers_omitted_global_scanner_ban_from_captured_policy(tmp_path):
+    from aidast.scope.execution_rules import ScopeExecutionResolver, validate_policy_prerequisites
+    from aidast.web.requirements import build_scope_execution_requirements
+
+    quote = 'Please do not use automatic scanners.'
+    doc = document()
+    text = doc.source.text + '\n' + quote + ' Be creative and test it yourself.'
+    doc = doc.model_copy(update={
+        'source': doc.source.model_copy(update={
+            'text': text,
+            'content_sha256': hashlib.sha256(text.encode()).hexdigest(),
+        }),
+        'analysis': doc.analysis.model_copy(update={
+            'required_request_headers': [],
+            'execution_rules': models.ScopeExecutionRules(exclusions=[]),
+        }),
+    })
+
+    analysis = ScopeExecutionResolver(
+        tmp_path, interpreter=lambda _: pytest.fail('complete Scope must not call AI'),
+    ).resolve(doc)
+    blockers = analysis.execution_rules.blocking_requirements
+    assert [(item.label, item.source_quote) for item in blockers] == [
+        ('Automatic scanners prohibited', quote),
+    ]
+    requirements = build_scope_execution_requirements(analysis)
+    assert [item.source_quote for item in requirements.policy_blockers] == [quote]
+    with pytest.raises(ValueError, match='Automatic scanners prohibited'):
+        validate_policy_prerequisites(analysis.execution_rules, ['example.org'])
+
+
+@pytest.mark.parametrize('policy', [
+    'Automated tooling max. 5 requests per second.',
+    'Do not run automatic scans against the billing endpoint.',
+])
+def test_source_policy_does_not_promote_allowed_or_targeted_automation_text(
+    tmp_path, policy,
+):
+    from aidast.scope.execution_rules import ScopeExecutionResolver
+
+    doc = document()
+    text = doc.source.text + '\n' + policy
+    doc = doc.model_copy(update={
+        'source': doc.source.model_copy(update={
+            'text': text,
+            'content_sha256': hashlib.sha256(text.encode()).hexdigest(),
+        }),
+        'analysis': doc.analysis.model_copy(update={
+            'required_request_headers': [],
+            'execution_rules': models.ScopeExecutionRules(exclusions=[]),
+        }),
+    })
+    analysis = ScopeExecutionResolver(tmp_path).resolve(doc)
+    assert analysis.execution_rules.blocking_requirements == []
+
+
 def test_conditional_scanner_exclusion_remains_a_request_guard():
     from aidast.scope.execution_rules import effective_blocking_requirements
     quote = 'Do not run automatic scans against the billing endpoint.'

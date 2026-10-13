@@ -110,6 +110,9 @@ def test_grounded_active_mutation_methods_are_preserved(agent_type, method):
 @pytest.mark.parametrize("authorization", [
     "Automated scanning against web resources and APIs is permitted.",
     "Researchers are invited to find security vulnerabilities on listed assets.",
+    "Test explicitly listed assets, using only researcher-created data.",
+    "You may test the assets listed as In Scope on this page.",
+    "Demonstrate authentication, authorization, isolation, documented-protection and business-logic failures within the policy's testing boundaries and stopping rules.",
 ])
 def test_public_bounty_scanning_language_authorizes_active_policy(
     agent_type, authorization,

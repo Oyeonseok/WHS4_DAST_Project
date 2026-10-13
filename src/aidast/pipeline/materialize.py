@@ -68,16 +68,28 @@ def materialize_pipeline(
             source.backup(destination)
             destination.execute("PRAGMA foreign_keys=ON")
             migrate_live_pipeline_schema(destination)
-            # First-party passive declarations remain candidates in immutable
-            # Recon output. In the writable attack database they become
-            # eligible for a bounded confirmation attempt while retaining the
-            # candidate verification status and provenance.
+            # Concrete first-party request declarations remain candidates in
+            # immutable Recon output. In the writable attack database they
+            # become eligible for a bounded confirmation attempt while
+            # retaining candidate status and provenance. A broad source-tool
+            # name is not enough: sitemap, robots and synthetic navigation
+            # inventory can use the same recorder without proving an API call.
             destination.execute(
                 """UPDATE endpoints SET is_excluded=0
                    WHERE verification_status='candidate'
                      AND exclude_reason='unverified_candidate'
-                     AND (instr(',' || coalesce(source_tools,'') || ',', ',adaptive_js,')>0
-                       OR instr(',' || coalesce(source_tools,'') || ',', ',passive_declaration,')>0)"""
+                     AND EXISTS (
+                         SELECT 1 FROM endpoint_observations declaration
+                         WHERE declaration.endpoint_id=endpoints.endpoint_id
+                           AND (
+                               (declaration.source_tool='adaptive_js'
+                                AND declaration.discovery_kind='js_http_call')
+                               OR
+                               (declaration.source_tool='passive_declaration'
+                                AND declaration.discovery_kind='api_spec_declaration')
+                               OR declaration.discovery_kind='form_action'
+                           )
+                     )"""
             )
             destination.execute(
                 """INSERT INTO pipeline_sources

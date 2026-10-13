@@ -283,8 +283,12 @@ class ApprovedScopeCatalog:
                 if not targets:
                     continue
                 cached_analysis = self.header_resolver.cached(document)
+                guard = getattr(self.header_resolver, "with_grounded_runtime_guards", None)
+                visible_analysis = cached_analysis or (
+                    guard(document, document.analysis) if guard else document.analysis
+                )
                 requirements = build_scope_execution_requirements(
-                    cached_analysis or document.analysis, identity_header=None,
+                    visible_analysis, identity_header=None,
                 )
                 if cached_analysis is None and requires_policy_advisory_review(document):
                     # Keep legacy controls visible while read-only listing waits

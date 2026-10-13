@@ -2,6 +2,7 @@
 from __future__ import annotations
 import hashlib
 import json
+import re
 from pathlib import Path
 from typing import Callable, Final
 from uuid import uuid4
@@ -16,6 +17,91 @@ from aidast.scope.models import (
 from aidast.core.http_safety import validate_platform_username
 
 DEFAULT_SCOPE_MODEL: Final = "gpt-5.6-sol"
+
+
+_GLOBAL_AUTOMATION_BAN = re.compile(
+    r"(?:please\s+)?(?:do\s+not|don't|must\s+not|shall\s+not|may\s+not|never)"
+    r"\s+(?:use|run)\s+(?:any\s+)?(?:automatic|automated)\s+"
+    r"(?:scanner(?:s)?|scan(?:s|ning)?|tool(?:s|ing)?)"
+    r"|(?:the\s+)?use\s+of\s+(?:automatic|automated)\s+"
+    r"(?:scanner(?:s)?|scan(?:s|ning)?|tool(?:s|ing)?)\s+"
+    r"(?:is|are)\s+(?:strictly\s+)?(?:prohibited|forbidden|disallowed|not\s+allowed)"
+    r"|(?:automatic|automated)\s+(?:scanner(?:s)?|scan(?:s|ning)?|tool(?:s|ing)?)"
+    r"\s+(?:is|are)\s+(?:strictly\s+)?(?:prohibited|forbidden|disallowed|not\s+allowed)",
+    flags=re.IGNORECASE,
+)
+
+
+def _policy_sentences(text: str):
+    """Yield exact short policy clauses without joining unrelated controls."""
+    for line in text.splitlines():
+        for match in re.finditer(r"[^.!?;]+(?:[.!?;]+|$)", line):
+            sentence = match.group(0).strip()
+            if sentence:
+                yield sentence
+
+
+def _grounded_automation_blockers(document: ScopeDocument) -> list[BlockingRequirement]:
+    """Recover explicit global scanner bans that model interpretation omitted.
+
+    Only the program's captured text and required testing references are
+    considered. The narrow full-clause match intentionally leaves endpoint or
+    asset-specific restrictions to the structured exclusion interpreter.
+    """
+    texts = [document.source.text]
+    texts.extend(
+        reference.text for reference in document.source.policy_references
+        if reference.status == "captured"
+        and reference.relationship == "required"
+        and reference.applicability in {"testing", "mixed"}
+    )
+    blockers: list[BlockingRequirement] = []
+    seen: set[str] = set()
+    for text in texts:
+        for sentence in _policy_sentences(text):
+            normalized = " ".join(sentence.split())
+            match = _GLOBAL_AUTOMATION_BAN.fullmatch(normalized.rstrip(".!?;"))
+            if match is None or sentence in seen:
+                continue
+            seen.add(sentence)
+            blockers.append(BlockingRequirement(
+                label="Automatic scanners prohibited",
+                source_quote=sentence,
+                target_assets=[],
+                reason=(
+                    "The captured program policy explicitly forbids automatic "
+                    "scanners, so automated DAST cannot run on this program."
+                ),
+            ))
+    return blockers
+
+
+def _merge_grounded_automation_blockers(
+    document: ScopeDocument, response: ScopeExecutionInterpretation,
+) -> ScopeExecutionInterpretation:
+    rules = response.execution_rules
+    blockers = list(rules.blocking_requirements)
+    existing = {(item.source_quote, tuple(item.target_assets)) for item in blockers}
+    for item in _grounded_automation_blockers(document):
+        identity = (item.source_quote, tuple(item.target_assets))
+        already_covered = any(
+            not current.target_assets and (
+                item.source_quote in current.source_quote
+                or current.source_quote in item.source_quote
+            )
+            for current in blockers
+        )
+        if identity in existing or already_covered:
+            continue
+        blockers.append(item)
+        existing.add(identity)
+    if blockers == rules.blocking_requirements:
+        return response
+    return response.model_copy(update={
+        "execution_rules": rules.model_copy(update={
+            "blocking_requirements": blockers,
+        }),
+    })
 
 
 def validate_policy_prerequisites(rules: ScopeExecutionRules | None, selected_assets: list[str],
@@ -168,6 +254,7 @@ class ScopeExecutionResolver:
 
     def _validate(self, document: ScopeDocument, result, *, fresh: bool = False) -> ScopeAnalysis:
         response = result if isinstance(result, ScopeExecutionInterpretation) else ScopeExecutionInterpretation.model_validate(result)
+        response = _merge_grounded_automation_blockers(document, response)
         if response.execution_rules.exclusions is None:
             raise ValueError('fresh Scope execution interpretation must supply exclusions ([] when none)')
         data = document.analysis.model_dump()
@@ -189,6 +276,17 @@ class ScopeExecutionResolver:
                 required_request_headers=reviewed.required_request_headers or [],
                 execution_rules=reviewed.execution_rules))
         return analysis
+
+    def with_grounded_runtime_guards(
+        self, document: ScopeDocument, analysis: ScopeAnalysis,
+    ) -> ScopeAnalysis:
+        """Add deterministic source guards without marking policy review ready."""
+        if analysis.required_request_headers is None or analysis.execution_rules is None:
+            return analysis
+        return self._validate(document, ScopeExecutionInterpretation(
+            required_request_headers=analysis.required_request_headers,
+            execution_rules=analysis.execution_rules,
+        ))
 
     def cached(self, document: ScopeDocument) -> ScopeAnalysis | None:
         try:

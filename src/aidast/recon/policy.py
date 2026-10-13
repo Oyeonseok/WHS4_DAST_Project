@@ -683,6 +683,10 @@ def validate_policy_for_target(
             r"vulnerability (?:test|testing|assessment|validation)|"
             r"automated (?:web (?:resource )?|api )?scann(?:ing|er)|"
             r"(?:find|finding) security vulnerabilities?|"
+            r"test explicitly listed assets?|"
+            r"you may test (?:the )?assets? listed as in scope|"
+            r"demonstrate (?:authentication|authorization|isolation|"
+            r"documented-protection|business-logic).{0,200} failures?|"
             r"보안 (?:테스트|검증)|취약점 (?:테스트|검증)|능동",
             quote,
             re.IGNORECASE,

@@ -435,11 +435,25 @@ def test_attack_plans_exact_public_client_declarations_but_not_inferred_crud(tmp
                 'verification_status': 'candidate', 'traffic_class': 'passive',
             },
             {
+                'method': 'GET', 'path': '/marketing-only',
+                'url': 'https://example.test/marketing-only',
+                'source': 'passive_declaration',
+                'discovery_kind': 'sitemap_declaration',
+                'verification_status': 'candidate', 'traffic_class': 'passive',
+            },
+            {
                 'method': 'GET', 'path': '/%7B%7Bhref%7D%7D',
                 'url': 'https://example.test/%7B%7Bhref%7D%7D',
                 'source': 'playwright_http', 'discovery_kind': 'http_request',
             },
         ])
+        # Recon may retain a sitemap candidate as ordinary inventory after a
+        # duplicate UI declaration clears its exclusion bit. Candidate status
+        # still means Attack has no network or first-party API-call evidence.
+        conn.execute(
+            "UPDATE endpoints SET is_excluded=0 "
+            "WHERE normalized_path='/marketing-only'"
+        )
 
     agent = Planner()
     result = plan_recon_attack(path, 'scan', agent=agent)
@@ -452,6 +466,7 @@ def test_attack_plans_exact_public_client_declarations_but_not_inferred_crud(tmp
     }
     assert '/rest/chat' in planned_paths
     assert '/api/Guesses/{id}' not in planned_paths
+    assert '/marketing-only' not in planned_paths
     assert '/%7B%7Bhref%7D%7D' not in planned_paths
     assert result['total_endpoints'] == 3
     assert manifest.by_vulnerability['llm_ai'] == 1

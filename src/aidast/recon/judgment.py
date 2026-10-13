@@ -32,7 +32,8 @@ PARAM_PATTERN = re.compile(
 _UNRESERVED = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~")
 
 STATIC_EXTENSIONS = (
-    ".js", ".css", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico",
+    ".js", ".css", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".avif",
+    ".svg", ".ico", ".webmanifest",
     ".woff", ".woff2", ".ttf", ".map",
 )
 
@@ -133,7 +134,11 @@ def is_static_asset(path: str) -> bool:
         candidate = urlsplit(str(path or "")).path
     except ValueError:
         candidate = str(path or "").split("?", 1)[0]
-    return candidate.lower().endswith(STATIC_EXTENSIONS)
+    folded = candidate.lower()
+    return (
+        folded.endswith(STATIC_EXTENSIONS)
+        or folded.rsplit("/", 1)[-1] in {"robots.txt", "sitemap.xml"}
+    )
 
 
 def is_probable_redirect_loop_path(path: str) -> bool:

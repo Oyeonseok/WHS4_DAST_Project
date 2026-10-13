@@ -1,4 +1,5 @@
 """Offline dashboard migration: listing preserves authority; preparation reviews it."""
+import hashlib
 from datetime import datetime, timezone
 
 import pytest
@@ -66,6 +67,35 @@ def test_catalog_legacy_policy_requires_preparation_then_warning_only_ready_with
 def test_review_payload_retains_reference_relationship():
     payload = ScopeWorkflowManager._review_payload(legacy_document())
     assert payload['policy_references'][0]['relationship'] == 'supporting'
+
+
+def test_pending_catalog_exposes_scanner_ban_omitted_by_saved_interpretation(tmp_path):
+    document = legacy_document(reference=True, blocker=False)
+    quote = 'Please do not use automatic scanners.'
+    source_data = document.source.model_dump()
+    source_data['text'] += '\n' + quote
+    source_data['content_sha256'] = hashlib.sha256(
+        source_data['text'].encode(),
+    ).hexdigest()
+    document = document.model_copy(update={
+        'source': document.source.model_validate(source_data),
+    })
+    directory = tmp_path / 'Scope' / 'bugcrowd' / 'example'
+    coordinator = ScopeCoordinator(directory)
+    coordinator.approve_draft(
+        coordinator._create_scope_draft(document), approved_by='operator',
+    )
+
+    resolver = ScopeExecutionResolver(tmp_path / '.execution-requirements')
+    requirements = ApprovedScopeCatalog(
+        tmp_path, execution_resolver=resolver,
+    ).get(document.scope_id).execution_requirements
+
+    assert requirements.execution_requirements_status == 'pending'
+    assert [(item.label, item.source_quote) for item in requirements.policy_blockers] == [
+        ('Automatic scanners prohibited', quote),
+    ]
+    assert not resolver.cache_dir.exists()
 
 
 def test_previous_review_reinterprets_feasible_header_and_binds_operator_identity(tmp_path):

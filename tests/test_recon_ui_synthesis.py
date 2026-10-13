@@ -42,6 +42,17 @@ def test_synthesis_is_bounded_same_origin_and_keeps_role_provenance() -> None:
     assert all(row["discovery_kind"] == "synthetic_ui_candidate" for row in rows)
 
 
+def test_synthesis_omits_modern_image_navigation_references() -> None:
+    rows = synthesize_client_ui_routes(
+        '<a href="/img/partner.webp">WebP</a><a href="/img/partner.avif">AVIF</a>'
+        '<link rel="manifest" href="/manifest.webmanifest">',
+        media_type="text/html", document_url="https://example.test/app",
+        base_url="https://example.test",
+    )
+
+    assert rows == []
+
+
 def test_route_stays_synthetic_until_captured_http_response_exists(tmp_path) -> None:
     conn, origin = _database(tmp_path)
     try:
