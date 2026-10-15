@@ -8,6 +8,7 @@ import hashlib
 import hmac
 from ipaddress import ip_address
 import json
+import math
 import re
 import secrets
 import time
@@ -303,10 +304,8 @@ def validate_scope_rules(rules: object) -> dict:
         raise ValueError("invalid excluded hosts")
     if any(scheme not in {"http", "https"} for scheme in rules["allowed_schemes"]):
         raise ValueError("invalid allowed schemes")
-    if any(
-        port != "*" and (type(port) is not int or not 1 <= port <= 65535)
-        for port in rules["allowed_ports"]
-    ):
+    if any(port != "*" and (type(port) is not int or not 1 <= port <= 65535)
+           for port in rules["allowed_ports"]):
         raise ValueError("invalid allowed ports")
     if any(method not in {"GET", "HEAD", "OPTIONS", "POST", "PUT", "PATCH", "DELETE"}
            for method in rules["allowed_methods"]):
@@ -326,8 +325,24 @@ def validate_scope_rules(rules: object) -> dict:
     ):
         raise ValueError("invalid browser context token")
     maximum = rules.get("max_requests")
-    if type(maximum) is not int or maximum < 1:
-        raise ValueError("scope rules require a positive max_requests")
+    if maximum is not None and (type(maximum) is not int or maximum < 1):
+        raise ValueError("scope rules require a positive max_requests when supplied")
+    rate = rules.get("max_rps")
+    if rate is not None and (
+        isinstance(rate, bool) or not isinstance(rate, (int, float))
+        or not math.isfinite(rate) or not 0 < rate <= 50
+    ):
+        raise ValueError("invalid max_rps")
+    concurrency = rules.get("max_concurrency")
+    if concurrency is not None and (
+        type(concurrency) is not int or not 1 <= concurrency <= 20
+    ):
+        raise ValueError("invalid max_concurrency")
+    timeout_seconds = rules.get("timeout_seconds")
+    if timeout_seconds is not None and (
+        type(timeout_seconds) is not int or not 1 <= timeout_seconds <= 120
+    ):
+        raise ValueError("invalid timeout_seconds")
     if "required_identity_headers" in rules:
         validate_identity_headers(rules["required_identity_headers"])
     if rules.get("hackerone_username") is not None:

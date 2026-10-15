@@ -61,6 +61,7 @@ EXECUTABLE_TYPES = {
     AssetType.IP_ADDRESS,
 }
 _HANDLE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+_DEFAULT_STRIX_MITM_IMAGE = "aidast-strix-mitm:local"
 
 
 def _windows_host() -> bool:
@@ -71,41 +72,13 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-def _scan_process_environment(*, project_root: Path, result_root: Path) -> dict[str, str]:
-    """Build a scan environment that can find user-local tools under launchd."""
-    env = os.environ.copy()
-    env["AIDAST_RESULT_ROOT"] = str(result_root)
-    env["AIDAST_DASHBOARD_MANUAL_LOGIN"] = "1"
-    env["PYTHONUNBUFFERED"] = "1"
-
-    candidates = [
-        project_root / ".venv" / ("Scripts" if _windows_host() else "bin"),
-        Path.home() / ".local" / "bin",
-        Path("/opt/homebrew/bin"),
-        Path("/usr/local/bin"),
-        *(Path(item) for item in env.get("PATH", "").split(os.pathsep) if item),
-    ]
-    ordered: list[str] = []
-    for directory in candidates:
-        value = str(directory)
-        if directory.is_dir() and value not in ordered:
-            ordered.append(value)
-    if ordered:
-        env["PATH"] = os.pathsep.join(ordered)
-
-    source_root = project_root / "src"
-    if source_root.is_dir():
-        prior = env.get("PYTHONPATH", "")
-        env["PYTHONPATH"] = str(source_root) + (os.pathsep + prior if prior else "")
-    return env
-
-
 class ScanLaunchRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     scope_id: str = Field(min_length=1, max_length=160)
     targets: list[str] = Field(min_length=1, max_length=64)
     profile: ProfileId = "safe-recon"
+    recon_engine: Literal["strix"] = "strix"
     max_requests: int = Field(default=500, ge=1, le=2000)
     max_rps: float | None = Field(default=None, gt=0, le=50)
     max_concurrency: int | None = Field(default=None, ge=1, le=20)
@@ -113,12 +86,12 @@ class ScanLaunchRequest(BaseModel):
     max_depth: int | None = Field(default=None, ge=0, le=10)
     ffuf_max_time_seconds: int = Field(default=150, ge=0, le=86400)
     tag_batch_size: int = Field(default=25, ge=1, le=200)
-    recon_engine: Literal["integrated", "native"] = "integrated"
     recon_model: str | None = Field(default=None, min_length=1, max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:/-]*$")
     attack_model: str | None = Field(default=None, min_length=1, max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:/-]*$")
     validation_model: str | None = Field(default=None, min_length=1, max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:/-]*$")
     report_model: str | None = Field(default=None, min_length=1, max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:/-]*$")
     login_mode: str = "none"
+    allow_authorized_account_registration: bool = False
     start_url: str | None = Field(default=None, max_length=2048)
     policy_values: dict[str, str] = Field(default_factory=dict, max_length=64)
     policy_confirmations: list[str] = Field(default_factory=list, max_length=64)
@@ -203,6 +176,11 @@ class ScanLaunchRequest(BaseModel):
                 raise ValueError("bug-bounty-safe requires exactly one target")
         if self.start_url and len(self.targets) != 1:
             raise ValueError("a specific start URL requires exactly one target")
+        if self.recon_engine == "strix":
+            if self.login_mode != "none":
+                raise ValueError("Strix Recon requires login_mode none until session handoff is connected")
+        elif self.allow_authorized_account_registration:
+            raise ValueError("account registration requires Strix Recon")
         return self
 
 
@@ -460,6 +438,11 @@ class ScanLaunchManager:
             if value is not None and value > getattr(effective, field):
                 raise ValueError(f'{field} exceeds the approved policy cap')
         targets = [target for target in document.analysis.in_scope_assets if target.asset in request.targets]
+        if request.allow_authorized_account_registration and not any(
+            target.asset_type in {AssetType.URL, AssetType.API, AssetType.DOMAIN, AssetType.IP_ADDRESS}
+            and "*" not in target.asset for target in targets
+        ):
+            raise ValueError("account registration requires an exact approved web target")
         starts = normalize_start_urls(
             {(targets[0].asset_type.value, targets[0].asset): request.start_url}
             if request.start_url else {},
@@ -531,9 +514,12 @@ class ScanLaunchManager:
         if request.max_rps is not None:
             argv.extend(("--max-rps", str(request.max_rps)))
         wordlist = self.project_root / "resources" / "wordlists" / "common.txt"
-        if request.profile != "bug-bounty-safe" and wordlist.is_file():
+        if request.recon_engine == "legacy" and request.profile != "bug-bounty-safe" and wordlist.is_file():
             argv.extend(("--ffuf-wordlist", str(wordlist)))
-        argv.extend(("--ffuf-max-time-seconds", str(request.ffuf_max_time_seconds)))
+        if request.recon_engine == "legacy":
+            argv.extend(("--ffuf-max-time-seconds", str(request.ffuf_max_time_seconds)))
+        elif request.allow_authorized_account_registration:
+            argv.append("--allow-authorized-account-registration")
         if request.max_depth is not None:
             argv.extend(("--max-depth", str(request.max_depth)))
         if request.max_concurrency is not None:
@@ -559,10 +545,16 @@ class ScanLaunchManager:
         with self._lock:
             self._jobs[scan_id] = job
         self._log(scan_id, "launch.accepted", "Scope", "Scan request accepted after approval verification.", message_code="pipeline.accepted")
-        env = _scan_process_environment(
-            project_root=self.project_root,
-            result_root=self.result_root,
-        )
+        env = os.environ.copy()
+        env["AIDAST_RESULT_ROOT"] = str(self.result_root)
+        env["AIDAST_DASHBOARD_MANUAL_LOGIN"] = "1"
+        env["PYTHONUNBUFFERED"] = "1"
+        if request.recon_engine == "strix":
+            env["AIDAST_STRIX_IMAGE"] = env.get("AIDAST_STRIX_IMAGE") or _DEFAULT_STRIX_MITM_IMAGE
+        source_root = self.project_root / "src"
+        if source_root.is_dir():
+            prior = env.get("PYTHONPATH", "")
+            env["PYTHONPATH"] = str(source_root) + (os.pathsep + prior if prior else "")
         try:
             with self._process_output(job) as output:
                 process = self.process_factory(
@@ -611,10 +603,16 @@ class ScanLaunchManager:
             sys.executable, "-m", "aidast", "resume", scan_id,
             "--result-root", str(self.result_root),
         ]
-        env = _scan_process_environment(
-            project_root=self.project_root,
-            result_root=self.result_root,
-        )
+        env = os.environ.copy()
+        env["AIDAST_RESULT_ROOT"] = str(self.result_root)
+        env["AIDAST_DASHBOARD_MANUAL_LOGIN"] = "1"
+        env["PYTHONUNBUFFERED"] = "1"
+        if plan.stage == "recon":
+            env["AIDAST_STRIX_IMAGE"] = env.get("AIDAST_STRIX_IMAGE") or _DEFAULT_STRIX_MITM_IMAGE
+        source_root = self.project_root / "src"
+        if source_root.is_dir():
+            prior = env.get("PYTHONPATH", "")
+            env["PYTHONPATH"] = str(source_root) + (os.pathsep + prior if prior else "")
         with self._lock:
             existing = self._jobs.get(scan_id)
             if existing is not None and existing.status in {"pending", "running", "paused"}:

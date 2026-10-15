@@ -13,7 +13,7 @@ if [ -n "${STRIX_HOST_UID:-}" ] && [ "${STRIX_HOST_UID}" != "0" ] && [ "${STRIX_
     sed -i "s|^pentester:x:${old_gid}:|pentester:x:${gid}:|" /etc/group
     chown -R "${STRIX_HOST_UID}:${gid}" /home/pentester /app/certs
     chown "${STRIX_HOST_UID}:${gid}" /workspace
-    exec setpriv --reuid "${STRIX_HOST_UID}" --regid "${gid}" --init-groups bash "$0" "$@"
+    exec setpriv --reuid "${STRIX_HOST_UID}" --regid "${gid}" --init-groups "$0" "$@"
   ' "$0" "$(id -u)" "$(id -g)" "$PATH" "$@"
 fi
 

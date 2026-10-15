@@ -11,11 +11,16 @@ Codex CLI values (the backend only accepts that client).
 from __future__ import annotations
 
 import base64
+import binascii
 import contextlib
 import hashlib
 import json
 import logging
+import os
+import queue
 import secrets
+import shutil
+import subprocess
 import threading
 import time
 import urllib.parse
@@ -82,7 +87,7 @@ def read_record() -> dict[str, Any] | None:
 
 
 def is_authenticated() -> bool:
-    return read_record() is not None
+    return read_record() is not None or _read_codex_cli_record() is not None
 
 
 def save_record(record: dict[str, Any]) -> None:
@@ -298,7 +303,7 @@ def _account_id_from_jwt(token: str | None) -> str | None:
     padding = "=" * (-len(payload_b64) % 4)
     try:
         payload = json.loads(base64.urlsafe_b64decode(payload_b64 + padding))
-    except (ValueError, json.JSONDecodeError):
+    except (ValueError, binascii.Error):
         return None
     if not isinstance(payload, dict):
         return None
@@ -315,6 +320,112 @@ def _account_id_from_jwt(token: str | None) -> str | None:
     return None
 
 
+def _read_codex_cli_record() -> dict[str, Any] | None:
+    """Read Codex CLI's current access token without copying or owning its refresh token."""
+    home = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex").expanduser()
+    path = home / "auth.json"
+    try:
+        if path.stat().st_size > 64 * 1024:
+            return None
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict) or data.get("auth_mode") != "chatgpt":
+        return None
+    tokens = data.get("tokens")
+    if not isinstance(tokens, dict):
+        return None
+    access = tokens.get("access_token")
+    account_id = tokens.get("account_id")
+    if not isinstance(access, str) or not access:
+        return None
+    if not isinstance(account_id, str) or not account_id:
+        account_id = _account_id_from_jwt(access)
+    if not account_id:
+        return None
+    try:
+        payload_b64 = access.split(".")[1]
+        payload = json.loads(base64.urlsafe_b64decode(payload_b64 + "=" * (-len(payload_b64) % 4)))
+        expires_at = payload.get("exp")
+    except (IndexError, ValueError, binascii.Error):
+        return None
+    if not isinstance(expires_at, int | float):
+        return None
+    return {"access": access, "account_id": account_id, "expires_at": expires_at}
+
+
+def _refresh_codex_cli_auth() -> None:
+    """Ask Codex to refresh its own store; Strix never spends its refresh token."""
+    executable = shutil.which("codex")
+    if executable is None:
+        raise CodexAuthError("codex_unavailable", "Codex CLI is unavailable; run `aidast login`")
+    try:
+        process = subprocess.Popen(
+            [executable, "app-server", "--stdio"],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            text=True, bufsize=1,
+        )
+    except OSError as exc:
+        raise CodexAuthError("codex_unavailable", "Could not start Codex authentication") from exc
+    responses: queue.Queue[dict[str, Any] | None] = queue.Queue()
+
+    def read_responses() -> None:
+        try:
+            assert process.stdout is not None
+            for line in process.stdout:
+                try:
+                    value = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(value, dict):
+                    responses.put(value)
+        finally:
+            responses.put(None)
+
+    threading.Thread(target=read_responses, daemon=True).start()
+
+    def send(value: dict[str, Any]) -> None:
+        assert process.stdin is not None
+        process.stdin.write(json.dumps(value) + "\n")
+        process.stdin.flush()
+
+    def await_response(request_id: int) -> dict[str, Any]:
+        deadline = time.monotonic() + 45
+        while time.monotonic() < deadline:
+            try:
+                response = responses.get(timeout=max(0.01, deadline - time.monotonic()))
+            except queue.Empty:
+                break
+            if response is None:
+                break
+            if response.get("id") == request_id:
+                return response
+        raise CodexAuthError("codex_refresh_failed", "Codex authentication refresh did not complete")
+
+    try:
+        send({"id": 1, "method": "initialize", "params": {
+            "clientInfo": {"name": "aidast-strix", "version": "0.1.0"}, "capabilities": {},
+        }})
+        if "error" in await_response(1):
+            raise CodexAuthError("codex_refresh_failed", "Codex authentication initialization failed")
+        send({"method": "initialized", "params": {}})
+        send({"id": 2, "method": "account/read", "params": {"refreshToken": True}})
+        response = await_response(2)
+        result = response.get("result")
+        if "error" in response or not isinstance(result, dict) or not result.get("account"):
+            raise CodexAuthError("codex_refresh_failed", "Codex login has expired; run `aidast login`")
+    except OSError as exc:
+        raise CodexAuthError("codex_refresh_failed", "Codex authentication refresh failed") from exc
+    finally:
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=3)
+
+
 def _near_expiry(record: dict[str, Any]) -> bool:
     expires_at = record.get("expires_at")
     if not isinstance(expires_at, int | float):
@@ -327,7 +438,16 @@ def get_valid_token() -> tuple[str, str]:
     guard if near expiry."""
     record = read_record()
     if record is None:
-        raise CodexAuthError("not_authenticated", "not signed in; run: strix auth login")
+        with _refresh_lock:
+            cli_record = _read_codex_cli_record()
+            if cli_record is None:
+                raise CodexAuthError("not_authenticated", "not signed in; run `aidast login` or `strix auth login chatgpt`")
+            if _near_expiry(cli_record):
+                _refresh_codex_cli_auth()
+                cli_record = _read_codex_cli_record()
+                if cli_record is None or _near_expiry(cli_record):
+                    raise CodexAuthError("codex_refresh_failed", "Codex login has expired; run `aidast login`")
+            return cli_record["access"], cli_record["account_id"]
     if not _near_expiry(record):
         return record["access"], record["account_id"]
     with _refresh_guard():

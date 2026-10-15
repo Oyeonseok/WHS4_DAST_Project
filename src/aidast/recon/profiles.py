@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+import re
 from types import MappingProxyType
 from typing import Final, Literal
 
@@ -40,27 +41,40 @@ EXECUTION_PROFILES: Final[Mapping[ProfileId, ProfileCaps]] = MappingProxyType(
             max_requests=2000,
         ),
         "bug-bounty-safe": ProfileCaps(
-            requests_per_second=0.2,
-            concurrency=1,
+            requests_per_second=10,
+            concurrency=2,
             timeout_seconds=15,
             max_depth=2,
-            max_requests=300,
+            max_requests=500,
         ),
     }
 )
 
 
+_RATE_PATTERN = re.compile(
+    r"(?i)(?:max(?:imum)?\.?\s*)?"
+    r"(?P<rate>\d+(?:\.\d+)?)\s*(?:requests?|reqs?)\s*(?:/|per)\s*"
+    r"(?:s|sec(?:ond)?s?)(?![A-Za-z])"
+)
+
+
 def grounded_scope_request_rate(analysis: ScopeAnalysis) -> float | None:
-    """Conservative average ceiling from AI-declared periodic quotas."""
+    """Use the strictest rate when structured limits and quoted evidence differ."""
     rules = analysis.execution_rules
-    rates = [limit.maximum / limit.period_seconds for limit in rules.request_limits
-             if limit.period_seconds is not None] if rules else []
+    rates = [
+        limit.maximum / limit.period_seconds
+        for limit in rules.request_limits
+        if limit.period_seconds is not None
+    ] if rules else []
+    quoted_rates = [
+        float(match.group("rate"))
+        for evidence in analysis.source_evidence
+        for match in _RATE_PATTERN.finditer(evidence.quote)
+    ]
+    rates.extend(quoted_rates)
     return min(rates) if rates else None
 
 
 def profile_request_rate(profile: ProfileId, scope_rate: float | None) -> float:
-    """Use the approved rate; profiles supply a fallback when none is declared."""
-    if profile == "bug-bounty-safe":
-        limit = EXECUTION_PROFILES[profile].requests_per_second
-        return min(scope_rate, limit) if scope_rate is not None else limit
-    return min(scope_rate, 50) if scope_rate is not None else EXECUTION_PROFILES[profile].requests_per_second
+    """An explicit approved Scope rate replaces the generic profile fallback."""
+    return scope_rate if scope_rate is not None else EXECUTION_PROFILES[profile].requests_per_second

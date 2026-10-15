@@ -1,28 +1,27 @@
 # TEAM_GUIDE — 역할별 안내
 
-이 문서는 `integrate/strix-recon-merge` 브랜치에서 작업할 팀원 각자가 "내 역할에서 뭘 어떻게 돌리면 되는지"만 보면 되게 정리한 것입니다. 병합 과정 전체(왜 이렇게 구조를 짰는지, 어떤 버그를 고쳤는지)는 `how_to_Integrated.md`를 보세요. 여긴 현재 사용법 위주입니다.
+이 문서는 `integrated/`를 받아서 작업할 팀원 각자가 "내 역할에서 뭘 어떻게 돌리면 되는지"만 보면 되게 정리한 것입니다. 병합 과정 전체(왜 이렇게 구조를 짰는지, 어떤 버그를 고쳤는지)는 `how_to_Integrated.md`를 보세요. 여긴 "사용법" 위주입니다.
 
-## 공통: 하나의 통합 설치를 사용합니다
+## 공통: 설치 두 개를 따로 쓴다는 것만 기억하면 됩니다
 
-- 설치: `uv sync --locked --extra recon-engine --group dev`
-- 전체 실행: `uv run python -m aidast run <scope-url> --target <승인 자산> --recon-engine integrated ...`
-- `integrated`는 Strix를 먼저 실행하고, Strix 런타임이 막히거나 인스코프 엔드포인트가 없을 때 같은 승인 정책으로 기본 정찰을 이어서 실행합니다.
-- 공용 `Recon.db`에서 `Surface.json`과 `Handoff.json`을 만든 뒤 Attack, Chaining, Validation, Report가 자동으로 이어집니다.
+- **recon**: `recon/AI-Dast`(Strix 엔진)를 **글로벌 도구**로 설치해서 씁니다 — `uv tool install --editable '.[recon-engine]'`. 명령어는 `aidast recon ...`.
+- **attack/chaining/validation/report**: 이 `integrated/` 프로젝트를 **로컬 venv**로 씁니다 — `uv sync`, 실행은 `uv run python -m aidast.cli ...`. **`uv tool install`로 설치하면 안 됩니다** — recon의 글로벌 설치를 덮어씁니다.
+- 둘은 **같은 DB 파일**(`Recon.db` = `Pipeline.db`)을 `--db`로 공유합니다. recon이 쓰고, attack이 그 DB를 이어서 읽습니다.
+- recon은 `aidast recon <scope-url> --target <url> --start-url <url> --allow-lab-account-creation --execute --diagnostic-logs` 형태로 돌립니다. 실타깃은 아래 "버그바운티" 섹션 참고.
 
 ---
 
 ## WebUI 담당
 
-- 실행: `uv run python -m aidast dashboard --result-root <결과 폴더> --ui-dir WebUI/dist`. 기본 포트 8000, `127.0.0.1`에만 바인딩됩니다.
-- 새 스캔 화면에서 `Strix 통합 · 기본 정찰 자동 대체` 또는 `기본 정찰 엔진`을 선택할 수 있습니다. 기본값은 통합 Strix입니다.
-- `로그인 방식`을 `런타임 브라우저`로 선택하면 동일한 사람 로그인 세션을 유지하기 위해 기본 정찰 엔진으로 자동 전환됩니다.
+- 실행: `uv run python -m aidast.cli dashboard --result-root <recon 결과 폴더>` (예: `/mnt/c/.../recon/AI-Dast/result`). 기본 포트 8000, `127.0.0.1`에만 바인딩됩니다(원격 인증이 없어서 loopback 전용).
+- 이건 **읽기 전용 프로젝션**입니다 — DB의 `stage_runs`, `attack_coverage_items`, `findings` 등을 그대로 보여주는 화면이고, WebUI에서 뭘 실행시키거나 바꾸는 기능은 없습니다.
 - `--ui-dir`로 빌드된 WebUI dist 폴더를 지정하면 그걸 `/`에서 서빙합니다. 커스텀 화면을 만들고 있다면 여기로 꽂으면 됩니다.
-- WebUI는 정찰 엔진 선택과 통합 실행 인자를 지원합니다. `guarded_replay`(IDOR 크로스 계정 테스트) 전용 화면은 아직 없으므로 해당 기능은 CLI에서 실행합니다.
+- **알아둘 것**: 이번 통합 작업에서 WebUI는 artex 원본 화면 그대로입니다. `guarded_replay`(IDOR 크로스 계정 테스트) 전용 화면 같은 건 없습니다 — 필요하면 새로 만들어야 합니다.
 
 ## 공격(Attack) 검토/수정 담당
 
 - 핵심 파일: `src/aidast/attack/*`(특히 `coverage.py`, `graph.py`, `surface.py`, `request_cli.py`), `src/aidast/orchestration/attack.py`(`AttackCoordinator`), `src/aidast/orchestration/coverage_attack.py`(`ExhaustiveAttackCoordinator`).
-- 통합 실행은 `Handoff.json`을 만들기 때문에 후속 단계 실패 시 `aidast resume <scan_id>`을 사용할 수 있습니다. Attack만 따로 점검하려면:
+- recon이 Strix 브릿지로 끝난 스캔은 `aidast resume`을 못 씁니다(`Handoff.json`이 없어서). 대신 attack만 따로 돌리려면:
   ```bash
   uv run python -m aidast.cli attack coverage-plan <Recon.db> --scan-id <scan_id>
   uv run python scripts/run_attack_coordinator.py \
@@ -41,7 +40,7 @@
 - Account A(관찰 대상)의 인증된 read-only 요청 하나를 DB에 넣어야 `guarded_replay`(교차 계정 IDOR)를 테스트할 수 있는데, 실제 recon 프록시를 다시 띄우는 대신 `scripts/capture_identity_a_request.py`로 쿠키 기반 요청 하나를 직접 캡처 포맷으로 넣을 수 있습니다.
 - 안전 문구: recon/attack 어느 쪽 코드도 Scope 승인 없이는 요청을 보내지 않습니다(mitmproxy가 fail-closed). 승인된 Scope 밖으로 나가는 요청은 자동으로 차단/기록됩니다.
 
-## 태깅
+## 태깅 (이윤담)
 
 - 명령어: `uv run python -m aidast.cli tag <Recon.db> --scan-id <scan_id> [--batch-size 200]`
 - 내부적으로 `aidast.recon.annotations.tag_pending_observations`를 씁니다 — recon이 끝난 뒤 쌓인 미분류 observation을 배치로 분류합니다. 배치 크기 관련 버그는 이전에 이미 고쳐서 반영돼 있습니다.
@@ -51,6 +50,6 @@
 
 ## 알려진 제약 (전원 참고)
 
-- WebUI 통합 Strix 실행은 `aidast resume` 가능한 표준 Handoff를 생성합니다.
+- `aidast resume`은 Strix 브릿지로 돌린 recon에는 못 씁니다 (`Handoff.json` 없음). 위의 `run_attack_coordinator.py` 같은 직접 호출 스크립트를 쓰세요.
 - 계정 가입 자동화는 본질적으로 100% 결정론적이지 않습니다 — 실패하면 재시도하거나 수동 경로(위 스크립트들)로 전환하세요.
-- 로컬 변경은 `integrate/strix-recon-merge` 작업 트리에 있으며, 별도 요청 전에는 push하지 않습니다.
+- 이 폴더(`attack/integrated`)는 아직 **git 저장소가 아닙니다**. 팀 repo에 올리기 전에 git init/커밋이 필요합니다.

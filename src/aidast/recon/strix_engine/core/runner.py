@@ -610,6 +610,7 @@ async def run_strix_scan(
         if not interactive and result is not None:
             final = getattr(result, "final_output", None)
             scan_completed = False
+            recon_blocked = False
             if isinstance(final, str):
                 try:
                     parsed = json.loads(final)
@@ -617,12 +618,18 @@ async def run_strix_scan(
                     scan_completed = bool(
                         isinstance(parsed, dict) and parsed.get(completion_key)
                     )
+                    recon_blocked = bool(
+                        recon_only and isinstance(parsed, dict) and parsed.get("recon_blocked")
+                    )
                 except (ValueError, TypeError):
                     scan_completed = False
             elif isinstance(final, dict):
                 completion_key = "recon_completed" if recon_only else "scan_completed"
                 scan_completed = bool(final.get(completion_key))
-            if not scan_completed:
+                recon_blocked = bool(recon_only and final.get("recon_blocked"))
+            if recon_blocked:
+                logger.warning("Scan %s ended with incomplete Recon coverage: %s", scan_id, str(final)[:300])
+            elif not scan_completed:
                 logger.error(
                     "Scan %s ended without calling its completion lifecycle tool. The agent "
                     "emitted a text-only turn instead of a lifecycle tool call, "

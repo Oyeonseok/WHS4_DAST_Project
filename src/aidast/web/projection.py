@@ -850,6 +850,65 @@ class DashboardProjector:
             for row in rows
         ]
 
+    def _sync_strix_capture(self, event_conn: sqlite3.Connection, scan_id: str) -> None:
+        """Project observed, in-scope Strix responses without request contents."""
+        path = self.result_root / "logs" / scan_id / "recon-capture" / "mitm_capture.jsonl"
+        if path.is_symlink() or not path.is_file() or not self._inside_root(path):
+            return
+        last = event_conn.execute(
+            """SELECT source_key FROM web_events WHERE scan_id=?
+            AND source_key LIKE 'strix-capture:%' ORDER BY event_id DESC LIMIT 1""",
+            (scan_id,),
+        ).fetchone()
+        try:
+            last_offset = int(last[0].partition(":")[2]) if last else -1
+        except ValueError:
+            last_offset = -1
+        try:
+            with path.open("rb") as stream:
+                size = path.stat().st_size
+                if last_offset >= size:
+                    last_offset = -1
+                start = max(0, size - 2 * 1024 * 1024, last_offset)
+                stream.seek(start)
+                if start:
+                    stream.readline()  # discard a cut line or the last projected line
+                while True:
+                    offset = stream.tell()
+                    line = stream.readline()
+                    if not line:
+                        break
+                    if len(line) > 512 * 1024 or not line.endswith(b"\n"):
+                        continue
+                    try:
+                        record = json.loads(line)
+                    except ValueError:
+                        continue
+                    if not isinstance(record, dict) or record.get("scope_allowed") is not True \
+                            or record.get("policy_blocked") is not False \
+                            or record.get("static_resource") is True \
+                            or record.get("duplicate") is True \
+                            or type(record.get("response_status")) is not int:
+                        continue
+                    activity = validated_activity({
+                        "phase": "endpoint_discovery", "state": "found",
+                        "method": record.get("method"), "url": record.get("url"),
+                        "source": "strix", "response_status": record["response_status"],
+                    })
+                    if activity is None:
+                        continue
+                    captured_at = record.get("captured_at")
+                    self._append(
+                        event_conn, scan_id=scan_id,
+                        source_key=f"strix-capture:{offset}",
+                        occurred_at=_utc(captured_at if isinstance(captured_at, str) and len(captured_at) <= 64 else None),
+                        event_type="log.appended",
+                        payload={"stage": "Recon", "level": "info", "message": "Recon activity",
+                                 "message_code": "recon.activity", "message_params": activity},
+                    )
+        except OSError:
+            return
+
     def _sync(
         self,
         event_conn: sqlite3.Connection,
@@ -858,6 +917,7 @@ class DashboardProjector:
         audits: list[sqlite3.Row],
     ) -> None:
         counts = state.pop("_tagging_counts", None)
+        self._sync_strix_capture(event_conn, scan_id)
         for row in audits:
             activity = (
                 validated_activity(_json_object(row["details_json"]))

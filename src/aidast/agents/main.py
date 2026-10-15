@@ -454,18 +454,35 @@ class CodexMainAgent:
         plan: ReconPlan,
         execution_start_urls: dict[tuple[str, str], str] | None = None,
     ) -> dict[tuple[str, str], TargetPolicy]:
-        proposal = self._run_structured(
-            prompt=self._build_target_policy_prompt(
-                scope_id,
-                scope_markdown,
-                plan,
-                execution_start_urls=execution_start_urls or {},
-            ),
-            model_type=TargetPolicySelectionSetProposal,
-            artifact_name="target-policies",
-            operation="target policy generation",
-            native_skill=("aidast.skills.target_policy", "aidast-target-policy"),
+        prompt = self._build_target_policy_prompt(
+            scope_id,
+            scope_markdown,
+            plan,
+            execution_start_urls=execution_start_urls or {},
         )
+        for attempt in range(2):
+            try:
+                proposal = self._run_structured(
+                    prompt=prompt,
+                    model_type=TargetPolicySelectionSetProposal,
+                    artifact_name="target-policies",
+                    operation="target policy generation",
+                    native_skill=("aidast.skills.target_policy", "aidast-target-policy"),
+                )
+                break
+            except MainAgentError as exc:
+                if (attempt or not exc.failure_diagnostics
+                        or exc.failure_diagnostics["failure_code"] != "invalid_result"
+                        or "excluded_hosts must contain" not in str(exc)):
+                    raise
+                prompt += (
+                    "\nThe previous policy failed validation. Every excluded_hosts entry "
+                    "must be a host name or a leading wildcard such as "
+                    "*.example.com. Do not put URLs, paths, or embedded wildcards "
+                    "there. Keep every explicit host exclusion from Scope.md; "
+                    "put path exclusions in excluded_path_prefixes. "
+                    "Return a fresh complete policy object.\n"
+                )
         canonical_targets = {
             f"target_{index:04d}": target
             for index, target in enumerate(plan.targets, start=1)

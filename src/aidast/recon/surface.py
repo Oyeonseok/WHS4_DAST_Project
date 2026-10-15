@@ -6,6 +6,8 @@ import json
 import sqlite3
 from pathlib import Path
 
+from aidast.recon.judgment import resource_type
+
 
 def export_surface(conn: sqlite3.Connection, *, scan_id: str, output_path: Path) -> Path:
     origins = conn.execute(
@@ -15,62 +17,76 @@ def export_surface(conn: sqlite3.Connection, *, scan_id: str, output_path: Path)
         (scan_id,),
     ).fetchall()
 
-    result: dict = {"schema_version": "2.3", "scan_id": scan_id, "origins": []}
+    result: dict = {"schema_version": "2.2", "scan_id": scan_id, "origins": []}
     result["annotation_runs"] = _rows(conn, """SELECT annotation_run_id, model,
         prompt_version, taxonomy_version, status, error_message, started_at, finished_at
         FROM annotation_runs WHERE scan_id=? ORDER BY started_at, annotation_run_id""", (scan_id,))
     for origin_id, base_url, spa_detected, framework in origins:
         endpoints = conn.execute(
-            """SELECT endpoint_id, method, normalized_path, query_signature, content_type, source_tools, verification_status
+            """SELECT endpoint_id, method, normalized_path, query_signature, content_type, source_tools
                FROM endpoints WHERE origin_id=? AND is_excluded=0""",
             (origin_id,),
         ).fetchall()
-        candidates = conn.execute(
-            """SELECT endpoint_id, method, normalized_path, query_signature, content_type, source_tools, verification_status
+        excluded = conn.execute(
+            """SELECT endpoint_id, method, normalized_path, query_signature,
+                      content_type, source_tools, exclude_reason
                FROM endpoints WHERE origin_id=? AND is_excluded=1
-                 AND verification_status='candidate'
-                 AND exclude_reason='unverified_candidate'""",
+               ORDER BY normalized_path, method""",
             (origin_id,),
         ).fetchall()
         signals = conn.execute(
             "SELECT signal_type, value FROM surface_signals WHERE origin_id=?",
             (origin_id,),
         ).fetchall()
-        result["origins"].append(
+        active_records = [
             {
+                "endpoint_id": endpoint_id,
+                "observations": _observations(conn, endpoint_id),
+                "annotations": _annotations(conn, endpoint_id),
+                "method": method,
+                "path": path,
+                "query_signature": query_signature,
+                "content_type": content_type,
+                "source_tools": (source_tools or "").split(","),
+            }
+            for endpoint_id, method, path, query_signature, content_type, source_tools in endpoints
+        ]
+        resource_records = []
+        excluded_records = []
+        for endpoint_id, method, path, signature, content_type, source_tools, reason in excluded:
+            record = {
+                "endpoint_id": endpoint_id,
+                "observations": _observations(conn, endpoint_id),
+                "annotations": _annotations(conn, endpoint_id),
+                "method": method,
+                "path": path,
+                "query_signature": signature,
+                "content_type": content_type,
+                "source_tools": (source_tools or "").split(","),
+                "exclude_reason": reason,
+            }
+            if reason == "static_asset":
+                record["resource_type"] = resource_type(path) or "static_resource"
+                resource_records.append(record)
+            else:
+                excluded_records.append(record)
+
+        result["origins"].append({
                 "base_url": base_url,
                 "spa_detected": bool(spa_detected),
                 "framework": framework,
-                "endpoints": [
-                    {
-                        "endpoint_id": endpoint_id,
-                        "observations": _observations(conn, endpoint_id),
-                        "annotations": _annotations(conn, endpoint_id),
-                        "method": method,
-                        "path": path,
-                        "query_signature": query_signature,
-                        "content_type": content_type,
-                        "source_tools": (source_tools or "").split(","),
-                        "verification_status": verification_status,
-                    }
-                    for endpoint_id, method, path, query_signature, content_type, source_tools, verification_status in endpoints
-                ],
-                "candidate_endpoints": [
-                    {
-                        "endpoint_id": endpoint_id,
-                        "observations": _observations(conn, endpoint_id),
-                        "method": method,
-                        "path": path,
-                        "query_signature": query_signature,
-                        "content_type": content_type,
-                        "source_tools": (source_tools or "").split(","),
-                        "verification_status": verification_status,
-                    }
-                    for endpoint_id, method, path, query_signature, content_type, source_tools, verification_status in candidates
-                ],
+                "endpoints": active_records,
+                # Similar to Strix's broad URL inventory, retain static files
+                # for coverage and provenance without passing them to Attack.
+                "resources": resource_records,
+                "excluded_candidates": excluded_records,
+                "counts": {
+                    "endpoints": len(active_records),
+                    "resources": len(resource_records),
+                    "excluded_candidates": len(excluded_records),
+                },
                 "surface_signals": {key: value for key, value in signals},
-            }
-        )
+            })
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")

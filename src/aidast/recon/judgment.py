@@ -7,6 +7,7 @@ dependency.
 
 from __future__ import annotations
 
+import hashlib
 import re
 from collections import defaultdict
 from urllib.parse import parse_qsl, unquote, urlsplit
@@ -31,11 +32,30 @@ PARAM_PATTERN = re.compile(
 
 _UNRESERVED = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~")
 
+# Resource files are retained in the recon database and exported separately
+# from attackable routes. Do not add .json/.xml/.csv here: these often are API
+# responses or machine-readable application endpoints.
 STATIC_EXTENSIONS = (
-    ".js", ".css", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".avif",
-    ".svg", ".ico", ".webmanifest",
-    ".woff", ".woff2", ".ttf", ".map",
+    ".js", ".mjs", ".cjs", ".css", ".map", ".wasm",
+    ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".webp", ".avif", ".bmp",
+    ".woff", ".woff2", ".ttf", ".otf", ".eot",
+    ".pdf", ".webmanifest",
+    ".mp3", ".mp4", ".m4a", ".ogg", ".webm", ".wav", ".mov",
+    ".zip", ".gz", ".tgz", ".rar", ".7z",
 )
+
+_RESOURCE_TYPES = {
+    "javascript": {".js", ".mjs", ".cjs"},
+    "stylesheet": {".css"},
+    "source_map": {".map"},
+    "wasm": {".wasm"},
+    "image": {".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".webp", ".avif", ".bmp"},
+    "font": {".woff", ".woff2", ".ttf", ".otf", ".eot"},
+    "document": {".pdf"},
+    "manifest": {".webmanifest"},
+    "media": {".mp3", ".mp4", ".m4a", ".ogg", ".webm", ".wav", ".mov"},
+    "archive": {".zip", ".gz", ".tgz", ".rar", ".7z"},
+}
 
 
 def normalize_path(raw_path: str) -> str:
@@ -89,6 +109,32 @@ def query_signature(raw_url: str) -> str:
     )
 
 
+def response_fingerprint(status: object, content_type: object, body: bytes | str | None = None,
+                         content_length: object = None) -> str:
+    """Stable, body-safe fingerprint for soft-404/similarity decisions."""
+    if isinstance(body, str):
+        body = body.encode("utf-8", "replace")
+    digest = hashlib.sha256(body or b"").hexdigest() if body is not None else ""
+    return "|".join((str(status or ""), str(content_type or "").split(";", 1)[0].lower(),
+                     str(content_length if content_length is not None else len(body or b"")), digest))
+
+
+def limit_parameter_occurrences(raw_url: str, maximum: int = 5) -> str:
+    """Bound crawler loops that append the same query key indefinitely."""
+    try:
+        parsed = urlsplit(str(raw_url or ""))
+        counts: dict[str, int] = defaultdict(int)
+        kept = []
+        for name, value in parse_qsl(parsed.query, keep_blank_values=True):
+            counts[name] += 1
+            if counts[name] <= maximum:
+                kept.append((name, value))
+        from urllib.parse import urlencode, urlunsplit
+        return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, urlencode(kept), ""))
+    except ValueError:
+        return str(raw_url or "")
+
+
 def adaptive_path_fingerprints(
     raw_endpoints: list[dict], threshold: int = 5, *, per_method: bool = False,
 ) -> dict[str | tuple[str, str], str]:
@@ -110,11 +156,6 @@ def adaptive_path_fingerprints(
         path, _, query = raw.partition("?")
         segments = [part for part in path.split("/") if part]
         for index, value in enumerate(segments):
-            if segments[0].lower() in {"api", "rest"}:
-                # API resource and action names can have many siblings at
-                # any depth. That alone does not prove a segment is an ID.
-                # Explicit numeric/UUID IDs are still normalized below.
-                continue
             key = (str(item.get("method", "GET")).upper(), index, tuple(segments[:index] + segments[index + 1:]))
             if len(rows[key]) >= threshold and not _looks_static_segment(value):
                 segments[index] = ":param"
@@ -139,6 +180,20 @@ def is_static_asset(path: str) -> bool:
         folded.endswith(STATIC_EXTENSIONS)
         or folded.rsplit("/", 1)[-1] in {"robots.txt", "sitemap.xml"}
     )
+
+
+def resource_type(path: str) -> str | None:
+    """Return a conservative resource class; API-shaped .json/.xml stay routes."""
+    try:
+        suffix = urlsplit(str(path or "")).path.lower().rsplit("/", 1)[-1]
+    except ValueError:
+        suffix = str(path or "").split("?", 1)[0].rsplit("/", 1)[-1].lower()
+    dot = suffix.rfind(".")
+    extension = suffix[dot:] if dot >= 0 else ""
+    for kind, extensions in _RESOURCE_TYPES.items():
+        if extension in extensions:
+            return kind
+    return None
 
 
 def is_probable_redirect_loop_path(path: str) -> bool:
@@ -180,32 +235,52 @@ def merge_and_normalize(raw_endpoints: list[dict]) -> list[dict]:
     the exclusion decision stays auditable.
     """
     merged: dict[tuple[str, str], dict] = {}
+    verification_rank = {"candidate": 0, "observed": 1, "verified": 2}
     learned = adaptive_path_fingerprints(raw_endpoints, per_method=True)
     for item in raw_endpoints:
         if is_probable_redirect_loop_path(item.get("path", "")):
             continue
-        norm_path = normalize_path(learned.get((item["method"].upper(), item["path"]), item["path"]))
-        key = (item["method"], norm_path)
+        method = str(item.get("method") or "GET").upper()
+        norm_path = normalize_path(learned.get((method, item["path"]), item["path"]))
+        key = (method, norm_path)
         excluded = is_static_asset(item["path"])
+        signature = query_signature(item.get("url") or item.get("path"))
+        content_type = item.get("content_type")
+        evidence = item.get("evidence") if isinstance(item.get("evidence"), dict) else {}
+        status = evidence.get("response_status", item.get("response_status"))
         verification_status = result_verification_status(item)
         if key not in merged:
             merged[key] = {
-                "method": item["method"],
+                "method": method,
                 "path": item["path"],
                 "normalized_path": norm_path,
-                "content_type": item.get("content_type"),
-                "query_signature": query_signature(item.get("url") or item.get("path")),
-                "source_tools": {item["source"]},
-                "is_excluded": excluded or verification_status == "candidate",
-                "exclude_reason": ("static_asset" if excluded else
-                                   "unverified_candidate" if verification_status == "candidate" else None),
+                "content_type": content_type,
+                "query_signature": signature,
+                "query_signatures": {signature} if signature else set(),
+                "response_statuses": {status} if type(status) is int else set(),
                 "verification_status": verification_status,
+                "source_tools": {str(item.get("source") or "unknown")},
+                "is_excluded": excluded,
+                "exclude_reason": "static_asset" if excluded else None,
+                "resource_type": resource_type(item["path"]) if excluded else None,
             }
         else:
-            merged[key]["source_tools"].add(item["source"])
-            if verification_status == "verified":
-                merged[key]["verification_status"] = "verified"
-                if merged[key]["exclude_reason"] == "unverified_candidate":
-                    merged[key]["is_excluded"] = False
-                    merged[key]["exclude_reason"] = None
+            current = merged[key]
+            if verification_rank[verification_status] > verification_rank[current["verification_status"]]:
+                current["verification_status"] = verification_status
+            current["source_tools"].add(str(item.get("source") or "unknown"))
+            if not current.get("content_type") and content_type:
+                current["content_type"] = content_type
+            if signature:
+                current["query_signatures"].add(signature)
+                if not current.get("query_signature"):
+                    current["query_signature"] = signature
+            if type(status) is int:
+                current["response_statuses"].add(status)
+            # An active route observation takes precedence over a static
+            # resource classification when both normalize to one key.
+            if current["is_excluded"] and not excluded:
+                current["is_excluded"] = False
+                current["exclude_reason"] = None
+                current["resource_type"] = None
     return list(merged.values())

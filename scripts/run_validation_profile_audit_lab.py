@@ -39,14 +39,20 @@ class ControlledReplayAssessmentAgent:
 
     def assess(self, blind_case, observations, correction=None):
         targets = tuple(item for item in observations if item["attempt_kind"] == "target")
-        if (len(targets) != 3
-                or len(targets) != len(observations)
+        positives = tuple(item for item in observations
+                          if item["attempt_kind"] == "positive_control")
+        negatives = tuple(item for item in observations
+                          if item["attempt_kind"] == "negative_control")
+        if (len(targets) != 3 or len(positives) != 1 or len(negatives) != 1
+                or positives[0]["signal_observed"] is not True
+                or negatives[0]["signal_observed"] is not False
                 or not (all(item["signal_observed"] is True for item in targets)
                         or all(item["signal_observed"] is False for item in targets))):
             raise ValueError("controlled audit requires a complete and consistent replay")
         reproduced = all(item["signal_observed"] is True for item in targets)
-        evidence = tuple(item["evidence_id"] for item in targets)
+        evidence = tuple(item["evidence_id"] for item in observations)
         target_evidence = targets[0]["evidence_id"]
+        negative_evidence = negatives[0]["evidence_id"]
 
         def axis(score, citations):
             return {"score": score, "evidence_ids": citations,
@@ -58,8 +64,10 @@ class ControlledReplayAssessmentAgent:
             "reproduced": reproduced,
             "signal_types": tuple(blind_case["signal_types"]),
             "target_attempt_ids": tuple(item["attempt_id"] for item in targets),
+            "control_attempt_ids": (positives[0]["attempt_id"], negatives[0]["attempt_id"]),
             "evidence_ids": evidence, "blocker_axis": None, "blocker_reason": None,
-            "impact_boundary": axis(1 if reproduced else 0, (target_evidence,)),
+            "impact_boundary": axis(1 if reproduced else 0,
+                                    (target_evidence, negative_evidence)),
             "impact_sensitivity": axis(0, (target_evidence,)),
             "impact_actor_requirements": axis(2 if reproduced else 0,
                                               (target_evidence,)),

@@ -51,7 +51,7 @@ def test_source_leak_lab_probes_value_without_storing_it_in_contract() -> None:
     assert any(row["kind"] == "json_path_nonempty_string"
                and row["path"] == ["users", 0, "password"]
                and row["expected"] is True for row in target)
-    assert set(runtime) == {"schema_version", "target"}
+    assert runtime["negative_control"]["assertions"] == target
 
 
 def test_prepare_seven_isolated_cases_without_leaking_answers(tmp_path: Path) -> None:

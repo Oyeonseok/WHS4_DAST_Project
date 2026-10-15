@@ -343,6 +343,43 @@ def test_projection_shows_discovered_url_with_response_evidence(tmp_path: Path) 
     assert projector.audit_log(SCAN_ID)[0]["message_params"] == expected
 
 
+def test_projection_shows_safe_strix_http_activity_while_recon_runs(tmp_path: Path) -> None:
+    database = _fixture(tmp_path)
+    with sqlite3.connect(database) as conn:
+        conn.execute("UPDATE scans SET status='running',finished_at=NULL WHERE scan_id=?", (SCAN_ID,))
+        conn.execute("UPDATE stage_runs SET status='running' WHERE stage_run_id='stage'")
+    capture = tmp_path / "logs" / SCAN_ID / "recon-capture" / "mitm_capture.jsonl"
+    capture.parent.mkdir(parents=True)
+    records = [
+        {"scope_allowed": True, "policy_blocked": False, "static_resource": False,
+         "method": "GET", "url": "https://example.com/account?token=must-not-leak",
+         "response_status": 200, "request_headers": {"Cookie": "must-not-leak"},
+         "response_body": "must-not-leak"},
+        {"scope_allowed": False, "policy_blocked": True, "method": "GET",
+         "url": "https://other.example/private", "response_status": 403},
+    ]
+    capture.write_text("".join(json.dumps(item) + "\n" for item in records), encoding="utf-8")
+    projector = DashboardProjector(tmp_path)
+
+    first = projector.snapshot(SCAN_ID)
+    activities = [item for item in first["logs"] if item.get("message_code") == "recon.activity"]
+    assert activities[-1]["message_params"] == {
+        "phase": "endpoint_discovery", "state": "found", "method": "GET",
+        "url": "https://example.com/account", "source": "strix",
+        "response_status": 200,
+    }
+    assert len(activities) == 1
+    assert "must-not-leak" not in json.dumps(first)
+    assert projector.snapshot(SCAN_ID)["last_event_id"] == first["last_event_id"]
+
+    with capture.open("a", encoding="utf-8") as stream:
+        stream.write(json.dumps({"scope_allowed": True, "policy_blocked": False,
+            "method": "GET", "url": "https://example.com/new", "response_status": 404}) + "\n")
+    updated = projector.snapshot(SCAN_ID)
+    assert updated["last_event_id"] > first["last_event_id"]
+    assert len([item for item in updated["logs"] if item.get("message_code") == "recon.activity"]) == 2
+
+
 def test_audit_log_categorizes_failures_without_exposing_error_text(tmp_path: Path) -> None:
     database = _fixture(tmp_path)
     with sqlite3.connect(database) as conn:
@@ -1300,7 +1337,8 @@ def test_dashboard_cli_defaults_and_rejects_remote_bind(tmp_path: Path) -> None:
         _run_dashboard(remote)
 
 
-def test_scan_launcher_builds_fixed_argv_and_streams_pre_database_logs(tmp_path: Path) -> None:
+def test_scan_launcher_builds_fixed_argv_and_streams_pre_database_logs(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.delenv("AIDAST_STRIX_IMAGE", raising=False)
     wordlist = tmp_path / "resources" / "wordlists" / "common.txt"
     wordlist.parent.mkdir(parents=True)
     wordlist.write_text("api\napp\n", encoding="utf-8")
@@ -1397,6 +1435,7 @@ def test_scan_launcher_builds_fixed_argv_and_streams_pre_database_logs(tmp_path:
     argv = captured["argv"]
     assert captured["kwargs"]["shell"] is False
     assert captured["kwargs"]["env"]["PYTHONUNBUFFERED"] == "1"
+    assert "AIDAST_STRIX_IMAGE" not in captured["kwargs"]["env"]
     assert captured["kwargs"]["stderr"] == subprocess.STDOUT
     assert argv[1:4] == ["-m", "aidast", "run"]
     assert argv[argv.index("--target") + 1] == "prismlife.com"
@@ -1410,7 +1449,6 @@ def test_scan_launcher_builds_fixed_argv_and_streams_pre_database_logs(tmp_path:
     assert argv[argv.index("--timeout-seconds") + 1] == "10"
     assert argv[argv.index("--tag-batch-size") + 1] == "17"
     assert argv[argv.index("--recon-model") + 1] == "gpt-6-sol"
-    assert argv[argv.index("--recon-engine") + 1] == "integrated"
     assert argv[argv.index("--attack-model") + 1] == "gpt-6-luna"
     assert argv[argv.index("--validation-model") + 1] == "gpt-5.6-terra"
     assert argv[argv.index("--report-model") + 1] == "gpt-6-astra"
@@ -1421,6 +1459,23 @@ def test_scan_launcher_builds_fixed_argv_and_streams_pre_database_logs(tmp_path:
     params = manager.snapshot(launched["scan_id"])["logs"][-1]["message_params"]
     assert (tmp_path / params["diagnostic_log"]).is_file()
     assert projector.stored_events_after(launched["scan_id"], 0)[0]["event_id"] == 1
+    strix_request = ScanLaunchRequest.model_validate({
+        **request.model_dump(), "recon_engine": "strix",
+        "allow_authorized_account_registration": True,
+        "max_depth": None, "timeout_seconds": None,
+    })
+    manager.launch(strix_request)
+    strix_argv = captured["argv"]
+    assert strix_argv[strix_argv.index("--recon-engine") + 1] == "strix"
+    assert "--allow-authorized-account-registration" in strix_argv
+    assert captured["kwargs"]["env"]["AIDAST_STRIX_IMAGE"] == "aidast-strix-mitm:local"
+    monkeypatch.setenv("AIDAST_STRIX_IMAGE", "approved-custom:latest")
+    manager.launch(strix_request)
+    assert captured["kwargs"]["env"]["AIDAST_STRIX_IMAGE"] == "approved-custom:latest"
+    assert "--ffuf-wordlist" not in strix_argv
+    assert "--ffuf-max-time-seconds" not in strix_argv
+    assert "--max-depth" not in strix_argv
+    assert "--timeout-seconds" not in strix_argv
     app = create_app(result_root=tmp_path, launch_manager=manager)
 
     async def before_recon_database() -> None:
@@ -1459,6 +1514,8 @@ def test_scan_launcher_builds_fixed_argv_and_streams_pre_database_logs(tmp_path:
         requirements=dict(required_request_headers=[item.model_dump() for item in scope_analysis.required_request_headers],
             execution_rules=dict(policy_review_version=3, exclusions=[], request_limits=[dict(maximum=10,period_seconds=1,scope="program",source_quote=rate_quote)])))))
     manager.catalog.header_resolver = resolver
+    manager.launch(strix_request)
+    assert captured["argv"][captured["argv"].index("--recon-engine") + 1] == "strix"
     manager.launch(request.model_copy(update={"max_rps": 10}))
     argv = captured["argv"]
     assert float(argv[argv.index("--max-rps") + 1]) == 10.0
@@ -1749,6 +1806,16 @@ def test_scan_request_rejects_unconfirmed_or_excessive_budget() -> None:
         ScanLaunchRequest(**base)
     with pytest.raises(ValueError, match="request budget exceeds"):
         ScanLaunchRequest(**base, max_requests=501, authorization_confirmed=True)
+    assert ScanLaunchRequest(**{**base, "profile": "bug-bounty-safe"},
+                             recon_engine="strix", authorization_confirmed=True).profile == "bug-bounty-safe"
+    with pytest.raises(ValueError, match="session handoff"):
+        ScanLaunchRequest(**base, recon_engine="strix", login_mode="runtime-browser",
+                          authorization_confirmed=True)
+    with pytest.raises(ValueError, match="requires Strix Recon"):
+        ScanLaunchRequest(**base, allow_authorized_account_registration=True,
+                          authorization_confirmed=True)
+    assert ScanLaunchRequest(**base, recon_engine="strix", max_depth=1,
+                             authorization_confirmed=True).max_depth == 1
     for invalid_batch in (0, 201, 1.5):
         with pytest.raises(ValueError):
             ScanLaunchRequest(**base, tag_batch_size=invalid_batch, authorization_confirmed=True)
@@ -1980,6 +2047,7 @@ def test_validations_api_reports_case_verdicts_and_safe_evidence(tmp_path: Path)
 
 
 def test_resume_uses_saved_policy_without_new_launch_inputs(tmp_path, monkeypatch):
+    monkeypatch.delenv("AIDAST_STRIX_IMAGE", raising=False)
     from types import SimpleNamespace
     from unittest.mock import Mock
     projector = DashboardProjector(tmp_path)
@@ -1994,4 +2062,5 @@ def test_resume_uses_saved_policy_without_new_launch_inputs(tmp_path, monkeypatc
     assert result['status'] == 'running'
     argv = factory.call_args.args[0]
     assert argv[1:5] == ['-m', 'aidast', 'resume', 'scan_resume_fixture']
+    assert factory.call_args.kwargs['env']['AIDAST_STRIX_IMAGE'] == 'aidast-strix-mitm:local'
     assert '--policy-input' not in argv and '--confirm-policy' not in argv

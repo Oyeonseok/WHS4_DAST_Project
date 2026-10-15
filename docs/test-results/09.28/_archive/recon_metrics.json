@@ -9038,10 +9038,10 @@
   "previous_detail_scheduler_validation_reference": {
     "label": "GENERIC_DETAIL_SCHEDULER_JUICE_POPULATED",
     "scan_id": "scan_recon_test_7277e2c93c2c4145bf344c25d3e17366",
-    "output": "<RESULT_ROOT>/test-runs/09.28/generic-detail-benchmark/juice-fair"
+    "output": "/Users/lkhlkh0823/university/whs/AI-Dast/result/test-runs/09.28/generic-detail-benchmark/juice-fair"
   },
   "cross_target_document_openapi": {
-    "comparison_artifact": "<RESULT_ROOT>/test-runs/09.28/document-openapi-benchmark/Comparison.json",
+    "comparison_artifact": "/Users/lkhlkh0823/university/whs/AI-Dast/result/test-runs/09.28/document-openapi-benchmark/Comparison.json",
     "runs": [
       {
         "target": "juice",
@@ -9287,7 +9287,7 @@
     "label": "DOCUMENT_OPENAPI_JUICE_POPULATED",
     "original_label": "juice-openapi",
     "scan_id": "scan_recon_test_edb681ee45b04e8791e7bfe20b13e7ea",
-    "output": "<RESULT_ROOT>/test-runs/09.28/document-openapi-benchmark/juice-openapi",
+    "output": "/Users/lkhlkh0823/university/whs/AI-Dast/result/test-runs/09.28/document-openapi-benchmark/juice-openapi",
     "coverage": {
       "included_http_statuses": 58,
       "all_http_statuses": 61,
@@ -10705,7 +10705,7 @@
   "previous_ai_pattern_validation_reference": {
     "label": "CAPTURE_FETCH_BINDING_JUICE_POPULATED",
     "scan_id": "scan_recon_test_8de0af7f098f4221b9770f696887ca74",
-    "output": "<RESULT_ROOT>/test-runs/09.28/capture-binding-benchmark/juice-binding"
+    "output": "/Users/lkhlkh0823/university/whs/AI-Dast/result/test-runs/09.28/capture-binding-benchmark/juice-binding"
   },
   "cross_target_ai_patterns": {
     "comparison": "result/test-runs/09.28/ai-pattern-benchmark/Comparison.json",

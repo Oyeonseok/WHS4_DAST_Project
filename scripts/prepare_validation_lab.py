@@ -99,21 +99,26 @@ def _contract(candidate: dict) -> tuple[str, str, str, dict, str]:
     vuln = candidate["vuln_class"]
     if project == "juice-shop" and path == "/api/Feedbacks/:id":
         endpoint, slot, location = "/api/Feedbacks/1", "probe", "query"
-        target, marker = None, '"comment"'
+        target, positive, negative = None, "healthy", "inert"
+        marker, positive_status = '"comment"', 401
     elif project == "juice-shop" and path in {
         "/api/Users", "/api/PrivacyRequests", "/api/Complaints"
     }:
         endpoint, slot, location = path, "probe", "query"
-        target, marker = None, '"data"'
+        target, positive, negative = None, "healthy", "inert"
+        marker, positive_status = '"data"', 401
     elif path == "/api/billers/by-category/<int:category_id>":
         endpoint, slot, location = "/api/billers/by-category/{category_id}", "category_id", "path"
-        target, marker = "1' OR 1=1", '"billers"'
+        target, positive, negative = "1' OR 1=1", "1", "not-an-int"
+        marker, positive_status = '"billers"', 200
     elif path == "/api/virtual-cards/<int:card_id>/transactions":
         endpoint, slot, location = "/api/virtual-cards/{card_id}/transactions", "card_id", "path"
-        target, marker = "1' OR 1=1", '"transactions"'
+        target, positive, negative = "1' OR 1=1", "1", "not-an-int"
+        marker, positive_status = '"transactions"', 401
     elif project == "vuln-bank" and path == "/debug/users":
         endpoint, slot, location = "/debug/{resource}", "resource", "path"
-        target, marker = "users", '"password":'
+        target, positive, negative = "users", "users", "missing"
+        marker, positive_status = '"password":', 200
     else:
         raise ValueError(f"no read-only replay plan for {candidate['candidate_id']}")
     proof = {"assertion_id": "bounded-signal", "kind": "body_contains", "expected": marker}
@@ -131,6 +136,14 @@ def _contract(candidate: dict) -> tuple[str, str, str, dict, str]:
     runtime = validate_runtime_contract({
         "schema_version": 1,
         "target": {"request": request(target), "assertions": proofs},
+        "positive_control": {
+            "request": request(positive),
+            "assertions": [{"assertion_id": "channel-healthy", "kind": "status_equals",
+                            "expected": positive_status}],
+        },
+        "negative_control": {
+            "request": request(negative), "assertions": proofs,
+        },
     }).model_dump(mode="json")
     return endpoint, slot, location, runtime, SKILLS[vuln]
 

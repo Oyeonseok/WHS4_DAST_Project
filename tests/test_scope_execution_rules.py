@@ -60,17 +60,31 @@ def test_profile_bounds_use_structured_rules_only():
     from aidast.web.requirements import build_scope_execution_requirements
     doc = document()
     assert grounded_scope_request_rate(doc.analysis) is None
+    limit_quote = 'Keep requests to 10 per minute and concurrency to 1.'
     data = doc.analysis.model_dump()
     data.update(required_request_headers=[], execution_rules=dict(exclusions=[], request_limits=[dict(
-        maximum=10, period_seconds=60, scope='program', source_quote=QUOTE)], option_limits=[dict(
-        field='concurrency', value=1, source_quote=QUOTE)]))
-    data['source_evidence'].append(dict(section='Limits', quote=QUOTE))
+        maximum=10, period_seconds=60, scope='program', source_quote=limit_quote)], option_limits=[dict(
+        field='concurrency', value=1, source_quote=limit_quote)]))
+    data['source_evidence'].append(dict(section='Limits', quote=limit_quote))
     analysis = models.ScopeAnalysis.model_validate(data)
     requirements = build_scope_execution_requirements(analysis)
     assert requirements.execution_requirements_status == 'ready'
     assert requirements.profiles[0].limits.requests_per_second == pytest.approx(1/6)
     assert requirements.profiles[0].limits.concurrency == 1
     assert build_scope_execution_requirements(doc.analysis).header_requirements_status == 'pending'
+
+
+def test_quoted_rate_can_be_stricter_than_structured_limit():
+    from aidast.recon.profiles import grounded_scope_request_rate
+    from aidast.web.requirements import build_scope_execution_requirements
+    quote = 'Keep to 1 request per second or lower.'
+    data = document().analysis.model_dump()
+    data.update(required_request_headers=[], execution_rules=dict(exclusions=[], request_limits=[dict(
+        maximum=10, period_seconds=1, scope='program', source_quote=quote)]))
+    data['source_evidence'].append(dict(section='Limits', quote=quote))
+    analysis = models.ScopeAnalysis.model_validate(data)
+    assert grounded_scope_request_rate(analysis) == 1
+    assert build_scope_execution_requirements(analysis).profiles[0].limits.requests_per_second == 1
 
 
 def test_global_automatic_scanner_ban_is_an_effective_launch_blocker():

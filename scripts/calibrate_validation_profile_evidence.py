@@ -29,15 +29,18 @@ SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 
 def _valid_fact_bindings(document: dict[str, Any]) -> bool:
     targets = document.get("target_attempt_ids")
+    controls = document.get("control_attempt_ids")
     target_evidence = document.get("observed_target_evidence_ids")
+    negative_evidence = document.get("inert_negative_evidence_ids")
     facts = document.get("facts")
     if any(not isinstance(value, list) or any(not isinstance(item, str) or not item
                                                for item in value)
-           for value in (targets, target_evidence)):
+           for value in (targets, controls, target_evidence, negative_evidence)):
         return False
     if not isinstance(facts, list) or len(facts) > 8:
         return False
-    if any(len(value) != len(set(value)) for value in (targets, target_evidence)):
+    if any(len(value) != len(set(value)) for value in
+           (targets, controls, target_evidence, negative_evidence)):
         return False
     if document.get("replay_status") != "complete" and facts:
         return False
@@ -49,22 +52,26 @@ def _valid_fact_bindings(document: dict[str, Any]) -> bool:
     for fact in facts:
         if (not isinstance(fact, dict)
                 or fact.get("kind") not in {
-                    "target_assertion_observed", "target_nonce_callback_observed",
+                    "assertion_differential", "json_value_differential",
+                    "nonce_callback_differential",
                 }
                 or fact.get("profile_id") != document.get("profile_id")
                 or fact.get("runtime_kind") != document.get("runtime_kind")
                 or fact.get("provenance") != "contract_bound_adapter_summary"
                 or not same_ids(fact.get("target_attempt_ids"), targets)
-                or not same_ids(fact.get("target_evidence_ids"), target_evidence)):
+                or not same_ids(fact.get("target_evidence_ids"), target_evidence)
+                or fact.get("negative_attempt_id") not in controls
+                or fact.get("negative_evidence_id") not in negative_evidence):
             return False
-        if fact["kind"] == "target_assertion_observed":
+        if fact["kind"] in {"assertion_differential", "json_value_differential"}:
             if any(not isinstance(fact.get(key), str)
                    or SHA256.fullmatch(fact[key]) is None
                    for key in ("assertion_id_sha256", "assertion_predicate_sha256",
                                "expected_sha256")) or not isinstance(fact.get("assertion_kind"), str):
                 return False
-            if (fact.get("assertion_kind") == "json_path_nonempty_string"
+            if (fact["kind"] == "json_value_differential"
                     and (document.get("runtime_kind") not in {"http", "multipart"}
+                         or fact.get("assertion_kind") != "json_path_nonempty_string"
                          or fact.get("value_shape") != "nonempty_string"
                          or not isinstance(fact.get("json_path_sha256"), str)
                          or SHA256.fullmatch(fact["json_path_sha256"]) is None)):

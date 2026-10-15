@@ -1,7 +1,5 @@
 # integrated/ 병합 과정 상세 기록
 
-> **과거 병합 기록:** 이 문서의 2개 설치·수동 산출물 전달 절차는 초기 설계를 설명합니다. 현재 실행 방법은 `TEAM_GUIDE.md`와 `STATUS_REPORT.md`를 따르세요. 현재 `integrate/strix-recon-merge` 브랜치는 하나의 설치에서 Strix 정찰을 표준 Handoff·Attack·Validation·Report 파이프라인으로 연결하며 WebUI에서도 선택할 수 있습니다.
-
 이 문서는 `attack/integrated/`가 어떻게 만들어졌는지, 왜 그렇게 결정했는지, 무엇을 바꿨고 무엇을 안 바꿨는지를 전부 기록합니다. 나중에 다시 봐도 재현/검증할 수 있도록 근거(코드 확인 결과)를 같이 남겼습니다.
 
 ---
@@ -13,7 +11,7 @@
 1. **`artex`** (팀 저장소 브랜치, commit `f6a1ef0`) — 가장 최신. 온라인 evidence graph, Coverage/Lead 듀얼 워크큐, precondition resolver, attack-time chain follow-up, 구조화된 외부 도구 어댑터, intent checkpoint, "실제 버그바운티 안전 실행 모드" 등을 추가하고 Wiki 기능은 제거한 버전.
 2. **`benchmark`** (팀 저장소 브랜치, commit `314729e`) — artex의 바로 이전 베이스라인.
 3. **`AI-Dast-main`**(로컬 작업 폴더, 이 세션 내내 테스트해온 것, 문서에서는 `ours`) — benchmark 계열의 더 오래된/부분적인 스냅샷. 로컬 전용 수정(체이닝 `demonstrated` 버그 수정 등)이 있었음.
-4. **별도 Recon 저장소** — Strix 스타일 recon 엔진(실제 오픈소스 Strix를 쓰는 게 아니라 자체 구현)을 가진, 별도로 발전한 저장소. attack/chaining 코드는 자체적으로 갖고 있지만 **AI-Dast-main과 거의 동일한, 더 오래된 버전**이었음.
+4. **`recon/AI-Dast`**(`ehsehs5652/AI-Dast`, 민석이형 개인 repo) — Strix 스타일 recon 엔진(실제 오픈소스 Strix를 쓰는 게 아니라 자체 구현)을 가진, 별도로 발전한 레포. attack/chaining 코드는 자체적으로 갖고 있지만 **AI-Dast-main과 거의 동일한, 더 오래된 버전**이었음.
 
 목표: artex의 더 발전된 attack/chaining 코드 위에, `recon/AI-Dast`의 Strix recon 엔진을 올리고, `ours`(AI-Dast-main)에만 있던 로컬 개선사항을 잃지 않고 포팅하는 것.
 

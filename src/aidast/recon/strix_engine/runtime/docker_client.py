@@ -26,7 +26,6 @@ import contextlib
 import logging
 import os
 import uuid
-from pathlib import Path
 from typing import Any, cast
 
 from agents.sandbox.errors import ExposedPortUnavailableError
@@ -53,34 +52,6 @@ logger = logging.getLogger(__name__)
 
 
 _SANDBOX_NETWORK_ENV = "STRIX_DOCKER_SANDBOX_NETWORK"
-_IMAGE_ENTRYPOINT_PATH = "/usr/local/bin/docker-entrypoint.sh"
-
-
-def _apply_integrated_entrypoint(
-    create_kwargs: dict[str, Any], environment: dict[str, str] | None,
-) -> None:
-    """Use the packaged proxy-aware entrypoint with the upstream sandbox image."""
-    if not environment or environment.get("STRIX_PROXY_BACKEND") != "mitmproxy":
-        return
-    source = (
-        Path(__file__).resolve().parents[1]
-        / "containers"
-        / "docker-entrypoint.sh"
-    )
-    if not source.is_file():
-        raise FileNotFoundError(f"integrated Strix entrypoint is missing: {source}")
-    mounts = create_kwargs.setdefault("mounts", [])
-    mounts.append(
-        DockerSDKMount(
-            target=_IMAGE_ENTRYPOINT_PATH,
-            source=str(source),
-            type="bind",
-            read_only=True,
-        )
-    )
-    # Invoke through bash because source distributions do not necessarily
-    # preserve the executable bit on package-data files.
-    create_kwargs["entrypoint"] = ["/bin/bash", _IMAGE_ENTRYPOINT_PATH]
 
 
 def _sandbox_network() -> str | None:
@@ -280,8 +251,6 @@ class StrixDockerSandboxClient(DockerSandboxClient):
                         read_only=spec.get("read_only", False),
                     )
                 )
-
-        _apply_integrated_entrypoint(create_kwargs, environment)
 
         logger.debug(
             "Creating sandbox container: image=%s caps=%s exposed_ports=%s",

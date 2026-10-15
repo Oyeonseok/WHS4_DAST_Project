@@ -8,15 +8,19 @@ boundary.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import threading
 from datetime import UTC, datetime
+from fnmatch import fnmatchcase
 from ipaddress import ip_address
 from pathlib import Path
+from typing import Callable
 from urllib.parse import urlsplit, urlunsplit
 
 from aidast.core.http_safety import validate_scope_rules
+from aidast.recon.policy import TargetPolicy
 from aidast.scope.models import AssetType, ScopeAsset, ScopeDocument
 
 
@@ -105,7 +109,9 @@ def _scope_prohibits_http(scope: ScopeDocument) -> bool:
     return any(_HTTP_PROHIBITION.search(str(statement)) for statement in statements)
 
 
-def _safe_agent_event_sink(path: Path):
+def _safe_agent_event_sink(
+    path: Path | None, *, progress_callback: Callable[[int, str], None] | None = None,
+):
     """Persist tool names and constrained auth-decision markers, never payloads.
 
     The SDK stream contains prompts, tool arguments/results and potentially
@@ -114,8 +120,25 @@ def _safe_agent_event_sink(path: Path):
     """
     lock = threading.Lock()
     tool_names: dict[str, str] = {}
+    completed_tools = 0
+    tool_activities = {
+        "aidast_list_captured_requests": "capture_list",
+        "aidast_view_captured_request": "capture_review",
+        "list_requests": "capture_list",
+        "view_request": "capture_review",
+        "list_sitemap": "sitemap_review",
+        "view_sitemap_entry": "sitemap_review",
+        "create_agent": "agent_assignment",
+        "wait_for_agents": "agent_wait",
+        "view_agent_graph": "agent_review",
+        "load_skill": "reference_review",
+        "finish_recon": "recon_summary",
+        "browser": "browser",
+    }
 
     def write(record: dict[str, object]) -> None:
+        if path is None:
+            return
         payload = {
             "timestamp": datetime.now(UTC).isoformat(),
             **record,
@@ -126,6 +149,7 @@ def _safe_agent_event_sink(path: Path):
                 stream.flush()
 
     def sink(agent_id: str, event: object) -> None:
+        nonlocal completed_tools
         event_type = str(getattr(event, "type", ""))
         item = getattr(event, "item", None)
         item_type = str(getattr(item, "type", ""))
@@ -153,6 +177,14 @@ def _safe_agent_event_sink(path: Path):
                 "agent_id": agent_id,
                 "tool_name": tool_name,
             })
+            if item_type == "tool_call_output_item" and progress_callback is not None:
+                with lock:
+                    completed_tools += 1
+                    count = completed_tools
+                try:
+                    progress_callback(count, tool_activities.get(tool_name, "tool_work"))
+                except Exception:
+                    logging.getLogger(__name__).warning("Could not publish Strix Recon progress")
             return
         if item_type != "message_output_item":
             return
@@ -296,7 +328,9 @@ def build_strix_proxy_rules(
     targets: list[ScopeAsset],
     *,
     request_headers: dict[str, str] | None = None,
-    execution_limits: dict[str, object] | None = None,
+    read_only: bool = False,
+    max_requests: int | None = None,
+    target_policies: list[TargetPolicy] | None = None,
 ) -> dict:
     """Create a fail-closed per-asset MITM policy directly from approved Scope.
 
@@ -320,11 +354,21 @@ def build_strix_proxy_rules(
     if not allowed_schemes:
         raise ValueError("approved Scope explicitly prohibits both HTTP and HTTPS")
     methods = [method for method in _HTTP_METHODS if method not in explicitly_forbidden]
+    if read_only:
+        methods = [method for method in methods if method in {"GET", "HEAD", "OPTIONS"}]
     if not methods:
         raise ValueError("approved Scope explicitly prohibits every supported HTTP method")
+    if target_policies is not None and not read_only:
+        raise ValueError("TargetPolicy-bound Strix rules require read-only mode")
 
     target_rules: list[dict] = []
     loopback_host_aliases: list[dict[str, object]] = []
+    policy_exclusions: list[dict] = []
+    policy_hosts_excluded: list[str] = []
+    policy_by_asset = (
+        {(policy.asset_type, policy.asset): policy for policy in target_policies}
+        if target_policies is not None else {}
+    )
     for asset in targets:
         if asset.asset_type not in {
             AssetType.URL, AssetType.API, AssetType.DOMAIN,
@@ -333,6 +377,31 @@ def build_strix_proxy_rules(
             continue
         rule = _asset_rule(asset, methods, allowed_schemes=allowed_schemes)
         if rule is not None:
+            if read_only:
+                parsed_asset = urlsplit(asset.asset if "://" in asset.asset else "https://" + asset.asset)
+                if parsed_asset.scheme.lower() not in allowed_schemes:
+                    raise ValueError("selected target scheme is prohibited by approved Scope")
+                rule["schemes"] = [parsed_asset.scheme.lower()]
+                rule["ports"] = [parsed_asset.port or (443 if parsed_asset.scheme == "https" else 80)]
+            if target_policies is not None:
+                policy = policy_by_asset.get((asset.asset_type, asset.asset))
+                if policy is None:
+                    raise ValueError(f"selected target has no bound TargetPolicy: {asset.asset}")
+                host = (urlsplit(asset.asset if "://" in asset.asset else "https://" + asset.asset).hostname or "").lower().rstrip(".")
+                if asset.asset_type is AssetType.WILDCARD:
+                    host = host.removeprefix("*.")
+                if not policy.allows_host(host):
+                    raise ValueError("selected target is denied by TargetPolicy")
+                rule["schemes"] = [scheme for scheme in rule["schemes"] if scheme in policy.allowed_schemes]
+                rule["ports"] = [port for port in rule["ports"] if port in policy.allowed_ports]
+                rule["methods"] = [method for method in rule["methods"]
+                                   if method in policy.allowed_methods and policy.allows_execution_method(method)]
+                rule["paths"] = list(policy.allowed_path_prefixes)
+                if not all((rule["schemes"], rule["ports"], rule["methods"], rule["paths"])):
+                    raise ValueError("selected target has no executable TargetPolicy intersection")
+                for path in policy.excluded_path_prefixes:
+                    policy_exclusions.append({**rule, "paths": [path]})
+                policy_hosts_excluded.extend(policy.excluded_hosts)
             target_rules.append(rule)
             parsed_asset = urlsplit(
                 asset.asset if "://" in asset.asset else "https://" + asset.asset
@@ -361,8 +430,8 @@ def build_strix_proxy_rules(
     if not target_rules:
         raise ValueError("selected Scope has no executable HTTP(S) target assets")
 
-    excluded_hosts = []
-    excluded_target_rules: list[dict] = []
+    excluded_hosts = list(dict.fromkeys(policy_hosts_excluded))
+    excluded_target_rules: list[dict] = policy_exclusions
     for asset in scope.analysis.out_of_scope_assets:
         rule = _asset_rule(
             asset, methods, allowed_schemes=allowed_schemes,
@@ -378,33 +447,53 @@ def build_strix_proxy_rules(
         elif rule["host_pattern"] not in excluded_hosts:
             excluded_hosts.append(rule["host_pattern"])
 
+    for alias in loopback_host_aliases:
+        canonical_host = str(alias["canonical_host"])
+        alias_host = str(alias["host"])
+        alias_port = int(alias["port"])
+        if any(fnmatchcase(canonical_host, pattern.lower()) for pattern in excluded_hosts):
+            excluded_hosts.append(alias_host)
+        for rule in list(excluded_target_rules):
+            if fnmatchcase(canonical_host, rule["host_pattern"].lower()) and (
+                "*" in rule["ports"] or alias_port in rule["ports"]
+            ):
+                excluded_target_rules.append({**rule, "host_pattern": alias_host, "ports": [alias_port]})
+
     hosts = list(dict.fromkeys(rule["host_pattern"] for rule in target_rules))
     schemes = list(dict.fromkeys(scheme for rule in target_rules for scheme in rule["schemes"]))
     ports = list(dict.fromkeys(port for rule in target_rules for port in rule["ports"]))
+    effective_methods = list(dict.fromkeys(method for rule in target_rules for method in rule["methods"]))
+    effective_max_requests = max_requests
+    if target_policies:
+        effective_max_requests = min(
+            ([max_requests] if max_requests is not None else [])
+            + [policy.limits.max_requests for policy in target_policies]
+        )
     rules = {
         "enforcement_required": True,
         "allowed_hosts": hosts,
         "excluded_hosts": excluded_hosts,
         "allowed_schemes": schemes,
         "allowed_ports": ports,
-        "allowed_methods": methods,
+        "allowed_methods": effective_methods,
         # Per-asset path/method constraints below narrow these aggregate values.
         "allowed_path_prefixes": ["/"],
         "excluded_path_prefixes": [],
         "include_subdomains": False,
-        "mitm_capture_bodies": True,
+        "mitm_capture_bodies": (
+            all(policy.tools.mitm_capture_bodies for policy in target_policies)
+            if target_policies is not None else True
+        ),
         "target_rules": target_rules,
         "loopback_host_aliases": loopback_host_aliases,
         "excluded_target_rules": excluded_target_rules,
         "request_headers": dict(request_headers or {}),
-        "max_requests": 3000,
+        **({"max_requests": effective_max_requests} if effective_max_requests is not None else {}),
+        **({"max_rps": min(policy.limits.requests_per_second for policy in target_policies),
+            "max_concurrency": min(policy.limits.concurrency for policy in target_policies),
+            "timeout_seconds": min(policy.limits.timeout_seconds for policy in target_policies)}
+           if target_policies else {}),
     }
-    for key in (
-        "max_requests", "budget_total", "budget_used_before",
-        "timeout_seconds", "requests_per_second", "request_governor",
-    ):
-        if execution_limits is not None and key in execution_limits:
-            rules[key] = execution_limits[key]
     return validate_scope_rules(rules)
 
 
@@ -680,12 +769,15 @@ async def run_strix_recon(
     user_instructions: str = "",
     start_urls: dict[tuple[str, str], str] | None = None,
     request_headers: dict[str, str] | None = None,
-    model: str | None = None,
-    execution_limits: dict[str, object] | None = None,
     allow_lab_account_creation: bool = False,
     allow_lab_state_changing_discovery: bool = False,
     allow_authorized_account_registration: bool = False,
     diagnostic_logs: bool = False,
+    read_only: bool = False,
+    max_requests: int | None = None,
+    target_policies: list[TargetPolicy] | None = None,
+    model: str | None = None,
+    progress_callback: Callable[[int, str], None] | None = None,
 ):
     """Run the embedded AI-DAST Recon engine with the Scope/MITM boundary.
 
@@ -722,7 +814,7 @@ async def run_strix_recon(
     try:
         os.chdir("/tmp")
         try:
-            from aidast.recon.strix_engine.config import load_settings
+            from aidast.recon.strix_engine.config import codex, load_settings
             from aidast.recon.strix_engine.core.runner import run_strix_scan
         except ImportError as exc:
             raise RuntimeError(
@@ -754,12 +846,22 @@ async def run_strix_recon(
             ),
         }
         rules = build_strix_proxy_rules(
-            scope,
-            targets,
-            request_headers=request_headers,
-            execution_limits=execution_limits,
+            scope, targets, request_headers=request_headers, read_only=read_only,
+            max_requests=max_requests, target_policies=target_policies,
         )
         settings = load_settings()
+        selected_model = model or settings.llm.model
+        if (
+            selected_model
+            and selected_model.startswith("gpt-")
+            and "/" not in selected_model
+            and not settings.llm.api_key
+            and codex.is_authenticated()
+        ):
+            selected_model = f"chatgpt/{selected_model}"
+        selected_image = os.environ.get("AIDAST_STRIX_IMAGE") or settings.runtime.image
+        if not os.environ.get("AIDAST_STRIX_IMAGE") and selected_image == "ghcr.io/usestrix/strix-sandbox:1.3.0":
+            selected_image = "aidast-strix-mitm:local"
         result = await run_strix_scan(
             scan_config=build_strix_scan_config(
                 scope, targets, user_instructions=user_instructions,
@@ -773,8 +875,8 @@ async def run_strix_recon(
             ),
             scan_id=scan_id,
             run_dir=capture_directory / "runtime",
-            image=os.environ.get("AIDAST_STRIX_IMAGE", settings.runtime.image),
-            model=model,
+            model=selected_model,
+            image=selected_image,
             local_sources=[{
                 "source_path": str(capture_directory),
                 "workspace_subdir": "aidast-capture",
@@ -794,9 +896,9 @@ async def run_strix_recon(
             },
             proxy_capture_path="/workspace/aidast-capture/mitm_capture.jsonl",
             proxy_capture_host_path=str(capture_file),
-            event_sink=(
-                _safe_agent_event_sink(capture_directory / "agent_action_diagnostics.jsonl")
-                if diagnostic_logs else None
+            event_sink=_safe_agent_event_sink(
+                capture_directory / "agent_action_diagnostics.jsonl" if diagnostic_logs else None,
+                progress_callback=progress_callback,
             ),
         )
         return result, capture_file, rules

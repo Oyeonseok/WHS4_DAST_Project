@@ -1,7 +1,7 @@
 # ARTEX 비교와 AIDAST 개선안
 
-작성일: 2026-10-06
-분석 대상: [Autumn-27/ARTEX](https://github.com/Autumn-27/ARTEX)
+작성일: 2026-10-06  
+분석 대상: [Autumn-27/ARTEX](https://github.com/Autumn-27/ARTEX)  
 분석한 ARTEX 커밋: [`b55ceb1`](https://github.com/Autumn-27/ARTEX/commit/b55ceb1fdd84a813d77de09a06af83d323a81f85)
 
 ## 결론

@@ -16,7 +16,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-RECON_SCHEMA_VERSION = 12
+RECON_SCHEMA_VERSION = 8
 
 SCHEMA = """
 -- WAL은 -wal/-shm 보조 파일에 mmap 기반 공유 락이 필요한데, WSL에서
@@ -98,8 +98,7 @@ CREATE TABLE IF NOT EXISTS endpoints (
     source_tools TEXT,
     is_excluded INTEGER DEFAULT 0,
     exclude_reason TEXT,
-    verification_status TEXT NOT NULL DEFAULT 'observed'
-        CHECK(verification_status IN ('candidate','observed','verified')),
+    verification_status TEXT,
     discovered_at TEXT DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (origin_id) REFERENCES origins(origin_id),
     FOREIGN KEY (session_id) REFERENCES sessions(session_id),
@@ -169,42 +168,6 @@ CREATE TABLE IF NOT EXISTS surface_signals (
     FOREIGN KEY (origin_id) REFERENCES origins(origin_id)
 );
 
-CREATE TABLE IF NOT EXISTS benchmark_catalog_items (
-    catalog_item_id TEXT PRIMARY KEY,
-    scan_id TEXT NOT NULL,
-    ordinal INTEGER NOT NULL CHECK(ordinal > 0),
-    category TEXT NOT NULL CHECK(length(trim(category)) > 0),
-    title TEXT NOT NULL CHECK(length(trim(title)) > 0),
-    source_path TEXT NOT NULL CHECK(length(trim(source_path)) > 0),
-    source_line INTEGER NOT NULL CHECK(source_line > 0),
-    source_ref TEXT NOT NULL CHECK(length(trim(source_ref)) > 0),
-    source_sha256 TEXT NOT NULL CHECK(length(source_sha256) = 64),
-    assessment_status TEXT NOT NULL DEFAULT 'declared_unassessed'
-        CHECK(assessment_status IN (
-            'declared_unassessed','mapped_runtime','mapped_static',
-            'confirmed','not_reproduced','unsupported','duplicate'
-        )),
-    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (scan_id) REFERENCES scans(scan_id),
-    UNIQUE(scan_id, ordinal),
-    UNIQUE(scan_id, category, title)
-);
-CREATE INDEX IF NOT EXISTS idx_benchmark_catalog_scan_status
-    ON benchmark_catalog_items(scan_id, assessment_status, ordinal);
-
-CREATE TABLE IF NOT EXISTS benchmark_catalog_mappings (
-    catalog_item_id TEXT PRIMARY KEY,
-    annotation_id TEXT NOT NULL UNIQUE,
-    endpoint_id TEXT NOT NULL,
-    vuln_class TEXT NOT NULL CHECK(length(trim(vuln_class)) > 0),
-    mapping_kind TEXT NOT NULL DEFAULT 'pinned_benchmark'
-        CHECK(mapping_kind IN ('pinned_benchmark')),
-    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (catalog_item_id) REFERENCES benchmark_catalog_items(catalog_item_id),
-    FOREIGN KEY (annotation_id) REFERENCES endpoint_annotations(annotation_id),
-    FOREIGN KEY (endpoint_id) REFERENCES endpoints(endpoint_id)
-);
-
 CREATE TABLE IF NOT EXISTS pipeline_runs (
     pipeline_run_id TEXT PRIMARY KEY,
     scan_id TEXT NOT NULL,
@@ -231,7 +194,6 @@ CREATE TABLE IF NOT EXISTS http_transactions (
     response_headers TEXT,
     response_body BLOB,
     content_type TEXT,
-    request_receipt TEXT,
     captured_at TEXT DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (endpoint_id) REFERENCES endpoints(endpoint_id) ON DELETE SET NULL
 );
@@ -444,33 +406,43 @@ def upsert_endpoint(
     source_tool: str = "",
     is_excluded: bool = False,
     exclude_reason: str | None = None,
-    verification_status: str = "observed",
+    verification_status: str | None = None,
 ) -> str:
-    if verification_status not in {"candidate", "observed", "verified"}:
-        raise ValueError("invalid endpoint verification status")
-    if verification_status == "candidate":
-        is_excluded = True
-        exclude_reason = exclude_reason or "unverified_candidate"
+    method = str(method or "GET").upper()
     row = conn.execute(
-        "SELECT endpoint_id, source_tools FROM endpoints WHERE origin_id=? AND method=? AND normalized_path=?",
+        "SELECT endpoint_id, source_tools, is_excluded, exclude_reason, verification_status FROM endpoints "
+        "WHERE origin_id=? AND method=? AND normalized_path=?",
         (origin_id, method, normalized_path),
     ).fetchone()
     if row:
-        endpoint_id, existing_tools = row
+        endpoint_id, existing_tools, existing_excluded, existing_reason, existing_verification = row
         tools = set(filter(None, (existing_tools or "").split(",")))
         tools.update(filter(None, source_tool.split(",")))
+        # A route seen actively must not remain hidden just because an earlier
+        # source classified the same canonical key as a static resource. A
+        # redirect-loop artifact, on the other hand, remains excluded.
+        redirect_loop = exclude_reason == "redirect_loop" or existing_reason == "redirect_loop"
+        if redirect_loop:
+            merged_excluded, merged_reason = 1, "redirect_loop"
+        elif not is_excluded or not existing_excluded:
+            merged_excluded, merged_reason = 0, None
+        else:
+            merged_excluded, merged_reason = 1, existing_reason or exclude_reason
+        merged_verification = _stronger_verification(existing_verification, verification_status)
         conn.execute(
-            "UPDATE endpoints SET source_tools=?, query_signature=CASE WHEN query_signature='' THEN ? ELSE query_signature END WHERE endpoint_id=?",
-            (",".join(sorted(tools)), query_signature, endpoint_id),
+            """UPDATE endpoints SET source_tools=?,
+               query_signature=CASE WHEN query_signature='' THEN ? ELSE query_signature END,
+               content_type=COALESCE(content_type,?),
+               auth_required=CASE WHEN auth_required=1 OR ?=1 THEN 1
+                                  WHEN auth_required=0 OR ?=0 THEN 0
+                                  ELSE NULL END,
+               is_excluded=?,exclude_reason=?,verification_status=?
+               WHERE endpoint_id=?""",
+            (",".join(sorted(tools)), query_signature, content_type,
+             int(bool(auth_required)) if auth_required is not None else None,
+             int(bool(auth_required)) if auth_required is not None else None,
+             merged_excluded, merged_reason, merged_verification, endpoint_id),
         )
-        if verification_status == "verified":
-            conn.execute(
-                """UPDATE endpoints SET verification_status='verified',
-                   is_excluded=CASE WHEN exclude_reason='unverified_candidate' THEN 0 ELSE is_excluded END,
-                   exclude_reason=CASE WHEN exclude_reason='unverified_candidate' THEN NULL ELSE exclude_reason END
-                   WHERE endpoint_id=?""",
-                (endpoint_id,),
-            )
     else:
         endpoint_id = new_id("endpoint")
         conn.execute(
@@ -502,6 +474,11 @@ def upsert_endpoint(
         )
     conn.commit()
     return endpoint_id
+
+
+def _stronger_verification(existing: str | None, incoming: str | None) -> str | None:
+    rank = {None: -1, "candidate": 0, "observed": 1, "verified": 2}
+    return max((existing, incoming), key=lambda value: rank.get(value, -1))
 
 
 def upsert_parameter(
@@ -585,7 +562,7 @@ def reconcile_observed_endpoints(
                 (origin_id, method, old_path),
             ).fetchone()
             target = conn.execute(
-                """SELECT endpoint_id,source_tools FROM endpoints
+                """SELECT endpoint_id,source_tools,verification_status FROM endpoints
                    WHERE origin_id=? AND method=? AND normalized_path=?""",
                 (origin_id, method, target_path),
             ).fetchone()
@@ -609,13 +586,10 @@ def reconcile_observed_endpoints(
                                       WHEN auth_required=0 OR ?=0 THEN 0
                                       ELSE NULL END,
                    query_signature=CASE WHEN query_signature='' THEN ? ELSE query_signature END,
-                   verification_status=CASE WHEN ?='verified' THEN 'verified' ELSE verification_status END,
-                   is_excluded=CASE WHEN ?='verified' AND exclude_reason='unverified_candidate'
-                                    THEN 0 ELSE is_excluded END,
-                   exclude_reason=CASE WHEN ?='verified' AND exclude_reason='unverified_candidate'
-                                       THEN NULL ELSE exclude_reason END
+                   verification_status=?
                    WHERE endpoint_id=?""",
-                (tools, old[2], old[3], old[3], old[4], old[5], old[5], old[5], target_id),
+                (tools, old[2], old[3], old[3], old[4],
+                 _stronger_verification(target[2], old[5]), target_id),
             )
             for name, location, data_type, role, identifier in conn.execute(
                 """SELECT name,location,data_type,role,is_identifier FROM parameters
@@ -647,6 +621,61 @@ def reconcile_observed_endpoints(
             conn.execute("DELETE FROM parameters WHERE endpoint_id=?", (old_id,))
             conn.execute("DELETE FROM endpoint_query_signatures WHERE endpoint_id=?", (old_id,))
             conn.execute("DELETE FROM endpoints WHERE endpoint_id=?", (old_id,))
+
+
+def exclude_http_404_only_candidates(conn: sqlite3.Connection, *, scan_id: str) -> int:
+    """Reclassify endpoints whose only evidence is a 404-only HTTP transaction.
+
+    An active endpoint (``is_excluded=0``) for this scan is excluded with
+    ``exclude_reason='http_404_only'`` when all of the following hold:
+
+    - at least one linked ``http_transaction`` returned status 404;
+    - no linked transaction returned a non-404 status, and none are missing
+      a response (``response_status IS NULL`` blocks exclusion rather than
+      being ignored, since an unanswered request is not a confirmed 404);
+    - it has no discovery evidence besides ``discovery_kind='http_request'``
+      — an independent ``api_spec_operation``, ``form_action``, or other
+      discovery keeps the candidate active even if the raw request 404'd,
+      since the alternate evidence may still be a real route.
+
+    This only reclassifies already-captured evidence into
+    ``excluded_candidates`` (see ``recon/surface.py``); it never issues new
+    requests and never changes what was actually discovered.
+    """
+    rows = conn.execute(
+        """
+        SELECT e.endpoint_id
+        FROM endpoints e
+        JOIN origins o ON o.origin_id = e.origin_id
+        JOIN assets a ON a.asset_id = o.asset_id
+        WHERE a.scan_id = ? AND e.is_excluded = 0
+          AND EXISTS (
+              SELECT 1 FROM endpoint_observations v
+              JOIN http_transactions t ON t.http_transaction_id = v.http_transaction_id
+              WHERE v.endpoint_id = e.endpoint_id AND t.response_status = 404
+          )
+          AND NOT EXISTS (
+              SELECT 1 FROM endpoint_observations v
+              JOIN http_transactions t ON t.http_transaction_id = v.http_transaction_id
+              WHERE v.endpoint_id = e.endpoint_id
+                AND (t.response_status IS NULL OR t.response_status != 404)
+          )
+          AND NOT EXISTS (
+              SELECT 1 FROM endpoint_observations v
+              WHERE v.endpoint_id = e.endpoint_id AND v.discovery_kind != 'http_request'
+          )
+        """,
+        (scan_id,),
+    ).fetchall()
+    endpoint_ids = [row[0] for row in rows]
+    if endpoint_ids:
+        conn.executemany(
+            "UPDATE endpoints SET is_excluded=1, exclude_reason='http_404_only' "
+            "WHERE endpoint_id=?",
+            [(endpoint_id,) for endpoint_id in endpoint_ids],
+        )
+        conn.commit()
+    return len(endpoint_ids)
 
 
 def insert_dns_resolution(
@@ -684,6 +713,26 @@ def upsert_host_port(
         )
     conn.commit()
     return host_port_id
+
+
+def insert_observation(
+    conn: sqlite3.Connection, *, origin_id: str, obs_type: str, key: str, value: str, source: str
+) -> None:
+    conn.execute(
+        "INSERT INTO observations (observation_id, origin_id, type, key, value, source) VALUES (?, ?, ?, ?, ?, ?)",
+        (new_id("obs"), origin_id, obs_type, key, value, source),
+    )
+    conn.commit()
+
+
+def insert_surface_signal(
+    conn: sqlite3.Connection, *, origin_id: str, signal_type: str, value: str
+) -> None:
+    conn.execute(
+        "INSERT INTO surface_signals (signal_id, origin_id, signal_type, value) VALUES (?, ?, ?, ?)",
+        (new_id("signal"), origin_id, signal_type, value),
+    )
+    conn.commit()
 
 
 def log_pipeline_run(
@@ -729,18 +778,14 @@ def insert_http_transaction(
     response_headers: dict | None = None,
     response_body: bytes | None = None,
     content_type: str | None = None,
-    request_receipt: dict | None = None,
 ) -> str:
-    if request_receipt is not None:
-        from aidast.core.capture_receipt import validate_capture_receipt
-        request_receipt = validate_capture_receipt(request_receipt, url=url, method=method, response_body=response_body)
     transaction_id = new_id("httptx")
     conn.execute(
         """INSERT INTO http_transactions
            (http_transaction_id, endpoint_id, source, method, url,
             request_headers, request_body, response_status,
-            response_headers, response_body, content_type, request_receipt)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            response_headers, response_body, content_type)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             transaction_id,
             endpoint_id,
@@ -753,28 +798,30 @@ def insert_http_transaction(
             json.dumps(response_headers) if response_headers is not None else None,
             response_body,
             content_type,
-            json.dumps(request_receipt) if request_receipt is not None else None,
         ),
     )
     conn.commit()
     return transaction_id
 
 
-def insert_observation(
-    conn: sqlite3.Connection,
-    *,
-    origin_id: str,
-    obs_type: str,
-    key: str,
-    value: str,
-    source: str,
-) -> None:
-    """Persist a bounded Strix/API-spec observation in the shared Recon DB."""
+def insert_websocket_connection(
+    conn: sqlite3.Connection, *, url: str, source: str | None = None
+) -> str:
+    connection_id = new_id("ws")
     conn.execute(
-        """INSERT INTO observations
-           (observation_id, origin_id, type, key, value, source)
-           VALUES (?, ?, ?, ?, ?, ?)""",
-        (new_id("obs"), origin_id, obs_type, key, value, source),
+        "INSERT INTO websocket_connections (websocket_connection_id, url, source) VALUES (?, ?, ?)",
+        (connection_id, url, source),
+    )
+    conn.commit()
+    return connection_id
+
+
+def insert_websocket_message(
+    conn: sqlite3.Connection, *, connection_id: str, direction: str, payload: bytes | None
+) -> None:
+    conn.execute(
+        "INSERT INTO websocket_messages (websocket_message_id, connection_id, direction, payload) VALUES (?, ?, ?, ?)",
+        (new_id("wsmsg"), connection_id, direction, payload),
     )
     conn.commit()
 
@@ -821,41 +868,16 @@ CREATE TABLE IF NOT EXISTS deferred_candidates (
     method TEXT NOT NULL, url TEXT NOT NULL, priority INTEGER,
     reason TEXT NOT NULL, observed_at TEXT NOT NULL
 );
-CREATE TABLE IF NOT EXISTS synthetic_ui_candidates (
-    candidate_id TEXT PRIMARY KEY,
-    scan_id TEXT NOT NULL REFERENCES scans(scan_id),
-    origin_id TEXT NOT NULL REFERENCES origins(origin_id),
-    method TEXT NOT NULL CHECK(method IN ('GET','HEAD','OPTIONS','POST','PUT','PATCH','DELETE')),
-    normalized_path TEXT NOT NULL CHECK(substr(normalized_path,1,1)='/'),
-    candidate_kind TEXT NOT NULL CHECK(candidate_kind IN ('navigation','api_request')),
-    state TEXT NOT NULL DEFAULT 'synthetic'
-        CHECK(state IN ('synthetic','verified','rejected')),
-    required_role_hint TEXT NOT NULL DEFAULT 'unknown',
-    source_url TEXT NOT NULL,
-    source_sha256 TEXT NOT NULL CHECK(length(source_sha256)=64),
-    evidence_json TEXT NOT NULL DEFAULT '{}' CHECK(
-        json_valid(evidence_json) AND length(CAST(evidence_json AS BLOB)) <= 4096
-    ),
-    promoted_endpoint_id TEXT REFERENCES endpoints(endpoint_id),
-    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    verified_at TEXT,
-    UNIQUE(origin_id,method,normalized_path,candidate_kind,source_sha256)
-);
 CREATE INDEX IF NOT EXISTS idx_observations_endpoint ON endpoint_observations(endpoint_id);
 CREATE INDEX IF NOT EXISTS idx_observations_context ON endpoint_observations(context_id);
 CREATE INDEX IF NOT EXISTS idx_annotations_observation ON endpoint_annotations(observation_id);
 CREATE INDEX IF NOT EXISTS idx_annotations_tag ON endpoint_annotations(category, tag);
-CREATE INDEX IF NOT EXISTS idx_synthetic_ui_candidates
-    ON synthetic_ui_candidates(scan_id,state,origin_id,normalized_path);
 """
 
 
 def _migrate_context_schema(conn: sqlite3.Connection) -> None:
     """Additive v2 migration: preserve legacy rows and unknown provenance."""
     columns = {row[1] for row in conn.execute("PRAGMA table_info(http_transactions)")}
-    if "request_receipt" not in columns:
-        conn.execute("ALTER TABLE http_transactions ADD COLUMN request_receipt TEXT")
     if "origin_id" not in columns:
         conn.execute("ALTER TABLE http_transactions ADD COLUMN origin_id TEXT REFERENCES origins(origin_id)")
     conn.executescript(CONTEXT_SCHEMA)
@@ -874,7 +896,14 @@ def _migrate_context_schema(conn: sqlite3.Connection) -> None:
         ("parameters", {"role": "TEXT"}),
         ("endpoints", {
             "query_signature": "TEXT NOT NULL DEFAULT ''",
-            "verification_status": "TEXT NOT NULL DEFAULT 'observed' CHECK(verification_status IN ('candidate','observed','verified'))",
+            # artex's Attack-side eligibility/graph queries (attack/surface.py,
+            # attack/graph.py, pipeline/materialize.py) read this column, but
+            # the recon/AI-Dast engine's own endpoints table never defined it.
+            # NULL is correct for every endpoint this engine discovers from
+            # real captured traffic: the eligibility SQL only special-cases
+            # verification_status='candidate' for AI-pattern-inferred routes,
+            # and otherwise gates purely on is_excluded, which is unaffected.
+            "verification_status": "TEXT",
         }),
         ("asset_discovery_candidates", {
             "probe_state": "TEXT NOT NULL DEFAULT 'unknown' CHECK(probe_state IN ('unknown','active','dead'))"
@@ -885,8 +914,6 @@ def _migrate_context_schema(conn: sqlite3.Connection) -> None:
             if name not in existing:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_parameters_role ON parameters(role)")
-    conn.execute("""UPDATE endpoints SET verification_status='candidate'
-        WHERE exclude_reason='unverified_candidate' AND verification_status='observed'""")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_endpoints_query_signature ON endpoints(origin_id,method,query_signature)")
     conn.execute("""CREATE TABLE IF NOT EXISTS endpoint_query_signatures (
         endpoint_id TEXT NOT NULL REFERENCES endpoints(endpoint_id),
